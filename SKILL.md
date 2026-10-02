@@ -231,7 +231,7 @@ never `branch -D`. Keep the manifest and ledger.
 ## Resume
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
-   (earlier work from a hand-run attempt): reference.md "Adopting earlier work" first.
+   (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
 2. `python3 <skill_dir>/scripts/ledger status <ledger_dir>` prints `{done, reviewed,
    blocked, start_points, carry}`. Set the manifest's `done` and `reviewed` to those lists (a
    `settled` task is in both; never ask again). Put each `carry` entry into
