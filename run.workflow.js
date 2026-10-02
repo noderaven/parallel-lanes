@@ -29,6 +29,8 @@ function agentRules() {
     'Never amend, rebase, reset, or force-update a branch. Decline commit-message findings with a reason; ' +
       'they are reported to the user.',
     'Do not invoke parallel-lanes or any plan-execution skill.',
+    'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
+      "previous one's output: every separate call costs a full turn.",
   ].join('\n');
 }
 
@@ -76,6 +78,12 @@ function laneIdPattern() {
   return '^[A-Za-z0-9_][A-Za-z0-9._-]*$';
 }
 
+// agent_type names a custom agent definition (scripts/find-agent-type prints
+// it); manifest.schema.json repeats the pattern.
+function agentTypePattern() {
+  return '^[a-z0-9-]+$';
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -103,6 +111,10 @@ function validateManifest(m) {
   }
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
+  }
+  if ('agent_type' in m && m.agent_type !== null
+    && !(typeof m.agent_type === 'string' && new RegExp(agentTypePattern()).test(m.agent_type))) {
+    err(`agent_type: must be null or a name matching ${agentTypePattern()}`);
   }
   if ('dry_run' in m && typeof m.dry_run !== 'boolean') err('dry_run: must be a boolean');
   if ('autonomy' in m && m.autonomy !== 'autonomous' && m.autonomy !== 'supervised') {
@@ -592,9 +604,6 @@ function findingsText(findings) {
 function taskContext(m, task, where, guidance = null) {
   const files = taskFiles(m, task);
   const tasks = unitTasks(task);
-  const briefCommand = (t) => `cd ${shellQuote(where.dir)} && python3 ` +
-    `${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ${shellQuote(m.plan)} ${shellQuote(t.id)} ` +
-    `${shellQuote(taskFiles(m, t).brief)}`;
   const userNote = (t) => m.notes && m.notes[t.id];
   // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
@@ -602,15 +611,14 @@ function taskContext(m, task, where, guidance = null) {
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
-    'Task briefs, one per task. Before reading each, generate it from the current plan with its command (it',
-    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
-    ...tasks.flatMap((t) => [`- Task ${t.id}: ${taskFiles(m, t).brief}`, `  ${briefCommand(t)}`]),
+    'Task briefs, one per task. The start command below regenerates each from the current plan and prints it',
+    '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
+    ...tasks.map((t) => `- Task ${t.id}: ${taskFiles(m, t).brief}`),
     ...tasks.filter(userNote).map((t) =>
       `The user's answer for task ${t.id} (follow it where it settles a question): ${userNote(t)}`),
   ] : [
-    `Task brief: ${files.brief}. Before reading it, generate it from the current plan with this command (it`,
-    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
-    `  ${briefCommand(task)}`,
+    `Task brief: ${files.brief}. The start command below regenerates it from the current plan and prints it`,
+    '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you).',
     ...(userNote(task)
       ? [`The user's answer for this task (follow it where it settles a question): ${userNote(task)}`] : []),
   ];
@@ -672,7 +680,8 @@ function fallbackReReviewer() {
   ].join('\n');
 }
 
-// How a reviewer gets the diff for base..head.
+// How a reviewer gets the diff for base..head. With superpowers the start
+// command builds the review package (startCommand's pkg).
 function diffSteps(m, task, where, base, head) {
   const dir = shellQuote(where.dir);
   if (m.sp_dir === null) {
@@ -682,14 +691,60 @@ function diffSteps(m, task, where, base, head) {
       `  git -C ${dir} diff ${shellQuote(`${base}..${head}`)}`,
     ].join('\n');
   }
-  const reviews = taskFiles(m, task).reviews;
-  const out = `${reviews}/${task.id}-${base}..${head}.diff`;
-  const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
+  return '[DIFF_FILE] is the path the start command printed under its "===== review package =====" line.';
+}
+
+// The start-task command a task agent runs first: the optional fast-forward
+// to the feature branch (opts.sync), every brief of the unit regenerated from
+// the current plan and printed, and with opts.pkg = {base, head} and
+// superpowers present the review package for base..head.
+function startCommand(m, task, where, opts = {}) {
+  const sync = opts.sync || null;
+  const pkg = opts.pkg || null;
+  const parts = [
+    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
+    shellQuote(where.dir), shellQuote(m.plan),
+  ];
+  if (present(sync)) parts.push('--sync', shellQuote(sync));
+  if (pkg && m.sp_dir !== null) {
+    const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
+    const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
+    parts.push('--package', shellQuote(script), shellQuote(pkg.base), shellQuote(pkg.head), shellQuote(out));
+  }
+  for (const t of unitTasks(task)) parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
+  return parts.join(' ');
+}
+
+// The "Run this first" block of a task prompt. failure says what a non-zero
+// exit means for this agent.
+function startBlock(m, task, where, opts, failure) {
+  const what = [
+    ...(present(opts.sync) ? ['fast-forwards this worktree to the feature branch (it holds the prelude commits)'] : []),
+    isBatch(task)
+      ? 'regenerates every task brief from the current plan and prints it'
+      : 'regenerates the task brief from the current plan and prints it',
+    ...(opts.pkg && m.sp_dir !== null ? ['builds the review package'] : []),
+  ];
+  const files = isBatch(task) ? 'brief files' : 'brief file';
   return [
-    'Build the review package yourself with review-package (it writes the diff file and prints its path):',
-    `  cd ${dir} && mkdir -p ${shellQuote(reviews)} && bash ${shellQuote(script)} ` +
-      `${shellQuote(m.plan)} ${shellQuote(base)} ${shellQuote(head)} ${shellQuote(out)}`,
+    `Run this first, as one call: it ${what.join(', then ')}, so you need not read the ${files} separately.`,
+    `  ${startCommand(m, task, where, opts)}`,
+    `If it exits non-zero, ${failure}`,
   ].join('\n');
+}
+
+// The finish-task command an implement or fix agent runs after committing:
+// branch check, commit validation against from..HEAD, the committed event for
+// every task of the unit, then head and changed_lines. The <sha> placeholders
+// are the agent's to fill.
+function finishCommand(m, task, where, from) {
+  return [
+    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
+    shellQuote(where.dir), shellQuote(where.branch), shellQuote(from), shellQuote(m.repo.ledger_dir),
+    shellQuote(where.lane),
+    ...unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`),
+    '--commit <sha> --commit <sha>',
+  ].join(' ');
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
@@ -712,6 +767,21 @@ function implementResultText(dir, question = false, from = null) {
   ].join('\n');
 }
 
+// The structured result an implement or fix agent returns: head and
+// changed_lines come from finish-task's output. from is the commit the
+// agent's work starts at (finish-task counts changed_lines from it).
+function taskResultText(dir, from) {
+  return [
+    'Return a structured result: status "done" or "blocked"; head = the head value finish-task printed after',
+    `your last commit (with no commit, head = git -C ${shellQuote(dir)} rev-parse HEAD); tests = the commands you`,
+    'ran and their outcome; notes = rulings, concerns, or the reason you are blocked. That result replaces any',
+    'status reply format named in the instructions above.',
+    `When you committed, also return changed_lines = the changed_lines value finish-task printed (counted from ${from}).`,
+    'When you need a question answered before you can continue correctly, return status "question" instead,',
+    'with question = the question (and head as above): do not guess. It is answered and the task reruns.',
+  ].join('\n');
+}
+
 function reviewResultText(m, task, where, rounds) {
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
@@ -729,6 +799,17 @@ function reviewResultText(m, task, where, rounds) {
       : 'Only when your verdict is approve, record it with:',
     ...ledgerLines(m, task, where, { event: 'reviewed', rounds }),
   ].join('\n');
+}
+
+// How an implement or fix prompt introduces its finish-task command.
+// shas says which commits it lists.
+function finishText(batch, shas) {
+  return `After committing, run finish-task once, with one --commit per sha (${shas}); it records the\n` +
+    (batch ? 'committed event for every task of the batch' : 'committed event') + ' and prints head and changed_lines:';
+}
+
+function finishFailure() {
+  return 'A non-zero exit records nothing: fix the cause (a wrong sha, the wrong branch) and rerun it, or report blocked.';
 }
 
 // Prompt for an implementer. base is the task base the script owns (the
@@ -752,14 +833,10 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     ].join('\n'),
     '',
     taskContext(m, task, where, guidance),
+    '',
+    startBlock(m, task, where, { sync: where.sync || null },
+      'stop and report blocked with its message (a failed fast-forward is reported, never forced).'),
   ];
-  if (where.sync) {
-    parts.push('', [
-      'Before anything else, bring this worktree up to date with the feature branch (it holds the prelude',
-      `commits): git -C ${shellQuote(where.dir)} merge --ff-only ${shellQuote(where.sync)}`,
-      'An already up to date result is fine; if the fast-forward fails, report blocked.',
-    ].join('\n'));
-  }
   parts.push('', [
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
@@ -772,15 +849,20 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     ].join('\n'));
   }
   parts.push('', [
-    batch
-      ? 'After committing, record your commits for every task of the batch (each command lists every sha you\n' +
-        'made for this batch, oldest first) with:'
-      : 'After committing, record your commits (every sha you made for this task, oldest first) with:',
-    ...ledgerLines(m, task, where, { event: 'committed', commits: ['<sha>', '<sha>'] }),
+    finishText(batch, `every sha you made for this ${noun}, oldest first`),
+    `  ${finishCommand(m, task, where, base)}`,
+    finishFailure(),
     batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
     ...ledgerLines(m, task, where, { event: 'blocked', reason: '<reason>' }),
-  ].join('\n'), '', implementResultText(where.dir, true, base));
+  ].join('\n'), '', taskResultText(where.dir, base));
   return parts.join('\n');
+}
+
+// What a non-zero start-task exit means for a reviewer, who has no blocked
+// status: a "changes" verdict, so a failed start never approves.
+function reviewStartFailure() {
+  return 'stop and report blocked with its message: return verdict "changes" with one critical finding (file\n' +
+    '"start-task", line 0) that quotes it, and record no ledger line.';
 }
 
 // Prompt for the first (full) review of a task's base..head range.
@@ -795,9 +877,10 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
       `Read and follow ${sdd}/task-reviewer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with [BRIEF_FILE]: ${briefRef(m, task)}; [GLOBAL_CONSTRAINTS]: the Global Constraints section of the plan and`,
       `the commit rules below; [REPORT_FILE]: ${files.report}; [BASE_SHA]: ${base}; [HEAD_SHA]: ${head};`,
-      '[DIFF_FILE]: the path review-package prints (below).',
+      '[DIFF_FILE]: the review package path the start command prints (below).',
     ].join('\n'),
     '',
+    startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     '',
     taskContext(m, task, where, guidance),
@@ -832,14 +915,15 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     '',
     taskContext(m, task, where, guidance),
     '',
-    batch
-      ? 'After committing, record your fix commits (oldest first) for every task of the batch with:'
-      : 'After committing, record your fix commits (oldest first) with:',
-    ...ledgerLines(m, task, where, { event: 'committed', commits: ['<sha>', '<sha>'] }),
+    startBlock(m, task, where, {}, 'stop and report blocked with its message.'),
+    '',
+    finishText(batch, 'every fix sha, oldest first'),
+    `  ${finishCommand(m, task, where, head)}`,
+    finishFailure(),
     batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
     ...ledgerLines(m, task, where, { event: 'blocked', reason: '<reason>' }),
     '',
-    implementResultText(where.dir, true, head),
+    taskResultText(where.dir, head),
   ].join('\n');
 }
 
@@ -854,12 +938,14 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     sdd === null ? fallbackReReviewer() : [
       `Read and follow ${sdd}/re-review-prompt.md: the prompt block inside its fence is your instructions,`,
       `with [BRIEF_FILE]: ${briefRef(m, task)}; [FINDINGS]: the findings below; [REPORT_FILE]: ${files.report};`,
-      `[FIX_BASE_SHA]: ${base}; [HEAD_SHA]: ${head}; [DIFF_FILE]: the path review-package prints (below).`,
+      `[FIX_BASE_SHA]: ${base}; [HEAD_SHA]: ${head}; [DIFF_FILE]: the review package path the start command`,
+      'prints (below).',
     ].join('\n'),
     '',
     'Findings under verification:',
     findingsText(findings),
     '',
+    startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     '',
     taskContext(m, task, where, guidance),
@@ -1724,12 +1810,23 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused}), and refuses calls past the limits of
-// effectiveLimits(m). A refused call spawns nothing and returns the sentinel
-// {__budget: true}; callers read it as a blocked or invalid result, and
-// runAll stops the run with reason budget. Once one call is refused every
+// state ({agents, rulings, refused, untyped?}), and refuses calls past the
+// limits of effectiveLimits(m). A refused call spawns nothing and returns the
+// sentinel {__budget: true}; callers read it as a blocked or invalid result,
+// and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
 // finish. The other io members pass through unchanged.
+//
+// Agent type: when agentTypeFor(m, label) names one, the spawn carries
+// agentType. A typed spawn that throws started no agent (the definition is
+// missing or broken), so its count is undone and it is retried once as
+// "<label> retry" without agentType through the normal checks. It also sets
+// the latch state.untyped (created on first use; missing means false): from
+// then on every spawn of the run, in any lane, goes out untyped, so a broken
+// definition costs one uncounted failure instead of doubling every agent and
+// ruling. A typed spawn that returns null is a dead agent like any other:
+// counted, retried untyped, latch untouched. Untyped spawns retry on null
+// only; their throw propagates.
 function makeIo(m, baseIo, state) {
   const limits = effectiveLimits(m);
   const refuse = (label) => {
@@ -1737,10 +1834,11 @@ function makeIo(m, baseIo, state) {
     baseIo.log(`parallel-lanes: budget exhausted: ${label} was not run`);
     return { __budget: true };
   };
+  const isRuling = (label) => / adjudicate( retry)?$/.test(label);
   const spawn = (prompt, opts) => {
     const label = opts.label;
     if (state.refused.length > 0 || state.agents >= limits.max_agents) return refuse(label);
-    const ruling = / adjudicate( retry)?$/.test(label);
+    const ruling = isRuling(label);
     if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
     // Only calls that run count: state.rulings is the adjudications spent.
     if (ruling) state.rulings += 1;
@@ -1750,11 +1848,36 @@ function makeIo(m, baseIo, state) {
   return {
     ...baseIo,
     agent: async (prompt, opts) => {
-      const r = await spawn(prompt, opts);
+      const retry = () => spawn(prompt, { ...opts, label: `${opts.label} retry` });
+      const agentType = state.untyped ? null : agentTypeFor(m, opts.label);
+      let r;
+      if (agentType === null) {
+        r = await spawn(prompt, opts);
+      } else {
+        try {
+          r = await spawn(prompt, { ...opts, agentType });
+        } catch (e) {
+          // Only a started spawn throws, so the count it took is undone.
+          state.agents -= 1;
+          if (isRuling(opts.label)) state.rulings -= 1;
+          state.untyped = true;
+          baseIo.log(`parallel-lanes: ${opts.label} failed as agent type ${agentType}`
+            + ` (${e && e.message ? e.message : e}); it and every later agent run on the default type`);
+          return retry();
+        }
+      }
       if (r !== null && r !== undefined) return r;
-      return spawn(prompt, { ...opts, label: `${opts.label} retry` });
+      return retry();
     },
   };
+}
+
+// The custom agent type for a spawn: m.agent_type, except for the hook agents
+// (e2e and post-integrate), whose instructions may need any tool.
+function agentTypeFor(m, label) {
+  if (typeof m.agent_type !== 'string' || m.agent_type.length === 0) return null;
+  if (/^(e2e|post-integrate)( retry)?$/.test(label)) return null;
+  return m.agent_type;
 }
 
 // ---- Execution engine: per-task loop and lanes ----

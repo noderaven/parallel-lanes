@@ -71,7 +71,7 @@ function stub(script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 const ledgerEntry = (id, event, extra) => JSON.stringify({ task: id, event, ...extra });
-const committedEntry = (id) => ledgerEntry(id, 'committed', { commits: ['<sha>', '<sha>'] });
+const finishTasks = "--task 'T2' --task 'T3' --commit";
 const blockedEntry = (id) => ledgerEntry(id, 'blocked', { reason: '<reason>' });
 const reviewedEntry = (id, rounds) => ledgerEntry(id, 'reviewed', { rounds });
 
@@ -85,9 +85,9 @@ test('two batched tasks run as one implementer and one review, with a result for
   assert.deepEqual([rev.model, rev.effort], ['opus', 'medium'], 'review effort from the batch changed_lines');
   for (const id of ['T2', 'T3']) {
     assert.ok(impl.prompt.includes(`/work/ledger/briefs/${id}.md`), `${id} brief file`);
-    assert.ok(impl.prompt.includes(`'${id}' '/work/ledger/briefs/${id}.md'`), `${id} brief command`);
+    assert.ok(impl.prompt.includes(`--brief '${id}' '/work/ledger/briefs/${id}.md'`), `${id} brief command`);
     assert.ok(impl.prompt.includes(`Title ${id}`), `${id} title`);
-    assert.ok(impl.prompt.includes(committedEntry(id)), `${id} committed command`);
+    assert.ok(impl.prompt.includes(finishTasks), `${id} committed via finish-task`);
     assert.ok(impl.prompt.includes(blockedEntry(id)), `${id} blocked command`);
     assert.ok(rev.prompt.includes(`/work/ledger/briefs/${id}.md`), `${id} brief for the reviewer`);
     assert.ok(rev.prompt.includes(reviewedEntry(id, 0)), `${id} reviewed command`);
@@ -119,7 +119,7 @@ test('a batch fix round and re-review cover every task of the batch', async () =
   assert.deepEqual([fix.model, fix.effort], ['sonnet', 'high']);
   assert.ok(fix.prompt.includes('FIX-ME'));
   for (const id of ['T2', 'T3']) {
-    assert.ok(fix.prompt.includes(committedEntry(id)), `${id} committed command in the fix`);
+    assert.ok(fix.prompt.includes(finishTasks), `${id} committed via finish-task in the fix`);
     assert.ok(rr.prompt.includes(reviewedEntry(id, 1)), `${id} reviewed command in the re-review`);
   }
   assert.ok(rr.prompt.includes('h1..h2'));
