@@ -67,10 +67,13 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     io.log(`${task.id}: escalating to standard (${reason})`);
   };
   // Why an implement or fix result did not move the branch past from, as
-  // {kind: 'blocked'|'question', reason}; null when it did. In supervised
-  // mode a question is just a blocked result.
+  // {kind: 'budget'|'blocked'|'question', reason}; null when it did. A budget
+  // refusal (the sentinel the run budget returns once the agent cap is hit)
+  // ends the task without adjudication: no agent can be spawned to settle it.
+  // In supervised mode a question is just a blocked result.
   const failure = (r, label, from) => {
     const blockedBy = (reason) => ({ kind: 'blocked', reason });
+    if (r && r.__budget) return { kind: 'budget', reason: `${label} was not run` };
     if (r === null || r === undefined) return blockedBy(`no result from ${label}`);
     if (r.status === 'question') {
       const q = present(r.question) ? r.question : (present(r.notes) ? r.notes : '(no question text)');
@@ -83,7 +86,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   };
   // A sonnet or light task escalates on a failure, except on a question it
   // can have answered by the adjudicator instead.
-  const escalates = (fail) => tierUsed !== 'standard' && fail.kind !== 'question';
+  const escalates = (fail) => tierUsed !== 'standard' && fail.kind !== 'question' && fail.kind !== 'budget';
   // Implement, escalating a sonnet or light task once if it does not finish. from
   // (optional) is the head the result must move past; it defaults to the
   // current head (or base before the first commit).
@@ -201,6 +204,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let open = null;
   for (;;) {
     if (need !== null) {
+      if (need.kind === 'budget') return result('blocked', need.reason);
       const ended = await settle(need);
       if (ended !== null) return ended;
       // A rerun after an adjudication only has to leave a non-empty task
@@ -212,6 +216,10 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       }
       need = null;
       verdict = await review();
+    }
+    if (verdict && verdict.__budget) {
+      need = { kind: 'budget', reason: `${task.id} ${reviewLabel} was not run` };
+      continue;
     }
     if (!verdict || (verdict.verdict !== 'approve' && verdict.verdict !== 'changes')) {
       need = { kind: 'blocked', reason: `no result from ${task.id} ${reviewLabel}`, findings: open };
