@@ -180,3 +180,67 @@ function validateManifest(m) {
 
   return errors;
 }
+
+// Model settings. Light applies to implementers of light tasks only; every
+// other agent (reviewers included) runs standard.
+function tierSettings(tier) {
+  return tier === 'light'
+    ? { model: 'sonnet', effort: 'medium' }
+    : { model: 'opus', effort: 'high' };
+}
+
+// The agents a run would spawn, in run order:
+// [{phase, lane|null, task|null, role, model, effort}].
+// Per task: none if done and reviewed, a review if done only, else implement
+// plus review. Fix rounds are not predictable, so each task review counts as
+// one; a task can add up to 2x review_rounds more (fix plus re-review).
+// final_fix and final_re_review are listed as the upper bound; they run only
+// when the final reviews report findings. Expects a valid manifest.
+function planAgents(m) {
+  const agents = [];
+  const standard = tierSettings('standard');
+  const add = (phase, lane, task, role, settings) =>
+    agents.push({ phase, lane, task, role, ...settings });
+  const done = new Set(m.done);
+  const reviewed = new Set(m.reviewed);
+  const addTasks = (phase, lane, tasks) => {
+    for (const t of tasks) {
+      if (done.has(t.id) && reviewed.has(t.id)) continue;
+      if (!done.has(t.id)) add(phase, lane, t.id, 'implement', tierSettings(t.tier));
+      add(phase, lane, t.id, 'review', standard);
+    }
+  };
+
+  add('Setup', null, null, 'setup', standard);
+  add('Pre-flight', null, null, 'preflight', standard);
+  addTasks('Prelude', null, m.prelude);
+  for (const lane of m.lanes) addTasks(lane.name, lane.id, lane.tasks);
+  add('Integrate', null, null, 'integrate', standard);
+  if (m.hooks.post_integrate) add('Integrate', null, null, 'post_integrate', standard);
+  addTasks('Join', null, m.join);
+  if (m.hooks.e2e) add('E2E', null, null, 'e2e', standard);
+  for (const role of ['final_review_sp', 'final_review_security', 'final_review_correctness', 'final_fix', 'final_re_review']) {
+    add('Final review', null, null, role, standard);
+  }
+  return agents;
+}
+
+// Lanes that would run at once: lanes with at least one planned agent,
+// capped by limits.max_parallel_lanes.
+function lanesEffective(m, agents) {
+  const active = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane));
+  return Math.min(active.size, m.limits.max_parallel_lanes);
+}
+
+// ---- Script body ----
+
+if (args !== null && typeof args === 'object' && args.dry_run === true) {
+  const errors = validateManifest(args);
+  const agents = errors.length === 0 ? planAgents(args) : [];
+  return {
+    dry_run: true,
+    errors,
+    agents,
+    lanes_effective: errors.length === 0 ? lanesEffective(args, agents) : 0,
+  };
+}
