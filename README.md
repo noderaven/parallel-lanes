@@ -34,34 +34,31 @@ built-in prompts.
 macOS (Homebrew):
 
 ```bash
-brew install git jq python node gh
+brew install git jq python node
 ```
 
 Debian or Ubuntu:
 
 ```bash
-sudo apt update && sudo apt install -y git jq python3 nodejs gh
+sudo apt update && sudo apt install -y git jq python3 nodejs
 ```
 
 Fedora:
 
 ```bash
-sudo dnf install -y git jq python3 nodejs gh
+sudo dnf install -y git jq python3 nodejs
 ```
 
 ---
 
 ## 2. Install the skill
 
-1. Clone the repo. It's private, so the owner has to add you as a collaborator first.
-   The easiest way to authenticate is the GitHub CLI: run `gh auth login` once.
+1. Clone the repo:
 
    ```bash
-   gh repo clone noderaven/parallel-lanes
+   git clone https://github.com/noderaven/parallel-lanes.git
    cd parallel-lanes
    ```
-
-   Plain git works too: `git clone https://github.com/noderaven/parallel-lanes.git`.
 
 2. Run the installer:
 
