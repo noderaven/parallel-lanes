@@ -5,20 +5,24 @@
 #
 # Run it from a clone of this repo (or an unzipped copy that holds
 # parallel-lanes/). Copies the skill to ~/.claude/skills/parallel-lanes
-# (without .git) and registers its two hooks in ~/.claude/settings.json
-# (backed up first):
+# (without .git), copies its parallel-lanes-worker agent type to
+# ~/.claude/agents/parallel-lanes-worker.md, and registers its two hooks in
+# ~/.claude/settings.json (backed up first):
 #   SessionStart (startup|clear|compact) -> hooks/session-start.sh
 #   PostToolUse  (Skill)                 -> hooks/notice.sh
-# Run from the installed folder itself, it only registers the hooks.
-# Running it again updates the skill and leaves hooks that already exist alone.
-# --uninstall removes the hooks and the skill directory. Run records under
-# ~/.claude/parallel-lanes/ are never touched.
+# Run from the installed folder itself, it only installs the agent type and
+# registers the hooks.
+# Running it again updates the skill and the agent type and leaves hooks that
+# already exist alone.
+# --uninstall removes the hooks, the agent type file, and the skill directory.
+# Run records under ~/.claude/parallel-lanes/ are never touched.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 dest="$claude_dir/skills/parallel-lanes"
 settings="$claude_dir/settings.json"
+agent_file="$claude_dir/agents/parallel-lanes-worker.md"
 start_cmd="bash $dest/hooks/session-start.sh"
 notice_cmd="bash $dest/hooks/notice.sh"
 
@@ -49,6 +53,10 @@ if [ "${1:-}" = "--uninstall" ]; then
     tmp="$(mktemp)"
     jq "$strip_filter" "$settings" > "$tmp" && mv "$tmp" "$settings"
     echo "Removed parallel-lanes hooks from $settings"
+  fi
+  if [ -e "$agent_file" ]; then
+    rm -f "$agent_file"
+    echo "Removed $agent_file"
   fi
   if [ "$here" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then
     echo "Left $dest in place (it is the folder this script runs from); delete it by hand"
@@ -81,6 +89,10 @@ else
   chmod +x "$dest"/hooks/*.sh "$dest"/scripts/*
   echo "Installed skill to $dest"
 fi
+
+mkdir -p "$claude_dir/agents"
+cp "$dest/agents/parallel-lanes-worker.md" "$agent_file"
+echo "Installed agent type parallel-lanes-worker to $agent_file"
 
 [ -f "$settings" ] || echo '{}' > "$settings"
 jq empty "$settings" 2>/dev/null || die "$settings is not valid JSON; fix it and rerun"
