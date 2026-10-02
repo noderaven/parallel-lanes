@@ -1,6 +1,6 @@
 ---
 name: parallel-lanes
-description: Use when an approved implementation plan is about to be executed (at the execution-method handoff) - evaluates whether its tasks split into independent file-disjoint lanes and, if so, offers parallel execution with superpowers per-task review; also use to resume a stopped parallel-lanes run.
+description: Use when an approved implementation plan is about to be executed (at the execution-method handoff), or when resuming a stopped parallel-lanes run.
 ---
 
 # Parallel lanes
@@ -49,8 +49,9 @@ still print it.
 ## Flow
 
 1. Invoked notice.
-2. If `<plan-dir>/<plan-name>.lanes.json` exists, or the user asks to resume or continue: go
-   to Resume (ask first if the user did not say whether to resume or start fresh). Starting
+2. If a manifest for this plan exists (`<plan-dir>/<plan-name>.lanes.json`, or any
+   `~/.claude/parallel-lanes/runs/*/*.lanes.json` whose `plan` equals this plan's absolute
+   path), or the user asks to resume or continue: go to Resume (ask first if the user did not say whether to resume or start fresh). Starting
    fresh: rename the old manifest to `<plan-name>.lanes.<old run_id>.json` and continue.
 3. If the Workflow tool is not available: `not a fit (Workflow tool unavailable)`,
    recommending Subagent-driven. Stop.
@@ -109,8 +110,12 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    CLAUDE.md, the plan's conventions, CONTRIBUTING). Every agent prompt carries it.
 6. `commands`, paths, `run_id`, `limits` (`review_rounds: 5`, `max_parallel_lanes: <cap>`):
    reference.md "Manifest fields". New run: `done: []`, `reviewed: []`, no `backfill`.
-7. Save as `<plan-dir>/<plan-name>.lanes.json`, beside the plan and outside the repo (if
-   the plan is inside the project, use `~/.claude/parallel-lanes/runs/<run_id>/`).
+7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
+   (and outside its repo); when the plan file lies inside the project or its repo (e.g.
+   `docs/superpowers/plans/`), `<run_dir>` = `~/.claude/parallel-lanes/runs/<run_id>/`.
+   Both the manifest and `repo.ledger_dir` go there, never inside the project: the ledger
+   dir also holds briefs, reports, and review packages. Save the manifest as
+   `<run_dir>/<plan-name>.lanes.json`; `ledger_dir` = `<run_dir>/<plan-name>.<run_id>.ledger`.
 
 ## Confirmation (every launch, no exceptions)
 

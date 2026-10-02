@@ -8,9 +8,7 @@ const SKILL_MD = join(SKILL_DIR, 'SKILL.md');
 const REFERENCE_MD = join(SKILL_DIR, 'reference.md');
 
 const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
-  'execution-method handoff) - evaluates whether its tasks split into independent file-disjoint ' +
-  'lanes and, if so, offers parallel execution with superpowers per-task review; also use to ' +
-  'resume a stopped parallel-lanes run.';
+  'execution-method handoff), or when resuming a stopped parallel-lanes run.';
 
 const NOTICES = {
   invoked: 'parallel-lanes invoked: evaluating <plan> for parallel execution',
@@ -138,4 +136,17 @@ test('every helper script SKILL.md and reference.md name exists', () => {
       assert.ok(existsSync(join(SKILL_DIR, 'scripts', name)), `${path} names missing scripts/${name}`);
     }
   }
+});
+
+test('run files of a plan inside the project go under ~/.claude/parallel-lanes/runs/<run_id>/', () => {
+  const skill = read(SKILL_MD).toString('utf8');
+  const reference = read(REFERENCE_MD).toString('utf8');
+  for (const [name, text] of [['SKILL.md', skill], ['reference.md', reference]]) {
+    assert.ok(text.includes('~/.claude/parallel-lanes/runs/<run_id>/'), `${name} lacks the runs/ location`);
+    assert.ok(text.includes('<run_dir>/<plan-name>.<run_id>.ledger'), `${name} lacks the run_dir ledger path`);
+    assert.ok(!text.includes('<plan-dir>/<plan-name>.<run_id>.ledger'), `${name} still pins the ledger beside the plan`);
+  }
+  assert.ok(skill.includes('<run_dir>/<plan-name>.lanes.json'), 'SKILL.md lacks the run_dir manifest path');
+  // Resume must find a manifest saved under runs/.
+  assert.ok(skill.includes('~/.claude/parallel-lanes/runs/*/*.lanes.json'), 'SKILL.md resume lookup misses runs/');
 });
