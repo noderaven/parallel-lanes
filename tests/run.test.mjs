@@ -702,3 +702,92 @@ test('reviewers report commit-message problems as minor findings that reach the 
   assert.ok(result.tasks.T1.notes.includes('commit abc1234'), result.tasks.T1.notes);
   assert.ok(result.tasks.T1.notes.includes('subject has a trailer'), result.tasks.T1.notes);
 });
+
+test('resume: a first prelude task done but unreviewed is reviewed on its own backfill range', async () => {
+  // setup reports the feature head, which already holds T1's commits: a
+  // review of feature_head..T1 head would be empty.
+  const m = manifest({ done: ['T1'], reviewed: [], backfill: backfillFor(['T1']) });
+  const script = {
+    ...phaseScript({
+      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }],
+    }),
+    ...taskScript(['T2', 'T3', 'T4', 'T5']),
+    'T1 review': [approve()],
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).includes('T1 implement'));
+  const rev = calls.find((c) => c.label === 'T1 review').prompt;
+  assert.ok(rev.includes('range T1-old-b..T1-old-h'), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', 'T1-old-h']);
+  // The next tasks build on T1's head.
+  assert.ok(calls.find((c) => c.label === 'T2 review').prompt.includes('T1-old-h..T2-h'));
+});
+
+test('resume: a first join task done but unreviewed is reviewed on its own backfill range', async () => {
+  // The post-integrate head is past the join commits an earlier attempt made.
+  const m = manifest({ done: [...ALL], reviewed: ['T1', 'T2', 'T3', 'T4'], backfill: backfillFor(ALL) });
+  const script = {
+    ...phaseScript({ 'post-integrate': [{ status: 'done', head: 'P9', notes: 'contracts ok' }] }),
+    'T5 review': [approve()],
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).includes('T5 implement'));
+  const rev = calls.find((c) => c.label === 'T5 review').prompt;
+  assert.ok(rev.includes('range T5-old-b..T5-old-h'), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T5.commits, ['T5-old-b', 'T5-old-h']);
+});
+
+test('lanes still review a first backfilled task from the prelude tip', async () => {
+  const m = manifest({ done: ['T1', 'T4'], reviewed: ['T1'], backfill: backfillFor(['T1', 'T4']) });
+  const script = { ...phaseScript(), ...taskScript(['T2', 'T3', 'T5']), 'T4 review': [approve()] };
+  const { calls } = await run(m, script);
+  assert.ok(calls.find((c) => c.label === 'T4 review').prompt.includes('range T1-old-h..T4-old-h'));
+});
+
+test('final review lenses report the feature head; the final fix starts from the real tip', async () => {
+  // A resume after an earlier final fix: the feature branch is at FF2, past
+  // the join tip the script knows (T5's backfill head).
+  const m = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
+  const lens = (findings) => [{ findings, cannot_verify: [], head: 'FF2' }];
+  const script = phaseScript({
+    'final review sp': [{ findings: [finding('dup issue')], cannot_verify: [] }],
+    'final review security': lens([finding('sec issue', 'src/b.js', 9)]),
+    'final review correctness': lens([]),
+  });
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  for (const c of calls.filter((x) => x.label.startsWith('final review'))) {
+    assert.ok(c.schema.required.includes('head'), c.label);
+    assert.ok(c.prompt.includes("git -C '/work/repo' rev-parse HEAD"), c.label);
+  }
+  const fix = calls.find((c) => c.label === 'final fix').prompt;
+  assert.ok(fix.includes('(now at FF2)'), fix);
+  assert.ok(!fix.includes('T5-old-h'));
+  assert.ok(calls.find((c) => c.label === 'final re-review').prompt.includes("'FF2..f1'"));
+
+  // A fix that returns the real tip made no new commits.
+  const noop = phaseScript({
+    'final review sp': lens([finding('dup issue')]),
+    'final review security': lens([]),
+    'final review correctness': lens([]),
+    'final fix': [{ status: 'done', head: 'FF2', tests: '', notes: '', declined: [] }],
+  });
+  const second = await run(m, noop);
+  assert.ok(!labels(second.calls).includes('final re-review'));
+  assert.deepEqual(second.result.final.fixed, []);
+  assert.deepEqual(second.result.final.declined.map((f) => f.reason), ['final fix made no commits']);
+});
+
+test('integrate allows earlier final-fix commits after the join tip only when every join task is done', async () => {
+  const resumed = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
+  const { calls } = await run(resumed, phaseScript());
+  const integ = calls.find((c) => c.label === 'integrate').prompt;
+  assert.match(integ, /final-fix commits from an earlier attempt/);
+  assert.ok(integ.includes('T5-old-h'), integ);
+
+  const fresh = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  const freshInteg = fresh.calls.find((c) => c.label === 'integrate').prompt;
+  assert.ok(!/final-fix commits/.test(freshInteg));
+});

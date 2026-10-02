@@ -819,9 +819,14 @@ function hasWork(m, tasks) {
 // done. Each task's base is the previous task's head (a skipped task's from
 // its backfill entry). Returns {results, stopped:reason|null, head} where head
 // is the last known head (base when no task moved it).
-async function runTaskList(m, tasks, where, base, io, name) {
+// baseIsPhaseTip: base is a head a phase agent reported (setup's feature head,
+// the integrate or post-integrate head). On a resume that tip can already sit
+// at or past this list's commits, so a done but unreviewed task that no
+// earlier task in the list precedes is reviewed on its backfill range instead.
+async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = false) {
   const results = [];
   let prev = base;
+  let prevIsPhaseTip = baseIsPhaseTip;
   for (const task of tasks) {
     const state = taskState(m, task.id);
     const range = (m.backfill || {})[task.id];
@@ -830,18 +835,23 @@ async function runTaskList(m, tasks, where, base, io, name) {
         task: task.id, status: 'skipped', base: range ? range.base : null, head: range ? range.head : null,
         rounds: null, tier_used: null, notes: '',
       });
-      if (range) prev = range.head;
+      if (range) {
+        prev = range.head;
+        prevIsPhaseTip = false;
+      }
       continue;
     }
+    const taskBase = state === 'review' && range && prevIsPhaseTip ? range.base : prev;
     const r = state === 'review' && !range
       ? { task: task.id, status: 'blocked', base: prev, head: null, rounds: 0, tier_used: task.tier, notes: 'done but not reviewed, and no backfill commits' }
-      : await runTask(m, task, where, prev, io, state === 'review' ? range : null);
+      : await runTask(m, task, where, taskBase, io, state === 'review' ? range : null);
     results.push(r);
     if (r.status !== 'done') {
       io.log(`${name}: stopped at ${task.id} (${r.notes})`);
       return { results, stopped: r.notes, head: prev };
     }
     prev = r.head;
+    prevIsPhaseTip = false;
   }
   return { results, stopped: null, head: prev };
 }
@@ -975,12 +985,18 @@ function e2eSchema() {
   };
 }
 
+// head: the feature checkout's HEAD when the lens ran (the real tip, which a
+// resume can leave past the tip the script tracked).
 function finalReviewSchema() {
   const review = reviewSchema();
   return {
     type: 'object',
-    properties: { findings: review.properties.findings, cannot_verify: review.properties.cannot_verify },
-    required: ['findings', 'cannot_verify'],
+    properties: {
+      findings: review.properties.findings,
+      cannot_verify: review.properties.cannot_verify,
+      head: { type: 'string' },
+    },
+    required: ['findings', 'cannot_verify', 'head'],
   };
 }
 
@@ -1116,6 +1132,14 @@ function integratePrompt(m, preludeTip) {
       `${admin} worktree remove ${q(w.dir)} then git -C ${dir} branch -d ${q(w.branch)}`;
   });
   const joinIds = m.join.length > 0 ? m.join.map((t) => t.id).join(', ') : '(none)';
+  // Every join task committed in an earlier attempt: a final fix of that
+  // attempt may have committed after the last join commit.
+  const lastJoin = m.join.length > 0 ? (m.backfill || {})[m.join[m.join.length - 1].id] : null;
+  const joinDone = Boolean(lastJoin) && m.join.every((t) => m.done.includes(t.id));
+  const finalFixes = joinDone ? [
+    '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
+    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
+  ] : [];
   return [
     `You are the integration agent for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
@@ -1137,6 +1161,7 @@ function integratePrompt(m, preludeTip) {
     '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
     '   commits (yours, or from an earlier attempt in this run), and commits an earlier attempt at a join task',
     `   made (join tasks: ${joinIds}; their recorded commits are in ${m.repo.ledger_dir}/join.jsonl).`,
+    ...finalFixes,
     "   Any other commit landed on the feature branch outside the run's steps: fail listing it (do not",
     '   rewrite history).',
     `5. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
@@ -1242,7 +1267,8 @@ function finalReviewPrompt(m, lens, e2e) {
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
-    'applies), issue, fix}] and cannot_verify = what you could not verify.',
+    'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
+    `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
   ].join('\n');
 }
 
@@ -1320,10 +1346,11 @@ function dedupeFindings(reports) {
 }
 
 // Final review: three lenses in parallel, one fix agent, one scoped
-// re-review of base..fix head (base = the feature tip the script tracked).
-// Returns {findings, fixed, declined, cannot_verify}; declined entries carry
-// a reason (declined by the fix agent, not fixed, or still open after the
-// re-review).
+// re-review of tip..fix head. tip is the real feature head: the first head a
+// lens reported, else base (the feature tip the script tracked); on a resume
+// after an earlier final fix the two differ. Returns {findings, fixed,
+// declined, cannot_verify}; declined entries carry a reason (declined by the
+// fix agent, not fixed, or still open after the re-review).
 async function runFinalReview(m, e2e, base, io) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
@@ -1341,12 +1368,14 @@ async function runFinalReview(m, e2e, base, io) {
     ({ lens: name, findings: results[i] ? results[i].findings : null })));
   const final = { findings, fixed: [], declined: [], cannot_verify: cannotVerify };
   if (findings.length === 0) return final;
+  const lensHead = results.find((r) => r && present(r.head));
+  const tip = lensHead ? lensHead.head : base;
 
   const declineAll = (reason) => {
     final.declined = findings.map((f) => ({ ...f, reason }));
     return final;
   };
-  const fix = await call('final fix', finalFixPrompt(m, findings, base), finalFixSchema());
+  const fix = await call('final fix', finalFixPrompt(m, findings, tip), finalFixSchema());
   if (!fix) return declineAll('no result from final fix');
   if (fix.status !== 'done') return declineAll(`final fix blocked: ${fix.notes}`);
   const declinedKeys = new Set((fix.declined || []).map(findingKey));
@@ -1356,11 +1385,11 @@ async function runFinalReview(m, e2e, base, io) {
   });
   const attempted = findings.filter((f) => !declinedKeys.has(findingKey(f)));
   if (attempted.length === 0) return final;
-  if (!present(fix.head) || fix.head === base) {
+  if (!present(fix.head) || fix.head === tip) {
     for (const f of attempted) final.declined.push({ ...f, reason: 'final fix made no commits' });
     return final;
   }
-  const rr = await call('final re-review', finalReReviewPrompt(m, base, fix.head, attempted),
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, fix.head, attempted),
     finalReReviewSchema());
   if (!rr) {
     for (const f of attempted) final.declined.push({ ...f, reason: 'no result from final re-review' });
@@ -1472,7 +1501,7 @@ async function runAll(m, io) {
   if (pre.conflicts.length > 0) return report('preflight_conflicts');
 
   io.phase('Prelude');
-  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), tip, counted, 'Prelude');
+  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), tip, counted, 'Prelude', true);
   record(prelude.results);
   if (prelude.stopped !== null) {
     stopAt('prelude', prelude);
@@ -1509,7 +1538,7 @@ async function runAll(m, io) {
   }
 
   io.phase('Join');
-  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), tip, counted, 'Join');
+  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), tip, counted, 'Join', true);
   record(join.results);
   if (join.stopped !== null) {
     stopAt('join', join);
