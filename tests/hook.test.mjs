@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
@@ -9,10 +10,18 @@ const NOTICE = join(SKILL_DIR, 'hooks', 'notice.sh');
 const SESSION_START = join(SKILL_DIR, 'hooks', 'session-start.sh');
 const BOOTSTRAP = join(SKILL_DIR, 'hooks', 'bootstrap.md');
 
-function runHook(script, stdin) {
-  const res = spawnSync('bash', [script], { input: stdin, encoding: 'utf8' });
+function runHook(script, stdin, env = process.env) {
+  const res = spawnSync(BASH, [script], { input: stdin, encoding: 'utf8', env });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+
+// Absolute paths of tools, so a test can run a hook with a PATH that lacks one.
+function which(name) {
+  const res = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `${name} not found`);
+  return res.stdout.trim();
+}
+const BASH = which('bash');
 
 function skillEvent(skill, toolName = 'Skill') {
   return JSON.stringify({
@@ -67,4 +76,28 @@ test('bootstrap.md is plain ASCII and under 120 words', () => {
   assert.equal(bad, -1, `bootstrap.md has a non-ASCII or control byte at offset ${bad}`);
   const words = buf.toString('utf8').split(/\s+/).filter(Boolean).length;
   assert.ok(words < 120, `bootstrap.md has ${words} words`);
+});
+
+test('session-start: a missing bootstrap.md prints nothing and exits 0', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pl-hook-'));
+  try {
+    copyFileSync(SESSION_START, join(dir, 'session-start.sh'));
+    const res = runHook(join(dir, 'session-start.sh'), '{}');
+    assert.equal(res.code, 0);
+    assert.equal(res.stdout, '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session-start: without jq prints nothing and exits 0', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'pl-hook-bin-'));
+  try {
+    symlinkSync(which('dirname'), join(bin, 'dirname'));
+    const res = runHook(SESSION_START, '{}', { PATH: bin });
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(res.stdout, '');
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
 });

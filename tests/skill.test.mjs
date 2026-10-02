@@ -150,3 +150,11 @@ test('run files of a plan inside the project go under ~/.claude/parallel-lanes/r
   // Resume must find a manifest saved under runs/.
   assert.ok(skill.includes('~/.claude/parallel-lanes/runs/*/*.lanes.json'), 'SKILL.md resume lookup misses runs/');
 });
+
+test('reference.md cleanup never runs git in a shadow project folder', () => {
+  const reference = read(REFERENCE_MD).toString('utf8');
+  const cleanup = reference.slice(reference.indexOf('## Cleanup'), reference.indexOf('## Worked example'));
+  assert.ok(cleanup.includes('git --git-dir="<git_dir>" worktree remove'), cleanup);
+  assert.ok(cleanup.includes('git -C "<worktree_root>/feature" branch -d'), cleanup);
+  assert.match(cleanup, /not a repo/);
+});

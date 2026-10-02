@@ -211,6 +211,9 @@ test('shadow mode: worktrees via --git-dir and a feature worktree for prelude an
   const setup = calls.find((c) => c.label === 'setup').prompt;
   assert.ok(setup.includes("git --git-dir='/shadow/abc' worktree add"));
   assert.ok(setup.includes("'/work/wt/feature'"));
+  // A reused feature worktree (resume) has its uncommitted changes listed and discarded.
+  assert.ok(setup.includes("git -C '/work/wt/feature' status --porcelain"), setup);
+  assert.match(setup, /add each line to discarded as "\/work\/wt\/feature: <line>"/);
   const t1 = calls.find((c) => c.label === 'T1 implement');
   assert.ok(t1.prompt.includes('Worktree: /work/wt/feature (branch pl/run-1)'));
   const integ = calls.find((c) => c.label === 'integrate').prompt;

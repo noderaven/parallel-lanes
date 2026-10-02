@@ -248,6 +248,7 @@ test('preview lists the lane commit as add, modify and delete', () => {
     add: ['new dir/file name.txt', 'we"ird.txt'],
     modify: ['a.txt', 'run.sh'],
     delete: ['b.txt', 'gone/only.txt'],
+    skipped: [],
   });
 });
 
@@ -354,7 +355,10 @@ test('writeback never creates files at excluded paths', () => {
 
   const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
   assert.deepEqual(JSON.parse(preview.stdout).add, ['b.txt']);
-  assert.equal(shadow(c.base, ['writeback', gitdir, c.project, 'lane']).code, 0);
+  assert.deepEqual(JSON.parse(preview.stdout).skipped, ['node_modules/forced.js'], 'excluded adds are listed, not dropped');
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
+  assert.equal(wb.code, 0, wb.stderr);
+  assert.deepEqual(JSON.parse(wb.stdout).skipped, ['node_modules/forced.js']);
   assert.ok(existsSync(join(c.project, 'b.txt')));
   assert.ok(!existsSync(join(c.project, 'node_modules')));
 });
@@ -375,6 +379,75 @@ test('preview rejects an unknown ref', () => {
   const res = shadow(c.base, ['preview', gitdir, c.project, 'no-such-branch']);
   assert.equal(res.code, 2);
   assert.match(res.stderr, /no-such-branch/);
+});
+
+const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+test('writeback preflight: an unwritable target or directory writes nothing', { skip: asRoot && 'root ignores permissions' }, () => {
+  const c = newCase({ 'a.txt': 'a\n', 'locked/f.txt': 'f\n', 'ro.txt': 'ro\n' });
+  const gitdir = init(c);
+  const wt = laneWorktree(c, gitdir);
+  write(wt, 'a.txt', 'a from lane\n');
+  write(wt, 'locked/new.txt', 'new\n');
+  write(wt, 'ro.txt', 'ro from lane\n');
+  commitAll(wt);
+  chmodSync(join(c.project, 'locked'), 0o555);
+  chmodSync(join(c.project, 'ro.txt'), 0o444);
+  try {
+    const before = snapshot(c.project);
+    const res = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
+    assert.equal(res.code, 3, res.stderr);
+    assert.match(res.stderr, /nothing was written/);
+    assert.match(res.stderr, /locked\/new\.txt/);
+    assert.match(res.stderr, /ro\.txt/);
+    assert.doesNotMatch(res.stderr, /^  a\.txt$/m);
+    assert.equal(res.stdout, '');
+    assert.deepEqual(snapshot(c.project), before);
+  } finally {
+    chmodSync(join(c.project, 'locked'), 0o755);
+    chmodSync(join(c.project, 'ro.txt'), 0o644);
+  }
+});
+
+test('a write that fails midway names the paths already written', () => {
+  const c = newCase({ 'a.txt': 'a\n', 'm.txt': 'm\n' });
+  const gitdir = init(c);
+  const wt = laneWorktree(c, gitdir);
+  write(wt, 'a.txt', 'a from lane\n');
+  unlinkSync(join(wt, 'm.txt'));
+  write(wt, 'z.bin', 'z'.repeat(64 * 1024));
+  commitAll(wt);
+  // A file size limit lets the small writes through and fails the large one.
+  const res = spawnSync('bash', ['-c', 'ulimit -c 0; ulimit -f 16; exec bash "$@"', 'limit', SHADOW, 'writeback', gitdir, c.project, 'lane'], {
+    encoding: 'utf8',
+    env: { ...process.env, ...GIT_ENV, PL_SHADOW_BASE: c.base },
+  });
+  assert.equal(res.status, 3, res.stderr);
+  assert.match(res.stderr, /writeback failed at z\.bin/);
+  assert.match(res.stderr, /^  m\.txt$/m);
+  assert.match(res.stderr, /^  a\.txt$/m);
+  assert.equal(readFileSync(join(c.project, 'a.txt'), 'utf8'), 'a from lane\n');
+  assert.ok(!existsSync(join(c.project, 'm.txt')));
+});
+
+test('core.autocrlf in the user config does not turn CRLF files into conflicts', () => {
+  const c = newCase({ 'w.txt': 'one\r\ntwo\r\n', 'keep.txt': 'k\r\n' });
+  const config = join(c.root, 'gitconfig');
+  writeFileSync(config, '[core]\n\tautocrlf = true\n\tsafecrlf = true\n');
+  const env = { GIT_CONFIG_GLOBAL: config };
+  const res = shadow(c.base, ['init', c.project], env);
+  assert.equal(res.code, 0, res.stderr);
+  const gitdir = res.stdout.trim();
+  const wt = laneWorktree(c, gitdir);
+  assert.equal(readFileSync(join(wt, 'w.txt'), 'utf8'), 'one\r\ntwo\r\n', 'the baseline keeps CRLF bytes');
+  write(wt, 'w.txt', 'one\r\ntwo\r\nthree\r\n');
+  commitAll(wt);
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane'], env);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane'], env);
+  assert.equal(wb.code, 0, wb.stderr);
+  assert.equal(readFileSync(join(c.project, 'w.txt'), 'utf8'), 'one\r\ntwo\r\nthree\r\n');
 });
 
 // --- remove -----------------------------------------------------------------

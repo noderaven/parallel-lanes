@@ -139,14 +139,21 @@ Integration already removes each clean lane worktree and deletes its merged bran
 ones it could not remove are listed in its notes. After the user confirms the result:
 
 ```bash
+# git mode
 git -C "<wt>" status --porcelain          # must print nothing
-git -C "<root>" worktree remove "<wt>"     # shadow: git --git-dir="<git_dir>" worktree remove "<wt>"
+git -C "<root>" worktree remove "<wt>"
 git -C "<root>" branch -d "<branch>"       # merged branches only; never -D
+
+# shadow mode: <root> is not a repo, so never run git -C "<root>"
+git -C "<wt>" status --porcelain                        # must print nothing
+git -C "<worktree_root>/feature" branch -d "<branch>"   # lane branches, while feature exists
+git --git-dir="<git_dir>" worktree remove "<wt>"
 ```
 
-A worktree with uncommitted files stays; list it for the user. In shadow mode remove
-`<worktree_root>/feature` the same way, then run `shadow remove`. Remove `worktree_root` if
-it is empty (`rmdir`).
+A worktree with uncommitted files stays; list it for the user. In shadow mode remove the lane
+worktrees first, then `<worktree_root>/feature` with the same status check and
+`git --git-dir="<git_dir>" worktree remove`, then run `shadow remove` (it deletes the shadow
+repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir`).
 
 ## Worked example: acme remote ingest (resume of a hand-run attempt)
 

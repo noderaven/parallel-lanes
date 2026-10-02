@@ -1024,8 +1024,11 @@ function setupPrompt(m) {
     `Shadow mode: the project folder ${m.repo.root} is not a git repo; the shadow repo ${m.repo.git_dir}`,
     'and its baseline already exist. Never modify the project folder.',
     `1. Create the feature branch if it does not exist: ${admin} branch ${branch} ${q(m.repo.base_ref)}`,
-    `   Feature worktree ${q(featureDir(m))}: if it does not exist, ${admin} worktree add ${q(featureDir(m))} ${branch};`,
-    '   if it exists it must be on that branch.',
+    `   Feature worktree ${q(featureDir(m))}: if it does not exist, ${admin} worktree add ${q(featureDir(m))} ${branch}.`,
+    '   If it exists (a resumed run) it must be on that branch; reuse it: list its uncommitted changes with',
+    `   git -C ${q(featureDir(m))} status --porcelain, add each line to discarded as "${featureDir(m)}: <line>",`,
+    `   then discard them with git -C ${q(featureDir(m))} reset --hard HEAD and git -C ${q(featureDir(m))} clean -fd`,
+    '   (ignored scratch stays). This worktree is the run\'s own, never the project folder.',
   ] : [
     `Git mode: the main checkout is ${m.repo.root}.`,
     `1. git -C ${q(m.repo.root)} status --porcelain must print nothing; otherwise return ok false listing`,

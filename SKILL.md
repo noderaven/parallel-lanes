@@ -168,9 +168,12 @@ final review (fixed, declined with reasons, cannot verify), `agents_spawned`.
 Then offer the next step and act only on an explicit yes:
 - Git mode: a PR from `branch` into `base_ref` (follow the user's PR policy).
 - Shadow mode: run `bash <skill_dir>/scripts/shadow preview <git_dir> <root> <branch>` and
-  show adds, changes, deletes, conflicts. On yes: `bash <skill_dir>/scripts/shadow writeback
-  <git_dir> <root> <branch>`. Exit 3 = files edited in the folder during the run; nothing was
-  written; show them and ask. Never copy files around it by hand.
+  show adds, changes, deletes, conflicts, and skipped (new files matching the exclude rules;
+  never written). On yes: `bash <skill_dir>/scripts/shadow writeback <git_dir> <root>
+  <branch>`. Exit 3 means, by its message: conflicts = files edited in the folder during the
+  run; "cannot be written" = permissions; in both nothing was written; show them and ask.
+  "writeback failed at" = a write failed midway; show the paths it lists as already
+  written. Never copy files around it by hand.
 
 Cleanup, only after the user confirms the result (PR merged or written-back folder works):
 for each worktree the run left (lane worktrees listed in the integration notes, and in
@@ -195,8 +198,9 @@ manifest and ledger.
    Record an answer in the manifest's `notes` as `{"<task id>": "<answer>"}` (plain
    ASCII); the script passes it to that task's agents. A plan fix needs nothing more:
    agents regenerate each task brief from the plan on every attempt.
-5. Keep `run_id`, `branch`, and `worktree_root`; setup reuses the worktrees and discards
-   their uncommitted changes (it logs each one). Shadow mode reuses the existing shadow.
+5. Keep `run_id`, `branch`, and `worktree_root`; setup reuses the worktrees (lane worktrees,
+   and in shadow mode `<worktree_root>/feature`) and discards their uncommitted changes (it
+   logs each one). Shadow mode reuses the existing shadow.
 6. Confirmation (same rules), then the resume notice, then launch.
 
 Adopting earlier work (no manifest or ledger, or lane branches not named
