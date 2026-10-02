@@ -273,7 +273,12 @@ test('ledger round-trips events across two lanes', () => {
   });
   assert.ok(existsSync(join(dir, 'beta.jsonl')));
 
-  assert.deepEqual(status(dir), { done: ['T1', 'T2'], reviewed: ['T1'], blocked: ['T3'] });
+  assert.deepEqual(status(dir), {
+    done: ['T1', 'T2'],
+    reviewed: ['T1'],
+    blocked: ['T3'],
+    start_points: {},
+  });
 });
 
 test('ledger: a commit after a review makes the task unreviewed again', () => {
@@ -282,7 +287,7 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 1 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
   appendOk(dir, 'alpha', { task: 'T13a', event: 'committed', commits: ['222'] });
-  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [] });
+  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [], start_points: {} });
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 3 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
 });
@@ -290,9 +295,43 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
 test('ledger: a commit after a block clears the block', () => {
   const dir = workDir();
   appendOk(dir, 'alpha', { task: 'T7', event: 'blocked', reason: 'flaky' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'] });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'], start_points: {} });
   appendOk(dir, 'alpha', { task: 'T7', event: 'committed', commits: ['333'] });
-  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [] });
+  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {} });
+});
+
+test('ledger: run_started events give the earliest start points per phase', () => {
+  const dir = workDir();
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'aaa111' });
+  appendOk(dir, 'prelude', { task: 'P1', event: 'committed', commits: ['bbb222'] });
+  assert.deepEqual(status(dir), {
+    done: ['P1'],
+    reviewed: [],
+    blocked: [],
+    start_points: { prelude: 'aaa111' },
+  });
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'ccc333' });
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'ddd444' });
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'eee555' });
+  assert.deepEqual(status(dir), {
+    done: ['P1'],
+    reviewed: [],
+    blocked: [],
+    start_points: { prelude: 'aaa111', join: 'ddd444' },
+  });
+  const lines = readFileSync(join(dir, '_run.jsonl'), 'utf8').trim().split('\n');
+  assert.deepEqual(JSON.parse(lines[0]), {
+    task: '_run',
+    event: 'run_started',
+    phase: 'setup',
+    head: 'aaa111',
+  });
+});
+
+test('ledger: a join start point alone omits the prelude key', () => {
+  const dir = workDir();
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'fff666' });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' } });
 });
 
 // Node's spawn() starts children too far apart to hit a first-append race, so
@@ -340,7 +379,7 @@ test('ledger append refuses a DIR that is a file with exit 3', () => {
 
 test('ledger status of a missing directory is empty', () => {
   const dir = join(workDir(), 'never created');
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [] });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: {} });
   assert.equal(existsSync(dir), false);
 });
 
@@ -358,6 +397,11 @@ test('ledger append rejects malformed entries with exit 2', () => {
     JSON.stringify({ task: 'T1', event: 'reviewed', rounds: true }),
     JSON.stringify({ task: 'T1', event: 'ruling' }),
     JSON.stringify({ task: 'T1', event: 'blocked' }),
+    JSON.stringify({ task: '_run', event: 'run_started', head: 'abc' }),
+    JSON.stringify({ task: '_run', event: 'run_started', phase: 'integrate', head: 'abc' }),
+    JSON.stringify({ task: '_run', event: 'run_started', phase: 'setup' }),
+    JSON.stringify({ task: '_run', event: 'run_started', phase: 'setup', head: '' }),
+    JSON.stringify({ task: '_run', event: 'run_started', phase: 'join', head: 7 }),
   ];
   for (const entry of bad) {
     const res = ledger('append', dir, 'alpha', entry);

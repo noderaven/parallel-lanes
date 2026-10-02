@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Deterministic run setup: the feature branch, run worktrees, setup commands.
+
+usage:
+  python3 setup MANIFEST
+
+MANIFEST is the run manifest (JSON). setup does what the Setup agent of
+run.workflow.js does, without an agent:
+
+git mode (the main checkout repo.root is the feature checkout):
+  refuses a main checkout with uncommitted changes (exit 3, nothing created;
+  its changes are never discarded), creates repo.branch from repo.base_ref
+  unless it exists, and switches the main checkout to repo.branch.
+shadow mode (repo.root is not a git repo; repo.git_dir is its shadow):
+  creates repo.branch through --git-dir unless it exists and creates or
+  reuses the feature worktree <worktree_root>/feature on it. The project
+  folder is never modified.
+
+profile full (the default): creates or reuses the lane worktree
+<worktree_root>/lane-<id> on branch pl-<run_id>-<id> (new lane branches
+start at repo.branch) for every lane. profile lite: no lane worktree or lane
+branch; the single lane works in the feature checkout.
+
+A reused worktree (the run's own: the shadow feature worktree or a lane
+worktree) must be a worktree of this repo on its branch; its uncommitted
+changes are listed in discarded as "<worktree>: <git status --porcelain
+line>" and discarded with reset --hard HEAD and clean -fd (ignored files
+stay). An existing non-empty directory that is not such a worktree is
+refused (exit 3) and left alone. No worktree is removed and no branch is
+deleted.
+
+Then commands.setup (or the lane's lane_commands override) runs with bash
+in the feature checkout and in each lane checkout; under lite the lane's
+own list also runs in the feature checkout unless it is the same list.
+Command output goes to stderr.
+
+On success setup appends {"task":"_run","event":"run_started","phase":
+"setup","head":<feature_head>} to the ledger lane _run in repo.ledger_dir
+and prints the manifest's setup_result:
+  {"feature_head": <sha of repo.branch>, "worktrees": {<lane id>: <path>},
+   "discarded": [...]}
+The worktree paths are exactly the paths the run uses for the lanes.
+
+Exit 0 on success; 1 when a git or setup command fails; 2 on a usage error
+or an unreadable or malformed manifest; 3 on a refused condition (dirty main
+checkout, foreign directory at a run worktree path, missing shadow).
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+# Variables that would point git at another repo than the one named.
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+
+
+class Failure(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def run_git(args, check=True):
+    res = subprocess.run(["git", *args], capture_output=True, text=True, env=ENV)
+    if check and res.returncode != 0:
+        raise Failure(1, f"git {' '.join(args)} failed: {res.stderr.strip()}")
+    return res
+
+
+def is_text(value):
+    return isinstance(value, str) and value != ""
+
+
+def load_manifest(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise Failure(2, f"cannot read manifest {path}: {e}")
+    if not isinstance(m, dict):
+        raise Failure(2, "manifest must be a JSON object")
+    repo = m.get("repo")
+    if not isinstance(repo, dict) or repo.get("mode") not in ("git", "shadow"):
+        raise Failure(2, "manifest repo.mode must be git or shadow")
+    for key in ("root", "base_ref", "branch", "worktree_root", "ledger_dir"):
+        if not is_text(repo.get(key)):
+            raise Failure(2, f"manifest repo.{key} must be a non-empty string")
+    if repo["mode"] == "shadow" and not is_text(repo.get("git_dir")):
+        raise Failure(2, "manifest repo.git_dir is required in shadow mode")
+    if not is_text(m.get("run_id")):
+        raise Failure(2, "manifest run_id must be a non-empty string")
+    lanes = m.get("lanes")
+    if not isinstance(lanes, list) or not all(
+            isinstance(lane, dict) and is_text(lane.get("id")) for lane in lanes):
+        raise Failure(2, "manifest lanes must be a list of objects with an id")
+    if m.get("profile", "full") not in ("full", "lite"):
+        raise Failure(2, "manifest profile must be lite or full")
+    if not isinstance(m.get("commands"), dict):
+        raise Failure(2, "manifest commands must be an object")
+    for branch in [repo["branch"]] + [lane_branch(m, lane) for lane in lanes]:
+        ok = run_git(["check-ref-format", "--branch", branch], check=False)
+        if ok.returncode != 0 or branch.startswith("-"):
+            raise Failure(2, f"invalid branch name {branch!r}")
+    return m
+
+
+def setup_commands(m, lane_id):
+    """The setup list for a lane (None: the feature checkout), as commandList."""
+    own = (m.get("lane_commands") or {}).get(lane_id) if lane_id is not None else None
+    if isinstance(own, dict) and "setup" in own:
+        cmds = own["setup"]
+    else:
+        cmds = m["commands"].get("setup") or []
+    if not isinstance(cmds, list) or not all(is_text(c) for c in cmds):
+        raise Failure(2, "manifest setup commands must be lists of non-empty strings")
+    return cmds
+
+
+def feature_dir(m):
+    repo = m["repo"]
+    return f"{repo['worktree_root']}/feature" if repo["mode"] == "shadow" else repo["root"]
+
+
+def lane_dir(m, lane):
+    return f"{m['repo']['worktree_root']}/lane-{lane['id']}"
+
+
+def lane_branch(m, lane):
+    return f"pl-{m['run_id']}-{lane['id']}"
+
+
+class Repo:
+    """git commands against the run's repo (main checkout or shadow git dir)."""
+
+    def __init__(self, m):
+        repo = m["repo"]
+        if repo["mode"] == "shadow":
+            git_dir = repo["git_dir"]
+            if not os.path.isfile(os.path.join(git_dir, "pl-baseline")):
+                raise Failure(3, f"not a shadow git dir: {git_dir}")
+            self.prefix = [f"--git-dir={git_dir}"]
+        else:
+            if not os.path.isdir(repo["root"]):
+                raise Failure(2, f"repo.root is not a directory: {repo['root']}")
+            self.prefix = ["-C", repo["root"]]
+        top = self.git("rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
+        if top.returncode != 0:
+            raise Failure(2, f"not a git repo: {' '.join(self.prefix)}: {top.stderr.strip()}")
+        self.common_dir = os.path.realpath(top.stdout.strip())
+
+    def git(self, *args, check=True):
+        return run_git([*self.prefix, *args], check=check)
+
+    def has_branch(self, branch):
+        res = self.git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
+        return res.returncode == 0
+
+    def head_of(self, branch):
+        return self.git("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}").stdout.strip()
+
+
+def worktree_state(repo, path, branch):
+    """'missing' (absent or empty dir) or 'reuse'; raises on anything else."""
+    if not os.path.lexists(path) or (os.path.isdir(path) and not os.listdir(path)):
+        return "missing"
+    refuse = Failure(3, f"{path} exists and is not a worktree of this repo on {branch}; "
+                        "move it away or fix it by hand")
+    if not os.path.isdir(path) or os.path.islink(path):
+        raise refuse
+    top = run_git(["-C", path, "rev-parse", "--path-format=absolute",
+                   "--show-toplevel", "--git-common-dir"], check=False)
+    if top.returncode != 0:
+        raise refuse
+    toplevel, common = top.stdout.splitlines()[:2]
+    if (os.path.realpath(toplevel) != os.path.realpath(path)
+            or os.path.realpath(common) != repo.common_dir):
+        raise refuse
+    head = run_git(["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
+    if head.returncode != 0 or head.stdout.strip() != branch:
+        raise refuse
+    return "reuse"
+
+
+def discard_changes(path, discarded):
+    status = run_git(["-C", path, "status", "--porcelain"]).stdout
+    for line in status.splitlines():
+        if line:
+            discarded.append(f"{path}: {line}")
+    if status:
+        run_git(["-C", path, "reset", "-q", "--hard", "HEAD"])
+        run_git(["-C", path, "clean", "-q", "-fd"])
+
+
+def ensure_worktree(repo, path, branch, start, state, discarded):
+    if state == "reuse":
+        discard_changes(path, discarded)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if repo.has_branch(branch):
+        repo.git("worktree", "add", "-q", path, branch)
+    else:
+        repo.git("worktree", "add", "-q", "-b", branch, path, start)
+
+
+def check_branch(path, branch):
+    head = run_git(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    if head != branch:
+        raise Failure(1, f"{path} is on {head}, expected {branch}")
+
+
+def run_commands(path, cmds):
+    for cmd in cmds:
+        res = subprocess.run(["bash", "-c", cmd], cwd=path, env=ENV,
+                             stdout=sys.stderr, stderr=sys.stderr)
+        if res.returncode != 0:
+            raise Failure(1, f"setup command failed in {path} (exit {res.returncode}): {cmd}")
+
+
+def setup(m):
+    repo_cfg = m["repo"]
+    lite = m.get("profile", "full") == "lite"
+    branch = repo_cfg["branch"]
+    repo = Repo(m)
+    feature = feature_dir(m)
+
+    # Every refusal comes before the first change.
+    if repo_cfg["mode"] == "git":
+        dirty = run_git(["-C", feature, "status", "--porcelain"]).stdout
+        if dirty:
+            raise Failure(3, f"the main checkout {feature} has uncommitted changes; commit or "
+                             f"stash them first (nothing was changed):\n{dirty.rstrip()}")
+    feature_state = (worktree_state(repo, feature, branch)
+                     if repo_cfg["mode"] == "shadow" else None)
+    lanes = [] if lite else [(lane, lane_dir(m, lane), lane_branch(m, lane)) for lane in m["lanes"]]
+    lane_states = [worktree_state(repo, path, lb) for _, path, lb in lanes]
+
+    discarded = []
+    # Drops only records of worktrees whose directory is gone.
+    repo.git("worktree", "prune")
+    if not repo.has_branch(branch):
+        repo.git("branch", branch, repo_cfg["base_ref"])
+    if repo_cfg["mode"] == "git":
+        repo.git("switch", "-q", branch)
+    else:
+        ensure_worktree(repo, feature, branch, repo_cfg["base_ref"], feature_state, discarded)
+    check_branch(feature, branch)
+    for (_, path, lb), state in zip(lanes, lane_states):
+        ensure_worktree(repo, path, lb, branch, state, discarded)
+        check_branch(path, lb)
+
+    feature_cmds = setup_commands(m, None)
+    run_commands(feature, feature_cmds)
+    if lite:
+        for lane in m["lanes"]:
+            cmds = setup_commands(m, lane["id"])
+            if cmds != feature_cmds:
+                run_commands(feature, cmds)
+    for lane, path, _ in lanes:
+        run_commands(path, setup_commands(m, lane["id"]))
+
+    head = repo.head_of(branch)
+    entry = {"task": "_run", "event": "run_started", "phase": "setup", "head": head}
+    res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ledger"), "append",
+                          repo_cfg["ledger_dir"], "_run", json.dumps(entry)],
+                         capture_output=True, text=True, env=ENV)
+    if res.returncode != 0:
+        raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
+    worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
+    return {"feature_head": head, "worktrees": worktrees, "discarded": discarded}
+
+
+def main(argv):
+    try:
+        if len(argv) != 1 or not argv[0]:
+            raise Failure(2, "usage: setup MANIFEST")
+        result = setup(load_manifest(argv[0]))
+    except Failure as e:
+        print(f"setup: {e}", file=sys.stderr)
+        sys.exit(e.code)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

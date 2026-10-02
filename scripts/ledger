@@ -9,14 +9,21 @@ append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
 0700. JSON must be an object with a non-empty string 'task' and an 'event' of:
   committed  with 'commits': non-empty list of strings
   reviewed   with 'rounds': integer >= 0
-  ruling     with 'text': string
-  blocked    with 'reason': string
+  ruling       with 'text': string
+  blocked      with 'reason': string
+  run_started  with 'phase': "setup" or "join", and 'head': non-empty string
 
 status reads every DIR/*.jsonl and prints
-  {"done": [...], "reviewed": [...], "blocked": [...]}
+  {"done": [...], "reviewed": [...], "blocked": [...], "start_points": {...}}
 done: tasks with a 'committed' event. reviewed: tasks with a 'reviewed' event
 after their last 'committed'. blocked: tasks with a 'blocked' event and no
-'committed' after it. A missing DIR has empty lists.
+'committed' after it. start_points: "prelude" is the head of the earliest
+run_started event with phase "setup", "join" the head of the earliest with
+phase "join" (earliest: first in ledger order, files by name then lines in
+order; the run appends them all to lane _run); a key is omitted when there
+is no such event. run_started
+events do not affect the lists. A missing DIR has empty lists and no start
+points.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 name or an unreadable ledger.
@@ -33,7 +40,9 @@ REQUIRED = {
     "reviewed": "rounds",
     "ruling": "text",
     "blocked": "reason",
+    "run_started": "head",
 }
+START_POINTS = {"setup": "prelude", "join": "join"}
 
 
 def fail(code, message):
@@ -60,6 +69,11 @@ def entry_error(entry):
     elif event == "reviewed":
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return "'rounds' must be an integer >= 0"
+    elif event == "run_started":
+        if entry.get("phase") not in START_POINTS:
+            return "'phase' must be one of setup, join"
+        if not isinstance(value, str) or not value:
+            return "'head' must be a non-empty string"
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
     return None
@@ -95,7 +109,7 @@ def append(directory, lane, raw):
 
 
 def status(directory):
-    done, reviewed, blocked = {}, {}, {}
+    done, reviewed, blocked, start_points = {}, {}, {}, {}
     if os.path.isdir(directory):
         names = sorted(n for n in os.listdir(directory) if n.endswith(".jsonl"))
         for name in names:
@@ -124,10 +138,14 @@ def status(directory):
                     reviewed[task] = task in done
                 elif event == "blocked":
                     blocked[task] = True
+                elif event == "run_started":
+                    key = START_POINTS[entry["phase"]]
+                    start_points.setdefault(key, entry["head"])
     result = {
         "done": list(done),
         "reviewed": [t for t, v in reviewed.items() if v],
         "blocked": [t for t, v in blocked.items() if v],
+        "start_points": start_points,
     }
     print(json.dumps(result))
 
