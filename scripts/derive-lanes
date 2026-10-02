@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Report the facts a session needs to lay out parallel lanes for a plan.
+
+usage: derive-lanes PLAN [--max-lanes N]
+
+Tasks are the '#+ Task <ID>: <title>' headings outside fenced code (ids are
+free-form, e.g. 1, 10, T13a). A task's section runs to the next task heading
+of the same or higher level, or any heading of a strictly higher level.
+
+Per task:
+  files  backticked paths in the task's '**Files:**' block, from clauses that
+         start with Create, Modify, or Test. The block is the Files line plus
+         the lines after it up to a blank line; clauses are bullets or
+         ';'-separated parts. A token counts as a path if it has no spaces
+         and contains '/' or '.'; a ':12-30' line suffix and a leading './'
+         are dropped.
+  deps   ids of other plan tasks named in bracketed lists on the heading line
+         (e.g. '[T1, T5]') or on '- Consumes:' lines, matched as whole tokens
+         ('Task 3' and 'T3' both work; ranges like 'Tasks 1-2' are not
+         expanded). Listed in plan order.
+
+Prints JSON on stdout:
+  tasks             [{id, title, files, deps}] in plan order
+  groups            connected components over shared files, each in plan
+                    order, sorted by first task position
+  bridge_files      [{file, splits_into}] for each file whose edges alone hold
+                    its group together: without them the group falls into the
+                    listed parts (each in plan order)
+  cross_group_deps  [{task, depends_on, task_group, dep_group}] for deps that
+                    point into another group (indexes into groups)
+  note              only with --max-lanes N when there are more than N groups
+
+The script reports facts; the session decides joins, preludes, and order.
+
+Exit 0 on success; 2 on usage error; 3 if the plan is unreadable, has no task
+headings, or repeats a task id.
+"""
+
+import json
+import re
+import sys
+
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+HEADING = re.compile(r"^(#{1,6})\s")
+TASK_HEADING = re.compile(r"^(#{1,6})\s+Task\s+([^\s:(\[\]]+)(.*)$")
+FILES_LINE = re.compile(r"^\s*\*\*Files:?\*\*:?(.*)$")
+BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
+CONSUMES_LINE = re.compile(r"^\s*[-*+]\s+\**Consumes:?\**:?(.*)$", re.IGNORECASE)
+FILE_VERB = re.compile(r"^\**(create|modify|tests?)\b", re.IGNORECASE)
+BACKTICK = re.compile(r"`([^`]+)`")
+BRACKETS = re.compile(r"\[([^\]]*)\]")
+TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
+LINE_SUFFIX = re.compile(r":\d+(-\d+)?$")
+
+
+def fail(code, message):
+    print(f"derive-lanes: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def warn(message):
+    print(f"derive-lanes: warning: {message}", file=sys.stderr)
+
+
+def parse_args(argv):
+    plan = None
+    max_lanes = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--max-lanes" or arg.startswith("--max-lanes="):
+            if arg == "--max-lanes":
+                i += 1
+                if i >= len(argv):
+                    usage()
+                value = argv[i]
+            else:
+                value = arg.split("=", 1)[1]
+            if not re.fullmatch(r"[0-9]+", value) or int(value) < 1:
+                usage()
+            max_lanes = int(value)
+        elif arg.startswith("-") or plan is not None or not arg:
+            usage()
+        else:
+            plan = arg
+        i += 1
+    if plan is None:
+        usage()
+    return plan, max_lanes
+
+
+def usage():
+    fail(2, "usage: derive-lanes PLAN [--max-lanes N]")
+
+
+def unfenced(lines):
+    """Return a list of booleans: True where a line is outside fenced code."""
+    mask = []
+    fence = None
+    for line in lines:
+        m = FENCE.match(line)
+        if m:
+            marker = m.group(1)
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence) and not line.strip()[len(marker):]:
+                fence = None
+            mask.append(False)
+            continue
+        mask.append(fence is None)
+    return mask
+
+
+def split_sections(lines, mask):
+    """Return [(id, heading_line, section_lines)] with fenced lines removed."""
+    headings = []
+    for i, line in enumerate(lines):
+        if not mask[i]:
+            continue
+        h = HEADING.match(line)
+        if h:
+            t = TASK_HEADING.match(line)
+            headings.append((i, len(h.group(1)), t))
+    tasks = []
+    for n, (start, level, t) in enumerate(headings):
+        if t is None:
+            continue
+        end = len(lines)
+        for i, lvl, other in headings[n + 1:]:
+            if lvl < level or (other is not None and lvl == level):
+                end = i
+                break
+        body = [lines[i] for i in range(start + 1, end) if mask[i]]
+        tasks.append((t.group(2).rstrip("."), lines[start], body))
+    return tasks
+
+
+def title_of(heading, known):
+    """Heading text after the first ':', minus bracketed dependency lists."""
+    rest = TASK_HEADING.match(heading).group(3)
+    if ":" in rest:
+        rest = rest.split(":", 1)[1]
+    rest = BRACKETS.sub(lambda m: "" if ids_in(m.group(1), known) else m.group(0), rest)
+    return " ".join(rest.split())
+
+
+def path_of(token):
+    token = token.strip()
+    if not token or any(c.isspace() for c in token):
+        return None
+    if "/" not in token and "." not in token:
+        return None
+    token = LINE_SUFFIX.sub("", token)
+    while token.startswith("./"):
+        token = token[2:]
+    return token or None
+
+
+def files_blocks(body):
+    """Yield the clause texts of each Files block in a task body."""
+    i = 0
+    while i < len(body):
+        m = FILES_LINE.match(body[i])
+        if not m:
+            i += 1
+            continue
+        items = [m.group(1)]
+        i += 1
+        while i < len(body) and body[i].strip() and not HEADING.match(body[i]):
+            b = BULLET.match(body[i])
+            if b:
+                items.append(b.group(1))
+            else:
+                items[-1] += " " + body[i].strip()
+            i += 1
+        yield [part.strip() for item in items for part in item.split(";")]
+
+
+def parse_files(body):
+    """Return (has_files_block, files)."""
+    has_block = False
+    files = []
+    for clauses in files_blocks(body):
+        has_block = True
+        for clause in clauses:
+            if not FILE_VERB.match(clause):
+                continue
+            for token in BACKTICK.findall(clause):
+                path = path_of(token)
+                if path and path not in files:
+                    files.append(path)
+    return has_block, files
+
+
+def ids_in(text, known):
+    found = set()
+    for token in TOKEN.findall(text):
+        token = token.rstrip(".")
+        if token in known:
+            found.add(token)
+    return found
+
+
+def parse_deps(task_id, heading, body, known):
+    found = set()
+    for inner in BRACKETS.findall(heading):
+        found |= ids_in(inner, known)
+    for line in body:
+        m = CONSUMES_LINE.match(line)
+        if m:
+            found |= ids_in(m.group(1), known)
+    found.discard(task_id)
+    return found
+
+
+class UnionFind:
+    def __init__(self, items):
+        self.parent = {x: x for x in items}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[rb] = ra
+
+
+def components(ids, file_tasks, skip=None):
+    """Connected components of ids over shared files, in plan order."""
+    uf = UnionFind(ids)
+    for path, touching in file_tasks.items():
+        if path == skip:
+            continue
+        members = [t for t in touching if t in uf.parent]
+        for other in members[1:]:
+            uf.union(members[0], other)
+    parts = {}
+    for t in ids:
+        parts.setdefault(uf.find(t), []).append(t)
+    return list(parts.values())
+
+
+def derive(text):
+    lines = text.splitlines()
+    sections = split_sections(lines, unfenced(lines))
+    if not sections:
+        fail(3, "no task headings ('#+ Task <ID>: <title>') in plan")
+    order = [task_id for task_id, _, _ in sections]
+    seen = set()
+    for task_id in order:
+        if task_id in seen:
+            fail(3, f"duplicate task id {task_id!r}; refusing to guess")
+        seen.add(task_id)
+    position = {task_id: n for n, task_id in enumerate(order)}
+
+    tasks = []
+    without_files = []
+    file_tasks = {}
+    for task_id, heading, body in sections:
+        has_block, files = parse_files(body)
+        if not has_block:
+            without_files.append(task_id)
+        for path in files:
+            file_tasks.setdefault(path, []).append(task_id)
+        deps = sorted(parse_deps(task_id, heading, body, seen), key=position.get)
+        tasks.append({"id": task_id, "title": title_of(heading, seen), "files": files, "deps": deps})
+
+    if len(without_files) == len(tasks):
+        warn("no task has a Files block; every task is its own group")
+    elif without_files:
+        warn("tasks without a Files block: " + ", ".join(without_files))
+
+    groups = components(order, file_tasks)
+    group_of = {t: n for n, group in enumerate(groups) for t in group}
+
+    bridges = []
+    for path, touching in file_tasks.items():
+        if len(touching) < 2:
+            continue
+        group = groups[group_of[touching[0]]]
+        parts = components(group, file_tasks, skip=path)
+        if len(parts) > 1:
+            bridges.append({"file": path, "splits_into": parts})
+
+    cross = []
+    for task in tasks:
+        for dep in task["deps"]:
+            if group_of[dep] != group_of[task["id"]]:
+                cross.append({
+                    "task": task["id"],
+                    "depends_on": dep,
+                    "task_group": group_of[task["id"]],
+                    "dep_group": group_of[dep],
+                })
+
+    return {"tasks": tasks, "groups": groups, "bridge_files": bridges, "cross_group_deps": cross}
+
+
+def main(argv):
+    plan, max_lanes = parse_args(argv)
+    try:
+        with open(plan, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        fail(3, f"cannot read plan {plan!r}: {e}")
+    result = derive(text)
+    n = len(result["groups"])
+    if max_lanes is not None and n > max_lanes:
+        result["note"] = (
+            f"{n} groups exceed --max-lanes {max_lanes}; the session must join "
+            "groups or run some in sequence"
+        )
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
