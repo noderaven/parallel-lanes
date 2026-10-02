@@ -32,6 +32,10 @@ function layoutText(m) {
   ].join('\n');
 }
 
+// Phase steps that merge and run commands (integrate, post-integrate) report
+// status/head/notes; conflict_files (optional) lists files a merge left
+// conflicting, and tests_failed (optional) says a project command still fails
+// after the merges so a fix agent is needed instead of a hard stop.
 function statusSchema() {
   return {
     type: 'object',
@@ -39,6 +43,8 @@ function statusSchema() {
       status: { type: 'string', enum: ['done', 'failed'] },
       head: { type: 'string' },
       notes: { type: 'string' },
+      conflict_files: { type: 'array', items: { type: 'string' } },
+      tests_failed: { type: 'boolean' },
     },
     required: ['status', 'head', 'notes'],
   };
@@ -157,23 +163,19 @@ function setupPrompt(m) {
     `   Create the feature branch if it does not exist: ${admin} branch ${branch} ${q(m.repo.base_ref)}`,
     `   Then check it out: git -C ${q(m.repo.root)} switch ${branch}`,
   ];
-  const lanes = m.lanes.map((lane) => {
-    const w = laneWhere(m, lane);
-    const note = lane.setup_note ? `\n     Note: ${lane.setup_note}` : '';
-    return `   - lane ${lane.id}: worktree ${q(w.dir)} on branch ${q(w.branch)}${note}`;
-  });
-  const setupCmds = [`   - ${featureDir(m)}: ${commandList(m, null, 'setup')}`];
-  for (const lane of m.lanes) {
-    setupCmds.push(`   - ${laneWhere(m, lane).dir}: ${commandList(m, lane.id, 'setup')}`);
-  }
-  return [
-    `You are the setup agent for parallel-lanes run ${m.run_id}.`,
-    'Stop at the first step that fails and return ok false with the reason in notes.',
-    '',
-    ...feature,
-    `2. ${admin} worktree prune (it only drops records of worktrees whose directory is gone).`,
+  // Profile lite: the lane works in the feature checkout, so there is no
+  // lane worktree or branch; a lane setup override runs there too.
+  const lite = m.profile === 'lite';
+  const lanes = lite ? [
+    '3. Profile lite: create no lane worktree and no lane branch;',
+    ...m.lanes.map((lane) => `   lane ${lane.id} works in the feature checkout ${featureDir(m)} on ${m.repo.branch}.`),
+  ] : [
     '3. Lane worktrees (create or reuse):',
-    ...lanes,
+    ...m.lanes.map((lane) => {
+      const w = laneWhere(m, lane);
+      const note = lane.setup_note ? `\n     Note: ${lane.setup_note}` : '';
+      return `   - lane ${lane.id}: worktree ${q(w.dir)} on branch ${q(w.branch)}${note}`;
+    }),
     '   For each: if the directory exists as a worktree on its branch, reuse it: list its uncommitted changes',
     '   with git -C <worktree> status --porcelain, add each line to discarded as "<worktree>: <line>", then',
     '   discard them with git -C <worktree> reset --hard HEAD (the branch stays on its commit; this is the',
@@ -181,6 +183,21 @@ function setupPrompt(m) {
     `   Else if the branch exists: ${admin} worktree add <worktree> <branch>.`,
     `   Else: ${admin} worktree add -b <branch> <worktree> ${branch}`,
     '   Do not remove any worktree or delete any branch.',
+  ];
+  const setupCmds = [`   - ${featureDir(m)}: ${commandList(m, null, 'setup')}`];
+  for (const lane of m.lanes) {
+    const cmds = commandList(m, lane.id, 'setup');
+    if (!lite) setupCmds.push(`   - ${laneWhere(m, lane).dir}: ${cmds}`);
+    else if (cmds !== commandList(m, null, 'setup')) setupCmds.push(`   - ${featureDir(m)} (lane ${lane.id}): ${cmds}`);
+  }
+  const branchCheck = lite ? ';' : ' and that each lane worktree prints its lane branch;';
+  return [
+    `You are the setup agent for parallel-lanes run ${m.run_id}.`,
+    'Stop at the first step that fails and return ok false with the reason in notes.',
+    '',
+    ...feature,
+    `2. ${admin} worktree prune (it only drops records of worktrees whose directory is gone).`,
+    ...lanes,
     '4. Run the setup commands in each checkout (from that directory):',
     ...setupCmds,
     '',
@@ -189,7 +206,7 @@ function setupPrompt(m) {
       `- every shell command starts with cd '<checkout>' && or uses git -C '<checkout>' (or ${admin});`,
       '- every project file path you read or write is absolute under the checkout it belongs to;',
       `- setup makes no commits; before step 4, check that git -C ${q(featureDir(m))} rev-parse --abbrev-ref HEAD`,
-      `  prints ${m.repo.branch} and that each lane worktree prints its lane branch; otherwise return ok false.`,
+      `  prints ${m.repo.branch}${branchCheck} otherwise return ok false.`,
     ].join('\n')),
     '',
     'Return ok (true only when every step succeeded), discarded (the listed changes), worktrees (the paths',
@@ -222,7 +239,42 @@ function preflightPrompt(m) {
   ].join('\n');
 }
 
-function integratePrompt(m, preludeTip) {
+// The ledger command the finishing Integrate-phase agent runs to record the
+// join start point (spec A4): the feature head when integration completes.
+// heal: the agent may return done with tests_failed true, which is not a
+// finished integration (a fix agent and a rerun follow), so it records the
+// start point only when no project command fails.
+function joinStartPointLine(m, heal = false) {
+  const cmd = ledgerCommand(m, '_run',
+    { task: '_run', event: 'run_started', phase: 'join', head: '<feature head>' }, featureDir(m));
+  const when = heal ? [
+    'After everything above succeeds, and only when you return tests_failed false (every project command',
+    'passes), record the join start point by running this command, substituting the full sha you return as',
+    'head for <feature head> (keep the surrounding quotes). When a project command still fails, do not run it:',
+  ] : [
+    'After everything above succeeds, record the join start point by running this command, substituting the',
+    'full sha you return as head for <feature head> (keep the surrounding quotes):',
+  ];
+  return [...when, `  ${cmd}`].join('\n');
+}
+
+// opts:
+// - conflictMode 'resolve' (Plan 1: resolve with confidence, else abort+fail)
+//   or 'abort' (Sonnet first pass: never resolve, abort+fail listing files).
+// - testFailure 'fail' (Plan 1: fail when a command stays broken) or 'heal'
+//   (autonomous: return done + tests_failed so a fix agent takes over).
+// - reviewConflicts: the conflicting files a prior resolver merged, when this
+//   rerun must also review that resolution; null otherwise.
+// - resolverNotes: that resolver's notes (how it resolved each file), shown
+//   with the resolution review.
+// - joinStartPoint: carry the A4 join start-point ledger command (only when no
+//   post_integrate hook finishes the phase).
+function integratePrompt(m, preludeTip, opts = {}) {
+  const conflictMode = opts.conflictMode || 'resolve';
+  const testFailure = opts.testFailure || 'fail';
+  const reviewConflicts = opts.reviewConflicts || null;
+  const resolverNotes = opts.resolverNotes || null;
+  const joinStartPoint = opts.joinStartPoint || false;
   const q = shellQuote;
   const dir = q(featureDir(m));
   const admin = gitAdmin(m);
@@ -245,6 +297,33 @@ function integratePrompt(m, preludeTip) {
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
     `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
   ] : [];
+  const conflictLine = conflictMode === 'abort' ? [
+    '   A branch that is already merged reports already up to date; that is fine. Do not resolve conflicts:',
+    '   on a conflicting merge run git merge --abort, stop, return status failed, and list every conflicting',
+    '   file in conflict_files (a later agent resolves them).',
+  ] : [
+    '   A branch that is already merged reports already up to date; that is fine. On a conflict, resolve it',
+    '   keeping the intent of both lanes (read the plan tasks that touched the file) and commit the merge; if',
+    '   you cannot resolve it with confidence, run git merge --abort and fail naming the files.',
+  ];
+  const testFailureLine = testFailure === 'heal'
+    ? '   Fix only small, obvious integration breakage (commit it per the commit rules). If a project command '
+      + 'still fails after that, return status done with the merges committed and tests_failed true (a later fix '
+      + 'agent handles it); do not fail for a command failure.'
+    : '   Fix only small, obvious integration breakage (commit it per the commit rules); otherwise fail.';
+  const returnTail = conflictMode === 'abort'
+    ? ', and conflict_files (the conflicting files on an aborted merge, else []).'
+    : testFailure === 'heal'
+      ? ', and tests_failed (true when a project command still fails after the merges).'
+      : '.';
+  const review = reviewConflicts ? [
+    'Resolution review: the merge conflicts in this run were already resolved by a prior agent in merge',
+    `commits after ${preludeTip}. Before cleanup, review those resolution merges against both lanes' intent`,
+    `(read the plan tasks that touched the conflicting files: ${reviewConflicts.join(', ')}); if a resolution`,
+    "drops or corrupts either lane's intent, fail naming the problem.",
+    ...(resolverNotes ? ["The resolver's notes on how it resolved each file:", resolverNotes] : []),
+    '',
+  ] : [];
   return [
     `You are the integration agent for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
@@ -254,13 +333,11 @@ function integratePrompt(m, preludeTip) {
     '   so by deleting, cleaning, or stashing files).',
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
-    '   A branch that is already merged reports already up to date; that is fine. On a conflict, resolve it',
-    '   keeping the intent of both lanes (read the plan tasks that touched the file) and commit the merge; if',
-    '   you cannot resolve it with confidence, run git merge --abort and fail naming the files.',
+    ...conflictLine,
     '3. In the tree step 1 found clean, rerun setup and then every command:',
     commandsText(m, null),
     ...overrides,
-    '   Fix only small, obvious integration breakage (commit it per the commit rules); otherwise fail.',
+    testFailureLine,
     `4. History: ${preludeTip} is the feature tip after the prelude. This command:`,
     `   git -C ${dir} log --first-parent --format='%H %P %s' ${q(`${preludeTip}..HEAD`)}`,
     '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
@@ -277,12 +354,93 @@ function integratePrompt(m, preludeTip) {
     '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',
     '   could not remove in notes and still return status done.',
     '',
+    ...review,
+    `Plan: ${m.plan}`,
+    keepFilesRule(),
+    phaseRules(m),
+    ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
+    '',
+    `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
+    `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
+  ].join('\n');
+}
+
+// Opus resolver (autonomous, C2): merges the conflicting lane branches and
+// resolves them, keeping both lanes' intent, then commits. The integrate
+// rerun that follows runs the commands, history checks, and cleanup and
+// reviews this resolution.
+function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
+  const q = shellQuote;
+  const dir = q(featureDir(m));
+  const merges = m.lanes.map((lane) =>
+    `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
+  const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
+  return [
+    `You are the conflict resolver for parallel-lanes run ${m.run_id}.`,
+    `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
+    `The first-pass merge aborted on conflicts in: ${files}.`,
+    '',
+    `1. git -C ${dir} status --porcelain must print nothing; otherwise return status failed (never make it so`,
+    '   by deleting, cleaning, or stashing files).',
+    '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
+    ...merges,
+    '   A branch already merged reports already up to date; that is fine. On a conflict, resolve it keeping',
+    '   the intent of both lanes: read the plan tasks that touched the conflicting files and keep what each',
+    '   lane meant to do, then commit the merge. Resolve the conflicts only; make no other change.',
+    '   Do not run the project commands, rewrite history, or remove any worktree or branch.',
+    '',
     `Plan: ${m.plan}`,
     keepFilesRule(),
     phaseRules(m),
     '',
-    `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
-    'and notes (merges, conflicts resolved, command results, cleanup).',
+    `Return status done when every conflicting merge is resolved and committed, else failed; head (the full`,
+    `sha printed by git -C ${dir} rev-parse HEAD when you finish); and notes (how you resolved each file).`,
+  ].join('\n');
+}
+
+// Opus fix (autonomous, C2) for a project command (or the post-integration
+// check) still failing on the feature branch after integration. failure is
+// the notes the failing step returned.
+function postIntegrateFixPrompt(m, failure) {
+  const dir = shellQuote(featureDir(m));
+  return [
+    `You are fixing a post-integration failure for parallel-lanes run ${m.run_id}.`,
+    `Work in ${featureDir(m)} on ${m.repo.branch}; do not switch branches.`,
+    'What is failing:',
+    failure,
+    '',
+    'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    'Rerun every project command afterwards and confirm they pass:',
+    commandsText(m, null),
+    m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
+    '',
+    `Plan: ${m.plan}`,
+    `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    `Return status done when the commands pass, otherwise failed; head = the full sha printed by`,
+    `git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the command results.`,
+  ].join('\n');
+}
+
+// Opus re-review (autonomous, C2) of a post-integration fix: the fix range
+// only, same findings shape as a task re-review.
+function postIntegrateReReviewPrompt(m, base, head) {
+  const dir = shellQuote(featureDir(m));
+  return [
+    `You are re-reviewing a post-integration fix for parallel-lanes run ${m.run_id} (fix range ${base}..${head}).`,
+    'You are read-only: never modify the checkout, the index, HEAD, or any branch.',
+    'Read the fix with:',
+    `  git -C ${dir} log ${shellQuote(`${base}..${head}`)}`,
+    `  git -C ${dir} diff ${shellQuote(`${base}..${head}`)}`,
+    '',
+    'Check the fix for correctness and for new critical or important problems; do not re-review code the fix',
+    'did not touch.',
+    phaseRules(m),
+    '',
+    'Return findings = [{severity ("critical", "important", or "minor"), file, line, issue, fix}], every',
+    'problem you found (empty when the fix is sound).',
   ].join('\n');
 }
 
@@ -301,6 +459,8 @@ function postIntegratePrompt(m) {
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     keepFilesRule(),
     phaseRules(m),
+    '',
+    joinStartPointLine(m),
     '',
     'Return status done when the instructions pass, otherwise failed; head = the full sha printed by',
     `git -C ${shellQuote(featureDir(m))} rev-parse HEAD when you finish; notes = what you checked and found.`,
@@ -325,14 +485,11 @@ function e2ePrompt(m) {
   ].join('\n');
 }
 
-function finalReviewPrompt(m, lens, e2e) {
-  const q = shellQuote;
-  const dir = q(featureDir(m));
-  const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
-  const diff = `git -C ${dir} diff ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`;
-  let focus;
+// What one final review lens looks for: 'sp' (the whole branch, through
+// superpowers' code reviewer when found), 'security', or 'correctness'.
+function finalLensFocus(m, lens, e2e) {
   if (lens === 'sp') {
-    focus = m.sp_dir === null ? [
+    return m.sp_dir === null ? [
       'Built-in instructions (superpowers not found):',
       'Review the whole branch as a senior reviewer: plan and spec compliance across all tasks, integration',
       'between lanes, architecture, test quality, and maintainability.',
@@ -341,22 +498,31 @@ function finalReviewPrompt(m, lens, e2e) {
       "whole branch: what was implemented = the plan's tasks; requirements = the plan and spec; base =",
       `${m.repo.base_ref}; head = ${m.repo.branch}.`,
     ].join('\n');
-  } else if (lens === 'security') {
+  }
+  if (lens === 'security') {
     const flagged = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join].filter((t) => t.security);
-    focus = [
+    return [
       'Security lens: authentication, authorization, crypto, untrusted input, injection, path handling,',
       'secrets, permissions, and unsafe defaults.',
       `Tasks flagged security-sensitive: ${flagged.length > 0 ? flagged.map((t) => t.id).join(', ') : '(none)'}`,
     ].join('\n');
-  } else {
-    focus = [
-      'Correctness lens: logic errors, edge cases, error handling, concurrency, contracts between lanes, and',
-      'tests that do not verify real behavior. End-to-end results:',
-      e2e === null ? '(no e2e hook)' : JSON.stringify(e2e),
-    ].join('\n');
   }
   return [
-    `You are a final reviewer for parallel-lanes run ${m.run_id}. You are read-only: never modify the`,
+    'Correctness lens: logic errors, edge cases, error handling, concurrency, contracts between lanes, and',
+    'tests that do not verify real behavior. End-to-end results:',
+    e2e === null ? '(no e2e hook)' : JSON.stringify(e2e),
+  ].join('\n');
+}
+
+// A final reviewer's prompt around its focus text: read-only, the whole
+// branch range, the commit-rules scan, and the findings/head result.
+function finalReviewFrame(m, intro, focus) {
+  const q = shellQuote;
+  const dir = q(featureDir(m));
+  const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
+  const diff = `git -C ${dir} diff ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`;
+  return [
+    `${intro} for parallel-lanes run ${m.run_id}. You are read-only: never modify the`,
     'checkout, the index, HEAD, or any branch.',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
@@ -375,6 +541,28 @@ function finalReviewPrompt(m, lens, e2e) {
     'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
     `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
   ].join('\n');
+}
+
+function finalReviewPrompt(m, lens, e2e) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e));
+}
+
+// Profile lite: one reviewer covers the three lenses of the full profile.
+// ctx = {e2e}: the e2e result, or null without an e2e hook.
+function combinedFinalReviewPrompt(m, ctx) {
+  const focus = [
+    'Review the whole branch through three lenses, in turn, and report every finding of each:',
+    '',
+    '1. Whole-branch lens.',
+    finalLensFocus(m, 'sp', ctx.e2e),
+    '',
+    '2. Security lens.',
+    finalLensFocus(m, 'security', ctx.e2e),
+    '',
+    '3. Correctness lens.',
+    finalLensFocus(m, 'correctness', ctx.e2e),
+  ].join('\n');
+  return finalReviewFrame(m, 'You are the final reviewer', focus);
 }
 
 function finalFixPrompt(m, findings, base) {
