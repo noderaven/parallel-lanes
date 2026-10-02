@@ -5,11 +5,11 @@ import { loadHelpers } from './harness.mjs';
 const {
   runTask, runLane, runLanes,
   implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
-  implementSchema, implementResultText,
+  implementSchema, implementResultText, finalFixSchema, reviewSettings,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
   'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
-  'implementSchema', 'implementResultText',
+  'implementSchema', 'implementResultText', 'finalFixSchema', 'reviewSettings',
 ]);
 
 function task(id, extra = {}) {
@@ -805,4 +805,178 @@ test('implementResultText: one argument keeps the final-fix wording; task prompt
     assert.ok(p[name].includes('"question"'), name);
   }
   assert.ok(!p.implement.includes('report blocked with the question instead'));
+});
+
+// ---- Sonnet tiers and review effort (spec D4, D5) ----
+
+const sized = (base, head, lines) => ({ ...done(base, head), changed_lines: lines });
+
+test('a sonnet task escalates to standard after the first changes verdict', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 review': [changes('FIRST-FINDING'), approve()],
+  });
+  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 implement', 'T2 review']);
+  const [impl1, rev1, impl2, rev2] = s.calls;
+  assert.deepEqual([impl1.model, impl1.effort], ['sonnet', 'high']);
+  assert.deepEqual([rev1.model, rev1.effort], ['opus', 'high']);
+  assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
+  assert.ok(impl2.prompt.includes('FIRST-FINDING'), 'the escalated implementer sees the open findings');
+  assert.ok(rev2.prompt.includes('b0..h2'), 'the whole task range is reviewed again');
+  assert.equal(r.status, 'done');
+  assert.equal(r.tier_used, 'standard');
+  assert.equal(r.rounds, 0);
+  assert.equal(r.head, 'h2');
+  assert.match(r.notes, /escalated to standard/);
+});
+
+test('a light task does not escalate on the first changes verdict, only on the second', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [changes('first')],
+    'T2 fix 1': [done('h1', 'h2')],
+    'T2 re-review 1': [approve()],
+  });
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
+  assert.deepEqual([s.calls[2].model, s.calls[2].effort], ['sonnet', 'high']);
+  assert.equal(r.tier_used, 'light');
+});
+
+for (const [name, first] of [['blocked', blocked('b0', 'sonnet stuck')], ['null', null]]) {
+  test(`a sonnet task escalates to standard after a ${name} implement`, async () => {
+    const m = manifest({ autonomy: 'supervised' });
+    const s = stub({ 'T2 implement': [first, done('b0', 'h1')], 'T2 review': [approve()] });
+    const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+    assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 implement', 'T2 review']);
+    assert.deepEqual(s.calls.map((c) => c.model), ['sonnet', 'opus', 'opus']);
+    assert.equal(r.status, 'done');
+    assert.equal(r.tier_used, 'standard');
+  });
+}
+
+test('autonomous: a sonnet task that blocks escalates to standard before any adjudication', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [blocked('b0', 'sonnet stuck'), blocked('b0', 'standard stuck'), done('b0', 'h1')],
+    'T2 adjudicate': [ruled('answer', 'ANSWER-S')],
+    'T2 review': [approve()],
+  });
+  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  assert.deepEqual(labels(s.calls),
+    ['T2 implement', 'T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
+  assert.deepEqual(s.calls.map((c) => c.model), ['sonnet', 'opus', 'opus', 'opus', 'opus']);
+  assert.ok(s.calls[2].prompt.includes('standard stuck'));
+  assert.equal(r.status, 'done');
+  assert.equal(r.tier_used, 'standard');
+});
+
+test('review effort: medium under 60 changed lines, high at 60, for security, or when missing', async () => {
+  const cases = [
+    [{}, 59, 'medium'],
+    [{}, 60, 'high'],
+    [{}, 0, 'medium'],
+    [{ security: true }, 5, 'high'],
+    [{}, undefined, 'high'],
+  ];
+  for (const [extra, lines, effort] of cases) {
+    const m = manifest();
+    const impl = lines === undefined ? done('b0', 'h1') : sized('b0', 'h1', lines);
+    const s = stub({ 'T2 implement': [impl], 'T2 review': [approve()] });
+    await runTask(m, task('T2', extra), WHERE, 'b0', s.io);
+    const rev = s.calls[1];
+    assert.deepEqual([rev.model, rev.effort], ['opus', effort], JSON.stringify([extra, lines]));
+  }
+});
+
+test('reviewSettings: opus always; medium only for a known non-security diff under 60 lines', () => {
+  assert.deepEqual(reviewSettings(task('T2'), 59), { model: 'opus', effort: 'medium' });
+  assert.deepEqual(reviewSettings(task('T2'), 60), { model: 'opus', effort: 'high' });
+  assert.deepEqual(reviewSettings(task('T2', { security: true }), 5), { model: 'opus', effort: 'high' });
+  for (const bad of [undefined, null, -1, 12.5, '12']) {
+    assert.deepEqual(reviewSettings(task('T2'), bad), { model: 'opus', effort: 'high' }, String(bad));
+  }
+});
+
+test('a re-review takes the fix result changed_lines, not the implement one', async () => {
+  for (const [implLines, fixLines, revEffort, reEffort] of [[200, 10, 'high', 'medium'], [10, 100, 'medium', 'high']]) {
+    const m = manifest();
+    const s = stub({
+      'T2 implement': [sized('b0', 'h1', implLines)],
+      'T2 review': [changes()],
+      'T2 fix 1': [sized('h1', 'h2', fixLines)],
+      'T2 re-review 1': [approve()],
+    });
+    await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
+    assert.equal(s.calls[1].effort, revEffort);
+    assert.equal(s.calls[3].effort, reEffort);
+    assert.equal(s.calls[3].model, 'opus');
+  }
+});
+
+test('the review after an escalated rerun takes the rerun implement changed_lines', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [sized('b0', 'h1', 10), sized('h1', 'h2', 80)],
+    'T2 review': [changes(), approve()],
+  });
+  await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  assert.deepEqual(s.calls.map((c) => [c.label, c.model, c.effort]), [
+    ['T2 implement', 'sonnet', 'high'],
+    ['T2 review', 'opus', 'medium'],
+    ['T2 implement', 'opus', 'high'],
+    ['T2 review', 'opus', 'high'],
+  ]);
+});
+
+test('a resumed task without a changed_lines count is reviewed at high effort', async () => {
+  const m = manifest();
+  const s = stub({ 'T2 review': [approve()] });
+  await runTask(m, task('T2'), WHERE, 'b0', s.io, { base: 'b0', head: 'h1' });
+  assert.deepEqual([s.calls[0].model, s.calls[0].effort], ['opus', 'high']);
+});
+
+test('implement schema offers an optional integer changed_lines', () => {
+  const sc = implementSchema();
+  assert.equal(sc.properties.changed_lines.type, 'integer');
+  assert.ok(!sc.required.includes('changed_lines'));
+});
+
+// The subset of JSON schema the result schemas use: required keys present,
+// present properties of the declared type.
+function schemaErrors(schema, value) {
+  const errors = [];
+  for (const key of schema.required || []) if (!(key in value)) errors.push(`missing ${key}`);
+  const typeOf = (v) => (Array.isArray(v) ? 'array' : Number.isInteger(v) ? 'integer' : typeof v);
+  for (const [key, v] of Object.entries(value)) {
+    const prop = schema.properties[key];
+    if (!prop) continue;
+    const t = typeOf(v);
+    if (!(t === prop.type || (prop.type === 'number' && t === 'integer'))) errors.push(`${key}: ${t}`);
+  }
+  return errors;
+}
+
+test('a final-fix result without changed_lines still validates against finalFixSchema', () => {
+  const sc = finalFixSchema();
+  assert.equal(sc.properties.changed_lines.type, 'integer');
+  assert.ok(!sc.required.includes('changed_lines'));
+  const result = { status: 'done', head: 'h9', tests: 'npm test: pass', notes: '', declined: [] };
+  assert.deepEqual(schemaErrors(sc, result), []);
+  assert.deepEqual(schemaErrors(sc, { ...result, changed_lines: 12 }), []);
+});
+
+test('implementResultText asks for changed_lines over the agent range; the one-argument form fits the final fix', () => {
+  const plain = implementResultText('/work/repo');
+  assert.match(plain, /changed_lines/);
+  assert.match(plain, /--shortstat/);
+  assert.ok(plain.includes("git -C '/work/repo' diff --shortstat <start> HEAD"));
+  const p = allPrompts(manifest());
+  assert.match(p.implement, /changed_lines/);
+  assert.ok(p.implement.includes("diff --shortstat 'b0' HEAD"), 'implement counts from the task base');
+  assert.ok(p.fix.includes("diff --shortstat 'h1' HEAD"), 'a fix counts from the head it builds on');
 });

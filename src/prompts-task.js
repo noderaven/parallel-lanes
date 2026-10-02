@@ -121,12 +121,18 @@ function diffSteps(m, task, where, base, head) {
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
-// question (task agents only) offers the "question" status.
-function implementResultText(dir, question = false) {
+// question (task agents only) offers the "question" status. from (optional)
+// is the commit the agent's work starts at, which changed_lines counts from;
+// without it the wording points at the starting commit the prompt names.
+function implementResultText(dir, question = false, from = null) {
+  const start = present(from) ? shellQuote(from) : '<start>';
   return [
     `Return a structured result: status "done" or "blocked"; head = git -C ${shellQuote(dir)} rev-parse HEAD`,
     'after your last commit; tests = the commands you ran and their outcome; notes = rulings, concerns, or the',
     'reason you are blocked. That result replaces any status reply format named in the instructions above.',
+    'When you committed, also return changed_lines = the lines added plus the lines removed (insertions plus',
+    `deletions) that git -C ${shellQuote(dir)} diff --shortstat ${start} HEAD prints` +
+      (present(from) ? '.' : ', where <start> is the commit this prompt says the branch was at when you started.'),
     ...(question ? [
       'When you need a question answered before you can continue correctly, return status "question" instead,',
       'with question = the question (and head as above): do not guess. It is answered and the task reruns.',
@@ -198,7 +204,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     `  ${committed}`,
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
-  ].join('\n'), '', implementResultText(where.dir, true));
+  ].join('\n'), '', implementResultText(where.dir, true, base));
   return parts.join('\n');
 }
 
@@ -257,7 +263,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
     '',
-    implementResultText(where.dir, true),
+    implementResultText(where.dir, true, head),
   ].join('\n');
 }
 
@@ -295,6 +301,7 @@ function implementSchema() {
       tests: { type: 'string' },
       notes: { type: 'string' },
       question: { type: 'string' },
+      changed_lines: { type: 'integer' },
     },
     required: ['status', 'head', 'tests', 'notes'],
   };

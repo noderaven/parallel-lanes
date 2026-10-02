@@ -4,7 +4,24 @@
 // so tests can load them with loadHelpers. The run functions take a trailing
 // io object {agent, log} that defaults to the Workflow globals.
 
+// Model and effort for a task review or re-review (spec D4): always Opus, at
+// medium effort when the task is not security-flagged and the diff under
+// review has fewer than 60 changed lines, else high. changedLines is the
+// changed_lines the agent whose work is under review returned; a missing or
+// malformed count means high.
+function reviewSettings(task, changedLines) {
+  const small = Number.isInteger(changedLines) && changedLines >= 0 && changedLines < 60;
+  return { model: 'opus', effort: !task.security && small ? 'medium' : 'high' };
+}
+
 // Run one task through implement -> review -> fix/re-review rounds.
+// Tiers (spec D5): a sonnet or light task implements and fixes on its tier's
+// settings and escalates to standard when an implement or fix does not
+// finish (not on a question), a sonnet task also after the first changes
+// verdict, a light task after the second; escalation reruns implement at
+// standard from the current head with the open findings, then reviews the
+// whole task range. Reviews use reviewSettings with the changed_lines of the
+// implement or fix result under review.
 // Returns {task, status:'done'|'blocked', base, head, rounds, tier_used,
 // notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
@@ -25,7 +42,6 @@
 // committed); stop blocks the task. rulings lists each ruling text.
 async function runTask(m, task, where, base, io = { agent, log }, resume = null, note = null) {
   const phaseName = lanePhase(m, where.lane);
-  const standard = tierSettings('standard');
   const autonomous = effectiveAutonomy(m) === 'autonomous';
   let tierUsed = task.tier;
   let head = null;
@@ -62,10 +78,10 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     if (r.head === from) return blockedBy(`${label} reported done with no new commits`);
     return null;
   };
-  // A light task escalates on a failure, except on a question it can have
-  // answered by the adjudicator instead.
-  const escalates = (fail) => tierUsed === 'light' && fail.kind !== 'question';
-  // Implement, escalating a light task once if it does not finish. from
+  // A sonnet or light task escalates on a failure, except on a question it
+  // can have answered by the adjudicator instead.
+  const escalates = (fail) => tierUsed !== 'standard' && fail.kind !== 'question';
+  // Implement, escalating a sonnet or light task once if it does not finish. from
   // (optional) is the head the result must move past; it defaults to the
   // current head (or base before the first commit).
   const implement = async (retry, from = null) => {
@@ -87,11 +103,13 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let reviewLabel = 'review';
   const review = () => {
     reviewLabel = 'review';
-    return call('review', reviewPrompt(m, task, where, base, head, rounds, guidance), standard, reviewSchema());
+    return call('review', reviewPrompt(m, task, where, base, head, rounds, guidance),
+      reviewSettings(task, latest.changed_lines), reviewSchema());
   };
 
-  // Escalate a light task: rerun implement at standard from the current
-  // head with the open findings, then review the whole task range again.
+  // Escalate a sonnet or light task: rerun implement at standard from the
+  // current head with the open findings, then review the whole task range
+  // again.
   const rerunAtStandard = async (reason, findings) => {
     escalate(reason);
     const fail = await implement({ reason, findings });
@@ -193,8 +211,10 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     changesSeen += 1;
     const findings = verdict.findings;
     open = findings;
-    if (changesSeen === 2 && tierUsed === 'light') {
-      const fail = await rerunAtStandard('review requested changes twice', findings);
+    const escalateAfter = { sonnet: 1, light: 2 }[tierUsed];
+    if (changesSeen === escalateAfter) {
+      const reason = escalateAfter === 1 ? 'review requested changes' : 'review requested changes twice';
+      const fail = await rerunAtStandard(reason, findings);
       if (fail !== null) need = { ...fail, findings };
       continue;
     }
@@ -215,7 +235,8 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       latest = fix;
       reviewLabel = `re-review ${rounds}`;
       verdict = await call(reviewLabel,
-        reReviewPrompt(m, task, where, prevHead, head, findings, rounds, guidance), standard, reviewSchema());
+        reReviewPrompt(m, task, where, prevHead, head, findings, rounds, guidance),
+        reviewSettings(task, fix.changed_lines), reviewSchema());
     }
     if (fail !== null) need = { ...fail, findings };
   }
