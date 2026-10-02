@@ -149,6 +149,30 @@ test('init with a .gitignore: project rules apply instead of the built-ins', () 
   assert.ok(!existsSync(join(c.project, '.git')));
 });
 
+test('init runs no global hooks in the project and copies no template hooks', () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const hook = '#!/bin/sh\necho ran > hook-output.txt\n';
+  const hooksDir = join(c.root, 'global hooks');
+  const templateDir = join(c.root, 'template');
+  for (const dir of [hooksDir, join(templateDir, 'hooks')]) {
+    for (const name of ['pre-commit', 'post-commit', 'post-checkout']) {
+      write(dir, name, hook);
+      chmodSync(join(dir, name), 0o755);
+    }
+  }
+  write(templateDir, 'info/exclude', '# template\n');
+  const config = join(c.root, 'gitconfig');
+  writeFileSync(config, `[core]\n\thooksPath = ${hooksDir}\n[init]\n\ttemplateDir = ${templateDir}\n`);
+  const before = snapshot(c.project);
+
+  const res = shadow(c.base, ['init', c.project], { GIT_CONFIG_GLOBAL: config });
+  assert.equal(res.code, 0, res.stderr);
+  const gitdir = res.stdout.trim();
+  assert.deepEqual(snapshot(c.project), before);
+  const hooks = join(gitdir, 'hooks');
+  assert.deepEqual(existsSync(hooks) ? readdirSync(hooks) : [], []);
+});
+
 test('init again reuses the shadow and keeps its baseline', () => {
   const c = newCase({ 'a.txt': 'a\n' });
   const gitdir = init(c);
