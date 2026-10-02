@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Print the name of the lean worker agent type when it is installed.
+#
+# The agent is installed when
+# ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents/parallel-lanes-worker.md exists
+# and its frontmatter (the lines between its first two "---" lines) has the
+# line "name: parallel-lanes-worker".
+#
+# Exit 0 with the name on stdout; 2 on usage error; 3 (no output) if the agent
+# is not installed.
+set -euo pipefail
+
+if [ "$#" -ne 0 ]; then
+  echo "usage: find-agent-type" >&2
+  exit 2
+fi
+
+name="parallel-lanes-worker"
+file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents/$name.md"
+
+[ -f "$file" ] || exit 3
+
+# Exit 0 when the frontmatter has the name line, else 1.
+if awk -v want="name: $name" '
+  { sub(/\r$/, "") }
+  $0 == "---" { fences += 1; if (fences == 2) exit; next }
+  fences == 1 && $0 == want { found = 1; exit }
+  END { exit found ? 0 : 1 }
+' "$file"; then
+  printf '%s\n' "$name"
+else
+  exit 3
+fi

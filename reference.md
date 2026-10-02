@@ -36,6 +36,7 @@ validator in `run.workflow.js` (`validateManifest`) is authoritative;
 | `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (see Backfill below). Required for every done task; each `head` is the next task's review base. |
 | `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents. |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
+| `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e` and `post-integrate` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it is retried once on the default type. |
 | `skill_dir` | `<skill_dir>`. |
 
 Plan task ids must have `#+ Task <ID>:` headings; agents extract briefs with

@@ -111,7 +111,7 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    (e.g. "Opus for everything" means all `standard`).
 5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md,
    the plan's conventions, CONTRIBUTING). Every agent prompt carries it.
-6. `commands`, paths, `run_id`, `autonomy` (`autonomous` default), `limits`
+6. `commands`, paths, `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits`
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
@@ -132,7 +132,7 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    25 (reference.md "Budgets") so the table shows them.
 2. Show a header (mode, base and feature branch, worktree_root, `profile`, `autonomy`,
    `limits.max_agents`, `limits.max_rulings`, lanes at once = `lanes_effective`, superpowers
-   or built-in prompts, commit_rules, accepted merges, tasks left out of the run, batches)
+   or built-in prompts, agent type, commit_rules, accepted merges, tasks left out of the run, batches)
    and this table, one row per task in run order (prelude, lanes, join), then one row for
    the run-level agents and a total M:
 

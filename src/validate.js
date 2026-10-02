@@ -19,6 +19,12 @@ function laneIdPattern() {
   return '^[A-Za-z0-9_][A-Za-z0-9._-]*$';
 }
 
+// agent_type names a custom agent definition (scripts/find-agent-type prints
+// it); manifest.schema.json repeats the pattern.
+function agentTypePattern() {
+  return '^[a-z0-9-]+$';
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -46,6 +52,10 @@ function validateManifest(m) {
   }
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
+  }
+  if ('agent_type' in m && m.agent_type !== null
+    && !(typeof m.agent_type === 'string' && new RegExp(agentTypePattern()).test(m.agent_type))) {
+    err(`agent_type: must be null or a name matching ${agentTypePattern()}`);
   }
   if ('dry_run' in m && typeof m.dry_run !== 'boolean') err('dry_run: must be a boolean');
   if ('autonomy' in m && m.autonomy !== 'autonomous' && m.autonomy !== 'supervised') {
