@@ -118,6 +118,7 @@ def read_usage(path):
     """
     model = None
     models = {}
+    counted = set()
     usages = {}
     anonymous = []
     try:
@@ -138,14 +139,17 @@ def read_usage(path):
                     continue
                 final = not ("stop_reason" in msg and msg["stop_reason"] is None)
                 mid = msg.get("id")
+                rid = obj.get("requestId")
+                key = (mid, rid if isinstance(rid, str) else None) if isinstance(mid, str) and mid else None
                 if isinstance(msg.get("model"), str):
                     model = msg["model"]
-                    key = (mid, obj.get("requestId")) if isinstance(mid, str) and mid else None
-                    if key is None or key not in usages:
+                    # Each message counts once per model, on the first line that names it.
+                    if key is None or (key, model) not in counted:
                         models[model] = models.get(model, 0) + 1
-                if isinstance(mid, str) and mid:
-                    rid = obj.get("requestId")
-                    usages[(mid, rid if isinstance(rid, str) else None)] = (usage, final)
+                        if key is not None:
+                            counted.add((key, model))
+                if key is not None:
+                    usages[key] = (usage, final)
                 else:
                     anonymous.append((usage, final))
     except OSError:

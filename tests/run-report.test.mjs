@@ -191,3 +191,22 @@ test('mid-stream usage lines (stop_reason null) make output a lower bound; fallb
   assert.equal(out.totals.output_tokens_min, 7 + 96 + 8 + 50);
   assert.deepEqual(out.models, { 'opus-new': 2, 'opus-old': 1 });
 });
+
+test('resolved_models counts a message once even with a non-string requestId or a late model field', () => {
+  const dir = join(TMP, 'modelcount');
+  mkdirSync(dir, { recursive: true });
+  const line = (id, model, rid) => JSON.stringify({
+    type: 'assistant', requestId: rid, timestamp: '2026-10-02T10:00:00.000Z',
+    message: { id, ...(model ? { model } : {}), usage: { input_tokens: 1, output_tokens: 1,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  });
+  writeFileSync(join(dir, 'agent-d1.meta.json'),
+    JSON.stringify({ description: 'T1 review', workflowPhase: 'Lane A', model: 'opus' }));
+  writeFileSync(join(dir, 'agent-d1.jsonl'), [
+    line('m1', 'opus-a', 7), line('m1', 'opus-a', 7), line('m1', 'opus-a', 7),
+    line('m2', null, 'r2'), line('m2', 'opus-a', 'r2'),
+  ].join('\n') + '\n');
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).agents[0].resolved_models, { 'opus-a': 2 });
+});
