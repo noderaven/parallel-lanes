@@ -196,10 +196,11 @@ tiers sum only complete agents, so when `output_incomplete` > 0 report `output_t
 as the output figure (a minimum). Report both,
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback). The hand-back appends the report, saves it beside the manifest, and lists
-"Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. A
-task whose result is blocked with `adjudicator_stop: security` had its park or unblock
-refused: list that task's adjudicator ruling as `refused (security-gated): <text>`, never as
-a ruling that took effect.
+"Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
+a task result's `rulings` has an entry starting `refused (security-gated):`, the security gate
+refused the adjudicator's park or unblock: list that ruling with the prefix, never as one that
+took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
+such entry) is listed as a stop ruling, as written.
 
 ## Backfill
 
