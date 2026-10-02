@@ -32,7 +32,10 @@ function checkoutRules(dir, branch) {
 }
 
 // For agents in the feature checkout (the user's main checkout in git mode).
+// The project's setup commands are exempt: they may recreate ignored files
+// (npm ci replaces node_modules) and are part of the run.
 function keepFilesRule() {
   return 'Never run git clean -x or git clean -X, and never delete ignored or untracked files: they may hold ' +
-    "the user's .env files, local databases, or credentials.";
+    "the user's .env files, local databases, or credentials. Exempt from this: the project's own setup commands " +
+    '(for example npm ci recreating node_modules), which may replace ignored files; run them as given.';
 }

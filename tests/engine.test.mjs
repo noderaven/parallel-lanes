@@ -4,10 +4,10 @@ import { loadHelpers } from './harness.mjs';
 
 const {
   runTask, runLane, runLanes,
-  implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt,
+  implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
-  'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt',
+  'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
 ]);
 
 function task(id, extra = {}) {
@@ -379,6 +379,27 @@ test('each prompt names the ledger event its agent records', () => {
   assert.ok(p.review.includes('"event":"reviewed","rounds":0'));
   assert.ok(p.reReview.includes('"event":"reviewed","rounds":1'));
   for (const name of ['review', 'reReview']) assert.match(p[name], /read-only/);
+});
+
+test('ledgerCommand starts in the checkout of the agent that runs it', () => {
+  const m = manifest();
+  const cmd = ledgerCommand(m, 'alpha', { task: 'T2', event: 'blocked', reason: 'x' }, "/work/it's here");
+  assert.equal(cmd, "cd '/work/it'\\''s here' && python3 '/skills/parallel-lanes/scripts/ledger' append " +
+    '\'/work/ledger\' \'alpha\' \'{"task":"T2","event":"blocked","reason":"x"}\'');
+  for (const dir of [undefined, null, '']) {
+    assert.throws(() => ledgerCommand(m, 'alpha', { task: 'T2' }, dir), /checkout/);
+  }
+});
+
+test('task prompts run provided commands from the task worktree', () => {
+  const p = allPrompts(manifest());
+  const prefix = "cd '/work/wt/lane-alpha' && ";
+  for (const [name, text] of Object.entries(p)) {
+    const lines = text.split('\n').filter((l) => /scripts\/(ledger|task-brief|review-package)' /.test(l));
+    assert.ok(lines.length > 0, name);
+    for (const line of lines) assert.ok(line.trim().startsWith(prefix), `${name}: ${line.trim()}`);
+  }
+  assert.ok(p.review.includes(`${prefix}mkdir -p '/work/ledger/reviews' && bash `), 'review-package order');
 });
 
 test('lane_commands override the project commands for that lane', () => {

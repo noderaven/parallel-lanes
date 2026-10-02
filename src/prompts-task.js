@@ -1,7 +1,10 @@
-// The exact ledger append command for one event of a task.
-function ledgerCommand(m, laneId, entry) {
+// The exact ledger append command for one event. dir is the checkout of
+// the agent that runs it (where.dir for task agents, featureDir(m) for phase
+// agents and lane _run events): like every provided command, it starts there.
+function ledgerCommand(m, laneId, entry, dir) {
+  if (!present(dir)) throw new Error('ledgerCommand: dir (the agent checkout) is required');
   const ledger = `${m.skill_dir}/scripts/ledger`;
-  return `python3 ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
+  return `cd ${shellQuote(dir)} && python3 ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
@@ -28,10 +31,10 @@ function findingsText(findings) {
 function taskContext(m, task, where) {
   const files = taskFiles(m, task);
   const note = m.notes && m.notes[task.id];
-  const brief = `python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
+  const brief = `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
     `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
   const ruling = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' });
+    { task: task.id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   return [
     `Task ${task.id}: ${task.title}`,
     `Plan: ${m.plan}`,
@@ -103,7 +106,7 @@ function diffSteps(m, task, where, base, head) {
   const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
   return [
     'Build the review package yourself with review-package (it writes the diff file and prints its path):',
-    `  mkdir -p ${shellQuote(reviews)} && cd ${dir} && bash ${shellQuote(script)} ` +
+    `  cd ${dir} && mkdir -p ${shellQuote(reviews)} && bash ${shellQuote(script)} ` +
       `${shellQuote(m.plan)} ${shellQuote(base)} ${shellQuote(head)} ${shellQuote(out)}`,
   ].join('\n');
 }
@@ -117,7 +120,7 @@ function implementResultText(dir) {
 }
 
 function reviewResultText(m, task, where, rounds) {
-  const reviewed = ledgerCommand(m, where.lane, { task: task.id, event: 'reviewed', rounds });
+  const reviewed = ledgerCommand(m, where.lane, { task: task.id, event: 'reviewed', rounds }, where.dir);
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
@@ -141,8 +144,9 @@ function implementPrompt(m, task, where, base, retry = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] });
-  const blockedCmd = ledgerCommand(m, where.lane, { task: task.id, event: 'blocked', reason: '<reason>' });
+    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] }, where.dir);
+  const blockedCmd = ledgerCommand(m, where.lane,
+    { task: task.id, event: 'blocked', reason: '<reason>' }, where.dir);
   const parts = [
     `You are implementing Task ${task.id}: ${task.title}`,
     '',
@@ -209,8 +213,9 @@ function fixPrompt(m, task, where, findings, report, head) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] });
-  const blockedCmd = ledgerCommand(m, where.lane, { task: task.id, event: 'blocked', reason: '<reason>' });
+    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] }, where.dir);
+  const blockedCmd = ledgerCommand(m, where.lane,
+    { task: task.id, event: 'blocked', reason: '<reason>' }, where.dir);
   return [
     `You are fixing review findings for Task ${task.id}: ${task.title}`,
     '',

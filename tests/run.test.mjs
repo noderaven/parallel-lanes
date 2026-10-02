@@ -676,6 +676,47 @@ test('agents on the feature checkout never delete ignored or untracked files', a
   assert.ok(!/From a clean tree/.test(integ));
 });
 
+test('the keep-files rule exempts the project setup commands and still forbids git clean -x', async () => {
+  const { calls } = await fullRun('git');
+  for (const label of ['integrate', 'post-integrate', 'e2e', 'final fix']) {
+    const prompt = calls.find((c) => c.label === label).prompt;
+    assert.ok(prompt.includes("the project's own setup commands"), `${label}: setup exemption`);
+    assert.match(prompt, /npm ci/, `${label}: the exemption example`);
+    assert.match(prompt, /Never run git clean -x or git clean -X/, `${label}: git clean -x still forbidden`);
+  }
+});
+
+// The checkout an agent works in, from its label: lane tasks run in their
+// lane worktree; prelude and join tasks and every phase agent in the feature
+// checkout.
+function agentCheckout(label, featureDir) {
+  const id = (label.match(/^(T\d+) /) || [])[1];
+  if (id === 'T2' || id === 'T3') return '/work/wt/lane-alpha';
+  if (id === 'T4') return '/work/wt/lane-beta';
+  return featureDir;
+}
+
+// Lines of a prompt that run a provided script: ledger, task-brief, or
+// review-package.
+const PROVIDED = /scripts\/ledger' append|scripts\/task-brief' |scripts\/review-package' /;
+
+test('every provided ledger, task-brief, and review-package command starts in the agent checkout', async () => {
+  for (const [mode, featureDir] of [['git', '/work/repo'], ['shadow', '/work/wt/feature']]) {
+    const { calls } = await fullRun(mode);
+    const seen = { ledger: 0, brief: 0, review: 0 };
+    for (const c of calls) {
+      const prefix = `cd '${agentCheckout(c.label, featureDir)}' && `;
+      for (const line of c.prompt.split('\n').filter((l) => PROVIDED.test(l))) {
+        assert.ok(line.trim().startsWith(prefix), `${mode} ${c.label}: ${line.trim()}`);
+        if (line.includes('scripts/ledger')) seen.ledger += 1;
+        if (line.includes('scripts/task-brief')) seen.brief += 1;
+        if (line.includes('review-package')) seen.review += 1;
+      }
+    }
+    for (const [kind, count] of Object.entries(seen)) assert.ok(count > 0, `${mode}: saw ${kind} commands`);
+  }
+});
+
 test('integrate checks the first-parent history after the prelude tip', async () => {
   const { calls } = await fullRun('git');
   const integ = calls.find((c) => c.label === 'integrate').prompt;
