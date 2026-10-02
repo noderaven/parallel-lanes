@@ -392,14 +392,41 @@ test('a stopped prelude stops the run before any lane', async () => {
 
 test('a failed integration stops before join (supervised)', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const script = { ...phaseScript({ integrate: [{ status: 'failed', head: '', notes: 'build broke' }] }), ...taskScript(ALL) };
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'build broke' },
+        { status: 'failed', head: '', notes: 'build still broke' },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'stopped');
   assert.equal(result.integrate.status, 'failed');
+  assert.match(result.reason, /build still broke/);
   assert.ok(!labels(calls).includes('post-integrate'));
+  assert.ok(!labels(calls).includes('post-integrate fix'));
   assert.ok(!calls.some((c) => c.phase === 'Join'));
-  // Supervised does not escalate a non-conflict failure to an Opus rerun.
-  assert.equal(labels(calls).filter((l) => l === 'integrate').length, 1);
+  // Supervised escalates a non-conflict failure to one Opus rerun on the
+  // plain Plan 1 prompt (no self-heal), then stops as in Plan 1.
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+  assert.match(integ[1].prompt, /resolve it/);
+  assert.ok(!/tests_failed/.test(integ[1].prompt), 'supervised rerun does not heal command failures');
+});
+
+test('a supervised sonnet integrate that returns null is finished by the opus rerun', async () => {
+  const m = manifest({ autonomy: 'supervised' });
+  const script = {
+    ...phaseScript({ integrate: [null, { status: 'done', head: 'I2', notes: 'merged on opus' }], 'integrate retry': [null] }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(result.integrate.status, 'done');
 });
 
 test('a stopped join stops before e2e and final review', async () => {
@@ -1028,6 +1055,98 @@ test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the o
   assert.equal(result.integrate.status, 'done');
 });
 
+test('a resolver that fails or returns null: the opus rerun resolves on the plain prompt', async () => {
+  for (const resolved of [{ status: 'failed', head: '', notes: 'could not resolve' }, null]) {
+    const script = {
+      ...phaseScript({
+        integrate: [
+          { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
+          { status: 'done', head: 'I2', notes: 'resolved on the rerun' },
+        ],
+        'resolve conflicts': [resolved],
+        'resolve conflicts retry': [null],
+      }),
+      ...taskScript(ALL),
+    };
+    const { result, calls } = await run(manifest(), script);
+    assert.equal(result.status, 'complete');
+    const integ = calls.filter((c) => c.label === 'integrate');
+    assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+    assert.ok(!/Resolution review/.test(integ[1].prompt), 'no claim that a prior agent resolved the conflicts');
+    assert.ok(!/already resolved/.test(integ[1].prompt));
+    assert.match(integ[1].prompt, /resolve it/);
+    assert.ok(!/Do not resolve conflicts/.test(integ[1].prompt));
+  }
+});
+
+test('a resolver that finishes hands its notes to the reviewing opus rerun', async () => {
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
+        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+      ],
+      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'RESOLVER-NOTES: kept both exports' }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { calls } = await run(manifest(), script);
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.match(integ[1].prompt, /Resolution review/);
+  assert.ok(integ[1].prompt.includes('RESOLVER-NOTES: kept both exports'), integ[1].prompt);
+});
+
+test('post-integrate re-review findings are reported and reach the final fix wave', async () => {
+  const fxIssue = { severity: 'critical', file: 'src/fx.js', line: 7, issue: 'fix drops error handling', fix: 'restore it' };
+  const quiet = {
+    'final review sp': [{ findings: [], cannot_verify: [] }],
+    'final review security': [{ findings: [], cannot_verify: [] }],
+    'final review correctness': [{ findings: [], cannot_verify: [] }],
+  };
+  // Integrate tests_failed path.
+  const viaInteg = await run(manifest({ hooks: { e2e: 'E2E-HOOK: run the checklist' } }), {
+    ...phaseScript({
+      ...quiet,
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: 'I3', notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [fxIssue] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(viaInteg.result.status, 'complete');
+  assert.deepEqual(viaInteg.result.integrate.fix_review.map((f) => f.issue), ['fix drops error handling']);
+  const fixCall = viaInteg.calls.find((c) => c.label === 'final fix');
+  assert.ok(fixCall, 'the final fix wave runs on the carried finding');
+  assert.ok(fixCall.prompt.includes('fix drops error handling'));
+  assert.equal(fixCall.model, 'opus');
+  const carried = viaInteg.result.final.findings.find((f) => f.issue === 'fix drops error handling');
+  assert.deepEqual(carried.lenses, ['post-integrate re-review']);
+  assert.ok(viaInteg.result.final.fixed.some((f) => f.issue === 'fix drops error handling'));
+
+  // Hook failure path; a re-review that returns null is listed under cannot_verify.
+  const viaHook = await run(manifest(), {
+    ...phaseScript({
+      ...quiet,
+      'post-integrate': [
+        { status: 'failed', head: '', notes: 'contract drift' },
+        { status: 'done', head: 'P2', notes: 'contracts ok' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'PFX', notes: 'realigned contract' }],
+      'post-integrate re-review': [null],
+      'post-integrate re-review retry': [null],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(viaHook.result.status, 'complete');
+  assert.deepEqual(viaHook.result.integrate.fix_review, []);
+  assert.ok(viaHook.result.final.cannot_verify.includes('the post-integrate re-review returned no result'),
+    JSON.stringify(viaHook.result.final.cannot_verify));
+});
+
 test('autonomous integrate failure without conflicts: one opus rerun, no resolver', async () => {
   const script = {
     ...phaseScript({
@@ -1201,4 +1320,42 @@ test('the finishing integrate-phase agent records the join start point (A4)', as
     { ...phaseScript(), ...taskScript(ALL) });
   const integNo = noHook.calls.find((c) => c.label === 'integrate').prompt;
   assert.match(integNo, JOIN_START);
+
+  // Without the hook, the Opus integrate reruns that finish the phase on the
+  // self-heal paths carry it too.
+  const noHookM = manifest({ hooks: { e2e: 'E2E-HOOK: run the checklist' } });
+  const conflict = await run(noHookM, {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
+        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+      ],
+      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'resolved' }],
+    }),
+    ...taskScript(ALL),
+  });
+  const conflictInteg = conflict.calls.filter((c) => c.label === 'integrate');
+  assert.match(conflictInteg[conflictInteg.length - 1].prompt, JOIN_START);
+  assert.ok(!JOIN_START.test(conflict.calls.find((c) => c.label === 'resolve conflicts').prompt));
+
+  const healed = await run(noHookM, {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: 'I3', notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  });
+  const healedInteg = healed.calls.filter((c) => c.label === 'integrate');
+  assert.equal(healedInteg.length, 3);
+  for (const c of healedInteg.slice(1)) {
+    assert.match(c.prompt, JOIN_START);
+    // In heal mode the join start point is recorded only when no command fails.
+    assert.match(c.prompt, /only when you return tests_failed false/);
+  }
+  assert.ok(!/tests_failed false/.test(healedInteg[0].prompt), 'the sonnet first pass does not heal');
 });

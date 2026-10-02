@@ -9,8 +9,11 @@
 // reported, else base (the feature tip the script tracked); on a resume
 // after an earlier final fix the two differ. Returns {findings, fixed,
 // declined, cannot_verify}; declined entries carry a reason (declined by the
-// fix agent, not fixed, or still open after the re-review).
-async function runFinalReview(m, e2e, base, io) {
+// fix agent, not fixed, or still open after the re-review). carried holds
+// findings from before the final review (the post-integrate re-reviews, C2):
+// they join the lenses' findings, so the one fix wave and the final
+// re-review cover them too.
+async function runFinalReview(m, e2e, base, io, carried = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -27,8 +30,10 @@ async function runFinalReview(m, e2e, base, io) {
     if (!r) cannotVerify.push(`the ${name} review returned no result`);
     else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
   });
-  const findings = dedupeFindings(lenses.map(([, name], i) =>
-    ({ lens: name, findings: results[i] ? results[i].findings : null })));
+  const findings = dedupeFindings([
+    ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
+    { lens: 'post-integrate re-review', findings: carried },
+  ]);
   const final = { findings, fixed: [], declined: [], cannot_verify: cannotVerify };
   if (findings.length === 0) return final;
   const lensHead = results.find((r) => r && present(r.head));
@@ -128,13 +133,15 @@ function preflightResolved(m, text) {
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings},
-//  integrate:{status, notes, post_integrate}, e2e:{items}|null,
+//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items}|null,
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
 //  reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only)}.
-// Task status is done, blocked, skipped (done and reviewed earlier), or
-// not_run. Under profile lite no pre-flight agent runs (preflight has no
-// conflicts or rulings) and integrate stays null.
+// integrate.fix_review lists the findings of the post-integrate re-reviews
+// (C2); they also reach the final fix wave. Task status is done, blocked,
+// skipped (done and reviewed earlier), or not_run. Under profile lite no
+// pre-flight agent runs (preflight has no conflicts or rulings) and
+// integrate stays null.
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -188,6 +195,8 @@ async function runAll(m, io) {
   let integrate = null;
   let e2e = null;
   let final = null;
+  // Set when a post-integrate fix's re-review returned no result (C2).
+  let fixUnreviewed = false;
   const report = (status, reason = null) => ({
     status,
     run_id: m.run_id,
@@ -332,6 +341,10 @@ async function runAll(m, io) {
     };
     const preludeTip = tip;
     const BUDGET = Symbol('budget');
+    // Post-integrate re-review findings (C2): reported under
+    // integrate.fix_review and carried into the final fix wave.
+    const fixReview = [];
+    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'), post_integrate: null, fix_review: fixReview });
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
@@ -340,9 +353,11 @@ async function runAll(m, io) {
         postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
       if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
-        await callM('post-integrate re-review', 'Integrate',
+        const rr = await callM('post-integrate re-review', 'Integrate',
           postIntegrateReReviewPrompt(m, base, fix.head), finalReReviewSchema(), standard);
         if (state.refused.length > 0) return BUDGET;
+        if (rr && Array.isArray(rr.findings)) fixReview.push(...rr.findings);
+        else fixUnreviewed = true;
         return fix.head;
       }
       return base;
@@ -357,30 +372,29 @@ async function runAll(m, io) {
     if (state.refused.length > 0) return budgetReport();
     if (!integ || integ.status !== 'done') {
       const conflicts = integ && Array.isArray(integ.conflict_files) ? integ.conflict_files : [];
+      // The rerun reviews a resolution only when the resolver finished it;
+      // otherwise it resolves the conflicts itself on the plain prompt.
+      let resolved = null;
       if (conflicts.length > 0 && autonomous) {
-        await callM('resolve conflicts', 'Integrate',
+        const res = await callM('resolve conflicts', 'Integrate',
           resolveConflictsPrompt(m, preludeTip, conflicts), statusSchema(), standard);
         if (state.refused.length > 0) return budgetReport();
-        integ = await callM('integrate', 'Integrate',
-          integratePrompt(m, preludeTip,
-            { conflictMode: 'resolve', testFailure: 'heal', reviewConflicts: conflicts, joinStartPoint: joinNoHook }),
-          statusSchema(), standard);
-        if (state.refused.length > 0) return budgetReport();
-      } else if (conflicts.length > 0) {
-        // Supervised conflict: an Opus rerun that resolves only with confidence.
-        integ = await callM('integrate', 'Integrate',
-          integratePrompt(m, preludeTip, { joinStartPoint: joinNoHook }), statusSchema(), standard);
-        if (state.refused.length > 0) return budgetReport();
-      } else if (autonomous) {
-        // Any other Sonnet failure or null: the Opus rerun (autonomous heals
-        // a residual command failure into tests_failed).
-        integ = await callM('integrate', 'Integrate',
-          integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
-        if (state.refused.length > 0) return budgetReport();
+        if (res && res.status === 'done' && present(res.head)) resolved = { files: conflicts, notes: res.notes };
       }
-      // Supervised non-conflict failure keeps the failed Sonnet result and stops.
+      // Every Sonnet failure or null escalates to one Opus rerun (D5).
+      // Autonomous heals a residual command failure into tests_failed;
+      // supervised uses the Plan 1 prompt (resolve only with confidence,
+      // fail on a command failure) and stops if the rerun fails.
+      integ = await callM('integrate', 'Integrate',
+        integratePrompt(m, preludeTip, {
+          testFailure: autonomous ? 'heal' : 'fail',
+          reviewConflicts: resolved ? resolved.files : null,
+          resolverNotes: resolved ? resolved.notes : null,
+          joinStartPoint: joinNoHook,
+        }), statusSchema(), standard);
+      if (state.refused.length > 0) return budgetReport();
     }
-    integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
+    integrate = integrateReport(integ);
     if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
     tip = integ.head;
     // Post-integration test failures (autonomous, C2): fix + re-review, then
@@ -392,7 +406,7 @@ async function runAll(m, io) {
       integ = await callM('integrate', 'Integrate',
         integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
-      integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
+      integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {
         return report('stopped', `integration failed: ${integrate.notes || 'tests still failing after the fix'}`);
       }
@@ -441,8 +455,9 @@ async function runAll(m, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted);
+  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
   if (state.refused.length > 0) return budgetReport();
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
+  if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
   return report('complete');
 }

@@ -241,14 +241,21 @@ function preflightPrompt(m) {
 
 // The ledger command the finishing Integrate-phase agent runs to record the
 // join start point (spec A4): the feature head when integration completes.
-function joinStartPointLine(m) {
+// heal: the agent may return done with tests_failed true, which is not a
+// finished integration (a fix agent and a rerun follow), so it records the
+// start point only when no project command fails.
+function joinStartPointLine(m, heal = false) {
   const cmd = ledgerCommand(m, '_run',
     { task: '_run', event: 'run_started', phase: 'join', head: '<feature head>' }, featureDir(m));
-  return [
+  const when = heal ? [
+    'After everything above succeeds, and only when you return tests_failed false (every project command',
+    'passes), record the join start point by running this command, substituting the full sha you return as',
+    'head for <feature head> (keep the surrounding quotes). When a project command still fails, do not run it:',
+  ] : [
     'After everything above succeeds, record the join start point by running this command, substituting the',
     'full sha you return as head for <feature head> (keep the surrounding quotes):',
-    `  ${cmd}`,
-  ].join('\n');
+  ];
+  return [...when, `  ${cmd}`].join('\n');
 }
 
 // opts:
@@ -258,12 +265,15 @@ function joinStartPointLine(m) {
 //   (autonomous: return done + tests_failed so a fix agent takes over).
 // - reviewConflicts: the conflicting files a prior resolver merged, when this
 //   rerun must also review that resolution; null otherwise.
+// - resolverNotes: that resolver's notes (how it resolved each file), shown
+//   with the resolution review.
 // - joinStartPoint: carry the A4 join start-point ledger command (only when no
 //   post_integrate hook finishes the phase).
 function integratePrompt(m, preludeTip, opts = {}) {
   const conflictMode = opts.conflictMode || 'resolve';
   const testFailure = opts.testFailure || 'fail';
   const reviewConflicts = opts.reviewConflicts || null;
+  const resolverNotes = opts.resolverNotes || null;
   const joinStartPoint = opts.joinStartPoint || false;
   const q = shellQuote;
   const dir = q(featureDir(m));
@@ -311,6 +321,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `commits after ${preludeTip}. Before cleanup, review those resolution merges against both lanes' intent`,
     `(read the plan tasks that touched the conflicting files: ${reviewConflicts.join(', ')}); if a resolution`,
     "drops or corrupts either lane's intent, fail naming the problem.",
+    ...(resolverNotes ? ["The resolver's notes on how it resolved each file:", resolverNotes] : []),
     '',
   ] : [];
   return [
@@ -347,7 +358,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `Plan: ${m.plan}`,
     keepFilesRule(),
     phaseRules(m),
-    ...(joinStartPoint ? ['', joinStartPointLine(m)] : []),
+    ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
     `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
