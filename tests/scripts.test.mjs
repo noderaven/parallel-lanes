@@ -281,6 +281,49 @@ test('ledger: a commit after a block clears the block', () => {
   assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [] });
 });
 
+// Node's spawn() starts children too far apart to hit a first-append race, so
+// one bash process launches every append of a trial in the background at once.
+const RACE = `
+ledger="$1"; base="$2"; trials="$3"; lanes="$4"
+for t in $(seq 1 "$trials"); do
+  for l in $(seq 1 "$lanes"); do
+    ( python3 "$ledger" append "$base/trial $t/fresh ledger" "lane$l" \\
+        "{\\"task\\":\\"T$l\\",\\"event\\":\\"committed\\",\\"commits\\":[\\"a\\"]}"
+      echo "$t $l $?" ) &
+  done
+  wait
+done
+`;
+
+test('ledger: concurrent first appends to a missing directory all succeed', () => {
+  const base = workDir();
+  const trials = 25;
+  const lanes = 8;
+  const res = spawnSync(
+    'bash',
+    ['-c', RACE, 'race', join(SCRIPTS, 'ledger'), base, String(trials), String(lanes)],
+    { encoding: 'utf8' },
+  );
+  assert.equal(res.status, 0, res.stderr);
+  const rows = res.stdout.trim().split('\n');
+  assert.equal(rows.length, trials * lanes);
+  const failed = rows.filter((row) => !row.endsWith(' 0'));
+  assert.deepEqual(failed, [], res.stderr);
+  const expected = Array.from({ length: lanes }, (_, i) => `T${i + 1}`).sort();
+  for (let t = 1; t <= trials; t += 1) {
+    const dir = join(base, `trial ${t}`, 'fresh ledger');
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    assert.deepEqual(status(dir).done.sort(), expected);
+  }
+});
+
+test('ledger append refuses a DIR that is a file with exit 3', () => {
+  const file = join(workDir(), 'not a dir');
+  writeFileSync(file, '');
+  const res = ledger('append', file, 'alpha', JSON.stringify({ task: 'T1', event: 'blocked', reason: 'x' }));
+  assert.equal(res.code, 3, res.stderr);
+});
+
 test('ledger status of a missing directory is empty', () => {
   const dir = join(workDir(), 'never created');
   assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [] });
