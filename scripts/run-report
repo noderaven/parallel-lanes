@@ -10,11 +10,23 @@ agent-*.jsonl (resolved message.model and usage per line). MANIFEST is the
 run manifest, used to recognise task ids and to derive implement and fix
 effort. Prints JSON (or writes it to FILE):
 
-  {agents: [...], tiers: {<tier>: {...}}, totals: {...},
-   unavailable: N, escalations: N, fix_rounds: N, retries: N}
+  {agents: [...], tiers: {<tier>: {...}}, totals: {...}, models: {...},
+   unavailable: N, output_incomplete: N, escalations: N, fix_rounds: N,
+   retries: N}
 
 Anything that cannot be read or derived is the string "unavailable", never a
 guess; totals sum only known values.
+
+Output tokens: a transcript line written mid-stream carries
+"stop_reason": null and the output count from the start of the stream, not
+the final count. A message whose kept line has stop_reason null is
+incomplete; an agent with any incomplete message has output_tokens
+"unavailable" and output_tokens_min (the counts it does have, a lower
+bound). Lines with no stop_reason key are taken as final.
+
+Models: resolved_models maps every model that served the agent to its
+message count (a fallback model shows up here even when the workflow
+recorded the requested one); top-level models counts agents per model.
 """
 import glob
 import json
@@ -94,14 +106,18 @@ def model_tier(model):
 
 
 def read_usage(path):
-    """Return (resolved_model, sums) or (None, None) when no usage lines.
+    """Return (resolved_model, sums, models, complete), or (None, None, {}, True)
+    when there are no usage lines.
 
     A transcript writes one assistant message over several lines that share
     its message.id, each repeating that message's usage (output_tokens as a
     running value). Each message counts once, with the last usage seen for
     its id (and requestId when present); lines without an id count each.
+    complete is False when a counted line has stop_reason null (its
+    output_tokens is a mid-stream value).
     """
     model = None
+    models = {}
     usages = {}
     anonymous = []
     try:
@@ -120,25 +136,31 @@ def read_usage(path):
                 usage = msg.get("usage")
                 if not isinstance(usage, dict):
                     continue
+                final = not ("stop_reason" in msg and msg["stop_reason"] is None)
+                mid = msg.get("id")
                 if isinstance(msg.get("model"), str):
                     model = msg["model"]
-                mid = msg.get("id")
+                    key = (mid, obj.get("requestId")) if isinstance(mid, str) and mid else None
+                    if key is None or key not in usages:
+                        models[model] = models.get(model, 0) + 1
                 if isinstance(mid, str) and mid:
                     rid = obj.get("requestId")
-                    usages[(mid, rid if isinstance(rid, str) else None)] = usage
+                    usages[(mid, rid if isinstance(rid, str) else None)] = (usage, final)
                 else:
-                    anonymous.append(usage)
+                    anonymous.append((usage, final))
     except OSError:
-        return None, None
+        return None, None, {}, True
     if not usages and not anonymous:
-        return None, None
+        return None, None, {}, True
     sums = {k: 0 for k in TOKEN_FIELDS}
-    for usage in list(usages.values()) + anonymous:
+    complete = True
+    for usage, final in list(usages.values()) + anonymous:
+        complete = complete and final
         for k in TOKEN_FIELDS:
             v = usage.get(k)
             if isinstance(v, int) and not isinstance(v, bool):
                 sums[k] += v
-    return model, sums
+    return model, sums, models, complete
 
 
 def first_timestamp(path):
@@ -175,6 +197,7 @@ def start_key(meta_path):
 
 def blank_bucket():
     b = {k: 0 for k in TOKEN_FIELDS}
+    b["output_tokens_min"] = 0
     b["agents"] = 0
     return b
 
@@ -193,7 +216,7 @@ def build(transcript_dir, manifest):
                       if isinstance(meta.get(k), str)), None)
         task, role, retried, base_label = parse_label(label, ids)
         requested = meta.get("model") if isinstance(meta.get("model"), str) else None
-        resolved, sums = read_usage(stem + ".jsonl")
+        resolved, sums, models, complete = read_usage(stem + ".jsonl")
         tier = model_tier(resolved) or model_tier(requested) or UNAVAILABLE
         if isinstance(meta.get("effort"), str):
             effort = meta["effort"]
@@ -211,8 +234,12 @@ def build(transcript_dir, manifest):
             "resolved_model": resolved if resolved else UNAVAILABLE,
             "effort": effort,
         }
+        entry["resolved_models"] = models
         for k in TOKEN_FIELDS:
             entry[k] = sums[k] if sums is not None else UNAVAILABLE
+        entry["output_tokens_min"] = sums["output_tokens"] if sums is not None else UNAVAILABLE
+        if sums is not None and not complete:
+            entry["output_tokens"] = UNAVAILABLE
         entry["_base"] = base_label
         entry["_retried"] = retried
         agents.append(entry)
@@ -220,6 +247,8 @@ def build(transcript_dir, manifest):
     tiers = {}
     totals = blank_bucket()
     unavailable = 0
+    output_incomplete = 0
+    models = {}
     retries = 0
     last_model = {}  # stripped label -> (tier, model) of its latest run
     for a in agents:
@@ -229,12 +258,17 @@ def build(transcript_dir, manifest):
         bucket["fix_rounds"] = bucket.get("fix_rounds", 0)
         bucket["agents"] += 1
         totals["agents"] += 1
+        for m in a["resolved_models"]:
+            models[m] = models.get(m, 0) + 1
         if a["input_tokens"] == UNAVAILABLE:
             unavailable += 1
         else:
-            for k in TOKEN_FIELDS:
-                bucket[k] += a[k]
-                totals[k] += a[k]
+            if a["output_tokens"] == UNAVAILABLE:
+                output_incomplete += 1
+            for k in TOKEN_FIELDS + ("output_tokens_min",):
+                if a[k] != UNAVAILABLE:
+                    bucket[k] += a[k]
+                    totals[k] += a[k]
         if a["_retried"]:
             retries += 1
         if a["task"] is not None and re.match(r"^fix \d+$", a["role"]):
@@ -255,7 +289,9 @@ def build(transcript_dir, manifest):
         "agents": agents,
         "tiers": tiers,
         "totals": totals,
+        "models": models,
         "unavailable": unavailable,
+        "output_incomplete": output_incomplete,
         "escalations": sum(b["escalations"] for b in tiers.values()),
         "fix_rounds": sum(b["fix_rounds"] for b in tiers.values()),
         "retries": retries,

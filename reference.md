@@ -185,12 +185,19 @@ stop, a budget cap, and a failed relaunch.
 
 `python3 <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
 workflow transcript directory printed at launch (`agent-*.meta.json` and `agent-*.jsonl`).
-Output: `agents` (per agent: label, phase, task, role, requested and resolved model, effort,
-input, output, cache read, and cache creation tokens), `tiers` (totals per tier), `totals`,
-and `unavailable`, `escalations`, `fix_rounds`, `retries` counts. A field that cannot be read
-is the string `unavailable`, never a guess. The hand-back appends it, saves it beside the
-manifest, and lists "Rulings made on your behalf" from the ledger `ruling` events plus
-`preflight.rulings`.
+Output: `agents` (per agent: label, phase, task, role, requested and resolved model,
+`resolved_models` with message counts, effort, input, output, cache read, and cache creation
+tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
+`unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
+that cannot be read is the string `unavailable`, never a guess. Transcripts often keep only
+the mid-stream output count of a message (`stop_reason` null); such an agent's
+`output_tokens` is `unavailable` and `output_tokens_min` holds the lower bound. Report both,
+and call out any agent whose `resolved_models` names a model other than the one requested
+(a fallback). The hand-back appends the report, saves it beside the manifest, and lists
+"Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. A
+task whose result is blocked with `adjudicator_stop: security` had its park or unblock
+refused: list that task's adjudicator ruling as `refused (security-gated): <text>`, never as
+a ruling that took effect.
 
 ## Backfill
 

@@ -137,7 +137,7 @@ test('adjudicatorPrompt: no task-brief command when task is null', () => {
 test('adjudicatorPrompt: ruling ledger command for the task lane, cd where.dir', () => {
   const m = manifest();
   const p = adjudicatorPrompt(m, blockedCtx());
-  const cmd = ledgerCommand(m, 'alpha', { task: 'T2', event: 'ruling', text: RULING }, WHERE.dir);
+  const cmd = ledgerCommand(m, 'alpha', { task: 'T2', event: 'ruling', by: 'adjudicator', text: RULING }, WHERE.dir);
   assert.ok(cmd.startsWith("cd '/work/wt/lane-alpha' && "));
   assert.ok(p.includes(cmd), 'ruling ledger command for lane alpha');
 });
@@ -145,7 +145,7 @@ test('adjudicatorPrompt: ruling ledger command for the task lane, cd where.dir',
 test('adjudicatorPrompt: ruling ledger command for lane _run in featureDir when where is null', () => {
   const m = manifest();
   const p = adjudicatorPrompt(m, preflightCtx());
-  const cmd = ledgerCommand(m, '_run', { task: '_run', event: 'ruling', text: RULING }, '/work/repo');
+  const cmd = ledgerCommand(m, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: RULING }, '/work/repo');
   assert.ok(cmd.startsWith("cd '/work/repo' && "));
   assert.ok(p.includes(cmd), 'ruling ledger command for lane _run');
   assert.ok(p.includes(preflightCtx().details), 'pre-flight conflicts');

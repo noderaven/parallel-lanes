@@ -446,14 +446,18 @@ test('ledger exits 2 on usage errors', () => {
   assert.equal(ledger('frobnicate', 'dir').code, 2);
 });
 
-test('ledger: carry holds the last ruling of a task whose final outcome is unblock', () => {
+test('ledger: carry holds the last adjudicator ruling after the last commit of a task whose final outcome is unblock', () => {
   const dir = workDir();
-  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', text: 'Ruling: first try - x - y' });
-  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', text: 'Ruling: stub the client - unblocks T4 - rework' });
-  appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'b0' });
-  appendOk(dir, 'alpha', { task: 'T5', event: 'ruling', text: 'Ruling: park - minor - low' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', by: 'adjudicator', text: 'Ruling: answer before commit - x - y' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c1'] });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', by: 'adjudicator', text: 'Ruling: stub the client - unblocks T4 - rework' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', text: 'Ruling: implementer naming choice - small - low' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'c1' });
+  appendOk(dir, 'alpha', { task: 'T5', event: 'ruling', by: 'adjudicator', text: 'Ruling: park - minor - low' });
   appendOk(dir, 'alpha', { task: 'T5', event: 'settled', outcome: 'park', base: 'b1', head: 'b1' });
+  appendOk(dir, 'beta', { task: 'T7', event: 'ruling', text: 'Ruling: implementer only - x - y' });
   appendOk(dir, 'beta', { task: 'T7', event: 'settled', outcome: 'unblock', base: 'b2', head: 'b2' });
+  // Only the adjudicator's ruling after the last commit carries; implementer rulings never do.
   assert.deepEqual(status(dir).carry, { T3: 'Ruling: stub the client - unblocks T4 - rework' });
   // A later commit means the task ran again; its unblock note no longer carries.
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c9'] });

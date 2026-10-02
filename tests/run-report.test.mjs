@@ -156,3 +156,38 @@ test('lines sharing a message id count that message once, with its last usage', 
   assert.equal(a.cache_creation_input_tokens, 20 * 4);
   assert.equal(a.output_tokens, 9 + 3 + 2 + 2, 'the last running output value of each message');
 });
+
+test('mid-stream usage lines (stop_reason null) make output a lower bound; fallback models are listed', () => {
+  const dir = join(TMP, 'midstream');
+  mkdirSync(dir, { recursive: true });
+  const line = (id, model, output, stop) => JSON.stringify({
+    type: 'assistant', requestId: `req-${id}`, timestamp: '2026-10-02T10:00:00.000Z',
+    message: { id, model, stop_reason: stop, usage: {
+      input_tokens: 1, output_tokens: output, cache_read_input_tokens: 10, cache_creation_input_tokens: 2,
+    } },
+  });
+  writeFileSync(join(dir, 'agent-c1.meta.json'),
+    JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
+  writeFileSync(join(dir, 'agent-c1.jsonl'), [
+    line('m1', 'opus-new', 7, null), line('m1', 'opus-new', 7, null),
+    line('m2', 'opus-old', 96, 'tool_use'),
+    line('m3', 'opus-old', 8, null),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'agent-c2.meta.json'),
+    JSON.stringify({ description: 'T1 review', workflowPhase: 'Lane A', model: 'opus' }));
+  writeFileSync(join(dir, 'agent-c2.jsonl'), line('m9', 'opus-new', 50, 'end_turn') + '\n');
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  const impl = out.agents.find((x) => x.label === 'T1 implement');
+  assert.equal(impl.output_tokens, 'unavailable');
+  assert.equal(impl.output_tokens_min, 7 + 96 + 8);
+  assert.equal(impl.input_tokens, 3, 'input counts are complete at stream start');
+  assert.deepEqual(impl.resolved_models, { 'opus-new': 1, 'opus-old': 2 });
+  const rev = out.agents.find((x) => x.label === 'T1 review');
+  assert.equal(rev.output_tokens, 50);
+  assert.equal(out.output_incomplete, 1);
+  assert.equal(out.totals.output_tokens, 50, 'totals sum only known values');
+  assert.equal(out.totals.output_tokens_min, 7 + 96 + 8 + 50);
+  assert.deepEqual(out.models, { 'opus-new': 2, 'opus-old': 1 });
+});

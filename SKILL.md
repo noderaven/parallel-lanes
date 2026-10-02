@@ -214,7 +214,7 @@ Report: run `python3 <skill_dir>/scripts/run-report <transcript dir> <manifest> 
 <run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch, append
 its output, and keep that file beside the manifest. Per task: status, commits (`skipped`:
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
-verify. "Rulings made on your behalf": ledger `ruling` events plus `preflight.rulings`. Then
+verify. "Rulings made on your behalf" (reference.md "Report"). Then
 integration and post-integrate notes, E2E PASS/FAIL, final review (fixed, declined with
 reasons, cannot verify), `agents_spawned` (reference.md "Report").
 

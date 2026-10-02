@@ -29,9 +29,10 @@ order; the run appends them all to lane _run); a key is omitted when there
 is no such event. run_started
 events do not affect the lists. carry: for each task whose last 'committed'
 or 'settled' event is a 'settled' with outcome "unblock", the text of that
-task's last 'ruling' event (the adjudicator's unblock note, which a resume
-hands to the next task in the same list); a task with no ruling text is
-omitted. A missing DIR has empty lists, no start points, and no carry.
+task's last 'ruling' event with "by": "adjudicator" after its last
+'committed' (the adjudicator's unblock ruling, which a resume hands to the
+next task in the same list); a task with no such ruling is omitted. Other
+rulings (implementers', or from before a later commit) are never carried. A missing DIR has empty lists, no start points, and no carry.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 name or an unreadable ledger.
@@ -150,6 +151,7 @@ def status(directory):
                 task, event = entry["task"], entry["event"]
                 if event == "committed":
                     unblocked[task] = False
+                    last_ruling.pop(task, None)
                     done[task] = True
                     reviewed[task] = False
                     blocked[task] = False
@@ -162,7 +164,7 @@ def status(directory):
                     blocked[task] = False
                 elif event == "blocked":
                     blocked[task] = True
-                elif event == "ruling" and entry["text"]:
+                elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
                     last_ruling[task] = entry["text"]
                 elif event == "run_started":
                     key = START_POINTS[entry["phase"]]

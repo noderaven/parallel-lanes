@@ -1618,7 +1618,8 @@ function adjudicatorPrompt(m, ctx) {
   const branch = where ? where.branch : m.repo.branch;
   const lane = where ? where.lane : '_run';
   const ruling = ledgerCommand(m, lane,
-    { task: task ? task.id : '_run', event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, dir);
+    { task: task ? task.id : '_run', event: 'ruling', by: 'adjudicator', text: 'Ruling: <decision> - <why> - <cost if wrong>' },
+    dir);
   const subject = task ? `Task ${task.id}: ${task.title}` : 'the run (pre-flight)';
   const parts = [
     `You are the adjudicator for ${subject}. The run is autonomous: the user is not available, and you decide`,
