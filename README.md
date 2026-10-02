@@ -236,3 +236,7 @@ Other things to know:
 | `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `tests/` | `node --test tests/` |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
