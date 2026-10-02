@@ -29,6 +29,7 @@ function validateManifest(m) {
   const isTextOrNull = (v) => v === null || isText(v);
   const isTextList = (v) => Array.isArray(v) && v.every(isText);
   const isPositiveInt = (v) => Number.isInteger(v) && v >= 1;
+  const isAbsolutePath = (v) => isText(v) && v.startsWith('/');
 
   if (!isObject(m)) return ['manifest: must be an object'];
 
@@ -47,6 +48,10 @@ function validateManifest(m) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
   }
   if ('dry_run' in m && typeof m.dry_run !== 'boolean') err('dry_run: must be a boolean');
+  if ('autonomy' in m && m.autonomy !== 'autonomous' && m.autonomy !== 'supervised') {
+    err("autonomy: must be 'autonomous' or 'supervised'");
+  }
+  if ('profile' in m && m.profile !== 'lite' && m.profile !== 'full') err("profile: must be 'lite' or 'full'");
 
   if ('repo' in m) {
     const repo = m.repo;
@@ -82,22 +87,33 @@ function validateManifest(m) {
   };
   if ('commands' in m) checkCommands('commands', m.commands, true);
 
-  // Tasks: shape, light/security rule, and id uniqueness across all groups.
+  // Tasks: shape, tier/security and batch rules, and id uniqueness across
+  // all groups. allTasks collects every task object for the profile rules.
   const taskIds = new Set();
+  const allTasks = [];
   const checkTask = (where, t) => {
     if (!isObject(t)) {
       err(`${where}: must be an object`);
       return;
     }
+    allTasks.push(t);
     const name = isText(t.id) ? `task ${t.id}` : where;
     if (!isText(t.id)) err(`${where}.id: must be a non-empty string`);
     else if (taskIds.has(t.id)) err(`task ${t.id}: id appears more than once`);
     else taskIds.add(t.id);
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
-    if (t.tier !== 'standard' && t.tier !== 'light') err(`${name}: tier must be 'standard' or 'light'`);
+    if (t.tier !== 'standard' && t.tier !== 'sonnet' && t.tier !== 'light') {
+      err(`${name}: tier must be 'standard', 'sonnet' or 'light'`);
+    }
     if (typeof t.security !== 'boolean') err(`${name}: security must be a boolean`);
-    if (t.tier === 'light' && t.security === true) err(`${name}: a light tier task cannot have security set`);
+    if ((t.tier === 'sonnet' || t.tier === 'light') && t.security === true) {
+      err(`${name}: a ${t.tier} tier task cannot have security set (security tasks are always standard)`);
+    }
+    if ('batch' in t) {
+      if (!isText(t.batch)) err(`${name}: batch must be a non-empty string`);
+      else if (t.tier !== 'light') err(`${name}: batch is allowed only on a light tier task`);
+    }
   };
   const checkTaskList = (where, list) => {
     if (!Array.isArray(list)) {
@@ -176,6 +192,12 @@ function validateManifest(m) {
       for (const key of ['review_rounds', 'max_parallel_lanes']) {
         if (!isPositiveInt(m.limits[key])) err(`limits.${key}: must be an integer >= 1`);
       }
+      if ('max_agents' in m.limits && !isPositiveInt(m.limits.max_agents)) {
+        err('limits.max_agents: must be an integer >= 1');
+      }
+      if ('max_rulings' in m.limits && !(Number.isInteger(m.limits.max_rulings) && m.limits.max_rulings >= 0)) {
+        err('limits.max_rulings: must be an integer >= 0');
+      }
     }
   }
 
@@ -223,5 +245,74 @@ function validateManifest(m) {
     }
   }
 
+  // Lite profile (spec D2): one lane on the feature branch, a small plan, and
+  // no security task (it gets no separate security review lens).
+  if (m.profile === 'lite') {
+    if (Array.isArray(m.lanes) && m.lanes.length !== 1) {
+      err(`profile lite: requires exactly one lane (found ${m.lanes.length})`);
+    }
+    if (allTasks.length > 8) {
+      err(`profile lite: allows at most 8 tasks across prelude, lanes and join (found ${allTasks.length})`);
+    }
+    for (const t of allTasks) {
+      if (isObject(t) && t.security === true) {
+        const name = isText(t.id) ? `task ${t.id}` : 'a task';
+        err(`profile lite: allows no security task (${name} has security set)`);
+      }
+    }
+  }
+
+  // setup_result: the output of scripts/setup. Every lane needs a worktree
+  // entry so a run never starts a lane without its checkout (the run itself
+  // checks each path against the one it uses).
+  if ('setup_result' in m) {
+    const r = m.setup_result;
+    if (!isObject(r)) {
+      err('setup_result: must be an object');
+    } else {
+      if (!isText(r.feature_head)) err('setup_result.feature_head: must be a non-empty string');
+      if (!isTextList(r.discarded)) err('setup_result.discarded: must be a list of non-empty strings');
+      if (!isObject(r.worktrees)) {
+        err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');
+      } else {
+        for (const [laneId, path] of Object.entries(r.worktrees)) {
+          if (!laneIds.has(laneId)) err(`setup_result.worktrees.${laneId}: unknown lane id`);
+          if (!isAbsolutePath(path)) err(`setup_result.worktrees.${laneId}: must be an absolute path`);
+        }
+        for (const laneId of laneIds) {
+          if (!(laneId in r.worktrees)) err(`setup_result.worktrees: missing a worktree for lane ${laneId}`);
+        }
+      }
+    }
+  }
+
+  // start_points: feature heads from the ledger run_started events.
+  if ('start_points' in m) {
+    if (!isObject(m.start_points)) {
+      err('start_points: must be an object');
+    } else {
+      for (const [key, sha] of Object.entries(m.start_points)) {
+        if (key !== 'prelude' && key !== 'join') err(`start_points.${key}: unknown start point`);
+        else if (!isText(sha)) err(`start_points.${key}: must be a non-empty string`);
+      }
+    }
+  }
+
   return errors;
+}
+
+// The run's autonomy mode (spec C1): autonomous unless the manifest says
+// supervised.
+function effectiveAutonomy(m) {
+  return m.autonomy === 'supervised' ? 'supervised' : 'autonomous';
+}
+
+// The run's budgets (spec C3) for a valid manifest: max_agents defaults to
+// twice the dry-run estimate, max_rulings to 25.
+function effectiveLimits(m) {
+  const limits = m.limits;
+  return {
+    max_agents: 'max_agents' in limits ? limits.max_agents : 2 * planAgents(m).length,
+    max_rulings: 'max_rulings' in limits ? limits.max_rulings : 25,
+  };
 }

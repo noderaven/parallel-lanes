@@ -110,11 +110,11 @@ test('a task in done but not reviewed produces a review agent only', () => {
   assert.deepEqual(roles(forTask(agents, 'T2')), ['review']);
 });
 
-test('a light task implementer runs at sonnet/medium and its reviewer at opus/high', () => {
+test('a light task implementer runs at sonnet/high and its reviewer at opus/high', () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
   const [implement, review] = forTask(planAgents(m), 'T4');
-  assert.deepEqual([implement.role, implement.model, implement.effort], ['implement', 'sonnet', 'medium']);
+  assert.deepEqual([implement.role, implement.model, implement.effort], ['implement', 'sonnet', 'high']);
   assert.deepEqual([review.role, review.model, review.effort], ['review', 'opus', 'high']);
 });
 

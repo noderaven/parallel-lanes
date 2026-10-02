@@ -166,8 +166,8 @@ test('a light task escalates to standard after the second changes verdict', asyn
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 implement', 'T2 review',
   ]);
   const [impl1, rev1, fix1, , impl2, rev2] = s.calls;
-  assert.deepEqual([impl1.model, impl1.effort], ['sonnet', 'medium']);
-  assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'medium']);
+  assert.deepEqual([impl1.model, impl1.effort], ['sonnet', 'high']);
+  assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'high']);
   assert.deepEqual([rev1.model, rev1.effort], ['opus', 'high']);
   assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
   assert.ok(impl2.prompt.includes('second'), 'the escalated implementer sees the open findings');
@@ -206,7 +206,7 @@ for (const [name, fixResult] of [['reports blocked', blocked('h1', 'fix stuck')]
     const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
     assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 implement', 'T2 review']);
     const [, , fix1, impl2, rev2] = s.calls;
-    assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'medium']);
+    assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'high']);
     assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
     assert.ok(impl2.prompt.includes('first'), 'the escalated implementer sees the open findings');
     assert.ok(rev2.prompt.includes('b0') && rev2.prompt.includes('h2'), 'the full task range is reviewed again');

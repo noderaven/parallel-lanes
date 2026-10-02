@@ -186,7 +186,7 @@ test('every non-light agent runs at opus/high and every prompt carries the commi
   for (const c of calls) {
     assert.ok(c.prompt.includes('COMMIT-RULES: plain ASCII, no trailers'), c.label);
     assert.ok(/^[\x00-\x7f]*$/.test(c.prompt), `${c.label}: plain ASCII`);
-    if (c.label === 'T4 implement') assert.deepEqual([c.model, c.effort], ['sonnet', 'medium']);
+    if (c.label === 'T4 implement') assert.deepEqual([c.model, c.effort], ['sonnet', 'high']);
     else assert.deepEqual([c.model, c.effort], ['opus', 'high'], c.label);
   }
 });
@@ -355,7 +355,7 @@ test('a backfilled review that requests changes runs the normal fix loop', async
 });
 
 test('a stopped lane yields stopped and integration does not run', async () => {
-  const m = manifest();
+  const m = manifest({ autonomy: 'supervised' });
   const script = { ...phaseScript(), ...taskScript(['T1', 'T3', 'T4', 'T5']), 'T2 implement': [blocked('T2-b', 'need a contract change')] };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'stopped');
@@ -375,7 +375,7 @@ test('a stopped lane yields stopped and integration does not run', async () => {
 
 test('a stopped prelude stops the run before any lane', async () => {
   const script = { ...phaseScript(), 'T1 implement': [null] };
-  const { result, calls } = await run(manifest(), script);
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
   assert.equal(result.status, 'stopped');
   assert.deepEqual(result.stopped_lanes.map((s) => s.lane), ['prelude']);
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
@@ -392,7 +392,7 @@ test('a failed integration stops before join', async () => {
 
 test('a stopped join stops before e2e and final review', async () => {
   const script = { ...phaseScript(), ...taskScript(['T1', 'T2', 'T3', 'T4']), 'T5 implement': [blocked('x')] };
-  const { result, calls } = await run(manifest(), script);
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
   assert.equal(result.status, 'stopped');
   assert.deepEqual(result.stopped_lanes.map((s) => s.lane), ['join']);
   assert.ok(!calls.some((c) => c.phase === 'E2E' || c.phase === 'Final review'));

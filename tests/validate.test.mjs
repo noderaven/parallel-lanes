@@ -4,11 +4,18 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
-const { validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern } = await loadHelpers([
+const {
+  validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern,
+  effectiveAutonomy, effectiveLimits, planAgents, tierSettings,
+} = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
   'runIdPattern',
   'laneIdPattern',
+  'effectiveAutonomy',
+  'effectiveLimits',
+  'planAgents',
+  'tierSettings',
 ]);
 
 function task(id, files, extra = {}) {
@@ -129,4 +136,217 @@ test('schema id patterns match the validator and the ledger lane rule', () => {
   assert.ok(ledger.includes(`re.compile(r"${laneIdPattern()}")`), 'ledger LANE regex differs from laneIdPattern');
   assert.ok(ledger.includes('LANE.fullmatch('), 'ledger must fullmatch lane names');
   assert.ok('notes' in schema.properties, 'schema documents notes');
+});
+
+test('autonomy: optional, autonomous or supervised, default autonomous', () => {
+  const m = validManifest();
+  assert.equal(effectiveAutonomy(m), 'autonomous');
+  for (const value of ['autonomous', 'supervised']) {
+    m.autonomy = value;
+    assert.deepEqual(validateManifest(m), [], value);
+    assert.equal(effectiveAutonomy(m), value);
+  }
+  m.autonomy = 'auto';
+  assertError(validateManifest(m), 'autonomy');
+});
+
+test('profile: optional, lite or full; anything else is reported', () => {
+  const m = validManifest();
+  m.profile = 'full';
+  assert.deepEqual(validateManifest(m), []);
+  m.profile = 'tiny';
+  assertError(validateManifest(m), 'profile');
+});
+
+function liteManifest(laneTasks = 2) {
+  const m = validManifest();
+  m.profile = 'lite';
+  m.lanes = [{
+    id: 'alpha',
+    name: 'Lane alpha',
+    tasks: Array.from({ length: laneTasks }, (_, i) => task(`L${i + 1}`, [`src/l${i + 1}.js`])),
+  }];
+  return m;
+}
+
+test('lite profile: one lane, at most 8 tasks, no security task is valid', () => {
+  assert.deepEqual(validateManifest(liteManifest(6)), []);
+});
+
+test('lite profile with a security task is reported naming the rule', () => {
+  for (const group of ['prelude', 'join', 'lane']) {
+    const m = liteManifest();
+    const t = group === 'lane' ? m.lanes[0].tasks[0] : m[group][0];
+    t.security = true;
+    assertError(validateManifest(m), 'profile lite', 'security', t.id);
+  }
+});
+
+test('lite profile with more than one lane is reported naming the rule', () => {
+  const m = liteManifest();
+  m.lanes.push({ id: 'beta', name: 'Lane beta', tasks: [task('B1', ['src/b.js'])] });
+  assertError(validateManifest(m), 'profile lite', 'exactly one lane', '2');
+});
+
+test('lite profile with no lane is reported naming the rule', () => {
+  const m = liteManifest();
+  m.lanes = [];
+  assertError(validateManifest(m), 'profile lite', 'exactly one lane', '0');
+});
+
+test('lite profile with more than 8 tasks across prelude, lane and join is reported naming the rule', () => {
+  // 1 prelude + 7 lane + 1 join = 9 tasks.
+  assertError(validateManifest(liteManifest(7)), 'profile lite', 'at most 8 tasks', '9');
+  // 1 prelude + 6 lane + 1 join = 8 tasks: allowed.
+  assert.deepEqual(validateManifest(liteManifest(6)), []);
+});
+
+test('full profile allows several lanes and security tasks', () => {
+  const m = validManifest();
+  m.profile = 'full';
+  m.lanes[0].tasks[0].security = true;
+  assert.deepEqual(validateManifest(m), []);
+});
+
+test('task tier: standard, sonnet, or light; anything else is reported', () => {
+  const m = validManifest();
+  m.lanes[0].tasks[0].tier = 'sonnet';
+  assert.deepEqual(validateManifest(m), []);
+  m.lanes[0].tasks[0].tier = 'haiku';
+  assertError(validateManifest(m), 'T2', 'tier');
+});
+
+test('a sonnet task with security set is reported', () => {
+  const m = validManifest();
+  m.lanes[0].tasks[0].tier = 'sonnet';
+  m.lanes[0].tasks[0].security = true;
+  assertError(validateManifest(m), 'T2', 'sonnet', 'security');
+});
+
+test('sonnet and light tiers run Sonnet at high effort; standard runs Opus at high', () => {
+  assert.deepEqual(tierSettings('sonnet'), { model: 'sonnet', effort: 'high' });
+  assert.deepEqual(tierSettings('light'), { model: 'sonnet', effort: 'high' });
+  assert.deepEqual(tierSettings('standard'), { model: 'opus', effort: 'high' });
+});
+
+test('batch: a non-empty string on a light task is valid', () => {
+  const m = validManifest();
+  m.lanes[0].tasks = [
+    task('T2', ['src/a.js'], { tier: 'light', batch: 'docs' }),
+    task('T6', ['src/a2.js'], { tier: 'light', batch: 'docs' }),
+  ];
+  assert.deepEqual(validateManifest(m), []);
+});
+
+test('batch on a standard or sonnet task is reported', () => {
+  for (const tier of ['standard', 'sonnet']) {
+    const m = validManifest();
+    m.lanes[0].tasks[0].tier = tier;
+    m.lanes[0].tasks[0].batch = 'docs';
+    assertError(validateManifest(m), 'T2', 'batch', 'light');
+  }
+});
+
+test('an empty or non-string batch key is reported', () => {
+  for (const batch of ['', 3, null]) {
+    const m = validManifest();
+    m.lanes[0].tasks[0].tier = 'light';
+    m.lanes[0].tasks[0].batch = batch;
+    assertError(validateManifest(m), 'T2', 'batch');
+  }
+});
+
+test('limits.max_agents and limits.max_rulings: optional integers with lower bounds', () => {
+  const m = validManifest();
+  m.limits.max_agents = 1;
+  m.limits.max_rulings = 0;
+  assert.deepEqual(validateManifest(m), []);
+  for (const bad of [0, -1, 1.5, '3']) {
+    const n = validManifest();
+    n.limits.max_agents = bad;
+    assertError(validateManifest(n), 'limits.max_agents');
+  }
+  for (const bad of [-1, 2.5, '0', null]) {
+    const n = validManifest();
+    n.limits.max_rulings = bad;
+    assertError(validateManifest(n), 'limits.max_rulings');
+  }
+});
+
+test('effectiveLimits defaults: max_agents 2 x the dry-run estimate, max_rulings 25', () => {
+  const m = validManifest();
+  assert.deepEqual(effectiveLimits(m), { max_agents: 2 * planAgents(m).length, max_rulings: 25 });
+  m.limits.max_agents = 7;
+  m.limits.max_rulings = 0;
+  assert.deepEqual(effectiveLimits(m), { max_agents: 7, max_rulings: 0 });
+});
+
+function setupResult(m) {
+  return {
+    feature_head: 'abc123',
+    worktrees: Object.fromEntries(m.lanes.map((l) => [l.id, `/work/wt/lane-${l.id}`])),
+    discarded: ['lane-alpha: M src/a.js'],
+  };
+}
+
+test('setup_result naming every lane is valid', () => {
+  const m = validManifest();
+  m.setup_result = setupResult(m);
+  assert.deepEqual(validateManifest(m), []);
+  m.setup_result.discarded = [];
+  assert.deepEqual(validateManifest(m), []);
+});
+
+test('setup_result missing a lane is reported naming the lane', () => {
+  const m = validManifest();
+  m.setup_result = setupResult(m);
+  delete m.setup_result.worktrees.beta;
+  assertError(validateManifest(m), 'setup_result.worktrees', 'beta');
+});
+
+test('setup_result shape errors are reported', () => {
+  const cases = [
+    [(r) => { r.feature_head = ''; }, 'setup_result.feature_head'],
+    [(r) => { delete r.discarded; }, 'setup_result.discarded'],
+    [(r) => { r.discarded = ['']; }, 'setup_result.discarded'],
+    [(r) => { r.worktrees = []; }, 'setup_result.worktrees'],
+    [(r) => { r.worktrees.alpha = 'relative/path'; }, 'setup_result.worktrees.alpha'],
+    [(r) => { r.worktrees.gamma = '/work/wt/lane-gamma'; }, 'setup_result.worktrees.gamma'],
+  ];
+  for (const [mutate, fragment] of cases) {
+    const m = validManifest();
+    m.setup_result = setupResult(m);
+    mutate(m.setup_result);
+    assertError(validateManifest(m), fragment);
+  }
+  const m = validManifest();
+  m.setup_result = 'done';
+  assertError(validateManifest(m), 'setup_result');
+});
+
+test('start_points: optional prelude and join shas', () => {
+  const m = validManifest();
+  m.start_points = {};
+  assert.deepEqual(validateManifest(m), []);
+  m.start_points = { prelude: 'abc', join: 'def' };
+  assert.deepEqual(validateManifest(m), []);
+  m.start_points = { prelude: '' };
+  assertError(validateManifest(m), 'start_points.prelude');
+  m.start_points = { lanes: 'abc' };
+  assertError(validateManifest(m), 'start_points.lanes');
+  m.start_points = ['abc'];
+  assertError(validateManifest(m), 'start_points');
+});
+
+test('schema documents every addendum field', () => {
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  const p = schema.properties;
+  assert.deepEqual(p.autonomy.enum, ['autonomous', 'supervised']);
+  assert.deepEqual(p.profile.enum, ['lite', 'full']);
+  assert.deepEqual(p.limits.properties.max_agents, { type: 'integer', minimum: 1 });
+  assert.deepEqual(p.limits.properties.max_rulings, { type: 'integer', minimum: 0 });
+  assert.deepEqual(schema.$defs.task.properties.tier.enum, ['standard', 'sonnet', 'light']);
+  assert.ok('batch' in schema.$defs.task.properties);
+  assert.deepEqual([...p.setup_result.required].sort(), ['discarded', 'feature_head', 'worktrees']);
+  assert.deepEqual(Object.keys(p.start_points.properties).sort(), ['join', 'prelude']);
 });

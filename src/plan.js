@@ -1,8 +1,9 @@
-// Model settings. Light applies to implementers of light tasks only; every
-// other agent (reviewers included) runs standard.
+// Model settings. The sonnet and light tiers apply to implementers of
+// sonnet and light tasks only; every other agent (reviewers included) runs
+// standard.
 function tierSettings(tier) {
-  return tier === 'light'
-    ? { model: 'sonnet', effort: 'medium' }
+  return tier === 'sonnet' || tier === 'light'
+    ? { model: 'sonnet', effort: 'high' }
     : { model: 'opus', effort: 'high' };
 }
 

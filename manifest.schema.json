@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "parallel-lanes/manifest.schema.json",
   "title": "parallel-lanes run manifest",
-  "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; light tasks cannot set security; repo.git_dir required in shadow mode; repo.branch must differ from repo.base_ref; lane_commands, notes, and backfill keys and done/reviewed entries must be known ids; lane ids prelude and join are reserved (ledger lanes); every task in done needs a backfill entry.",
+  "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; sonnet and light tasks cannot set security; batch only on light tasks; profile lite needs exactly one lane, at most 8 tasks across prelude, lanes and join, and no security task; setup_result.worktrees names exactly the lanes; repo.git_dir required in shadow mode; repo.branch must differ from repo.base_ref; lane_commands, notes, and backfill keys and done/reviewed entries must be known ids; lane ids prelude and join are reserved (ledger lanes); every task in done needs a backfill entry.",
   "type": "object",
   "required": [
     "version", "run_id", "plan", "spec", "commit_rules", "repo", "commands",
@@ -73,10 +73,42 @@
       "required": ["review_rounds", "max_parallel_lanes"],
       "properties": {
         "review_rounds": { "type": "integer", "minimum": 1 },
-        "max_parallel_lanes": { "type": "integer", "minimum": 1 }
+        "max_parallel_lanes": { "type": "integer", "minimum": 1 },
+        "max_agents": { "type": "integer", "minimum": 1 },
+        "max_rulings": { "type": "integer", "minimum": 0 }
       }
     },
     "dry_run": { "type": "boolean" },
+    "autonomy": {
+      "description": "Default autonomous: blocked tasks, questions, review caps and pre-flight conflicts go to the adjudicator; supervised stops and waits as Plan 1 did.",
+      "enum": ["autonomous", "supervised"]
+    },
+    "profile": {
+      "description": "Default full. lite: one lane worked on the feature branch, no integrate agent, one combined final reviewer.",
+      "enum": ["lite", "full"]
+    },
+    "setup_result": {
+      "description": "Output of scripts/setup; when present no Setup agent runs. worktrees maps every lane id to the absolute path of its checkout.",
+      "type": "object",
+      "required": ["feature_head", "worktrees", "discarded"],
+      "properties": {
+        "feature_head": { "$ref": "#/$defs/text" },
+        "worktrees": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "pattern": "^/" }
+        },
+        "discarded": { "$ref": "#/$defs/textList" }
+      }
+    },
+    "start_points": {
+      "description": "Feature heads from the ledger run_started events (ledger status start_points).",
+      "type": "object",
+      "properties": {
+        "prelude": { "$ref": "#/$defs/text" },
+        "join": { "$ref": "#/$defs/text" }
+      },
+      "additionalProperties": false
+    },
     "done": { "$ref": "#/$defs/textList" },
     "reviewed": { "$ref": "#/$defs/textList" },
     "notes": {
@@ -120,11 +152,20 @@
         "id": { "$ref": "#/$defs/text" },
         "title": { "$ref": "#/$defs/text" },
         "files": { "$ref": "#/$defs/textList" },
-        "tier": { "enum": ["standard", "light"] },
-        "security": { "type": "boolean" }
+        "tier": { "enum": ["standard", "sonnet", "light"] },
+        "security": { "type": "boolean" },
+        "batch": { "$ref": "#/$defs/text" }
       },
-      "if": { "properties": { "tier": { "const": "light" } } },
-      "then": { "properties": { "security": { "const": false } } }
+      "allOf": [
+        {
+          "if": { "properties": { "tier": { "enum": ["sonnet", "light"] } } },
+          "then": { "properties": { "security": { "const": false } } }
+        },
+        {
+          "if": { "required": ["batch"] },
+          "then": { "properties": { "tier": { "const": "light" } } }
+        }
+      ]
     },
     "taskList": { "type": "array", "items": { "$ref": "#/$defs/task" } }
   }
