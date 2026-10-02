@@ -22,6 +22,17 @@ function manifestRequiredKeys() {
   ];
 }
 
+// run_id becomes part of branch names; lane ids become ledger file names
+// (scripts/ledger enforces the same lane rule). manifest.schema.json repeats
+// both patterns.
+function runIdPattern() {
+  return '^[a-z0-9-]+$';
+}
+
+function laneIdPattern() {
+  return '^[A-Za-z0-9_][A-Za-z0-9._-]*$';
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -43,6 +54,9 @@ function validateManifest(m) {
   for (const key of ['run_id', 'plan', 'commit_rules', 'skill_dir']) {
     if (key in m && !isText(m[key])) err(`${key}: must be a non-empty string`);
   }
+  if (isText(m.run_id) && !new RegExp(runIdPattern()).test(m.run_id)) {
+    err('run_id: must use only a-z, 0-9 and - (it becomes part of branch names)');
+  }
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
   }
@@ -59,6 +73,7 @@ function validateManifest(m) {
       }
       if (!isTextOrNull(repo.git_dir)) err('repo.git_dir: must be a non-empty string or null');
       if (repo.mode === 'shadow' && !isText(repo.git_dir)) err('repo.git_dir: required when repo.mode is shadow');
+      if (isText(repo.branch) && repo.branch === repo.base_ref) err('repo.branch: must differ from repo.base_ref');
     }
   }
 
@@ -122,7 +137,9 @@ function validateManifest(m) {
           return;
         }
         if (!isText(lane.id)) err(`${where}.id: must be a non-empty string`);
-        else if (lane.id === 'prelude' || lane.id === 'join') err(`lane ${lane.id}: id is reserved`);
+        else if (!new RegExp(laneIdPattern()).test(lane.id)) {
+          err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
+        } else if (lane.id === 'prelude' || lane.id === 'join') err(`lane ${lane.id}: id is reserved`);
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
         else laneIds.add(lane.id);
         if (!isText(lane.name)) err(`${where}.name: must be a non-empty string`);
@@ -187,8 +204,22 @@ function validateManifest(m) {
     }
   }
 
-  // backfill: commits of done-but-unreviewed tasks, from ledger committed
-  // events; such a task is reviewed on base..head before its lane continues.
+  // notes: the user's answers to blocked questions, one text per task id;
+  // each is passed to that task's agents.
+  if ('notes' in m) {
+    if (!isObject(m.notes)) {
+      err('notes: must be an object');
+    } else {
+      for (const [id, text] of Object.entries(m.notes)) {
+        if (!taskIds.has(id)) err(`notes: unknown task id ${id}`);
+        if (!isText(text)) err(`notes.${id}: must be a non-empty string`);
+      }
+    }
+  }
+
+  // backfill: commits of done tasks, from ledger committed events. A done
+  // but unreviewed task is reviewed before its lane continues; every head is
+  // the next task's base.
   const backfill = 'backfill' in m ? m.backfill : {};
   if (!isObject(backfill)) {
     err('backfill: must be an object');
@@ -201,9 +232,7 @@ function validateManifest(m) {
     }
     if (isTextList(m.done) && isTextList(m.reviewed)) {
       for (const id of m.done) {
-        if (!m.reviewed.includes(id) && !(id in backfill)) {
-          err(`backfill: missing an entry for task ${id} (done but not reviewed)`);
-        }
+        if (!(id in backfill)) err(`backfill: missing an entry for task ${id} (done)`);
       }
     }
   }
@@ -342,9 +371,15 @@ function findingsText(findings) {
     `${i + 1}. [${f.severity}] ${f.file}:${f.line} - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
 }
 
+// A non-empty string (an agent-reported sha, for instance).
+function present(v) {
+  return typeof v === 'string' && v.length > 0;
+}
+
 // Shared context every task agent gets.
 function taskContext(m, task, where) {
   const files = taskFiles(m, task);
+  const note = m.notes && m.notes[task.id];
   const brief = `python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
     `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
   const ruling = ledgerCommand(m, where.lane,
@@ -354,8 +389,10 @@ function taskContext(m, task, where) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
-    `Task brief: ${files.brief}. If it does not exist, create it with:`,
+    `Task brief: ${files.brief}. Before reading it, generate it from the current plan with this command (it`,
+    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
     `  ${brief}`,
+    ...(note ? [`The user's answer for this task (follow it where it settles a question): ${note}`] : []),
     `Implementer report file: ${files.report}`,
     '',
     'Project commands (run from the worktree):',
@@ -421,20 +458,19 @@ function diffSteps(m, task, where, base, head) {
   ].join('\n');
 }
 
-function implementResultText() {
+function implementResultText(dir) {
   return [
-    'Return a structured result: status "done" or "blocked"; base = the commit HEAD pointed to before your',
-    'first commit in this session; head = HEAD after your last commit; tests = the commands you ran and their',
-    'outcome; notes = rulings, concerns, or the reason you are blocked. That result replaces any status reply',
-    'format named in the instructions above.',
+    `Return a structured result: status "done" or "blocked"; head = git -C ${shellQuote(dir)} rev-parse HEAD`,
+    'after your last commit; tests = the commands you ran and their outcome; notes = rulings, concerns, or the',
+    'reason you are blocked. That result replaces any status reply format named in the instructions above.',
   ].join('\n');
 }
 
 function reviewResultText(m, task, where, rounds) {
   const reviewed = ledgerCommand(m, where.lane, { task: task.id, event: 'reviewed', rounds });
   return [
-    'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the review package',
-    'and the ledger line (both outside the repo) is allowed.',
+    'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
+    'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
@@ -446,9 +482,10 @@ function reviewResultText(m, task, where, rounds) {
   ].join('\n');
 }
 
-// Prompt for an implementer. retry (optional) is {reason, findings} when a
-// previous attempt at the task blocked or failed review.
-function implementPrompt(m, task, where, retry = null) {
+// Prompt for an implementer. base is the task base the script owns (the
+// previous task's head, or the feature tip); retry (optional) is {reason,
+// findings} when a previous attempt in this run blocked or failed review.
+function implementPrompt(m, task, where, base, retry = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
@@ -469,15 +506,17 @@ function implementPrompt(m, task, where, retry = null) {
     parts.push('', [
       'Before anything else, bring this worktree up to date with the feature branch (it holds the prelude',
       `commits): git -C ${shellQuote(where.dir)} merge --ff-only ${shellQuote(where.sync)}`,
-      'An already up to date result is fine; if the fast-forward fails, report blocked. Your base is HEAD',
-      'after this step.',
+      'An already up to date result is fine; if the fast-forward fails, report blocked.',
     ].join('\n'));
   }
+  parts.push('', [
+    `Task base: ${base}. Everything on this branch after it is this task's work, and its review covers`,
+    `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this task: start from the current`,
+    'HEAD, keep what is right, and fix what is not.',
+  ].join('\n'));
   if (retry) {
     parts.push('', [
       `A previous attempt at this task did not succeed: ${retry.reason}`,
-      'The worktree HEAD may already hold commits from it. Start from the current HEAD, keep what is right,',
-      'and fix what is not.',
       ...(retry.findings ? ['Open review findings:', findingsText(retry.findings)] : []),
     ].join('\n'));
   }
@@ -486,7 +525,7 @@ function implementPrompt(m, task, where, retry = null) {
     `  ${committed}`,
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
-  ].join('\n'), '', implementResultText());
+  ].join('\n'), '', implementResultText(where.dir));
   return parts.join('\n');
 }
 
@@ -512,8 +551,9 @@ function reviewPrompt(m, task, where, base, head, rounds = 0) {
   ].join('\n');
 }
 
-// Prompt for a fix agent. report is the latest implement or fix result.
-function fixPrompt(m, task, where, findings, report) {
+// Prompt for a fix agent. report is the latest implement or fix result;
+// head is the branch head the fix builds on.
+function fixPrompt(m, task, where, findings, report, head) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
@@ -528,8 +568,8 @@ function fixPrompt(m, task, where, findings, report) {
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
-    'Fix these findings, rerun the tests that cover the amended code, commit, and append a fix report',
-    `(what changed, covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
+    `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
     findingsText(findings),
     '',
@@ -543,7 +583,7 @@ function fixPrompt(m, task, where, findings, report) {
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
     '',
-    implementResultText(),
+    implementResultText(where.dir),
   ].join('\n');
 }
 
@@ -577,12 +617,11 @@ function implementSchema() {
     type: 'object',
     properties: {
       status: { type: 'string', enum: ['done', 'blocked'] },
-      base: { type: 'string' },
       head: { type: 'string' },
       tests: { type: 'string' },
       notes: { type: 'string' },
     },
-    required: ['status', 'base', 'head', 'tests', 'notes'],
+    required: ['status', 'head', 'tests', 'notes'],
   };
 }
 
@@ -614,13 +653,15 @@ function reviewSchema() {
 // Run one task through implement -> review -> fix/re-review rounds.
 // Returns {task, status:'done'|'blocked', base, head, rounds, tier_used, notes};
 // for a blocked task notes is the reason (exactly 'review_rounds' at the cap).
-// resume ({base, head}, optional) is a task committed in an earlier run but
-// not reviewed: implement is skipped and the loop starts with its review.
-async function runTask(m, task, where, io = { agent, log }, resume = null) {
+// base is owned by the script (the previous task's head, or the feature tip):
+// every review range starts there, so commits of an earlier failed attempt
+// are reviewed too. resume ({base, head}, optional) is a task committed in an
+// earlier run but not reviewed: implement is skipped and the loop starts with
+// the review of base..resume.head.
+async function runTask(m, task, where, base, io = { agent, log }, resume = null) {
   const phaseName = lanePhase(m, where.lane);
   const standard = tierSettings('standard');
   let tierUsed = task.tier;
-  let base = null;
   let head = null;
   let rounds = 0;
   let changesSeen = 0;
@@ -637,20 +678,22 @@ async function runTask(m, task, where, io = { agent, log }, resume = null) {
     extra.push(`escalated to standard: ${reason}`);
     io.log(`${task.id}: escalating to standard (${reason})`);
   };
-  // An implement or fix result that moved the branch; else why it did not.
-  const failure = (r, label) => {
+  // An implement or fix result that moved the branch past from; else why
+  // it did not.
+  const failure = (r, label, from) => {
     if (r === null || r === undefined) return `no result from ${label}`;
     if (r.status !== 'done') return `${label} blocked: ${r.notes}`;
-    if (r.head === r.base) return `${label} reported done with no commits`;
+    if (!present(r.head)) return `${label} reported no head`;
+    if (r.head === from) return `${label} reported done with no new commits`;
     return null;
   };
   // Implement, escalating a light task once if it does not finish.
   const implement = async (retry) => {
     for (;;) {
-      const r = await call('implement', implementPrompt(m, task, where, retry),
+      const from = head === null ? base : head;
+      const r = await call('implement', implementPrompt(m, task, where, base, retry),
         tierSettings(tierUsed), implementSchema());
-      if (base === null && r && typeof r.base === 'string') base = r.base;
-      const why = failure(r, `${task.id} implement`);
+      const why = failure(r, `${task.id} implement`, from);
       if (why === null) {
         head = r.head;
         latest = r;
@@ -679,9 +722,8 @@ async function runTask(m, task, where, io = { agent, log }, resume = null) {
 
   let why = null;
   if (resume) {
-    base = resume.base;
     head = resume.head;
-    latest = { status: 'done', base, head, tests: '(committed in an earlier run)', notes: '' };
+    latest = { status: 'done', head, tests: '(committed in an earlier run)', notes: '' };
   } else {
     why = await implement(null);
     if (why !== null) return result('blocked', why);
@@ -703,9 +745,9 @@ async function runTask(m, task, where, io = { agent, log }, resume = null) {
     if (rounds >= m.limits.review_rounds) return result('blocked', 'review_rounds');
     rounds += 1;
     const fixLabel = `fix ${rounds}`;
-    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest),
+    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head),
       tierSettings(tierUsed), implementSchema());
-    why = failure(fix, `${task.id} ${fixLabel}`);
+    why = failure(fix, `${task.id} ${fixLabel}`, head);
     if (why !== null && tierUsed === 'light') {
       why = await rerunAtStandard(why, findings);
       if (why !== null) return result('blocked', why);
@@ -738,11 +780,14 @@ function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
 }
 
-// Run tasks in order at where; skip done-and-reviewed tasks, review
-// done-only tasks on their backfill range first; stop at the first task
-// that is not done. Returns {results, stopped:reason|null}.
-async function runTaskList(m, tasks, where, io, name) {
+// Run tasks in order at where, starting from base; skip done-and-reviewed
+// tasks, review done-only tasks first; stop at the first task that is not
+// done. Each task's base is the previous task's head (a skipped task's from
+// its backfill entry). Returns {results, stopped:reason|null, head} where head
+// is the last known head (base when no task moved it).
+async function runTaskList(m, tasks, where, base, io, name) {
   const results = [];
+  let prev = base;
   for (const task of tasks) {
     const state = taskState(m, task.id);
     const range = (m.backfill || {})[task.id];
@@ -751,31 +796,34 @@ async function runTaskList(m, tasks, where, io, name) {
         task: task.id, status: 'skipped', base: range ? range.base : null, head: range ? range.head : null,
         rounds: null, tier_used: null, notes: '',
       });
+      if (range) prev = range.head;
       continue;
     }
     const r = state === 'review' && !range
-      ? { task: task.id, status: 'blocked', base: null, head: null, rounds: 0, tier_used: task.tier, notes: 'done but not reviewed, and no backfill commits' }
-      : await runTask(m, task, where, io, state === 'review' ? range : null);
+      ? { task: task.id, status: 'blocked', base: prev, head: null, rounds: 0, tier_used: task.tier, notes: 'done but not reviewed, and no backfill commits' }
+      : await runTask(m, task, where, prev, io, state === 'review' ? range : null);
     results.push(r);
     if (r.status !== 'done') {
       io.log(`${name}: stopped at ${task.id} (${r.notes})`);
-      return { results, stopped: r.notes };
+      return { results, stopped: r.notes, head: prev };
     }
+    prev = r.head;
   }
-  return { results, stopped: null };
+  return { results, stopped: null, head: prev };
 }
 
-// Run a lane's tasks in order in its worktree; stop at the first task that
-// is not done. Returns {lane, results, stopped:reason|null}.
-async function runLane(m, lane, io = { agent, log }) {
-  const r = await runTaskList(m, lane.tasks, laneWhere(m, lane), io, lane.name);
+// Run a lane's tasks in order in its worktree, the first from base (the
+// feature tip the lane fast-forwards to); stop at the first task that is not
+// done. Returns {lane, results, stopped:reason|null, head}.
+async function runLane(m, lane, base, io = { agent, log }) {
+  const r = await runTaskList(m, lane.tasks, laneWhere(m, lane), base, io, lane.name);
   return { lane: lane.id, ...r };
 }
 
 // Run lanes with at most limits.max_parallel_lanes in flight (a promise
 // pool); results come back in lane order. A lane that throws stops only
-// itself.
-async function runLanes(m, lanes, io = { agent, log }) {
+// itself. base is the feature tip every lane starts from.
+async function runLanes(m, lanes, base, io = { agent, log }) {
   const results = new Array(lanes.length);
   let next = 0;
   const worker = async () => {
@@ -783,9 +831,9 @@ async function runLanes(m, lanes, io = { agent, log }) {
       const i = next;
       next += 1;
       try {
-        results[i] = await runLane(m, lanes[i], io);
+        results[i] = await runLane(m, lanes[i], base, io);
       } catch (e) {
-        results[i] = { lane: lanes[i].id, results: [], stopped: `error: ${e && e.message}` };
+        results[i] = { lane: lanes[i].id, results: [], stopped: `error: ${e && e.message}`, head: base };
       }
     }
   };
@@ -837,9 +885,10 @@ function statusSchema() {
     type: 'object',
     properties: {
       status: { type: 'string', enum: ['done', 'failed'] },
+      head: { type: 'string' },
       notes: { type: 'string' },
     },
-    required: ['status', 'notes'],
+    required: ['status', 'head', 'notes'],
   };
 }
 
@@ -850,9 +899,10 @@ function setupSchema() {
       ok: { type: 'boolean' },
       discarded: { type: 'array', items: { type: 'string' } },
       worktrees: { type: 'array', items: { type: 'string' } },
+      feature_head: { type: 'string' },
       notes: { type: 'string' },
     },
-    required: ['ok', 'discarded', 'worktrees', 'notes'],
+    required: ['ok', 'discarded', 'worktrees', 'feature_head', 'notes'],
   };
 }
 
@@ -975,7 +1025,8 @@ function setupPrompt(m) {
     phaseRules(m),
     '',
     'Return ok (true only when every step succeeded), discarded (the listed changes), worktrees (the paths',
-    'ready for work), and notes.',
+    `ready for work), feature_head (the full sha printed by ${admin} rev-parse ${branch} after the steps), and`,
+    'notes.',
   ].join('\n');
 }
 
@@ -1003,7 +1054,7 @@ function preflightPrompt(m) {
   ].join('\n');
 }
 
-function integratePrompt(m) {
+function integratePrompt(m, preludeTip) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const admin = gitAdmin(m);
@@ -1043,7 +1094,8 @@ function integratePrompt(m) {
     `Plan: ${m.plan}`,
     phaseRules(m),
     '',
-    'Return status done or failed, and notes (merges, conflicts resolved, command results, cleanup).',
+    `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
+    'and notes (merges, conflicts resolved, command results, cleanup).',
   ].join('\n');
 }
 
@@ -1062,7 +1114,8 @@ function postIntegratePrompt(m) {
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     phaseRules(m),
     '',
-    'Return status done when the instructions pass, otherwise failed; notes = what you checked and found.',
+    'Return status done when the instructions pass, otherwise failed; head = the full sha printed by',
+    `git -C ${shellQuote(featureDir(m))} rev-parse HEAD when you finish; notes = what you checked and found.`,
   ].join('\n');
 }
 
@@ -1134,10 +1187,10 @@ function finalReviewPrompt(m, lens, e2e) {
   ].join('\n');
 }
 
-function finalFixPrompt(m, findings) {
+function finalFixPrompt(m, findings, base) {
   return [
     `You are fixing the final review findings for parallel-lanes run ${m.run_id}.`,
-    `Work in ${featureDir(m)} on ${m.repo.branch}; do not switch branches.`,
+    `Work in ${featureDir(m)} on ${m.repo.branch} (now at ${base}); do not switch branches.`,
     'Findings:',
     findingsText(findings),
     '',
@@ -1150,7 +1203,7 @@ function finalFixPrompt(m, findings) {
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     phaseRules(m),
     '',
-    implementResultText(),
+    implementResultText(featureDir(m)),
     'Also return declined = [{file, line, issue, reason}] for each finding you did not fix.',
   ].join('\n');
 }
@@ -1206,10 +1259,11 @@ function dedupeFindings(reports) {
 }
 
 // Final review: three lenses in parallel, one fix agent, one scoped
-// re-review. Returns {findings, fixed, declined, cannot_verify}; declined
-// entries carry a reason (declined by the fix agent, not fixed, or still
-// open after the re-review).
-async function runFinalReview(m, e2e, io) {
+// re-review of base..fix head (base = the feature tip the script tracked).
+// Returns {findings, fixed, declined, cannot_verify}; declined entries carry
+// a reason (declined by the fix agent, not fixed, or still open after the
+// re-review).
+async function runFinalReview(m, e2e, base, io) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -1231,7 +1285,7 @@ async function runFinalReview(m, e2e, io) {
     final.declined = findings.map((f) => ({ ...f, reason }));
     return final;
   };
-  const fix = await call('final fix', finalFixPrompt(m, findings), finalFixSchema());
+  const fix = await call('final fix', finalFixPrompt(m, findings, base), finalFixSchema());
   if (!fix) return declineAll('no result from final fix');
   if (fix.status !== 'done') return declineAll(`final fix blocked: ${fix.notes}`);
   const declinedKeys = new Set((fix.declined || []).map(findingKey));
@@ -1241,11 +1295,11 @@ async function runFinalReview(m, e2e, io) {
   });
   const attempted = findings.filter((f) => !declinedKeys.has(findingKey(f)));
   if (attempted.length === 0) return final;
-  if (fix.head === fix.base) {
+  if (!present(fix.head) || fix.head === base) {
     for (const f of attempted) final.declined.push({ ...f, reason: 'final fix made no commits' });
     return final;
   }
-  const rr = await call('final re-review', finalReReviewPrompt(m, fix.base, fix.head, attempted),
+  const rr = await call('final re-review', finalReReviewPrompt(m, base, fix.head, attempted),
     finalReReviewSchema());
   if (!rr) {
     for (const f of attempted) final.declined.push({ ...f, reason: 'no result from final re-review' });
@@ -1305,7 +1359,7 @@ async function runAll(m, io) {
         status: r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
-        commits: r.base === null || r.base === undefined ? null : [r.base, r.head],
+        commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
       };
     }
@@ -1346,6 +1400,9 @@ async function runAll(m, io) {
     return report('stopped', `setup failed: ${setup ? setup.notes : 'no result from setup'}`);
   }
   for (const item of setup.discarded || []) io.log(`parallel-lanes: discarded uncommitted change ${item}`);
+  if (!present(setup.feature_head)) return report('stopped', 'setup failed: no feature head reported');
+  // The feature tip: the base of the next task on the feature branch.
+  let tip = setup.feature_head;
 
   io.phase('Pre-flight');
   const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -1354,15 +1411,16 @@ async function runAll(m, io) {
   if (pre.conflicts.length > 0) return report('preflight_conflicts');
 
   io.phase('Prelude');
-  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), counted, 'Prelude');
+  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), tip, counted, 'Prelude');
   record(prelude.results);
   if (prelude.stopped !== null) {
     stopAt('prelude', prelude);
     return report('stopped', 'prelude stopped');
   }
+  tip = prelude.head;
 
   // Lane agents carry their lane's phase; lanes with nothing left are skipped.
-  const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), counted);
+  const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
   for (const lr of laneResults) {
     record(lr.results);
     if (lr.stopped !== null) stopAt(lr.lane, lr);
@@ -1370,28 +1428,33 @@ async function runAll(m, io) {
   if (stoppedLanes.length > 0) return report('stopped', 'lanes stopped');
 
   io.phase('Integrate');
-  const integ = await call('integrate', 'Integrate', integratePrompt(m), statusSchema());
-  integrate = integ
-    ? { status: integ.status, notes: integ.notes, post_integrate: null }
-    : { status: 'failed', notes: 'no result from integrate', post_integrate: null };
+  // A phase result that is done must also report the head it left.
+  const phaseResult = (r, label) => {
+    if (!r) return { status: 'failed', notes: `no result from ${label}` };
+    if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+    return { status: r.status, notes: r.notes };
+  };
+  const integ = await call('integrate', 'Integrate', integratePrompt(m, tip), statusSchema());
+  integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
   if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
+  tip = integ.head;
   if (m.hooks.post_integrate) {
     const post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
-    integrate.post_integrate = post
-      ? { status: post.status, notes: post.notes }
-      : { status: 'failed', notes: 'no result from post-integrate' };
+    integrate.post_integrate = phaseResult(post, 'post-integrate');
     if (integrate.post_integrate.status !== 'done') {
       return report('stopped', `post-integrate failed: ${integrate.post_integrate.notes}`);
     }
+    tip = post.head;
   }
 
   io.phase('Join');
-  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), counted, 'Join');
+  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), tip, counted, 'Join');
   record(join.results);
   if (join.stopped !== null) {
     stopAt('join', join);
     return report('stopped', 'join stopped');
   }
+  tip = join.head;
 
   if (m.hooks.e2e) {
     io.phase('E2E');
@@ -1400,7 +1463,8 @@ async function runAll(m, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, counted);
+  final = await runFinalReview(m, e2e, tip, counted);
+  if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   return report('complete');
 }
 

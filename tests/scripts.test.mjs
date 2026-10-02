@@ -369,7 +369,7 @@ test('ledger append rejects malformed entries with exit 2', () => {
 test('ledger append refuses an unsafe lane name with exit 3', () => {
   const dir = workDir();
   const entry = JSON.stringify({ task: 'T1', event: 'blocked', reason: 'x' });
-  for (const lane of ['../escape', 'a/b', '.hidden', '']) {
+  for (const lane of ['../escape', 'a/b', '.hidden', '', 'alpha\n']) {
     const res = ledger('append', dir, lane, entry);
     assert.equal(res.code, 3, `expected exit 3 for lane ${JSON.stringify(lane)}`);
   }

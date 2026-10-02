@@ -188,9 +188,13 @@ manifest and ledger.
 3. `backfill`: one entry per done task, from its `committed` events in
    `<ledger_dir>/<lane>.jsonl`: `head` = the last sha of its last event, `base` = the parent
    of the first sha of its first event (`git -C <root> rev-parse <sha>^`; shadow mode
-   `git --git-dir=<git_dir> rev-parse <sha>^`). Required for done-but-unreviewed tasks
-   (they get a review before their lane continues); for reviewed ones it fills the report.
+   `git --git-dir=<git_dir> rev-parse <sha>^`). Required for every done task: each `head`
+   is the review base of the next task in its lane, and done-but-unreviewed tasks get a
+   review before their lane continues.
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
+   Record an answer in the manifest's `notes` as `{"<task id>": "<answer>"}` (plain
+   ASCII); the script passes it to that task's agents. A plan fix needs nothing more:
+   agents regenerate each task brief from the plan on every attempt.
 5. Keep `run_id`, `branch`, and `worktree_root`; setup reuses the worktrees and discards
    their uncommitted changes (it logs each one). Shadow mode reuses the existing shadow.
 6. Confirmation (same rules), then the resume notice, then launch.

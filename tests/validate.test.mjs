@@ -4,9 +4,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
-const { validateManifest, manifestRequiredKeys } = await loadHelpers([
+const { validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern } = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
+  'runIdPattern',
+  'laneIdPattern',
 ]);
 
 function task(id, files, extra = {}) {
@@ -116,4 +118,15 @@ test('done containing an unknown task id is reported', () => {
 test('schema required list matches the validator required keys', () => {
   const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
   assert.deepEqual([...schema.required].sort(), [...manifestRequiredKeys()].sort());
+});
+
+test('schema id patterns match the validator and the ledger lane rule', () => {
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  assert.equal(schema.properties.run_id.pattern, runIdPattern());
+  const laneId = schema.properties.lanes.items.properties.id;
+  assert.ok(laneId.allOf.some((s) => s.pattern === laneIdPattern()), JSON.stringify(laneId));
+  const ledger = readFileSync(join(SKILL_DIR, 'scripts', 'ledger'), 'utf8');
+  assert.ok(ledger.includes(`re.compile(r"${laneIdPattern()}")`), 'ledger LANE regex differs from laneIdPattern');
+  assert.ok(ledger.includes('LANE.fullmatch('), 'ledger must fullmatch lane names');
+  assert.ok('notes' in schema.properties, 'schema documents notes');
 });

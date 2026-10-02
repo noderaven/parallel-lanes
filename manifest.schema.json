@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "parallel-lanes/manifest.schema.json",
   "title": "parallel-lanes run manifest",
-  "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; light tasks cannot set security; repo.git_dir required in shadow mode; lane_commands keys and done/reviewed entries must be known ids; lane ids prelude and join are reserved (ledger lanes); backfill keys must be known task ids, and every task in done but not in reviewed needs a backfill entry.",
+  "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; light tasks cannot set security; repo.git_dir required in shadow mode; repo.branch must differ from repo.base_ref; lane_commands, notes, and backfill keys and done/reviewed entries must be known ids; lane ids prelude and join are reserved (ledger lanes); every task in done needs a backfill entry.",
   "type": "object",
   "required": [
     "version", "run_id", "plan", "spec", "commit_rules", "repo", "commands",
@@ -11,7 +11,7 @@
   ],
   "properties": {
     "version": { "const": 1 },
-    "run_id": { "$ref": "#/$defs/text" },
+    "run_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
     "plan": { "$ref": "#/$defs/text" },
     "spec": { "$ref": "#/$defs/textOrNull" },
     "commit_rules": { "$ref": "#/$defs/text" },
@@ -47,7 +47,12 @@
         "type": "object",
         "required": ["id", "name", "tasks"],
         "properties": {
-          "id": { "allOf": [{ "$ref": "#/$defs/text" }, { "not": { "enum": ["prelude", "join"] } }] },
+          "id": {
+            "allOf": [
+              { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$" },
+              { "not": { "enum": ["prelude", "join"] } }
+            ]
+          },
           "name": { "$ref": "#/$defs/text" },
           "setup_note": { "$ref": "#/$defs/text" },
           "tasks": { "$ref": "#/$defs/taskList" }
@@ -74,8 +79,13 @@
     "dry_run": { "type": "boolean" },
     "done": { "$ref": "#/$defs/textList" },
     "reviewed": { "$ref": "#/$defs/textList" },
+    "notes": {
+      "description": "Resume only: the user's answer to a blocked task's question, per task id; passed to that task's agents.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/text" }
+    },
     "backfill": {
-      "description": "Commits of tasks committed in an earlier run but not reviewed (from ledger committed events); each is reviewed on base..head before its lane continues.",
+      "description": "Commits of every task in done (from ledger committed events). A done but unreviewed task is reviewed before its lane continues; each head is the next task's review base.",
       "type": "object",
       "additionalProperties": {
         "type": "object",

@@ -16,20 +16,21 @@ validator in `run.workflow.js` (`validateManifest`) is authoritative;
 | `repo.root` | Git: the repo top level. Shadow: the project folder. |
 | `repo.git_dir` | Git: `null`. Shadow: the path `shadow init` printed. |
 | `repo.base_ref` | Git: the branch the work will merge into (usually the default branch). Shadow: `pl-base`. |
-| `repo.branch` | Feature branch. Git: the plan's or user's branch name if given (it may already exist), else `pl-<run_id>`. Shadow: `pl-<run_id>`. In git mode setup checks it out in the main checkout. |
+| `repo.branch` | Feature branch, never the same as `base_ref`. Git: the plan's or user's branch name if given (it may already exist), else `pl-<run_id>`. Shadow: `pl-<run_id>`. In git mode setup checks it out in the main checkout. |
 | `repo.worktree_root` | A directory outside the project that does not exist yet (or this run's, when resuming). Git: `<parent of root>/<repo name>-wt-<run_id>`. Shadow: `~/.claude/parallel-lanes/worktrees/<run_id>`. Lane worktrees go to `<worktree_root>/lane-<lane id>` on branches `pl-<run_id>-<lane id>`; shadow mode also uses `<worktree_root>/feature`. |
 | `repo.ledger_dir` | `<run_dir>/<plan-name>.<run_id>.ledger`, where `<run_dir>` is the plan's directory when the plan is outside the project and its repo, else `~/.claude/parallel-lanes/runs/<run_id>/` (plan inside the project, e.g. `docs/superpowers/plans/`). It holds briefs, reports, and review packages too, so it must never be inside the project; the manifest goes in the same `<run_dir>`. |
 | `commands` | `setup`, `test`, `lint`, `build`: lists of shell commands run from a checkout. Take them from the plan's conventions, then the project (package.json scripts, pyproject, Makefile). Use `[]` for a group the project lacks. |
 | `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
-| `lanes` | `[{id, name, setup_note?, tasks}]`. `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes. |
+| `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes. |
 | `join` | Tasks run in order on the merged branch after integration. |
 | task | `{id, title, files, tier, security}`. `id` exactly as in the plan heading (`T13a`, `7`); `title` and `files` from derive-lanes; `tier` `standard` or `light`; a light task cannot have `security: true`. |
 | `hooks` | Optional `post_integrate` (instructions for an agent after integration, e.g. a contract check) and `e2e` (instructions for an end-to-end check, e.g. "Follow plan Task T24"). |
 | `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, nproc + 2)`. |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status`. Never by hand. |
-| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (SKILL.md Resume). Required for every done task not in `reviewed`. |
+| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (SKILL.md Resume). Required for every done task; each `head` is the next task's review base. |
+| `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents. |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `skill_dir` | `<skill_dir>`. |
 

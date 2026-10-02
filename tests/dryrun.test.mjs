@@ -153,7 +153,7 @@ test('a post_integrate agent is present only when hooks.post_integrate is set', 
 });
 
 test('lanes_effective counts lanes with work, capped by max_parallel_lanes', async () => {
-  const m = manifest({ done: ['T4'], reviewed: ['T4'] });
+  const m = manifest({ done: ['T4'], reviewed: ['T4'], backfill: { T4: { base: 'b', head: 'h' } } });
   assert.equal((await dryRun(m)).result.lanes_effective, 1);
 
   const wide = manifest();

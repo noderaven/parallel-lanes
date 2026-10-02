@@ -84,7 +84,7 @@ const labels = (calls) => calls.map((c) => c.label);
 test('approve the first time: implement then review, no fix rounds', async () => {
   const m = manifest();
   const s = stub({ 'T2 implement': [done('b0', 'h1')], 'T2 review': [approve()] });
-  const r = await runTask(m, task('T2'), WHERE, s.io);
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review']);
   assert.equal(r.task, 'T2');
   assert.equal(r.status, 'done');
@@ -95,7 +95,7 @@ test('approve the first time: implement then review, no fix rounds', async () =>
   for (const c of s.calls) assert.equal(c.phase, 'Lane alpha');
   assert.equal(s.calls[0].model, 'opus');
   assert.equal(s.calls[0].effort, 'high');
-  assert.deepEqual(s.calls[0].schema.required.slice().sort(), ['base', 'head', 'notes', 'status', 'tests']);
+  assert.deepEqual(s.calls[0].schema.required.slice().sort(), ['head', 'notes', 'status', 'tests']);
   assert.deepEqual(s.calls[1].schema.required.slice().sort(), ['cannot_verify', 'findings', 'verdict']);
   assert.ok(s.calls[1].prompt.includes('b0') && s.calls[1].prompt.includes('h1'));
 });
@@ -110,7 +110,7 @@ test('changes then approve after 2 rounds: fix and re-review on the fix range', 
     'T2 fix 2': [done('h2', 'h3')],
     'T2 re-review 2': [approve()],
   });
-  const r = await runTask(m, task('T2'), WHERE, s.io);
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 fix 2', 'T2 re-review 2',
   ]);
@@ -143,7 +143,7 @@ test('5 rounds of changes stop the lane with reason review_rounds', async () => 
     script[`T2 re-review ${n}`] = [changes()];
   }
   const s = stub(script);
-  const r = await runLane(m, m.lanes[0], s.io);
+  const r = await runLane(m, m.lanes[0], 'b0', s.io);
   assert.equal(r.lane, 'alpha');
   assert.equal(r.stopped, 'review_rounds');
   assert.equal(r.results.length, 1);
@@ -161,7 +161,7 @@ test('a light task escalates to standard after the second changes verdict', asyn
     'T2 fix 1': [done('h1', 'h2')],
     'T2 re-review 1': [changes('second')],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 implement', 'T2 review',
   ]);
@@ -185,7 +185,7 @@ test('a light task escalates to standard after a blocked implement', async () =>
     'T2 implement': [blocked('b0', 'cannot find the parser'), done('b0', 'h1')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 implement', 'T2 review']);
   assert.equal(s.calls[0].model, 'sonnet');
   assert.equal(s.calls[1].model, 'opus');
@@ -203,7 +203,7 @@ for (const [name, fixResult] of [['reports blocked', blocked('h1', 'fix stuck')]
       'T2 review': [changes('first'), approve()],
       'T2 fix 1': [fixResult],
     });
-    const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, s.io);
+    const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
     assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 implement', 'T2 review']);
     const [, , fix1, impl2, rev2] = s.calls;
     assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'medium']);
@@ -220,7 +220,7 @@ for (const [name, fixResult] of [['reports blocked', blocked('h1', 'fix stuck')]
 test('a standard task does not escalate; a blocked implement blocks the task', async () => {
   const m = manifest();
   const s = stub({ 'T2 implement': [blocked('b0', 'contract change needed')] });
-  const r = await runTask(m, task('T2'), WHERE, s.io);
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement']);
   assert.equal(r.status, 'blocked');
   assert.ok(r.notes.includes('contract change needed'));
@@ -240,7 +240,7 @@ test('a null agent result counts as blocked, never as approved', async () => {
     },
   ]) {
     const s = stub(script);
-    const r = await runTask(m, task('T2'), WHERE, s.io);
+    const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
     assert.equal(r.status, 'blocked', JSON.stringify(Object.keys(script)));
     assert.match(r.notes, /no result/);
   }
@@ -249,7 +249,7 @@ test('a null agent result counts as blocked, never as approved', async () => {
 test('a light task whose escalated implement also returns null is blocked', async () => {
   const m = manifest();
   const s = stub({ 'T2 implement': [null, null] });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.tier_used, 'standard');
   assert.equal(s.calls.length, 2);
@@ -258,7 +258,7 @@ test('a light task whose escalated implement also returns null is blocked', asyn
 test('an implement that reports done without commits is blocked before review', async () => {
   const m = manifest();
   const s = stub({ 'T2 implement': [done('b0', 'b0')] });
-  const r = await runTask(m, task('T2'), WHERE, s.io);
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
   assert.equal(r.status, 'blocked');
   assert.deepEqual(labels(s.calls), ['T2 implement']);
 });
@@ -270,7 +270,7 @@ test('one blocked lane stops while another lane finishes', async () => {
     'T4 implement': [done('c0', 'c1')],
     'T4 review': [approve()],
   });
-  const results = await runLanes(m, m.lanes, s.io);
+  const results = await runLanes(m, m.lanes, 'b0', s.io);
   assert.equal(results.length, 2);
   const [alpha, beta] = results;
   assert.equal(alpha.lane, 'alpha');
@@ -299,7 +299,7 @@ test('never more than max_parallel_lanes lanes in flight', async () => {
   }
   const m = manifest({ lanes, limits: { review_rounds: 5, max_parallel_lanes: 2 } });
   const s = stub(script, { delay: 5 });
-  const results = await runLanes(m, lanes, s.io);
+  const results = await runLanes(m, lanes, 'b0', s.io);
   assert.equal(s.stats.maxInFlight, 2);
   assert.deepEqual(results.map((r) => r.lane), lanes.map((l) => l.id), 'results in lane order');
   assert.ok(results.every((r) => r.stopped === null && r.results.length === 2));
@@ -310,7 +310,7 @@ test('prelude and join tasks use their phase and ledger lane', async () => {
   for (const [lane, phaseName] of [['prelude', 'Prelude'], ['join', 'Join']]) {
     const s = stub({ 'T9 implement': [done('b0', 'h1')], 'T9 review': [approve()] });
     const where = { dir: '/work/repo', branch: 'pl/run-1', lane };
-    await runTask(m, task('T9'), where, s.io);
+    await runTask(m, task('T9'), where, 'b0', s.io);
     for (const c of s.calls) {
       assert.equal(c.phase, phaseName);
       assert.ok(c.prompt.includes(`append '/work/ledger' '${lane}'`), c.prompt);
@@ -322,9 +322,9 @@ function allPrompts(m) {
   const t = task('T2');
   const fs = [finding('the bug')];
   return {
-    implement: implementPrompt(m, t, WHERE),
+    implement: implementPrompt(m, t, WHERE, 'b0'),
     review: reviewPrompt(m, t, WHERE, 'b0', 'h1'),
-    fix: fixPrompt(m, t, WHERE, fs, done('b0', 'h1')),
+    fix: fixPrompt(m, t, WHERE, fs, done('b0', 'h1'), 'h1'),
     reReview: reReviewPrompt(m, t, WHERE, 'h1', 'h2', fs),
   };
 }
@@ -383,8 +383,89 @@ test('each prompt names the ledger event its agent records', () => {
 
 test('lane_commands override the project commands for that lane', () => {
   const m = manifest({ lane_commands: { alpha: { test: ['uv run pytest -q'] } } });
-  const text = implementPrompt(m, task('T2'), WHERE);
+  const text = implementPrompt(m, task('T2'), WHERE, 'b0');
   assert.ok(text.includes('uv run pytest -q'));
   assert.ok(!text.includes('npm test'));
   assert.ok(text.includes('npm ci'));
+});
+
+test('the script owns the task base: an implementer-reported base is ignored', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [{ status: 'done', base: 'agent-base', head: 'h1', tests: 'pass', notes: '' }],
+    'T2 review': [approve()],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'own-base', s.io);
+  assert.equal(r.base, 'own-base');
+  assert.equal(r.head, 'h1');
+  const [impl, rev] = s.calls;
+  assert.ok(impl.prompt.includes('own-base'), 'the implementer is told its base');
+  assert.match(impl.prompt, /HEAD may already hold commits from an earlier attempt/);
+  assert.ok(rev.prompt.includes('own-base..h1'), 'the review covers the script-owned range');
+  assert.ok(!rev.prompt.includes('agent-base'));
+});
+
+test('a rerun implementer that keeps commits from an earlier attempt is reviewed from the base', async () => {
+  const m = manifest();
+  // HEAD already holds h-old from a failed attempt; the agent adds h-new.
+  const s = stub({ 'T2 implement': [done('h-old', 'h-new')], 'T2 review': [approve()] });
+  await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.ok(s.calls[1].prompt.includes('b0..h-new'));
+});
+
+test('an implement that reports the base as head is blocked (no new commits)', async () => {
+  const m = manifest();
+  const s = stub({ 'T2 implement': [done('whatever', 'b0')] });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'blocked');
+  assert.match(r.notes, /no new commits/);
+  assert.deepEqual(labels(s.calls), ['T2 implement']);
+});
+
+test('a fix that reports the current head is blocked, never re-reviewed on an empty range', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [changes()],
+    'T2 fix 1': [done('h0', 'h1')],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'blocked');
+  assert.match(r.notes, /no new commits/);
+  assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1']);
+  assert.ok(s.calls[2].prompt.includes('h1'), 'the fix agent is told the current head');
+});
+
+test('lane tasks chain bases: each task starts at the previous task head', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [done('x', 'h2')],
+    'T2 review': [approve()],
+    'T3 implement': [done('y', 'h3')],
+    'T3 review': [approve()],
+  });
+  const r = await runLane(m, m.lanes[0], 'tip', s.io);
+  assert.equal(r.stopped, null);
+  assert.equal(r.head, 'h3');
+  const prompt = (label) => s.calls.find((c) => c.label === label).prompt;
+  assert.ok(prompt('T2 review').includes('tip..h2'));
+  assert.ok(prompt('T3 implement').includes('h2'));
+  assert.ok(prompt('T3 review').includes('h2..h3'));
+});
+
+test('implement and fix prompts always regenerate the task brief', () => {
+  const p = allPrompts(manifest());
+  for (const name of ['implement', 'fix']) {
+    assert.match(p[name], /overwrites any older copy/, name);
+    assert.ok(!p[name].includes('If it does not exist'), name);
+  }
+});
+
+test('a user note for a task reaches only that task\'s prompts', () => {
+  const m = manifest({ notes: { T2: 'USER-ANSWER: use the v2 endpoint' } });
+  for (const [name, text] of Object.entries(allPrompts(m))) {
+    assert.ok(text.includes('USER-ANSWER: use the v2 endpoint'), name);
+  }
+  const other = implementPrompt(m, task('T3'), WHERE, 'b0');
+  assert.ok(!other.includes('USER-ANSWER'));
 });
