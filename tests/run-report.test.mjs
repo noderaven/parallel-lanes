@@ -1,0 +1,114 @@
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SKILL_DIR } from './harness.mjs';
+
+const SCRIPT = join(SKILL_DIR, 'scripts', 'run-report');
+const FIX = join(SKILL_DIR, 'tests', 'fixtures', 'transcripts');
+const MANIFEST = join(FIX, 'manifest.json');
+const TMP = mkdtempSync(join(tmpdir(), 'pl-report-'));
+after(() => rmSync(TMP, { recursive: true, force: true }));
+
+function run(args) {
+  const r = spawnSync('python3', [SCRIPT, ...args], { encoding: 'utf8' });
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+const res = run([FIX, MANIFEST]);
+const report = res.code === 0 ? JSON.parse(res.stdout) : null;
+const find = (pred) => report.agents.find(pred);
+
+test('exits 0 and prints JSON', () => {
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(report);
+});
+
+test('per-agent token sums and resolved model', () => {
+  const a = find((x) => x.label === 'T1 implement' && x.tier === 'sonnet');
+  assert.equal(a.input_tokens, 11);
+  assert.equal(a.output_tokens, 7);
+  assert.equal(a.cache_read_input_tokens, 103);
+  assert.equal(a.cache_creation_input_tokens, 24);
+  assert.equal(a.resolved_model, 'claude-sonnet-4-6');
+  assert.equal(a.requested_model, 'sonnet');
+  assert.equal(a.phase, 'Lane A');
+  assert.equal(a.task, 'T1');
+  assert.equal(a.role, 'implement');
+});
+
+test('per-tier and run totals sum only known values', () => {
+  assert.equal(report.tiers.sonnet.agents, 5);
+  assert.equal(report.tiers.sonnet.input_tokens, 28);
+  assert.equal(report.tiers.opus.agents, 4);
+  assert.equal(report.tiers.opus.input_tokens, 36);
+  assert.equal(report.tiers.opus.cache_read_input_tokens, 59);
+  assert.equal(report.totals.input_tokens, 64);
+  assert.equal(report.totals.output_tokens, 40);
+  assert.equal(report.totals.agents, 9);
+});
+
+test('a died agent is unavailable and counted', () => {
+  const a = find((x) => x.label === 'T2 implement');
+  assert.equal(a.input_tokens, 'unavailable');
+  assert.equal(a.output_tokens, 'unavailable');
+  assert.equal(a.resolved_model, 'unavailable');
+  assert.equal(a.tier, 'sonnet');
+  assert.equal(report.unavailable, 1);
+});
+
+test('an implement label rerun at a different model is an escalation under the earlier tier', () => {
+  assert.equal(report.escalations, 1);
+  assert.equal(report.tiers.sonnet.escalations, 1);
+  assert.equal(report.tiers.opus.escalations, 0);
+});
+
+test('fix rounds are counted per tier', () => {
+  assert.equal(report.fix_rounds, 2);
+  assert.equal(report.tiers.sonnet.fix_rounds, 1);
+  assert.equal(report.tiers.opus.fix_rounds, 1);
+});
+
+test('a retry label parses to its base label and is counted', () => {
+  const retried = report.agents.filter((x) => x.label === 'T2 implement retry');
+  assert.equal(retried.length, 1);
+  assert.equal(retried[0].task, 'T2');
+  assert.equal(retried[0].role, 'implement');
+  assert.equal(report.retries, 1);
+  // the retry is not an escalation: same model as the died attempt
+  assert.equal(report.escalations, 1);
+});
+
+test('a phase label has task null and the full label as role', () => {
+  const a = find((x) => x.label === 'final review sp');
+  assert.equal(a.task, null);
+  assert.equal(a.role, 'final review sp');
+});
+
+test('a batch range of manifest ids sets task; meta effort wins', () => {
+  const a = find((x) => x.label === 'T3-T4 implement');
+  assert.equal(a.task, 'T3-T4');
+  assert.equal(a.role, 'implement');
+  assert.equal(a.effort, 'xhigh');
+});
+
+test('effort: manifest rule for implement and fix, unavailable for review', () => {
+  assert.equal(find((x) => x.label === 'T1 fix 1').effort, 'high');
+  assert.equal(find((x) => x.label === 'T1 review').effort, 'unavailable');
+  assert.equal(find((x) => x.label === 'final review sp').effort, 'unavailable');
+});
+
+test('--out writes the report to a file', () => {
+  const out = join(TMP, 'report.json');
+  const r = run([FIX, MANIFEST, '--out', out]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, '');
+  assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), report);
+});
+
+test('bad usage exits 2', () => {
+  assert.equal(run([FIX]).code, 2);
+  assert.equal(run([join(TMP, 'nope'), MANIFEST]).code, 2);
+});
