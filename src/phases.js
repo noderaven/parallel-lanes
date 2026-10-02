@@ -38,7 +38,16 @@ async function runFinalReview(m, e2e, base, io) {
     final.declined = findings.map((f) => ({ ...f, reason }));
     return final;
   };
-  const fix = await call('final fix', finalFixPrompt(m, findings, tip), finalFixSchema());
+  // Final fix tier (spec decision 5): Sonnet when every finding is minor or
+  // every finding is in documentation; otherwise Opus. A Sonnet fix that does
+  // not finish reruns once on Opus (same label); still one fix wave.
+  const docsOnly = findings.every((f) => typeof f.file === 'string' && f.file.endsWith('.md'));
+  const minorOnly = findings.every((f) => f.severity === 'minor');
+  const fixSettings = minorOnly || docsOnly ? { model: 'sonnet', effort: 'high' } : standard;
+  const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
+    { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
+  let fix = await callFix(fixSettings);
+  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
   if (!fix) return declineAll('no result from final fix');
   if (fix.status !== 'done') return declineAll(`final fix blocked: ${fix.notes}`);
   const declinedKeys = new Set((fix.declined || []).map(findingKey));
@@ -101,6 +110,20 @@ function labelTasks(m, label) {
   return [];
 }
 
+// A copy of the manifest whose notes for every not-yet-done task gain the
+// pre-flight ruling (spec C1). taskContext shows a task's note, so the ruling
+// binds every task agent for this run without an engine change.
+function preflightResolved(m, text) {
+  const line = `Pre-flight ruling (binding for this run): ${text}`;
+  const notes = { ...(m.notes || {}) };
+  const done = new Set(m.done);
+  for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
+    if (done.has(t.id)) continue;
+    notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
+  }
+  return { ...m, notes };
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
@@ -127,8 +150,12 @@ async function runAll(m, io) {
   const state = { agents: 0, rulings: 0, refused: [] };
   const counted = makeIo(m, io, state);
   const standard = tierSettings('standard');
+  const sonnetHigh = { model: 'sonnet', effort: 'high' };
   const call = (label, phaseName, prompt, schema) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...standard });
+  const callM = (label, phaseName, prompt, schema, settings) =>
+    counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
+  const autonomous = effectiveAutonomy(m) === 'autonomous';
 
   const tasks = {};
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -235,8 +262,24 @@ async function runAll(m, io) {
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
     if (state.refused.length > 0) return budgetReport();
     if (!pre) return report('stopped', 'no result from pre-flight');
-    preflight = { conflicts: pre.conflicts, rulings: pre.rulings };
-    if (pre.conflicts.length > 0) return report('preflight_conflicts');
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings] };
+    if (pre.conflicts.length > 0) {
+      // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
+      if (!autonomous) return report('preflight_conflicts');
+      const ruling = await adjudicate(m,
+        { kind: 'preflight', task: null, where: null, details: pre.conflicts.join('\n'), findings: [] }, counted);
+      if (state.refused.length > 0) return budgetReport();
+      if (ruling.outcome === 'stop') {
+        // An unavailable adjudicator (agent error) stops the run; a real stop
+        // decision is a pre-flight conflict the user settles.
+        if (ruling.unavailable) return report('stopped', ruling.text);
+        return report('preflight_conflicts');
+      }
+      // The ruling binds every not-yet-done task: taskContext shows each
+      // task's note, so the ruling reaches every task agent.
+      preflight.rulings.push(ruling.text);
+      m = preflightResolved(m, ruling.text);
+    }
   }
 
   io.phase('Prelude');
@@ -287,18 +330,89 @@ async function runAll(m, io) {
       if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
       return { status: r.status, notes: r.notes };
     };
-    const integ = await call('integrate', 'Integrate', integratePrompt(m, tip), statusSchema());
+    const preludeTip = tip;
+    const BUDGET = Symbol('budget');
+    // The Opus fix + scoped re-review (C2) for a post-integration failure.
+    // Returns the head to rerun from (base when the fix made no commit), or
+    // BUDGET when a spawn was refused.
+    const fixPostIntegration = async (failureNotes, base) => {
+      const fix = await callM('post-integrate fix', 'Integrate',
+        postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
+      if (state.refused.length > 0) return BUDGET;
+      if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
+        await callM('post-integrate re-review', 'Integrate',
+          postIntegrateReReviewPrompt(m, base, fix.head), finalReReviewSchema(), standard);
+        if (state.refused.length > 0) return BUDGET;
+        return fix.head;
+      }
+      return base;
+    };
+    // Integrate starts on Sonnet with a prompt that never resolves conflicts
+    // (D5). A conflict or any other failure escalates to an Opus rerun; in
+    // autonomous mode a conflict first goes to an Opus resolver (C2).
+    const joinNoHook = !m.hooks.post_integrate;
+    let integ = await callM('integrate', 'Integrate',
+      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook }),
+      statusSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
+    if (!integ || integ.status !== 'done') {
+      const conflicts = integ && Array.isArray(integ.conflict_files) ? integ.conflict_files : [];
+      if (conflicts.length > 0 && autonomous) {
+        await callM('resolve conflicts', 'Integrate',
+          resolveConflictsPrompt(m, preludeTip, conflicts), statusSchema(), standard);
+        if (state.refused.length > 0) return budgetReport();
+        integ = await callM('integrate', 'Integrate',
+          integratePrompt(m, preludeTip,
+            { conflictMode: 'resolve', testFailure: 'heal', reviewConflicts: conflicts, joinStartPoint: joinNoHook }),
+          statusSchema(), standard);
+        if (state.refused.length > 0) return budgetReport();
+      } else if (conflicts.length > 0) {
+        // Supervised conflict: an Opus rerun that resolves only with confidence.
+        integ = await callM('integrate', 'Integrate',
+          integratePrompt(m, preludeTip, { joinStartPoint: joinNoHook }), statusSchema(), standard);
+        if (state.refused.length > 0) return budgetReport();
+      } else if (autonomous) {
+        // Any other Sonnet failure or null: the Opus rerun (autonomous heals
+        // a residual command failure into tests_failed).
+        integ = await callM('integrate', 'Integrate',
+          integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
+        if (state.refused.length > 0) return budgetReport();
+      }
+      // Supervised non-conflict failure keeps the failed Sonnet result and stops.
+    }
     integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
     if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
     tip = integ.head;
-    if (m.hooks.post_integrate) {
-      const post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+    // Post-integration test failures (autonomous, C2): fix + re-review, then
+    // rerun the integrate step once; still failing stops the run.
+    if (autonomous && integ.tests_failed === true) {
+      const from = await fixPostIntegration(integrate.notes || 'a project command failed after the merges', tip);
+      if (from === BUDGET) return budgetReport();
+      tip = from;
+      integ = await callM('integrate', 'Integrate',
+        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
-      integrate.post_integrate = phaseResult(post, 'post-integrate');
-      if (integrate.post_integrate.status !== 'done') {
-        return report('stopped', `post-integrate failed: ${integrate.post_integrate.notes}`);
+      integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
+      if (integrate.status !== 'done' || integ.tests_failed === true) {
+        return report('stopped', `integration failed: ${integrate.notes || 'tests still failing after the fix'}`);
       }
+      tip = integ.head;
+    }
+    if (m.hooks.post_integrate) {
+      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      if (state.refused.length > 0) return budgetReport();
+      let pr = phaseResult(post, 'post-integrate');
+      // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
+      if (autonomous && pr.status !== 'done') {
+        const from = await fixPostIntegration(pr.notes, tip);
+        if (from === BUDGET) return budgetReport();
+        tip = from;
+        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+        if (state.refused.length > 0) return budgetReport();
+        pr = phaseResult(post, 'post-integrate');
+      }
+      integrate.post_integrate = pr;
+      if (pr.status !== 'done') return report('stopped', `post-integrate failed: ${pr.notes}`);
       tip = post.head;
     }
     joinBase = starts.join || tip;
@@ -315,8 +429,14 @@ async function runAll(m, io) {
 
   if (m.hooks.e2e) {
     io.phase('E2E');
-    const r = await call('e2e', 'E2E', e2ePrompt(m), e2eSchema());
+    // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
+    // Opus (same label) and the Opus result is used.
+    let r = await callM('e2e', 'E2E', e2ePrompt(m), e2eSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
+    if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
+      r = await callM('e2e', 'E2E', e2ePrompt(m), e2eSchema(), standard);
+      if (state.refused.length > 0) return budgetReport();
+    }
     e2e = r ? { items: r.items } : { items: [], notes: 'no result from e2e' };
   }
 

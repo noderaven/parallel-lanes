@@ -179,15 +179,18 @@ test('happy path: complete, phases in order, report filled in', async () => {
   for (const id of ALL) assert.deepEqual(result.tasks[id].commits.length, 2);
 });
 
-test('every non-light agent runs at opus/high and every prompt carries the commit rules', async () => {
+test('mechanical phases start on sonnet high; everything else runs opus high and all carry the commit rules', async () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
   const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+  // Integrate and e2e start on Sonnet (D5); the light T4 implementer too. On a
+  // clean run they succeed first try, so no Opus rerun follows.
+  const sonnet = new Set(['T4 implement', 'integrate', 'e2e']);
   for (const c of calls) {
     assert.ok(c.prompt.includes('COMMIT-RULES: plain ASCII, no trailers'), c.label);
     assert.ok(/^[\x00-\x7f]*$/.test(c.prompt), `${c.label}: plain ASCII`);
-    if (c.label === 'T4 implement') assert.deepEqual([c.model, c.effort], ['sonnet', 'high']);
-    else assert.deepEqual([c.model, c.effort], ['opus', 'high'], c.label);
+    const want = sonnet.has(c.label) ? ['sonnet', 'high'] : ['opus', 'high'];
+    assert.deepEqual([c.model, c.effort], want, c.label);
   }
 });
 
@@ -247,8 +250,8 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
   assert.match(p, /Cleanup never fails the integration/);
 });
 
-test('pre-flight conflicts stop before any implement', async () => {
-  const m = manifest();
+test('pre-flight conflicts stop before any implement (supervised)', async () => {
+  const m = manifest({ autonomy: 'supervised' });
   const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [] }] });
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'preflight_conflicts');
@@ -387,13 +390,16 @@ test('a stopped prelude stops the run before any lane', async () => {
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
 });
 
-test('a failed integration stops before join', async () => {
-  const script = { ...phaseScript({ integrate: [{ status: 'failed', notes: 'conflict in x' }] }), ...taskScript(ALL) };
-  const { result, calls } = await run(manifest(), script);
+test('a failed integration stops before join (supervised)', async () => {
+  const m = manifest({ autonomy: 'supervised' });
+  const script = { ...phaseScript({ integrate: [{ status: 'failed', head: '', notes: 'build broke' }] }), ...taskScript(ALL) };
+  const { result, calls } = await run(m, script);
   assert.equal(result.status, 'stopped');
   assert.equal(result.integrate.status, 'failed');
   assert.ok(!labels(calls).includes('post-integrate'));
   assert.ok(!calls.some((c) => c.phase === 'Join'));
+  // Supervised does not escalate a non-conflict failure to an Opus rerun.
+  assert.equal(labels(calls).filter((l) => l === 'integrate').length, 1);
 });
 
 test('a stopped join stops before e2e and final review', async () => {
@@ -569,9 +575,13 @@ test('an integration that reports done without a head stops before join', async 
   assert.ok(!calls.some((c) => c.phase === 'Join'));
 });
 
-test('an e2e agent that returns null is listed under final cannot_verify', async () => {
-  const script = { ...phaseScript({ e2e: [null], 'e2e retry': [null] }), ...taskScript(ALL) };
+test('an e2e agent that returns null reruns on opus, then is listed under final cannot_verify', async () => {
+  // Sonnet null (retried once by the budget wrapper) reruns on Opus; Opus null
+  // too, so the e2e result is unavailable.
+  const script = { ...phaseScript({ e2e: [null, null], 'e2e retry': [null, null] }), ...taskScript(ALL) };
   const { result, calls } = await run(manifest(), script);
+  const e2eCalls = calls.filter((c) => c.label === 'e2e');
+  assert.deepEqual(e2eCalls.map((c) => c.model), ['sonnet', 'opus']);
   assert.ok(labels(calls).includes('e2e retry'));
   assert.equal(result.status, 'complete');
   assert.ok(result.final.cannot_verify.includes('the e2e check returned no result'), JSON.stringify(result.final));
@@ -939,4 +949,256 @@ test('start_points: an empty prelude leaves the lanes on the setup feature head'
   assert.equal(result.status, 'complete');
   assert.deepEqual(result.tasks.T2.commits, ['F0', 'T2-h']);
   assert.ok(calls.find((c) => c.label === 'integrate').prompt.includes('F0 is the feature tip after the prelude'));
+});
+
+// ---- H4: self-healing phases and phase tiers ----
+
+const JOIN_START = /run_started.*"phase":"join"/;
+
+test('autonomous pre-flight conflict: an adjudicator answer continues the run and binds every task', async () => {
+  const script = {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [] }] }),
+    ...taskScript(ALL),
+    'run adjudicate': [{ outcome: 'answer', text: 'use the v2 contract' }],
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  assert.ok(result.preflight.rulings.includes('use the v2 contract'), JSON.stringify(result.preflight));
+  // The ruling reaches every not-yet-done task through its note.
+  for (const id of ALL) {
+    const impl = calls.find((c) => c.label === `${id} implement`).prompt;
+    assert.ok(impl.includes('Pre-flight ruling (binding for this run): use the v2 contract'), id);
+  }
+  const adj = calls.find((c) => c.label === 'run adjudicate');
+  assert.equal(adj.phase, 'Pre-flight');
+  assert.deepEqual([adj.model, adj.effort], ['opus', 'high']);
+  assert.ok(adj.prompt.includes('T2 vs T4 overlap'));
+});
+
+test('autonomous pre-flight conflict: park continues, stop yields preflight_conflicts, unavailable stops', async () => {
+  const withAdj = (adj) => ({
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    ...taskScript(ALL),
+    'run adjudicate': adj,
+  });
+  const park = await run(manifest(), withAdj([{ outcome: 'park', text: 'defer the overlap' }]));
+  assert.equal(park.result.status, 'complete');
+  assert.ok(park.result.preflight.rulings.includes('defer the overlap'));
+
+  const stop = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    'run adjudicate': [{ outcome: 'stop', text: 'security call', stop_condition: 'security' }],
+  });
+  assert.equal(stop.result.status, 'preflight_conflicts');
+  assert.ok(!labels(stop.calls).some((l) => l.endsWith('implement')));
+
+  const un = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    'run adjudicate': [null],
+    'run adjudicate retry': [null],
+  });
+  assert.equal(un.result.status, 'stopped');
+  assert.equal(un.result.reason, 'no result from run adjudicate');
+});
+
+test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the opus rerun reviews it', async () => {
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
+        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+      ],
+      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'resolved' }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+  const resolve = calls.find((c) => c.label === 'resolve conflicts');
+  assert.equal(resolve.model, 'opus');
+  assert.ok(resolve.prompt.includes('src/shared.js'));
+  const l = labels(calls);
+  assert.ok(l.indexOf('resolve conflicts') > l.indexOf('integrate'));
+  assert.ok(l.indexOf('resolve conflicts') < l.lastIndexOf('integrate'));
+  assert.match(integ[0].prompt, /Do not resolve conflicts/);
+  assert.match(integ[1].prompt, /Resolution review/);
+  assert.ok(integ[1].prompt.includes('src/shared.js'));
+  assert.equal(result.integrate.status, 'done');
+});
+
+test('autonomous integrate failure without conflicts: one opus rerun, no resolver', async () => {
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'command failed', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'fixed on opus' },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).includes('resolve conflicts'));
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+  assert.match(integ[1].prompt, /resolve it/);
+  assert.ok(!/Do not resolve conflicts/.test(integ[1].prompt));
+});
+
+test('autonomous post-integration test failure: opus fix + scoped re-review, then the integrate step reruns', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: 'I3', notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  const l = labels(calls).filter((x) => ['integrate', 'post-integrate fix', 'post-integrate re-review'].includes(x));
+  assert.deepEqual(l, ['integrate', 'integrate', 'post-integrate fix', 'post-integrate re-review', 'integrate']);
+  const fix = calls.find((c) => c.label === 'post-integrate fix');
+  assert.equal(fix.model, 'opus');
+  assert.ok(fix.prompt.includes('merged but tests fail'), fix.prompt);
+  const rr = calls.find((c) => c.label === 'post-integrate re-review');
+  assert.deepEqual([rr.model, rr.effort], ['opus', 'high']);
+  assert.ok(rr.prompt.includes('I2..FX'), rr.prompt.split('\n')[0]);
+  assert.equal(result.integrate.status, 'done');
+});
+
+test('autonomous post-integration test failure that stays red after one rerun stops the run', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'still red', tests_failed: true },
+        { status: 'done', head: 'I3', notes: 'still red again', tests_failed: true },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'tried' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'stopped');
+  assert.match(result.reason, /integration failed/);
+  assert.ok(!labels(calls).includes('post-integrate'), 'the hook never runs');
+});
+
+test('autonomous post_integrate hook failure: opus fix + re-review, then the hook reruns', async () => {
+  const script = {
+    ...phaseScript({
+      'post-integrate': [
+        { status: 'failed', head: '', notes: 'contract drift' },
+        { status: 'done', head: 'P2', notes: 'contracts ok' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'PFX', notes: 'realigned contract' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  const l = labels(calls).filter((x) => x.startsWith('post-integrate'));
+  assert.deepEqual(l, ['post-integrate', 'post-integrate fix', 'post-integrate re-review', 'post-integrate']);
+  assert.ok(calls.find((c) => c.label === 'post-integrate fix').prompt.includes('contract drift'));
+  assert.ok(calls.find((c) => c.label === 'post-integrate re-review').prompt.includes('I1..PFX'));
+  assert.equal(result.integrate.post_integrate.status, 'done');
+});
+
+test('e2e FAIL on sonnet reruns on opus and the opus result is used', async () => {
+  const script = {
+    ...phaseScript({
+      e2e: [
+        { items: [{ item: 'login', result: 'FAIL', evidence: 'boom' }] },
+        { items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  const e2e = calls.filter((c) => c.label === 'e2e');
+  assert.deepEqual(e2e.map((c) => c.model), ['sonnet', 'opus']);
+  assert.deepEqual(result.e2e.items.map((i) => i.result), ['PASS']);
+});
+
+test('e2e all PASS on sonnet does not rerun on opus', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  const e2e = calls.filter((c) => c.label === 'e2e');
+  assert.deepEqual(e2e.map((c) => c.model), ['sonnet']);
+});
+
+test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwise, sonnet null reruns on opus', async () => {
+  const minorF = (file = 'src/a.js') => ({ severity: 'minor', file, line: 1, issue: 'nit', fix: 'tidy' });
+  const okFix = { status: 'done', head: 'f1', tests: 'pass', notes: '', declined: [] };
+  const oneLens = (findings) => ({
+    'final review sp': [{ findings, cannot_verify: [] }],
+    'final review security': [{ findings: [], cannot_verify: [] }],
+    'final review correctness': [{ findings: [], cannot_verify: [] }],
+    'final re-review': [{ findings: [] }],
+  });
+
+  const minor = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF()]), 'final fix': [okFix] }), ...taskScript(ALL),
+  });
+  assert.equal(minor.calls.find((c) => c.label === 'final fix').model, 'sonnet');
+
+  const docs = await run(manifest(), {
+    ...phaseScript({ ...oneLens([finding('typo', 'README.md', 2)]), 'final fix': [okFix] }), ...taskScript(ALL),
+  });
+  assert.equal(docs.calls.find((c) => c.label === 'final fix').model, 'sonnet');
+
+  const mixed = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(mixed.calls.find((c) => c.label === 'final fix').model, 'opus');
+
+  const nul = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF()]), 'final fix': [null, okFix], 'final fix retry': [null] }),
+    ...taskScript(ALL),
+  });
+  const fixes = nul.calls.filter((c) => c.label === 'final fix');
+  assert.deepEqual(fixes.map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(nul.result.status, 'complete');
+});
+
+test('supervised integrate conflict escalates to one opus rerun with no resolver', async () => {
+  const m = manifest({ autonomy: 'supervised' });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
+        { status: 'done', head: 'I2', notes: 'resolved with confidence' },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).includes('resolve conflicts'));
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.deepEqual(integ.map((c) => c.model), ['sonnet', 'opus']);
+  assert.match(integ[1].prompt, /resolve it/);
+  assert.ok(!/tests_failed/.test(integ[1].prompt), 'supervised rerun does not heal command failures');
+});
+
+test('the finishing integrate-phase agent records the join start point (A4)', async () => {
+  const withHook = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  const post = withHook.calls.find((c) => c.label === 'post-integrate').prompt;
+  assert.match(post, JOIN_START);
+  const integWith = withHook.calls.find((c) => c.label === 'integrate').prompt;
+  assert.ok(!JOIN_START.test(integWith), 'integrate does not carry it when post-integrate finishes the phase');
+
+  const noHook = await run(manifest({ hooks: { e2e: 'E2E-HOOK: run the checklist' } }),
+    { ...phaseScript(), ...taskScript(ALL) });
+  const integNo = noHook.calls.find((c) => c.label === 'integrate').prompt;
+  assert.match(integNo, JOIN_START);
 });
