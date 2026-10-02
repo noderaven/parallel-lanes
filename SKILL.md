@@ -233,8 +233,9 @@ never `branch -D`. Keep the manifest and ledger.
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
    (earlier work from a hand-run attempt): reference.md "Adopting earlier work" first.
 2. `python3 <skill_dir>/scripts/ledger status <ledger_dir>` prints `{done, reviewed,
-   blocked, start_points}`. Set the manifest's `done` and `reviewed` to those lists (a
-   `settled` task, parked or unblocked, is in both; never ask about it again).
+   blocked, start_points, carry}`. Set the manifest's `done` and `reviewed` to those lists (a
+   `settled` task is in both; never ask again). Put each `carry` entry into
+   `notes` (reference.md "Backfill").
 3. `backfill`: one `{base, head}` entry per done task, from its `committed` or `settled`
    events (reference.md "Backfill"). Required for every done task.
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.

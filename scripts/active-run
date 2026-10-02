@@ -58,6 +58,7 @@ case "$1" in
     check_id "$run_id"
     (umask 077 && mkdir -p "$dir") 2>/dev/null || fail 3 "cannot create $dir"
     [ -d "$dir" ] || fail 3 "$dir is not a directory"
+    chmod 700 "$dir" 2>/dev/null || fail 3 "cannot set mode 700 on $dir"
     target="$dir/$run_id.json"
     started=""
     if [ -f "$target" ]; then

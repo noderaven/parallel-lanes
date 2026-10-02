@@ -22,7 +22,9 @@ function freshActiveDir() {
 }
 
 function runHook(script, stdin, env = process.env) {
-  const full = { PL_ACTIVE_DIR: freshActiveDir(), ...env };
+  // A default-env call always gets a fresh marker dir, even when the shell
+  // exports PL_ACTIVE_DIR; a caller that passes its own env keeps its value.
+  const full = env === process.env ? { ...env, PL_ACTIVE_DIR: freshActiveDir() } : { PL_ACTIVE_DIR: freshActiveDir(), ...env };
   const res = spawnSync(BASH, [script], { input: stdin, encoding: 'utf8', env: full });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }

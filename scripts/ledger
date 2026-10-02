@@ -16,7 +16,8 @@ append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
                non-empty strings (the task range when the adjudicator settled it)
 
 status reads every DIR/*.jsonl and prints
-  {"done": [...], "reviewed": [...], "blocked": [...], "start_points": {...}}
+  {"done": [...], "reviewed": [...], "blocked": [...], "start_points": {...},
+   "carry": {...}}
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
 'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
 with a 'blocked' event and no 'committed' or 'settled' after it. A settled
@@ -26,8 +27,11 @@ run_started event with phase "setup", "join" the head of the earliest with
 phase "join" (earliest: first in ledger order, files by name then lines in
 order; the run appends them all to lane _run); a key is omitted when there
 is no such event. run_started
-events do not affect the lists. A missing DIR has empty lists and no start
-points.
+events do not affect the lists. carry: for each task whose last 'committed'
+or 'settled' event is a 'settled' with outcome "unblock", the text of that
+task's last 'ruling' event (the adjudicator's unblock note, which a resume
+hands to the next task in the same list); a task with no ruling text is
+omitted. A missing DIR has empty lists, no start points, and no carry.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 name or an unreadable ledger.
@@ -123,6 +127,7 @@ def append(directory, lane, raw):
 
 def status(directory):
     done, reviewed, blocked, start_points = {}, {}, {}, {}
+    last_ruling, unblocked = {}, {}
     if os.path.isdir(directory):
         names = sorted(n for n in os.listdir(directory) if n.endswith(".jsonl"))
         for name in names:
@@ -144,17 +149,21 @@ def status(directory):
                     fail(3, f"{path}:{number}: {error}")
                 task, event = entry["task"], entry["event"]
                 if event == "committed":
+                    unblocked[task] = False
                     done[task] = True
                     reviewed[task] = False
                     blocked[task] = False
                 elif event == "reviewed":
                     reviewed[task] = task in done
                 elif event == "settled":
+                    unblocked[task] = entry["outcome"] == "unblock"
                     done[task] = True
                     reviewed[task] = True
                     blocked[task] = False
                 elif event == "blocked":
                     blocked[task] = True
+                elif event == "ruling" and entry["text"]:
+                    last_ruling[task] = entry["text"]
                 elif event == "run_started":
                     key = START_POINTS[entry["phase"]]
                     start_points.setdefault(key, entry["head"])
@@ -163,6 +172,7 @@ def status(directory):
         "reviewed": [t for t, v in reviewed.items() if v],
         "blocked": [t for t, v in blocked.items() if v],
         "start_points": start_points,
+        "carry": {t: last_ruling[t] for t, v in unblocked.items() if v and t in last_ruling},
     }
     print(json.dumps(result))
 

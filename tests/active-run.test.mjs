@@ -115,3 +115,11 @@ test('active-run: list skips a marker whose run_id is unsafe or differs from its
   writeFileSync(join(dir, 'x.json'), marker('../x'));
   assert.deepEqual(list(dir).map((m) => m.run_id), ['good']);
 });
+
+test('active-run: write tightens an existing wider marker directory to 0700', () => {
+  const dir = markerDir();
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  const w = activeRun(dir, 'write', 'run-c', '/plans/c.json');
+  assert.equal(w.code, 0, w.stderr);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+});

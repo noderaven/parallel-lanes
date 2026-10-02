@@ -251,6 +251,7 @@ test('setup: ledger records run_started and status reports the earliest start po
     reviewed: [],
     blocked: [],
     start_points: { prelude: first.feature_head },
+    carry: {},
   });
 });
 

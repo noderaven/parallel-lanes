@@ -278,6 +278,7 @@ test('ledger round-trips events across two lanes', () => {
     reviewed: ['T1'],
     blocked: ['T3'],
     start_points: {},
+    carry: {},
   });
 });
 
@@ -287,7 +288,7 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 1 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
   appendOk(dir, 'alpha', { task: 'T13a', event: 'committed', commits: ['222'] });
-  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [], start_points: {} });
+  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 3 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
 });
@@ -295,9 +296,9 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
 test('ledger: a commit after a block clears the block', () => {
   const dir = workDir();
   appendOk(dir, 'alpha', { task: 'T7', event: 'blocked', reason: 'flaky' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'], start_points: {} });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T7', event: 'committed', commits: ['333'] });
-  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {} });
+  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {}, carry: {} });
 });
 
 test('ledger: a settled task is done and reviewed, even after a block and with no commits', () => {
@@ -307,7 +308,7 @@ test('ledger: a settled task is done and reviewed, even after a block and with n
   appendOk(dir, 'alpha', { task: 'T2', event: 'settled', outcome: 'park', base: 'b0', head: 'b0' });
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c1'] });
   appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'c1' });
-  assert.deepEqual(status(dir), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {} });
+  assert.deepEqual(status(dir), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {}, carry: {} });
   // A later commit makes the task unreviewed again, as after a review.
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c2'] });
   assert.deepEqual(status(dir).reviewed, ['T2']);
@@ -322,6 +323,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
     reviewed: [],
     blocked: [],
     start_points: { prelude: 'aaa111' },
+    carry: {},
   });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'ccc333' });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'ddd444' });
@@ -331,6 +333,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
     reviewed: [],
     blocked: [],
     start_points: { prelude: 'aaa111', join: 'ddd444' },
+    carry: {},
   });
   const lines = readFileSync(join(dir, '_run.jsonl'), 'utf8').trim().split('\n');
   assert.deepEqual(JSON.parse(lines[0]), {
@@ -344,7 +347,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
 test('ledger: a join start point alone omits the prelude key', () => {
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'fff666' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' } });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' }, carry: {} });
 });
 
 // Node's spawn() starts children too far apart to hit a first-append race, so
@@ -392,7 +395,7 @@ test('ledger append refuses a DIR that is a file with exit 3', () => {
 
 test('ledger status of a missing directory is empty', () => {
   const dir = join(workDir(), 'never created');
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: {} });
+  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: {}, carry: {} });
   assert.equal(existsSync(dir), false);
 });
 
@@ -441,4 +444,18 @@ test('ledger exits 2 on usage errors', () => {
   assert.equal(ledger('status').code, 2);
   assert.equal(ledger('append', 'dir', 'lane').code, 2);
   assert.equal(ledger('frobnicate', 'dir').code, 2);
+});
+
+test('ledger: carry holds the last ruling of a task whose final outcome is unblock', () => {
+  const dir = workDir();
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', text: 'Ruling: first try - x - y' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', text: 'Ruling: stub the client - unblocks T4 - rework' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'b0' });
+  appendOk(dir, 'alpha', { task: 'T5', event: 'ruling', text: 'Ruling: park - minor - low' });
+  appendOk(dir, 'alpha', { task: 'T5', event: 'settled', outcome: 'park', base: 'b1', head: 'b1' });
+  appendOk(dir, 'beta', { task: 'T7', event: 'settled', outcome: 'unblock', base: 'b2', head: 'b2' });
+  assert.deepEqual(status(dir).carry, { T3: 'Ruling: stub the client - unblocks T4 - rework' });
+  // A later commit means the task ran again; its unblock note no longer carries.
+  appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c9'] });
+  assert.deepEqual(status(dir).carry, {});
 });

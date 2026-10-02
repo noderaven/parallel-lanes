@@ -1013,6 +1013,7 @@ test('autonomous: a security task with an important finding open cannot be parke
     const adj = s.calls[2].prompt;
     assert.match(adj, /This task is security-flagged/);
     assert.ok(!adj.includes('"event":"settled"'), 'no settled command for a gated security task');
+    assert.deepEqual(r.rulings, [`refused (security-gated): ${outcome} it`], outcome);
   }
 });
 

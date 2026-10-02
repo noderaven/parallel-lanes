@@ -206,6 +206,12 @@ Resume builds `backfill` for every done task from its `committed` events in
   and `head` instead (equal when it made no commits). `ledger status` lists it as done and
   reviewed, so it is skipped, never asked about again.
 
+`ledger status` also prints `carry`: `{<task>: <text>}` for each task the adjudicator last
+unblocked, with its unblock ruling. A skipped task passes no note at run time, so for each
+entry add `from <task>, unblocked by the adjudicator: <text>` to `notes` for the next task in
+the same list (prelude, the lane, or join; after a batch, the task after the batch),
+appended to any existing note for it.
+
 It is required because each `head` is the next task's review base, and done-but-unreviewed
 tasks get a review first. A wrong base silently changes the review range of every done task.
 

@@ -1936,12 +1936,15 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // A batch is adjudicated as its first task.
     const out = await adjudicate(m,
       { kind: need.kind, task: unitTasks(task)[0], where, details: details(need, findings), findings }, io);
-    if (!out.unavailable && !out.invalid) rulings.push(out.text);
+    const gated = (out.outcome === 'park' || out.outcome === 'unblock') && securityGated(findings);
+    // A park or unblock the security gate refuses never took effect, so it is
+    // listed as refused, not as a ruling made on the user's behalf.
+    if (!out.unavailable && !out.invalid) rulings.push(gated ? `refused (security-gated): ${out.text}` : out.text);
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
       return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
     }
-    if ((out.outcome === 'park' || out.outcome === 'unblock') && securityGated(findings)) {
+    if (gated) {
       io.log(`${task.id}: ${out.outcome} refused: security-flagged task with critical or important findings open`);
       return result('blocked', 'adjudicator_stop: security');
     }
