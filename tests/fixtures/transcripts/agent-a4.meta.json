@@ -1,1 +1,1 @@
-{"label": "T1 fix 1", "phase": "Lane A", "model": "opus"}
+{"agentType": "workflow-subagent", "description": "T1 fix 1", "workflowPhase": "Lane A", "spawnDepth": 1, "model": "opus"}

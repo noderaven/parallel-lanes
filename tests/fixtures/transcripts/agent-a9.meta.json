@@ -1,1 +1,1 @@
-{"label": "T3-T4 implement", "phase": "Lane B", "model": "sonnet", "effort": "xhigh"}
+{"agentType": "workflow-subagent", "description": "T3-T4 implement", "workflowPhase": "Lane B", "spawnDepth": 1, "model": "sonnet", "effort": "xhigh"}

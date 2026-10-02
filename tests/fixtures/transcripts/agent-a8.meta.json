@@ -1,1 +1,1 @@
-{"label": "final review sp", "phase": "Final review", "model": "opus"}
+{"agentType": "workflow-subagent", "description": "final review sp", "workflowPhase": "Final review", "spawnDepth": 1, "model": "opus"}

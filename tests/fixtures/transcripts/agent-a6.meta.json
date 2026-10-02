@@ -1,1 +1,1 @@
-{"label": "T2 implement", "phase": "Lane A", "model": "sonnet"}
+{"agentType": "workflow-subagent", "description": "T2 implement", "workflowPhase": "Lane A", "spawnDepth": 1, "model": "sonnet"}

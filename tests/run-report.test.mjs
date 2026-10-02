@@ -112,3 +112,21 @@ test('bad usage exits 2', () => {
   assert.equal(run([FIX]).code, 2);
   assert.equal(run([join(TMP, 'nope'), MANIFEST]).code, 2);
 });
+
+test('real meta shape: description, workflowPhase and absent model come through', () => {
+  const a = find((x) => x.label === 'T2 fix 1');
+  assert.equal(a.phase, 'Lane A');
+  assert.equal(a.task, 'T2');
+  assert.equal(a.role, 'fix 1');
+  assert.equal(a.requested_model, 'unavailable');
+  assert.equal(a.tier, 'sonnet');
+  assert.equal(a.effort, 'high');
+});
+
+test('agents are ordered by first timestamp, not filename', () => {
+  const labels = report.agents.map((x) => x.label);
+  assert.equal(labels[0], 'T1 implement');
+  assert.equal(report.agents[0].tier, 'sonnet');
+  // agent-azz1 sorts last by name but ran first; escalation stays under sonnet
+  assert.equal(report.tiers.sonnet.escalations, 1);
+});
