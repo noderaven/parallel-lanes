@@ -595,11 +595,24 @@ test('a setup result without a feature head stops the run', async () => {
   assert.deepEqual(labels(calls), ['setup']);
 });
 
-test('an integration that reports done without a head stops before join', async () => {
-  const script = { ...phaseScript({ integrate: [{ status: 'done', head: '', notes: 'merged' }] }), ...taskScript(ALL) };
+test('an integration that reports done without a head escalates to opus, then stops before join', async () => {
+  const noHead = { status: 'done', head: '', notes: 'merged' };
+  const script = { ...phaseScript({ integrate: [noHead, noHead] }), ...taskScript(ALL) };
   const { result, calls } = await run(manifest(), script);
+  assert.deepEqual(calls.filter((c) => c.label === 'integrate').map((c) => c.model), ['sonnet', 'opus']);
   assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'integration failed: integrate reported no head');
   assert.ok(!calls.some((c) => c.phase === 'Join'));
+});
+
+test('a sonnet integrate done without a head is rerun on opus, whose result is used', async () => {
+  const script = {
+    ...phaseScript({ integrate: [{ status: 'done', head: '', notes: 'merged' }, { status: 'done', head: 'I2', notes: 'ok' }] }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.deepEqual(calls.filter((c) => c.label === 'integrate').map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(result.status, 'complete');
 });
 
 test('an e2e agent that returns null reruns on opus, then is listed under final cannot_verify', async () => {
@@ -934,7 +947,9 @@ test('setup_result naming a different path for a lane: invalid naming the lane, 
 });
 
 test('setup_result under profile lite maps the lane to the feature checkout', async () => {
-  const m = manifest({ profile: 'lite', lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] }] });
+  const m = manifest({
+    profile: 'lite', hooks: {}, lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] }],
+  });
   m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
   const { result, calls } = await run(m, {});
   assert.equal(result.status, 'invalid');
@@ -1358,4 +1373,79 @@ test('the finishing integrate-phase agent records the join start point (A4)', as
     assert.match(c.prompt, /only when you return tests_failed false/);
   }
   assert.ok(!/tests_failed false/.test(healedInteg[0].prompt), 'the sonnet first pass does not heal');
+});
+
+test('heal mode: a tests_failed integrate holds cleanup back, and every rerun knows each lane tip', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: 'I3', notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete');
+  const integ = calls.filter((c) => c.label === 'integrate');
+  assert.equal(integ.length, 3);
+  for (const c of integ) {
+    assert.ok(c.prompt.includes('- pl-run-1-alpha: T3-h'), 'lane alpha tip');
+    assert.ok(c.prompt.includes('- pl-run-1-beta: T4-h'), 'lane beta tip');
+    assert.match(c.prompt, /merge-base --is-ancestor <sha> HEAD/);
+  }
+  for (const c of integ.slice(1)) {
+    assert.match(c.prompt, /When you return tests_failed true, skip this step entirely/);
+  }
+  assert.ok(!/skip this step entirely/.test(integ[0].prompt), 'the first pass cleans up as before');
+});
+
+test('resume: a lane with nothing left to run gives integrate its backfill tip', async () => {
+  const m = manifest({ done: ['T4'], reviewed: ['T4'], backfill: backfillFor(['T4']) });
+  const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T1', 'T2', 'T3', 'T5']) });
+  assert.equal(result.status, 'complete');
+  const integ = calls.find((c) => c.label === 'integrate').prompt;
+  assert.ok(integ.includes('- pl-run-1-beta: T4-old-h'), integ);
+});
+
+test('resume: a task the adjudicator parked with no commits is skipped and the lane goes on from its range', async () => {
+  // Ledger after the earlier run: T1 committed and reviewed; T2 blocked, then
+  // settled (park) at T1-old-h with no commits.
+  const m = manifest({
+    done: ['T1', 'T2'],
+    reviewed: ['T1', 'T2'],
+    backfill: { T1: { base: 'T1-old-b', head: 'T1-old-h' }, T2: { base: 'T1-old-h', head: 'T1-old-h' } },
+  });
+  const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T3', 'T4', 'T5']) });
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).some((l) => l.startsWith('T2 ')), 'the parked task never runs again');
+  assert.equal(result.tasks.T2.status, 'skipped');
+  assert.deepEqual(result.tasks.T2.commits, ['T1-old-h', 'T1-old-h']);
+  assert.deepEqual(result.tasks.T3.commits, ['T1-old-h', 'T3-h']);
+  assert.ok(calls.find((c) => c.label === 'T3 review').prompt.includes('range T1-old-h..T3-h'));
+});
+
+test('validator: profile lite with hooks.post_integrate makes the run invalid, never skips the hook', async () => {
+  const m = manifest({
+    profile: 'lite', prelude: [], join: [], lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] }],
+  });
+  const { result, calls } = await run(m, {});
+  assert.equal(result.status, 'invalid');
+  assert.ok(result.errors.some((e) => e.includes('hooks.post_integrate')), JSON.stringify(result.errors));
+  assert.equal(result.rulings_spent, 0);
+  assert.deepEqual(calls, []);
+});
+
+test('integratePrompt: a lane without a known tip falls back to its ledger; plan 1 cleanup is unchanged', async () => {
+  const { integratePrompt } = await loadHelpers(['integratePrompt']);
+  const m = manifest();
+  const p = integratePrompt(m, 'T1-h', { laneTips: { alpha: 'A9' } });
+  assert.ok(p.includes('- pl-run-1-alpha: A9'));
+  assert.ok(p.includes('- pl-run-1-beta: the last sha of the last committed event in /work/ledger/beta.jsonl'));
+  assert.match(p, /6\. Only when steps 1-5 passed, clean up each lane:/);
+  const heal = integratePrompt(m, 'T1-h', { testFailure: 'heal' });
+  assert.match(heal, /6\. Only when steps 1-5 passed and you return tests_failed false/);
+  assert.match(heal, /When you return tests_failed true, skip this step entirely/);
 });

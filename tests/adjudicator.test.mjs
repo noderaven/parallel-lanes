@@ -234,7 +234,7 @@ test('adjudicate: null result -> stop, unavailable', async () => {
 
 test('adjudicate: schema-invalid result -> stop plan_broken, not unavailable', async () => {
   const invalid = {
-    outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken',
+    outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken', invalid: true,
   };
   for (const r of [
     'answer',
@@ -255,7 +255,7 @@ test('adjudicate: schema-invalid result -> stop plan_broken, not unavailable', a
 
 test('adjudicate: stop without a valid stop_condition -> stop plan_broken', async () => {
   const invalid = {
-    outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken',
+    outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken', invalid: true,
   };
   for (const r of [
     { outcome: 'stop', text: 'just stop' },

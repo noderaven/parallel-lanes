@@ -302,8 +302,9 @@ function validateManifest(m) {
     }
   }
 
-  // Lite profile (spec D2): one lane on the feature branch, a small plan, and
-  // no security task (it gets no separate security review lens).
+  // Lite profile (spec D2): one lane on the feature branch, a small plan, no
+  // security task (it gets no separate security review lens), and no
+  // post_integrate hook.
   if (m.profile === 'lite') {
     if (Array.isArray(m.lanes) && m.lanes.length !== 1) {
       err(`profile lite: requires exactly one lane (found ${m.lanes.length})`);
@@ -316,6 +317,10 @@ function validateManifest(m) {
         const name = isText(t.id) ? `task ${t.id}` : 'a task';
         err(`profile lite: allows no security task (${name} has security set)`);
       }
+    }
+    // Lite has no integration phase, so the hook would never run.
+    if (isObject(m.hooks) && 'post_integrate' in m.hooks) {
+      err('profile lite: not allowed with hooks.post_integrate (lite does not run it)');
     }
   }
 
@@ -1175,12 +1180,19 @@ function joinStartPointLine(m, heal = false) {
 //   with the resolution review.
 // - joinStartPoint: carry the A4 join start-point ledger command (only when no
 //   post_integrate hook finishes the phase).
+// - laneTips: {<lane id>: sha} each lane's last commit (laneTips in
+//   phases.js). A lane branch an earlier cleanup deleted counts as merged when
+//   that commit is already in HEAD (a heal rerun, or a resume after cleanup);
+//   a lane missing here falls back to its ledger.
+// Heal mode holds cleanup back while tests_failed is true, so the rerun after
+// the fix still finds every lane branch.
 function integratePrompt(m, preludeTip, opts = {}) {
   const conflictMode = opts.conflictMode || 'resolve';
   const testFailure = opts.testFailure || 'fail';
   const reviewConflicts = opts.reviewConflicts || null;
   const resolverNotes = opts.resolverNotes || null;
   const joinStartPoint = opts.joinStartPoint || false;
+  const laneTipMap = opts.laneTips || {};
   const q = shellQuote;
   const dir = q(featureDir(m));
   const admin = gitAdmin(m);
@@ -1203,6 +1215,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
     `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
   ] : [];
+  const tipLines = m.lanes.map((lane) => {
+    const tip = laneTipMap[lane.id];
+    return `   - ${laneWhere(m, lane).branch}: ${present(tip) ? tip
+      : `the last sha of the last committed event in ${m.repo.ledger_dir}/${lane.id}.jsonl`}`;
+  });
+  const deletedBranch = [
+    '   A lane branch that no longer exists (an earlier cleanup in this run merged and deleted it) counts as',
+    `   already merged when its last commit is in HEAD (git -C ${dir} merge-base --is-ancestor <sha> HEAD exits`,
+    '   0); skip its merge. If that commit is not in HEAD, fail naming the branch. Last commits:',
+    ...tipLines,
+  ];
   const conflictLine = conflictMode === 'abort' ? [
     '   A branch that is already merged reports already up to date; that is fine. Do not resolve conflicts:',
     '   on a conflicting merge run git merge --abort, stop, return status failed, and list every conflicting',
@@ -1240,6 +1263,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     ...conflictLine,
+    ...deletedBranch,
     '3. In the tree step 1 found clean, rerun setup and then every command:',
     commandsText(m, null),
     ...overrides,
@@ -1254,7 +1278,11 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   rewrite history).',
     `5. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
     '   must list no path under .superpowers/; if it does, fail listing them (do not rewrite history).',
-    '6. Only when steps 1-5 passed, clean up each lane:',
+    ...(testFailure === 'heal' ? [
+      '6. Only when steps 1-5 passed and you return tests_failed false (every project command passes), clean',
+      '   up each lane. When you return tests_failed true, skip this step entirely: a fix agent and a rerun of',
+      '   these steps follow, and the rerun cleans up. Cleanup:',
+    ] : ['6. Only when steps 1-5 passed, clean up each lane:']),
     ...cleanup,
     '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
     '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',
@@ -1551,7 +1579,8 @@ function dedupeFindings(reports) {
 // ctx = {kind: 'blocked'|'question'|'round_cap'|'preflight', task|null,
 // where: {dir, branch, lane}|null, details, findings}. The result is always a
 // usable outcome object: a missing result is a stop marked unavailable (an
-// agent error), and an invalid one is a plan_broken stop, never approval.
+// agent error), and an invalid one (a budget refusal included) is a
+// plan_broken stop marked invalid, never approval. Neither is a ruling.
 
 function adjudicatorOutcomes() {
   return ['answer', 'clarify_plan', 'park', 'unblock', 'stop'];
@@ -1597,6 +1626,11 @@ function adjudicatorPrompt(m, ctx) {
     'safely; stop only for one of the four stop conditions below.',
     '',
     `Why you were called: ${adjudicatorKindText(ctx.kind)}`,
+    ...(task && task.security === true ? [
+      'This task is security-flagged. Parking or unblocking it while a critical or important finding is open is',
+      'a security-sensitive decision: choose stop with stop_condition security for that (answer or clarify_plan',
+      'remain open to you); a park or unblock in that case is treated as that stop.',
+    ] : []),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
@@ -1678,7 +1712,9 @@ async function adjudicate(m, ctx, io = { agent, log }) {
   }
   const valid = adjudicatorResult(r);
   if (valid === null) {
-    return { outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken' };
+    return {
+      outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken', invalid: true,
+    };
   }
   return valid;
 }
@@ -1703,10 +1739,10 @@ function makeIo(m, baseIo, state) {
   const spawn = (prompt, opts) => {
     const label = opts.label;
     if (state.refused.length > 0 || state.agents >= limits.max_agents) return refuse(label);
-    if (/ adjudicate( retry)?$/.test(label)) {
-      state.rulings += 1;
-      if (state.rulings > limits.max_rulings) return refuse(label);
-    }
+    const ruling = / adjudicate( retry)?$/.test(label);
+    if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
+    // Only calls that run count: state.rulings is the adjudications spent.
+    if (ruling) state.rulings += 1;
     state.agents += 1;
     return baseIo.agent(prompt, opts);
   };
@@ -1764,7 +1800,9 @@ function reviewSettings(task, changedLines) {
 // at most twice per task. answer and clarify_plan rerun implement with the
 // ruling as a note or a brief amendment, then review the whole task range;
 // park and unblock complete the task as it is (head = base when nothing was
-// committed); stop blocks the task. rulings lists each ruling text.
+// committed); stop blocks the task. rulings lists each ruling text. A
+// security-flagged task with critical or important findings open cannot be
+// parked or unblocked: it stops with 'adjudicator_stop: security'.
 async function runTask(m, task, where, base, io = { agent, log }, resume = null, note = null) {
   const phaseName = lanePhase(m, where.lane);
   const autonomous = effectiveAutonomy(m) === 'autonomous';
@@ -1854,11 +1892,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     return [...notes, ...more].join('\n');
   };
 
+  // A security-flagged task (spec C1) with critical or important findings
+  // open: parking or unblocking it is a security-sensitive decision the user
+  // makes, so the adjudicator cannot settle it.
+  const securityGated = (findings) => unitTasks(task).some((t) => t.security === true)
+    && (findings || []).some((f) => f.severity === 'critical' || f.severity === 'important');
+
   // What the adjudicator is told about the task: the diff range, the report
-  // file, the reason or question, and for a round cap the reviewed ledger
-  // command a park records. For a batch, the tasks it covers come first and
-  // a round cap names the reviewed command of every task.
-  const details = (need) => {
+  // file, the reason or question, and the settled ledger commands a park or
+  // unblock records (a settled task counts as done and reviewed on a resume,
+  // with the range the command names). For a batch, the tasks it covers come
+  // first and each command names every task. A security-gated task gets no
+  // settled commands.
+  const details = (need, findings) => {
+    const at = head === null ? base : head;
     const lines = [
       ...(isBatch(task) ? [`Batch ${task.id}: tasks ${unitTasks(task).map((t) => t.id).join(', ')} run as one ` +
         'unit (one implementer, one review over the combined range); your outcome applies to all of them.'] : []),
@@ -1866,11 +1913,12 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       `Implementer report file: ${taskFiles(m, task).report}`,
       `${need.kind === 'question' ? 'Question' : 'Reason'}: ${need.reason}`,
     ];
-    if (need.kind === 'round_cap') {
-      lines.push(isBatch(task)
-        ? 'Ledger commands for outcome park (each parked task counts as reviewed):'
-        : 'Ledger command for outcome park (the parked task counts as reviewed):',
-      ...ledgerLines(m, task, where, { event: 'reviewed', rounds }));
+    if (!securityGated(findings)) {
+      for (const outcome of ['park', 'unblock']) {
+        lines.push(`Ledger ${isBatch(task) ? 'commands' : 'command'} for outcome ${outcome} (the settled ` +
+          `${isBatch(task) ? 'tasks count' : 'task counts'} as done and reviewed on a resume):`,
+        ...ledgerLines(m, task, where, { event: 'settled', outcome, base, head: at }));
+      }
     }
     return lines.join('\n');
   };
@@ -1878,7 +1926,8 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   // A point where the task cannot go on by itself: need = {kind, reason,
   // findings}. Returns the task result when the task ends here, or null
   // when the adjudicator's answer or amendment is in guidance and implement
-  // should rerun.
+  // should rerun. Only a valid ruling is listed in rulings (not an agent
+  // error, an invalid result, or a budget refusal).
   const settle = async (need) => {
     if (!autonomous) return result('blocked', need.kind === 'round_cap' ? 'review_rounds' : need.reason);
     if (adjudications >= 2) return result('blocked', 'adjudication_cap');
@@ -1886,11 +1935,15 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     const findings = need.findings || [];
     // A batch is adjudicated as its first task.
     const out = await adjudicate(m,
-      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need), findings }, io);
-    if (!out.unavailable) rulings.push(out.text);
+      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need, findings), findings }, io);
+    if (!out.unavailable && !out.invalid) rulings.push(out.text);
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
       return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
+    }
+    if ((out.outcome === 'park' || out.outcome === 'unblock') && securityGated(findings)) {
+      io.log(`${task.id}: ${out.outcome} refused: security-flagged task with critical or important findings open`);
+      return result('blocked', 'adjudicator_stop: security');
     }
     if (out.outcome === 'park' || out.outcome === 'unblock') {
       if (head === null) head = base;
@@ -2215,6 +2268,23 @@ function setupResultErrors(m) {
   return errors;
 }
 
+// The last commit of each lane, {<lane id>: sha}: the head its lane run
+// reported, else (a lane with nothing left to run) the backfill head of its
+// last done task. A lane with neither is left out.
+function laneTips(m, laneResults) {
+  const backfill = m.backfill || {};
+  const tips = {};
+  for (const lane of m.lanes) {
+    const lr = laneResults.find((r) => r.lane === lane.id);
+    if (lr && present(lr.head)) {
+      tips[lane.id] = lr.head;
+      continue;
+    }
+    for (const t of lane.tasks) if (backfill[t.id]) tips[lane.id] = backfill[t.id].head;
+  }
+  return tips;
+}
+
 // The ids of the tasks an agent label belongs to: `<id> <role>`, or a batch
 // `<first>-<last> <role>` covering first through last in plan order. Phase
 // labels (setup, integrate, final review, ...) belong to no task.
@@ -2250,13 +2320,15 @@ function preflightResolved(m, text) {
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items}|null,
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
-//  reason (stopped runs only), errors (invalid only),
+//  rulings_spent (adjudications that ran; a relaunch subtracts it from
+//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
 // (C2); they also reach the final fix wave. Task status is done, blocked,
 // skipped (done and reviewed earlier), or not_run. Under profile lite no
 // pre-flight agent runs (preflight has no conflicts or rulings) and
-// integrate stays null.
+// integrate stays null (validateManifest rejects lite with a post_integrate
+// hook, so no configured hook is skipped).
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -2264,7 +2336,7 @@ async function runAll(m, io) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
-      integrate: null, e2e: null, final: null, agents_spawned: 0,
+      integrate: null, e2e: null, final: null, agents_spawned: 0, rulings_spent: 0,
     };
   }
 
@@ -2322,6 +2394,7 @@ async function runAll(m, io) {
     e2e,
     final,
     agents_spawned: state.agents,
+    rulings_spent: state.rulings,
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -2433,7 +2506,6 @@ async function runAll(m, io) {
     if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
     if (list.stopped !== null) return report('stopped', 'lanes stopped');
-    if (m.hooks.post_integrate) io.log('parallel-lanes: profile lite: the post_integrate hook is not run');
     tip = listTip(list);
     joinBase = tip;
     joinFromPhase = fromPhase && !moved(list);
@@ -2481,11 +2553,16 @@ async function runAll(m, io) {
     // (D5). A conflict or any other failure escalates to an Opus rerun; in
     // autonomous mode a conflict first goes to an Opus resolver (C2).
     const joinNoHook = !m.hooks.post_integrate;
+    // Each lane's last commit: a rerun counts a lane branch an earlier
+    // cleanup deleted as merged when that commit is already in HEAD.
+    const tips = laneTips(m, laneResults);
     let integ = await callM('integrate', 'Integrate',
-      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook }),
+      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips }),
       statusSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
-    if (!integ || integ.status !== 'done') {
+    // Any Sonnet result that is not a finished integration (a done without a
+    // head included) escalates.
+    if (phaseResult(integ, 'integrate').status !== 'done') {
       const conflicts = integ && Array.isArray(integ.conflict_files) ? integ.conflict_files : [];
       // The rerun reviews a resolution only when the resolver finished it;
       // otherwise it resolves the conflicts itself on the plain prompt.
@@ -2506,6 +2583,7 @@ async function runAll(m, io) {
           reviewConflicts: resolved ? resolved.files : null,
           resolverNotes: resolved ? resolved.notes : null,
           joinStartPoint: joinNoHook,
+          laneTips: tips,
         }), statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
@@ -2519,7 +2597,8 @@ async function runAll(m, io) {
       if (from === BUDGET) return budgetReport();
       tip = from;
       integ = await callM('integrate', 'Integrate',
-        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
+        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips }),
+        statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {

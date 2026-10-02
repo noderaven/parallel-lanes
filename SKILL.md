@@ -42,7 +42,8 @@ the text after the marker is fixed.
 
 `<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
 executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length
-(the Setup agent counted), `<K>` = length of the manifest's `done`. The script logs the same line; you still print it.
+minus the Setup agent, `<K>` = length of `done`. The script logs the same line; you still
+print it.
 
 ## Flow
 
@@ -187,11 +188,10 @@ integration or post-integrate on real failures) and status `invalid` or `preflig
 are NOT transient: never relaunch; stop and notify.
 
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
-stopped run's `agents_spawned`, `limits.max_rulings` by the ledger `ruling` events that run
-appended, floor 0). If fewer than 1 agent would remain, treat it as a budget cap: stop and
-notify. Rerun `scripts/setup`, recompute `done`, `reviewed`, `backfill`, and
-`start_points` from the ledger as in Resume, and launch again. These edits need no second
-table. A second transient stop is a real stop.
+stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
+fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Rerun
+`scripts/setup`, recompute `done`, `reviewed`, `backfill`, and `start_points` from the ledger
+as in Resume, and launch again. No second table. A second transient stop is a real stop.
 
 ## Notify
 
@@ -233,9 +233,10 @@ never `branch -D`. Keep the manifest and ledger.
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
    (earlier work from a hand-run attempt): reference.md "Adopting earlier work" first.
 2. `python3 <skill_dir>/scripts/ledger status <ledger_dir>` prints `{done, reviewed,
-   blocked, start_points}`. Set the manifest's `done` and `reviewed` to those lists.
-3. `backfill`: one `{base, head}` entry per done task, from its `committed` events in
-   `<ledger_dir>/<lane>.jsonl` (reference.md "Backfill"). Required for every done task.
+   blocked, start_points}`. Set the manifest's `done` and `reviewed` to those lists (a
+   `settled` task, parked or unblocked, is in both; never ask about it again).
+3. `backfill`: one `{base, head}` entry per done task, from its `committed` or `settled`
+   events (reference.md "Backfill"). Required for every done task.
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
    nothing more.

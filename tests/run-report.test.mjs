@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -129,4 +129,30 @@ test('agents are ordered by first timestamp, not filename', () => {
   assert.equal(report.agents[0].tier, 'sonnet');
   // agent-azz1 sorts last by name but ran first; escalation stays under sonnet
   assert.equal(report.tiers.sonnet.escalations, 1);
+});
+
+test('lines sharing a message id count that message once, with its last usage', () => {
+  const dir = join(TMP, 'dedupe');
+  mkdirSync(dir, { recursive: true });
+  const usage = (output) => ({
+    input_tokens: 5, output_tokens: output, cache_read_input_tokens: 100, cache_creation_input_tokens: 20,
+  });
+  const line = (id, output, extra = {}) => JSON.stringify({
+    type: 'assistant', requestId: id ? `req-${id}` : undefined, timestamp: '2026-10-02T10:00:00.000Z',
+    message: { ...(id ? { id } : {}), model: 'opus-test', usage: usage(output) }, ...extra,
+  });
+  writeFileSync(join(dir, 'agent-b1.meta.json'),
+    JSON.stringify({ description: 'T1 review', workflowPhase: 'Lane A', model: 'opus' }));
+  writeFileSync(join(dir, 'agent-b1.jsonl'), [
+    line('msg-1', 1), line('msg-1', 4), line('msg-1', 9),
+    line('msg-2', 3),
+    line(null, 2), line(null, 2),
+  ].join('\n') + '\n');
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const a = JSON.parse(r.stdout).agents[0];
+  assert.equal(a.input_tokens, 5 * 4, 'msg-1 and msg-2 once each, plus two lines without an id');
+  assert.equal(a.cache_read_input_tokens, 100 * 4);
+  assert.equal(a.cache_creation_input_tokens, 20 * 4);
+  assert.equal(a.output_tokens, 9 + 3 + 2 + 2, 'the last running output value of each message');
 });

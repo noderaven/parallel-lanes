@@ -350,3 +350,11 @@ test('schema documents every addendum field', () => {
   assert.deepEqual([...p.setup_result.required].sort(), ['discarded', 'feature_head', 'worktrees']);
   assert.deepEqual(Object.keys(p.start_points.properties).sort(), ['join', 'prelude']);
 });
+
+test('lite profile with hooks.post_integrate is reported naming the rule', () => {
+  const m = liteManifest();
+  m.hooks = { post_integrate: 'check the contracts' };
+  assertError(validateManifest(m), 'profile lite', 'hooks.post_integrate');
+  m.hooks = { e2e: 'run the checklist' };
+  assert.deepEqual(validateManifest(m), []);
+});

@@ -140,7 +140,11 @@ and the diff range, and returns one outcome:
 | `unblock` | The smallest change that unblocks dependents, carried to the next task. |
 | `stop` | Allowed only for `destructive` (irreversible operation), `security` (a security-sensitive decision), `outside_side_effect` (outside the run's worktrees), or `plan_broken` (every path is a guess). The run stops, resumable. |
 
-A task adjudicated twice and still blocked ends with `adjudication_cap`. Every ruling is a
+A park or unblock appends a `settled` ledger event (`outcome`, `base`, `head`), so a resume
+treats the task as done and reviewed even when it made no commits. A security-flagged task
+with a critical or important finding open cannot be parked or unblocked: that stops with
+`adjudicator_stop: security`. A task adjudicated twice and still blocked ends with
+`adjudication_cap`. Every ruling is a
 ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
 `preflight.rulings`. Both appear in the hand-back under "Rulings made on your behalf". Under
 `supervised` there is no adjudicator: a blocked task, a question, or the review cap
@@ -153,12 +157,13 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   with reason `budget`, resumable.
 - `limits.max_rulings`: 25 adjudicator rulings per run.
 - The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
-  notifies. Raise a limit in the manifest to continue; raise the limit in the manifest, then resume,
-  which goes through Confirmation again (dry run, table, explicit yes). The only edits that
+  notifies. Raise the limit in the manifest, then resume; that goes through Confirmation again
+  (dry run, table, explicit yes). The only edits that
   need no second table are `setup_result`, `start_points`, and the relaunch budget carry-over.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
-  `agents_spawned` and `max_rulings` by that run's ledger `ruling` events (floor 0); fewer
-  than 1 agent left is treated as a budget cap.
+  `agents_spawned` and `max_rulings` by its `rulings_spent`, the adjudications that ran
+  (floor 0). Never count ledger `ruling` events for this: implementers record their own
+  smaller rulings there too. Fewer than 1 agent left is treated as a budget cap.
 
 ## Active-run markers and stops
 
@@ -196,6 +201,10 @@ Resume builds `backfill` for every done task from its `committed` events in
 - `base` = the parent of the first sha of its first committed event, via
   `git -C <root> rev-parse <sha>^`, or `git --git-dir=<git_dir> rev-parse <sha>^` in shadow
   mode.
+- A task with a `settled` event (parked or unblocked by the adjudicator) after its last
+  committed event, or with no committed event at all, uses the last settled event's `base`
+  and `head` instead (equal when it made no commits). `ledger status` lists it as done and
+  reviewed, so it is skipped, never asked about again.
 
 It is required because each `head` is the next task's review base, and done-but-unreviewed
 tasks get a review first. A wrong base silently changes the review range of every done task.

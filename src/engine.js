@@ -42,7 +42,9 @@ function reviewSettings(task, changedLines) {
 // at most twice per task. answer and clarify_plan rerun implement with the
 // ruling as a note or a brief amendment, then review the whole task range;
 // park and unblock complete the task as it is (head = base when nothing was
-// committed); stop blocks the task. rulings lists each ruling text.
+// committed); stop blocks the task. rulings lists each ruling text. A
+// security-flagged task with critical or important findings open cannot be
+// parked or unblocked: it stops with 'adjudicator_stop: security'.
 async function runTask(m, task, where, base, io = { agent, log }, resume = null, note = null) {
   const phaseName = lanePhase(m, where.lane);
   const autonomous = effectiveAutonomy(m) === 'autonomous';
@@ -132,11 +134,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     return [...notes, ...more].join('\n');
   };
 
+  // A security-flagged task (spec C1) with critical or important findings
+  // open: parking or unblocking it is a security-sensitive decision the user
+  // makes, so the adjudicator cannot settle it.
+  const securityGated = (findings) => unitTasks(task).some((t) => t.security === true)
+    && (findings || []).some((f) => f.severity === 'critical' || f.severity === 'important');
+
   // What the adjudicator is told about the task: the diff range, the report
-  // file, the reason or question, and for a round cap the reviewed ledger
-  // command a park records. For a batch, the tasks it covers come first and
-  // a round cap names the reviewed command of every task.
-  const details = (need) => {
+  // file, the reason or question, and the settled ledger commands a park or
+  // unblock records (a settled task counts as done and reviewed on a resume,
+  // with the range the command names). For a batch, the tasks it covers come
+  // first and each command names every task. A security-gated task gets no
+  // settled commands.
+  const details = (need, findings) => {
+    const at = head === null ? base : head;
     const lines = [
       ...(isBatch(task) ? [`Batch ${task.id}: tasks ${unitTasks(task).map((t) => t.id).join(', ')} run as one ` +
         'unit (one implementer, one review over the combined range); your outcome applies to all of them.'] : []),
@@ -144,11 +155,12 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       `Implementer report file: ${taskFiles(m, task).report}`,
       `${need.kind === 'question' ? 'Question' : 'Reason'}: ${need.reason}`,
     ];
-    if (need.kind === 'round_cap') {
-      lines.push(isBatch(task)
-        ? 'Ledger commands for outcome park (each parked task counts as reviewed):'
-        : 'Ledger command for outcome park (the parked task counts as reviewed):',
-      ...ledgerLines(m, task, where, { event: 'reviewed', rounds }));
+    if (!securityGated(findings)) {
+      for (const outcome of ['park', 'unblock']) {
+        lines.push(`Ledger ${isBatch(task) ? 'commands' : 'command'} for outcome ${outcome} (the settled ` +
+          `${isBatch(task) ? 'tasks count' : 'task counts'} as done and reviewed on a resume):`,
+        ...ledgerLines(m, task, where, { event: 'settled', outcome, base, head: at }));
+      }
     }
     return lines.join('\n');
   };
@@ -156,7 +168,8 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   // A point where the task cannot go on by itself: need = {kind, reason,
   // findings}. Returns the task result when the task ends here, or null
   // when the adjudicator's answer or amendment is in guidance and implement
-  // should rerun.
+  // should rerun. Only a valid ruling is listed in rulings (not an agent
+  // error, an invalid result, or a budget refusal).
   const settle = async (need) => {
     if (!autonomous) return result('blocked', need.kind === 'round_cap' ? 'review_rounds' : need.reason);
     if (adjudications >= 2) return result('blocked', 'adjudication_cap');
@@ -164,11 +177,15 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     const findings = need.findings || [];
     // A batch is adjudicated as its first task.
     const out = await adjudicate(m,
-      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need), findings }, io);
-    if (!out.unavailable) rulings.push(out.text);
+      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need, findings), findings }, io);
+    if (!out.unavailable && !out.invalid) rulings.push(out.text);
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
       return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
+    }
+    if ((out.outcome === 'park' || out.outcome === 'unblock') && securityGated(findings)) {
+      io.log(`${task.id}: ${out.outcome} refused: security-flagged task with critical or important findings open`);
+      return result('blocked', 'adjudicator_stop: security');
     }
     if (out.outcome === 'park' || out.outcome === 'unblock') {
       if (head === null) head = base;

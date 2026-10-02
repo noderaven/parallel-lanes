@@ -12,8 +12,9 @@
 # 0700. write creates or replaces a marker: STATUS defaults to running, and
 # rewriting an existing marker keeps its started time and updates its status.
 # remove deletes a marker (a missing one is fine). list prints a JSON array of
-# the markers sorted by run id, skipping files that are not valid markers; a
-# missing directory lists as [].
+# the markers sorted by run id, skipping files that are not valid markers (a
+# marker's run_id must be a safe run id equal to its file name); a missing
+# directory lists as [].
 #
 # Exit 0 on success; 2 on usage error; 3 on an unsafe run id or a marker
 # directory that cannot be created or written.
@@ -35,9 +36,13 @@ check_id() {
   [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 3 "unsafe run id '$1'"
 }
 
-# A file's contents as a compact marker object, or nothing if it is not one.
+# A file's contents as a compact marker object, or nothing if it is not one:
+# its run_id must be a safe run id equal to the file's base name.
 read_marker() {
-  jq -c 'select(type == "object" and (.run_id | type) == "string"
+  local name
+  name="$(basename "$1" .json)"
+  jq -c --arg name "$name" 'select(type == "object" and (.run_id | type) == "string"
+    and (.run_id | test("^[A-Za-z0-9_][A-Za-z0-9._-]*$")) and .run_id == $name
     and (.manifest | type) == "string" and (.started | type) == "string"
     and (.status | type) == "string")' "$1" 2>/dev/null || true
 }

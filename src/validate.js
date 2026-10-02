@@ -245,8 +245,9 @@ function validateManifest(m) {
     }
   }
 
-  // Lite profile (spec D2): one lane on the feature branch, a small plan, and
-  // no security task (it gets no separate security review lens).
+  // Lite profile (spec D2): one lane on the feature branch, a small plan, no
+  // security task (it gets no separate security review lens), and no
+  // post_integrate hook.
   if (m.profile === 'lite') {
     if (Array.isArray(m.lanes) && m.lanes.length !== 1) {
       err(`profile lite: requires exactly one lane (found ${m.lanes.length})`);
@@ -259,6 +260,10 @@ function validateManifest(m) {
         const name = isText(t.id) ? `task ${t.id}` : 'a task';
         err(`profile lite: allows no security task (${name} has security set)`);
       }
+    }
+    // Lite has no integration phase, so the hook would never run.
+    if (isObject(m.hooks) && 'post_integrate' in m.hooks) {
+      err('profile lite: not allowed with hooks.post_integrate (lite does not run it)');
     }
   }
 

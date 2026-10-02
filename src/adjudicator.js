@@ -5,7 +5,8 @@
 // ctx = {kind: 'blocked'|'question'|'round_cap'|'preflight', task|null,
 // where: {dir, branch, lane}|null, details, findings}. The result is always a
 // usable outcome object: a missing result is a stop marked unavailable (an
-// agent error), and an invalid one is a plan_broken stop, never approval.
+// agent error), and an invalid one (a budget refusal included) is a
+// plan_broken stop marked invalid, never approval. Neither is a ruling.
 
 function adjudicatorOutcomes() {
   return ['answer', 'clarify_plan', 'park', 'unblock', 'stop'];
@@ -51,6 +52,11 @@ function adjudicatorPrompt(m, ctx) {
     'safely; stop only for one of the four stop conditions below.',
     '',
     `Why you were called: ${adjudicatorKindText(ctx.kind)}`,
+    ...(task && task.security === true ? [
+      'This task is security-flagged. Parking or unblocking it while a critical or important finding is open is',
+      'a security-sensitive decision: choose stop with stop_condition security for that (answer or clarify_plan',
+      'remain open to you); a park or unblock in that case is treated as that stop.',
+    ] : []),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
@@ -132,7 +138,9 @@ async function adjudicate(m, ctx, io = { agent, log }) {
   }
   const valid = adjudicatorResult(r);
   if (valid === null) {
-    return { outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken' };
+    return {
+      outcome: 'stop', text: 'adjudicator returned an invalid result', stop_condition: 'plan_broken', invalid: true,
+    };
   }
   return valid;
 }

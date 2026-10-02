@@ -300,6 +300,19 @@ test('ledger: a commit after a block clears the block', () => {
   assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {} });
 });
 
+test('ledger: a settled task is done and reviewed, even after a block and with no commits', () => {
+  const dir = workDir();
+  appendOk(dir, 'alpha', { task: 'T2', event: 'blocked', reason: 'upstream missing' });
+  appendOk(dir, 'alpha', { task: 'T2', event: 'ruling', text: 'Ruling: park - minor - low' });
+  appendOk(dir, 'alpha', { task: 'T2', event: 'settled', outcome: 'park', base: 'b0', head: 'b0' });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c1'] });
+  appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'c1' });
+  assert.deepEqual(status(dir), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {} });
+  // A later commit makes the task unreviewed again, as after a review.
+  appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c2'] });
+  assert.deepEqual(status(dir).reviewed, ['T2']);
+});
+
 test('ledger: run_started events give the earliest start points per phase', () => {
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'aaa111' });
@@ -402,6 +415,10 @@ test('ledger append rejects malformed entries with exit 2', () => {
     JSON.stringify({ task: '_run', event: 'run_started', phase: 'setup' }),
     JSON.stringify({ task: '_run', event: 'run_started', phase: 'setup', head: '' }),
     JSON.stringify({ task: '_run', event: 'run_started', phase: 'join', head: 7 }),
+    JSON.stringify({ task: 'T1', event: 'settled', base: 'a', head: 'a' }),
+    JSON.stringify({ task: 'T1', event: 'settled', outcome: 'stop', base: 'a', head: 'a' }),
+    JSON.stringify({ task: 'T1', event: 'settled', outcome: 'park', head: 'a' }),
+    JSON.stringify({ task: 'T1', event: 'settled', outcome: 'unblock', base: 'a', head: '' }),
   ];
   for (const entry of bad) {
     const res = ledger('append', dir, 'alpha', entry);

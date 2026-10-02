@@ -117,6 +117,17 @@ test('the launch notice the script logs matches the SKILL.md template', async ()
   assert.match(notices[0], templateRegex(NOTICES.launch));
 });
 
+test('the launch notice count is the dry-run agents length minus the Setup agent', async () => {
+  const dry = await loadScript({ args: manifest({ dry_run: true }), agent: async () => null });
+  assert.equal(dry.agents.filter((a) => a.role === 'setup').length, 1);
+  const setupResult = {
+    feature_head: 'F0', discarded: [], worktrees: { a: '/work/wt/lane-a', b: '/work/wt/lane-b' },
+  };
+  const notices = await loggedNotices(manifest({ setup_result: setupResult }));
+  assert.equal(notices.length, 1, JSON.stringify(notices));
+  assert.equal(notices[0], `parallel-lanes: launching run run-1: 2 lanes, ${dry.agents.length - 1} agents`);
+});
+
 test('the resume notice the script logs matches the SKILL.md template', async () => {
   const notices = await loggedNotices(manifest({
     done: ['T1'],

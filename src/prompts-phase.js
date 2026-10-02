@@ -269,12 +269,19 @@ function joinStartPointLine(m, heal = false) {
 //   with the resolution review.
 // - joinStartPoint: carry the A4 join start-point ledger command (only when no
 //   post_integrate hook finishes the phase).
+// - laneTips: {<lane id>: sha} each lane's last commit (laneTips in
+//   phases.js). A lane branch an earlier cleanup deleted counts as merged when
+//   that commit is already in HEAD (a heal rerun, or a resume after cleanup);
+//   a lane missing here falls back to its ledger.
+// Heal mode holds cleanup back while tests_failed is true, so the rerun after
+// the fix still finds every lane branch.
 function integratePrompt(m, preludeTip, opts = {}) {
   const conflictMode = opts.conflictMode || 'resolve';
   const testFailure = opts.testFailure || 'fail';
   const reviewConflicts = opts.reviewConflicts || null;
   const resolverNotes = opts.resolverNotes || null;
   const joinStartPoint = opts.joinStartPoint || false;
+  const laneTipMap = opts.laneTips || {};
   const q = shellQuote;
   const dir = q(featureDir(m));
   const admin = gitAdmin(m);
@@ -297,6 +304,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
     `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
   ] : [];
+  const tipLines = m.lanes.map((lane) => {
+    const tip = laneTipMap[lane.id];
+    return `   - ${laneWhere(m, lane).branch}: ${present(tip) ? tip
+      : `the last sha of the last committed event in ${m.repo.ledger_dir}/${lane.id}.jsonl`}`;
+  });
+  const deletedBranch = [
+    '   A lane branch that no longer exists (an earlier cleanup in this run merged and deleted it) counts as',
+    `   already merged when its last commit is in HEAD (git -C ${dir} merge-base --is-ancestor <sha> HEAD exits`,
+    '   0); skip its merge. If that commit is not in HEAD, fail naming the branch. Last commits:',
+    ...tipLines,
+  ];
   const conflictLine = conflictMode === 'abort' ? [
     '   A branch that is already merged reports already up to date; that is fine. Do not resolve conflicts:',
     '   on a conflicting merge run git merge --abort, stop, return status failed, and list every conflicting',
@@ -334,6 +352,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     ...conflictLine,
+    ...deletedBranch,
     '3. In the tree step 1 found clean, rerun setup and then every command:',
     commandsText(m, null),
     ...overrides,
@@ -348,7 +367,11 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   rewrite history).',
     `5. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
     '   must list no path under .superpowers/; if it does, fail listing them (do not rewrite history).',
-    '6. Only when steps 1-5 passed, clean up each lane:',
+    ...(testFailure === 'heal' ? [
+      '6. Only when steps 1-5 passed and you return tests_failed false (every project command passes), clean',
+      '   up each lane. When you return tests_failed true, skip this step entirely: a fix agent and a rerun of',
+      '   these steps follow, and the rerun cleans up. Cleanup:',
+    ] : ['6. Only when steps 1-5 passed, clean up each lane:']),
     ...cleanup,
     '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
     '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',

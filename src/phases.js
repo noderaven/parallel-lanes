@@ -100,6 +100,23 @@ function setupResultErrors(m) {
   return errors;
 }
 
+// The last commit of each lane, {<lane id>: sha}: the head its lane run
+// reported, else (a lane with nothing left to run) the backfill head of its
+// last done task. A lane with neither is left out.
+function laneTips(m, laneResults) {
+  const backfill = m.backfill || {};
+  const tips = {};
+  for (const lane of m.lanes) {
+    const lr = laneResults.find((r) => r.lane === lane.id);
+    if (lr && present(lr.head)) {
+      tips[lane.id] = lr.head;
+      continue;
+    }
+    for (const t of lane.tasks) if (backfill[t.id]) tips[lane.id] = backfill[t.id].head;
+  }
+  return tips;
+}
+
 // The ids of the tasks an agent label belongs to: `<id> <role>`, or a batch
 // `<first>-<last> <role>` covering first through last in plan order. Phase
 // labels (setup, integrate, final review, ...) belong to no task.
@@ -135,13 +152,15 @@ function preflightResolved(m, text) {
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items}|null,
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
-//  reason (stopped runs only), errors (invalid only),
+//  rulings_spent (adjudications that ran; a relaunch subtracts it from
+//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
 // (C2); they also reach the final fix wave. Task status is done, blocked,
 // skipped (done and reviewed earlier), or not_run. Under profile lite no
 // pre-flight agent runs (preflight has no conflicts or rulings) and
-// integrate stays null.
+// integrate stays null (validateManifest rejects lite with a post_integrate
+// hook, so no configured hook is skipped).
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -149,7 +168,7 @@ async function runAll(m, io) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
-      integrate: null, e2e: null, final: null, agents_spawned: 0,
+      integrate: null, e2e: null, final: null, agents_spawned: 0, rulings_spent: 0,
     };
   }
 
@@ -207,6 +226,7 @@ async function runAll(m, io) {
     e2e,
     final,
     agents_spawned: state.agents,
+    rulings_spent: state.rulings,
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -318,7 +338,6 @@ async function runAll(m, io) {
     if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
     if (list.stopped !== null) return report('stopped', 'lanes stopped');
-    if (m.hooks.post_integrate) io.log('parallel-lanes: profile lite: the post_integrate hook is not run');
     tip = listTip(list);
     joinBase = tip;
     joinFromPhase = fromPhase && !moved(list);
@@ -366,11 +385,16 @@ async function runAll(m, io) {
     // (D5). A conflict or any other failure escalates to an Opus rerun; in
     // autonomous mode a conflict first goes to an Opus resolver (C2).
     const joinNoHook = !m.hooks.post_integrate;
+    // Each lane's last commit: a rerun counts a lane branch an earlier
+    // cleanup deleted as merged when that commit is already in HEAD.
+    const tips = laneTips(m, laneResults);
     let integ = await callM('integrate', 'Integrate',
-      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook }),
+      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips }),
       statusSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
-    if (!integ || integ.status !== 'done') {
+    // Any Sonnet result that is not a finished integration (a done without a
+    // head included) escalates.
+    if (phaseResult(integ, 'integrate').status !== 'done') {
       const conflicts = integ && Array.isArray(integ.conflict_files) ? integ.conflict_files : [];
       // The rerun reviews a resolution only when the resolver finished it;
       // otherwise it resolves the conflicts itself on the plain prompt.
@@ -391,6 +415,7 @@ async function runAll(m, io) {
           reviewConflicts: resolved ? resolved.files : null,
           resolverNotes: resolved ? resolved.notes : null,
           joinStartPoint: joinNoHook,
+          laneTips: tips,
         }), statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
@@ -404,7 +429,8 @@ async function runAll(m, io) {
       if (from === BUDGET) return budgetReport();
       tip = from;
       integ = await callM('integrate', 'Integrate',
-        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook }), statusSchema(), standard);
+        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips }),
+        statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {

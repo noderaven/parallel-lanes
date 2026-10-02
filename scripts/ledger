@@ -12,12 +12,16 @@ append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
   ruling       with 'text': string
   blocked      with 'reason': string
   run_started  with 'phase': "setup" or "join", and 'head': non-empty string
+  settled      with 'outcome': "park" or "unblock", and 'base' and 'head':
+               non-empty strings (the task range when the adjudicator settled it)
 
 status reads every DIR/*.jsonl and prints
   {"done": [...], "reviewed": [...], "blocked": [...], "start_points": {...}}
-done: tasks with a 'committed' event. reviewed: tasks with a 'reviewed' event
-after their last 'committed'. blocked: tasks with a 'blocked' event and no
-'committed' after it. start_points: "prelude" is the head of the earliest
+done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
+'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
+with a 'blocked' event and no 'committed' or 'settled' after it. A settled
+task (parked or unblocked by the adjudicator) is done and reviewed even when
+it made no commits; its backfill range is the settled event's base and head. start_points: "prelude" is the head of the earliest
 run_started event with phase "setup", "join" the head of the earliest with
 phase "join" (earliest: first in ledger order, files by name then lines in
 order; the run appends them all to lane _run); a key is omitted when there
@@ -41,7 +45,9 @@ REQUIRED = {
     "ruling": "text",
     "blocked": "reason",
     "run_started": "head",
+    "settled": "outcome",
 }
+SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
 
 
@@ -74,6 +80,13 @@ def entry_error(entry):
             return "'phase' must be one of setup, join"
         if not isinstance(value, str) or not value:
             return "'head' must be a non-empty string"
+    elif event == "settled":
+        if value not in SETTLED_OUTCOMES:
+            return "'outcome' must be one of park, unblock"
+        for field in ("base", "head"):
+            v = entry.get(field)
+            if not isinstance(v, str) or not v:
+                return f"'{field}' must be a non-empty string"
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
     return None
@@ -136,6 +149,10 @@ def status(directory):
                     blocked[task] = False
                 elif event == "reviewed":
                     reviewed[task] = task in done
+                elif event == "settled":
+                    done[task] = True
+                    reviewed[task] = True
+                    blocked[task] = False
                 elif event == "blocked":
                     blocked[task] = True
                 elif event == "run_started":

@@ -18,10 +18,10 @@ function makeIo(m, baseIo, state) {
   const spawn = (prompt, opts) => {
     const label = opts.label;
     if (state.refused.length > 0 || state.agents >= limits.max_agents) return refuse(label);
-    if (/ adjudicate( retry)?$/.test(label)) {
-      state.rulings += 1;
-      if (state.rulings > limits.max_rulings) return refuse(label);
-    }
+    const ruling = / adjudicate( retry)?$/.test(label);
+    if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
+    // Only calls that run count: state.rulings is the adjudications spent.
+    if (ruling) state.rulings += 1;
     state.agents += 1;
     return baseIo.agent(prompt, opts);
   };

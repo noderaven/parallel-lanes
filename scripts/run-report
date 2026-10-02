@@ -94,10 +94,16 @@ def model_tier(model):
 
 
 def read_usage(path):
-    """Return (resolved_model, sums) or (None, None) when no usage lines."""
+    """Return (resolved_model, sums) or (None, None) when no usage lines.
+
+    A transcript writes one assistant message over several lines that share
+    its message.id, each repeating that message's usage (output_tokens as a
+    running value). Each message counts once, with the last usage seen for
+    its id (and requestId when present); lines without an id count each.
+    """
     model = None
-    sums = {k: 0 for k in TOKEN_FIELDS}
-    seen = False
+    usages = {}
+    anonymous = []
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -114,16 +120,25 @@ def read_usage(path):
                 usage = msg.get("usage")
                 if not isinstance(usage, dict):
                     continue
-                seen = True
                 if isinstance(msg.get("model"), str):
                     model = msg["model"]
-                for k in TOKEN_FIELDS:
-                    v = usage.get(k)
-                    if isinstance(v, int) and not isinstance(v, bool):
-                        sums[k] += v
+                mid = msg.get("id")
+                if isinstance(mid, str) and mid:
+                    rid = obj.get("requestId")
+                    usages[(mid, rid if isinstance(rid, str) else None)] = usage
+                else:
+                    anonymous.append(usage)
     except OSError:
         return None, None
-    return (model, sums) if seen else (None, None)
+    if not usages and not anonymous:
+        return None, None
+    sums = {k: 0 for k in TOKEN_FIELDS}
+    for usage in list(usages.values()) + anonymous:
+        for k in TOKEN_FIELDS:
+            v = usage.get(k)
+            if isinstance(v, int) and not isinstance(v, bool):
+                sums[k] += v
+    return model, sums
 
 
 def first_timestamp(path):

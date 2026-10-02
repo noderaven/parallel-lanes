@@ -242,7 +242,7 @@ test('autonomous: a blocked batch escalates, then is adjudicated as its first ta
   assert.deepEqual(r.results[0].rulings, ['ANSWER-B: use v2']);
 });
 
-test('autonomous: a batch parked at the round cap gives the adjudicator every reviewed command', async () => {
+test('autonomous: a batch parked at the round cap gives the adjudicator every settled command', async () => {
   const m = manifest([task('T2', { batch: 'x' }), task('T3', { batch: 'x' })], {
     limits: { review_rounds: 0, max_parallel_lanes: 3 },
   });
@@ -253,7 +253,12 @@ test('autonomous: a batch parked at the round cap gives the adjudicator every re
   });
   const r = await runLane(m, m.lanes[0], 'b0', s.io);
   assert.deepEqual(labels(s.calls), ['T2-T3 implement', 'T2-T3 review', 'T2 adjudicate']);
-  for (const id of ['T2', 'T3']) assert.ok(s.calls[2].prompt.includes(reviewedEntry(id, 0)), id);
+  for (const id of ['T2', 'T3']) {
+    for (const outcome of ['park', 'unblock']) {
+      const entry = ledgerEntry(id, 'settled', { outcome, base: 'b0', head: 'h1' });
+      assert.ok(s.calls[2].prompt.includes(entry), `${id} ${outcome}`);
+    }
+  }
   assert.deepEqual(r.results.map((x) => [x.task, x.status, x.head]), [['T2', 'done', 'h1'], ['T3', 'done', 'h1']]);
 });
 

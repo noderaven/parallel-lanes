@@ -9,6 +9,7 @@ import {
   readdirSync,
   existsSync,
   realpathSync,
+  symlinkSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -351,4 +352,73 @@ test('setup: usage errors and unreadable manifests exit 2', () => {
   const bad = join(c.root, 'bad.json');
   writeFileSync(bad, JSON.stringify({ version: 1 }));
   assert.equal(sh('python3', [join(SCRIPTS, 'setup'), bad]).code, 2);
+});
+
+test('setup: unsafe manifests exit 2 before any change', () => {
+  const c = newCase();
+  const repo = manifest(c).repo;
+  const cases = [
+    manifest(c, { run_id: 'R1/..' }),
+    manifest(c, { lanes: [{ id: '../x', name: 'Lane X', tasks: [] }] }),
+    manifest(c, { lanes: [{ id: 'join', name: 'Lane J', tasks: [] }] }),
+    manifest(c, { repo: { ...repo, worktree_root: 'relative/wt' } }),
+    manifest(c, { repo: { ...repo, ledger_dir: 'ledger' } }),
+    manifest(c, { repo: { ...repo, root: 'my project' } }),
+    manifest(c, { repo: { ...repo, base_ref: '--no-track' } }),
+  ];
+  for (const m of cases) {
+    const res = setup(c, m);
+    assert.equal(res.code, 2, `${JSON.stringify(m.repo)} ${m.run_id}: ${res.stderr}`);
+  }
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+  assert.equal(sh('git', ['-C', c.project, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature/x']).code, 1);
+  assert.equal(existsSync(c.worktreeRoot), false);
+});
+
+test('setup: a base_ref that names no commit exits 1 and creates no branch', () => {
+  const c = newCase();
+  const m = manifest(c);
+  m.repo.base_ref = 'no-such-ref';
+  const res = setup(c, m);
+  assert.equal(res.code, 1, res.stderr);
+  assert.match(res.stderr, /no-such-ref/);
+  assert.equal(sh('git', ['-C', c.project, 'rev-parse', '--verify', '--quiet', 'refs/heads/feature/x']).code, 1);
+});
+
+test('setup: the feature branch starts at the resolved base_ref commit', () => {
+  const c = newCase();
+  const base = git(c.project, 'rev-parse', 'main');
+  git(c.project, 'switch', '-q', '-c', 'other');
+  write(c.project, 'other.txt', 'x\n');
+  git(c.project, 'add', '-A');
+  git(c.project, 'commit', '-q', '-m', 'other');
+  const result = setupOk(c, manifest(c));
+  assert.equal(result.feature_head, base);
+});
+
+test('setup: a symlink at a lane path exits 3, even one to an empty directory', () => {
+  const c = newCase();
+  const target = join(c.root, 'elsewhere');
+  mkdirSync(target, { recursive: true });
+  mkdirSync(c.worktreeRoot, { recursive: true });
+  symlinkSync(target, laneDir(c, 'a'));
+  const res = setup(c, manifest(c));
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /lane-a/);
+  assert.deepEqual(readdirSync(target), [], 'nothing is created at the link target');
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+});
+
+test('setup: prunes only missing worktree records under worktree_root', () => {
+  const c = newCase();
+  const own = join(c.root, 'user wt');
+  git(c.project, 'worktree', 'add', '-q', '-b', 'user-branch', own);
+  setupOk(c, manifest(c));
+  // Both directories go missing: the run's lane worktree and the user's own.
+  rmSync(laneDir(c, 'a'), { recursive: true, force: true });
+  rmSync(own, { recursive: true, force: true });
+  setupOk(c, manifest(c));
+  const list = git(c.project, 'worktree', 'list', '--porcelain');
+  assert.ok(list.includes(`worktree ${own}`), "the user's missing worktree keeps its record");
+  assert.ok(existsSync(join(laneDir(c, 'a'), 'README.md')), 'the lane worktree is recreated');
 });

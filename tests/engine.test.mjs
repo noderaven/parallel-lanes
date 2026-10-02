@@ -648,7 +648,10 @@ test('autonomous: the round cap is adjudicated; an answer reruns implement and r
   const adj = s.calls[4];
   assert.match(adj.prompt, /Why you were called: round_cap/);
   assert.ok(adj.prompt.includes('CAP-2'), 'the open findings reach the adjudicator');
-  assert.ok(adj.prompt.includes('"event":"reviewed"'), 'details carry the reviewed ledger command');
+  assert.ok(adj.prompt.includes('{"task":"T2","event":"settled","outcome":"park","base":"b0","head":"h2"}'),
+    'details carry the settled ledger command for park');
+  assert.ok(adj.prompt.includes('{"task":"T2","event":"settled","outcome":"unblock","base":"b0","head":"h2"}'),
+    'details carry the settled ledger command for unblock');
   assert.ok(adj.prompt.includes("append '/work/ledger' 'alpha'"));
   const impl2 = s.calls[5];
   assert.ok(impl2.prompt.includes('CAP-2') && impl2.prompt.includes('ANSWER-CAP: drop the cache'));
@@ -979,4 +982,66 @@ test('implementResultText asks for changed_lines over the agent range; the one-a
   assert.match(p.implement, /changed_lines/);
   assert.ok(p.implement.includes("diff --shortstat 'b0' HEAD"), 'implement counts from the task base');
   assert.ok(p.fix.includes("diff --shortstat 'h1' HEAD"), 'a fix counts from the head it builds on');
+});
+
+test('autonomous: a park or unblock without commits gives the adjudicator settled commands at base', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [blocked('b0', 'nothing to do')],
+    'T2 adjudicate': [ruled('park', 'PARK-0')],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'done');
+  const adj = s.calls[1].prompt;
+  for (const outcome of ['park', 'unblock']) {
+    const entry = JSON.stringify({ task: 'T2', event: 'settled', outcome, base: 'b0', head: 'b0' });
+    assert.ok(adj.includes(entry), `${outcome} command at base`);
+  }
+});
+
+test('autonomous: a security task with an important finding open cannot be parked or unblocked', async () => {
+  for (const outcome of ['park', 'unblock']) {
+    const m = manifest({ limits: { review_rounds: 0, max_parallel_lanes: 3 } });
+    const s = stub({
+      'T2 implement': [done('b0', 'h1')],
+      'T2 review': [changes('SEC-1')],
+      'T2 adjudicate': [ruled(outcome, `${outcome} it`)],
+    });
+    const r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', s.io);
+    assert.equal(r.status, 'blocked', outcome);
+    assert.equal(r.notes, 'adjudicator_stop: security', outcome);
+    const adj = s.calls[2].prompt;
+    assert.match(adj, /This task is security-flagged/);
+    assert.ok(!adj.includes('"event":"settled"'), 'no settled command for a gated security task');
+  }
+});
+
+test('autonomous: a security task may still be parked with only minor findings open', async () => {
+  const m = manifest({ limits: { review_rounds: 0, max_parallel_lanes: 3 } });
+  const minor = { verdict: 'changes', findings: [{ ...finding('NIT-1'), severity: 'minor' }], cannot_verify: [] };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [minor],
+    'T2 adjudicate': [ruled('park', 'PARK-NIT')],
+  });
+  const r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'done');
+  assert.ok(s.calls[2].prompt.includes('"event":"settled"'));
+});
+
+test('a non-security task is not told it is security-flagged', async () => {
+  const m = manifest();
+  const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [ruled('park', 'P')] });
+  await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.ok(!/security-flagged/.test(s.calls[1].prompt));
+});
+
+test('autonomous: an invalid or budget-refused adjudication is not listed as a ruling', async () => {
+  for (const r0 of [{ outcome: 'approve', text: 'ok' }, { __budget: true }]) {
+    const m = manifest();
+    const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [r0] });
+    const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    assert.equal(r.status, 'blocked');
+    assert.deepEqual(r.rulings, [], JSON.stringify(r0));
+  }
 });

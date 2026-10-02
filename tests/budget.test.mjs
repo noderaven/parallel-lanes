@@ -134,6 +134,7 @@ test('the rulings cap counts only adjudicate labels, retries included, and lets 
   assert.deepEqual(await wrapped.agent('P', { label: 'run adjudicate' }), { outcome: 'answer' });
   assert.equal(state.rulings, 3);
   assert.deepEqual(await wrapped.agent('P', { label: 'T2 adjudicate' }), { __budget: true });
+  assert.equal(state.rulings, 3, 'a refused adjudication is not counted as spent');
   assert.deepEqual(labels(calls),
     ['T1 implement', 'T1 adjudicate', 'T1 adjudicate retry', 'final review sp', 'run adjudicate']);
   assert.equal(state.agents, 5);
@@ -147,6 +148,7 @@ test('max_rulings 0: no adjudication runs', async () => {
   assert.deepEqual(await makeIo(m, io, state).agent('P', { label: 'T1 adjudicate' }), { __budget: true });
   assert.deepEqual(calls, []);
   assert.equal(state.agents, 0);
+  assert.equal(state.rulings, 0);
   assert.deepEqual(state.refused, ['T1 adjudicate']);
 });
 
@@ -215,6 +217,7 @@ test('a clean run under the default budget completes and counts every agent', as
   const { result, calls } = await run(m, cleanScript());
   assert.equal(result.status, 'complete');
   assert.equal(result.agents_spawned, calls.length);
+  assert.equal(result.rulings_spent, 0);
   assert.equal(result.budget, undefined);
 });
 
@@ -291,4 +294,18 @@ test('a dead agent retried once completes the run', async () => {
   assert.equal(result.tasks.T3.status, 'done');
   assert.ok(labels(calls).includes('T3 implement retry'));
   assert.equal(result.agents_spawned, calls.length);
+});
+
+test('rulings_spent counts the adjudications that ran, not the one the cap refused', async () => {
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_rulings: 1 } });
+  const script = cleanScript();
+  const stuck = { status: 'blocked', head: 'F0', tests: '', notes: 'stuck' };
+  script['T1 implement'] = [stuck, stuck];
+  script['T1 adjudicate'] = [{ outcome: 'answer', text: 'Ruling: try v2 - spec says so - low' }];
+  const { result, calls } = await run(m, script);
+  assert.equal(labels(calls).filter((l) => l === 'T1 adjudicate').length, 1);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'budget');
+  assert.equal(result.rulings_spent, 1);
+  assert.equal(result.budget.rulings, 1);
 });
