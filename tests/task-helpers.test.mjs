@@ -28,10 +28,10 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 'author@example.invalid',
 };
 
-function sh(cmd, args) {
+function sh(cmd, args, extraEnv = {}) {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV },
+    env: { ...process.env, ...GIT_ENV, ...extraEnv },
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -55,6 +55,8 @@ function commit(dir, rel, content, message) {
 }
 
 const script = (name) => (...args) => sh('python3', [join(SCRIPTS, name), ...args]);
+// The same scripts run with extra environment variables.
+const scriptEnv = (name) => (env, ...args) => sh('python3', [join(SCRIPTS, name), ...args], env);
 const startTask = script('start-task');
 const finishTask = script('finish-task');
 const taskBrief = script('task-brief');
@@ -90,6 +92,25 @@ function newCase() {
   const plan = join(root, 'plan dir', 'plan.md');
   write(plan, PLAN);
   return { root, project, lane, plan, initial, ledgerDir: join(root, 'ledger dir') };
+}
+
+// An unrelated repo on main with one commit, and the variables that would
+// redirect git to it.
+function otherRepoEnv(c) {
+  const other = join(c.root, 'other repo');
+  mkdirSync(other, { recursive: true });
+  git(other, 'init', '-q', '-b', 'main');
+  commit(other, 'o.txt', 'other\n', 'other init');
+  return {
+    other,
+    env: {
+      GIT_DIR: join(other, '.git'),
+      GIT_WORK_TREE: other,
+      GIT_INDEX_FILE: join(other, '.git', 'index'),
+      GIT_OBJECT_DIRECTORY: join(other, '.git', 'objects'),
+      GIT_COMMON_DIR: join(other, '.git'),
+    },
+  };
 }
 
 function done(c) {
@@ -183,6 +204,27 @@ test('start-task exits 1 when the package script fails', () => {
   assert.match(res.stderr, /broken/);
 });
 
+test('start-task ignores GIT_DIR and friends pointing at another repo', () => {
+  const c = newCase();
+  git(c.project, 'checkout', '-q', 'feature');
+  const tip = commit(c.project, 'b.txt', 'prelude\n', 'prelude');
+  const { other, env } = otherRepoEnv(c);
+  const otherHead = git(other, 'rev-parse', 'HEAD');
+  const pkg = join(c.root, 'tools dir', 'package.sh');
+  write(pkg, '{ git rev-parse --show-toplevel; printf "%s\\n" "${GIT_DIR-unset}"; } > "$4"\necho "$4"\n');
+  const out = join(c.root, 'review dir', 'package.md');
+  const brief = join(c.root, 'briefs', 'T1.md');
+  const res = scriptEnv('start-task')(
+    env, c.lane, c.plan, '--sync', 'feature',
+    '--package', pkg, 'BASE', 'HEAD', out, '--brief', 'T1', brief,
+  );
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.startsWith(`branch: lane-a\nhead: ${tip}\n`), res.stdout);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), tip);
+  assert.equal(git(other, 'rev-parse', 'HEAD'), otherHead);
+  assert.equal(readFileSync(out, 'utf8'), `${c.lane}\nunset\n`);
+});
+
 test('start-task without --brief exits 2', () => {
   const c = newCase();
   const res = startTask(c.lane, c.plan);
@@ -270,4 +312,22 @@ test('finish-task without --commit exits 2', () => {
   const res = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1');
   assert.equal(res.code, 2);
   assert.deepEqual(done(c), []);
+});
+
+test('finish-task ignores GIT_DIR and friends pointing at another repo', () => {
+  const c = newCase();
+  const from = git(c.lane, 'rev-parse', 'HEAD');
+  const sha = commit(c.lane, 'b.txt', 'x\ny\n', 'add b');
+  const { env } = otherRepoEnv(c);
+  const res = scriptEnv('finish-task')(
+    env, c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1', '--commit', sha,
+  );
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout), {
+    head: sha,
+    changed_lines: 2,
+    commits: [sha],
+    branch: 'lane-a',
+  });
+  assert.deepEqual(done(c), ['T1']);
 });

@@ -12,6 +12,9 @@ In order:
   --package  mkdir -p the parent of OUT, then bash SCRIPT PLAN BASE HEAD OUT
              with DIR as the working directory (a failure exits 1).
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
+GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+GIT_COMMON_DIR are removed from the environment of git, task-brief and the
+package script, so DIR alone names the repository.
 
 stdout, only on success:
   branch: <abbrev-ref of DIR>
@@ -19,7 +22,8 @@ stdout, only on success:
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
   ===== review package =====           then the script's stdout (--package)
 
-Exit 0 on success; 1 if the package script fails; 2 on usage error; 3 if DIR
+Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
+brief cannot be read, or the package script fails; 2 on usage error; 3 if DIR
 is not a git worktree or the fast-forward fails; task-brief's code if a brief
 fails.
 """
@@ -30,6 +34,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+# Variables that would point git at another repo than the one named.
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 
 
 def fail(code, message):
@@ -39,14 +47,14 @@ def fail(code, message):
 
 def git(directory, *args):
     return subprocess.run(
-        ["git", "-C", directory, *args], capture_output=True, text=True
+        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
     )
 
 
-def rev_parse(directory, *args):
+def rev_parse(code, directory, *args):
     res = git(directory, "rev-parse", *args)
     if res.returncode != 0:
-        fail(3, f"git rev-parse {' '.join(args)} failed in {directory!r}: {res.stderr.strip()}")
+        fail(code, f"git rev-parse {' '.join(args)} failed in {directory!r}: {res.stderr.strip()}")
     return res.stdout.strip()
 
 
@@ -67,26 +75,28 @@ def parse(argv):
 def main(argv):
     args = parse(argv)
     directory = args.dir
-    branch = rev_parse(directory, "--abbrev-ref", "HEAD")
+    branch = rev_parse(3, directory, "--abbrev-ref", "HEAD")
 
     if args.sync is not None:
         res = git(directory, "merge", "--ff-only", args.sync)
         if res.returncode != 0:
             detail = (res.stderr or res.stdout).strip()
             fail(3, f"fast-forward of {directory!r} to {args.sync!r} failed: {detail}")
-    head = rev_parse(directory, "HEAD")
+    head = rev_parse(1, directory, "HEAD")
 
     out = [f"branch: {branch}\n", f"head: {head}\n"]
     plan = os.path.abspath(args.plan)
     for task_id, path in args.brief:
-        res = subprocess.run([sys.executable, os.path.join(HERE, "task-brief"), plan, task_id, path])
+        res = subprocess.run(
+            [sys.executable, os.path.join(HERE, "task-brief"), plan, task_id, path], env=ENV
+        )
         if res.returncode != 0:
             sys.exit(res.returncode)
         try:
             with open(path, encoding="utf-8") as f:
                 text = f.read()
         except (OSError, UnicodeDecodeError) as e:
-            fail(3, f"cannot read brief {path!r}: {e}")
+            fail(1, f"cannot read brief {path!r}: {e}")
         out.append(f"===== brief {task_id}: {path} =====\n{text}")
 
     if args.package is not None:
@@ -97,6 +107,7 @@ def main(argv):
         res = subprocess.run(
             ["bash", script, plan, base, head_ref, package_out],
             cwd=directory,
+            env=ENV,
             stdout=subprocess.PIPE,
             text=True,
         )

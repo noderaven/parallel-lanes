@@ -17,8 +17,14 @@ prints one JSON line:
    git diff --shortstat FROM HEAD, 0 when empty>, "commits": [...],
    "branch": BRANCH}
 
-Exit 0 on success; 2 on usage error; 3 on a refusal or a git failure; the
-ledger's code if an append fails.
+GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+GIT_COMMON_DIR are removed from the environment of every git and ledger call,
+so DIR alone names the repository.
+
+Exit 0 on success; 1 if git merge-base or git diff --shortstat fails; 2 on
+usage error; 3 on a refusal (DIR's branch unreadable or not BRANCH, an
+unresolvable FROM or SHA, a SHA outside FROM..HEAD); the ledger's code if an
+append fails.
 """
 
 import argparse
@@ -30,6 +36,10 @@ import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 SHORTSTAT = re.compile(r"(\d+) (insertion|deletion)")
+# Variables that would point git at another repo than the one named.
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 
 
 def fail(code, message):
@@ -39,7 +49,7 @@ def fail(code, message):
 
 def git(directory, *args):
     return subprocess.run(
-        ["git", "-C", directory, *args], capture_output=True, text=True
+        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
     )
 
 
@@ -53,7 +63,7 @@ def commit_sha(directory, ref):
 def is_ancestor(directory, older, newer):
     res = git(directory, "merge-base", "--is-ancestor", older, newer)
     if res.returncode not in (0, 1):
-        fail(3, f"git merge-base failed in {directory!r}: {res.stderr.strip()}")
+        fail(1, f"git merge-base failed in {directory!r}: {res.stderr.strip()}")
     return res.returncode == 0
 
 
@@ -96,13 +106,15 @@ def main(argv):
 
     res = git(directory, "diff", "--shortstat", base, head)
     if res.returncode != 0:
-        fail(3, f"git diff --shortstat failed in {directory!r}: {res.stderr.strip()}")
+        fail(1, f"git diff --shortstat failed in {directory!r}: {res.stderr.strip()}")
     changed = sum(int(n) for n, _ in SHORTSTAT.findall(res.stdout))
 
     ledger = os.path.join(HERE, "ledger")
     for task in args.task:
         entry = json.dumps({"task": task, "event": "committed", "commits": commits})
-        res = subprocess.run([sys.executable, ledger, "append", args.ledger_dir, args.lane, entry])
+        res = subprocess.run(
+            [sys.executable, ledger, "append", args.ledger_dir, args.lane, entry], env=ENV
+        )
         if res.returncode != 0:
             sys.exit(res.returncode)
 
