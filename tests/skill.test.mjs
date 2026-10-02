@@ -158,3 +158,27 @@ test('reference.md cleanup never runs git in a shadow project folder', () => {
   assert.ok(cleanup.includes('git -C "<worktree_root>/feature" branch -d'), cleanup);
   assert.match(cleanup, /not a repo/);
 });
+
+test('SKILL.md names the addendum scripts, fields, tools, and flow rules', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  for (const term of ['scripts/setup', 'scripts/run-report', 'scripts/active-run', 'setup_result',
+    'start_points', 'profile', 'autonomy', 'max_agents', 'PushNotification']) {
+    assert.ok(text.includes(term), `SKILL.md lacks ${term}`);
+  }
+  assert.ok(text.includes('1-2 task'), 'SKILL.md lacks the 1-2 task step-aside rule');
+  assert.match(text, /copy `<skill_dir>\/run\.workflow\.js` into the session scratchpad directory/);
+  assert.match(text, /use that copy as `scriptPath`/);
+});
+
+test('SKILL.md stays under 2400 words', () => {
+  const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
+  assert.ok(words < 2400, `SKILL.md has ${words} words`);
+});
+
+test('reference.md has sections for profiles, tiers, batching, adjudicator, budgets, and the report', () => {
+  const text = read(REFERENCE_MD).toString('utf8');
+  const headings = [...text.matchAll(/^## (.+)$/gm)].map((m) => m[1].toLowerCase());
+  for (const word of ['profiles', 'tiers', 'batching', 'adjudicator', 'budgets', 'report']) {
+    assert.ok(headings.some((h) => h.includes(word)), `reference.md lacks a ${word} section`);
+  }
+});

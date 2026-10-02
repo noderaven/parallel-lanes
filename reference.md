@@ -24,9 +24,13 @@ validator in `run.workflow.js` (`validateManifest`) is authoritative;
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes. |
 | `join` | Tasks run in order on the merged branch after integration. |
-| task | `{id, title, files, tier, security}`. `id` exactly as in the plan heading (`T13a`, `7`); `title` and `files` from derive-lanes; `tier` `standard` or `light`; a light task cannot have `security: true`. |
+| task | `{id, title, files, tier, security, batch?}`. `id` exactly as in the plan heading (`T13a`, `7`); `title` and `files` from derive-lanes; `tier` `standard`, `sonnet`, or `light` (see Tiers); a sonnet or light task cannot have `security: true`; `batch` only on light tasks (see Batching). |
 | `hooks` | Optional `post_integrate` (instructions for an agent after integration, e.g. a contract check) and `e2e` (instructions for an end-to-end check, e.g. "Follow plan Task T24"). |
-| `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, nproc + 2)`. |
+| `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, nproc + 2)`, `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
+| `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
+| `profile` | `full` (default) or `lite` (see Profiles). |
+| `setup_result` | The output of `scripts/setup <manifest>`: `{feature_head, worktrees, discarded}`. Added after the yes to the table; when present no Setup agent runs. Absent only in hand-written manifests (the Setup agent is then the fallback). |
+| `start_points` | `{prelude, join}` feature heads, copied verbatim from `ledger status` after setup. |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status`. Never by hand. |
 | `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (SKILL.md Resume). Required for every done task; each `head` is the next task's review base. |
@@ -77,24 +81,110 @@ Otherwise:
    - Anything else (both parts change the same logic): keep them in one lane.
 5. Small groups with nothing between them can share a lane (a lane is a sequence). Balance
    lanes so the longest lane, which sets the wall time, stays short.
-6. More lanes than the cap is fine: extra lanes queue. Fewer than 2 lanes or about 6
-   runnable tasks: not a fit.
+6. More lanes than the cap is fine: extra lanes queue. A single lane is fine; a plan of 1-2
+   runnable tasks is not a fit.
 7. A task that commits nothing (end-to-end verification) becomes `hooks.e2e`, not a task.
+
+## Profiles
+
+- `full` (default): prelude, lane worktrees, an integrate agent, a pre-flight agent, and three
+  final reviews (superpowers, security, correctness).
+- `lite`: one lane, worked directly on the feature branch; no lane worktree, no integrate
+  agent, a deterministic-only pre-flight, and one combined final reviewer. Allowed only for
+  exactly one lane, at most 8 tasks across prelude, lane, and join, no security task, and
+  no `hooks.post_integrate` (lite does not run it). Otherwise use `full`. The dry run
+  rejects a lite manifest that breaks these rules.
+- The table header shows the profile; the user may switch it there (re-dry-run).
 
 ## Tiers
 
 | Tier | Model | Use for |
 |---|---|---|
-| standard | Opus 5.5, effort high | Default. Every task with logic or tests of logic. Every reviewer, pre-flight, integration, E2E, and final review agent (the script enforces this). |
-| light | Sonnet 5.5, effort medium | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. |
+| standard | Opus 5.5, effort high | Default. Every task with logic or tests of logic. Every reviewer, pre-flight, adjudicator, resolver, integration, post-integrate, and final review agent. |
+| sonnet | Sonnet 5.5, effort high | Implementers of well-specified tasks with some logic. After the first `changes` verdict the task escalates to Opus. |
+| light | Sonnet 5.5, effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates like sonnet. |
 
 - `security: true` for tasks touching authentication, authorization, tokens, crypto,
   untrusted input (uploads, parsing external files, request bodies), file paths from users,
-  or permissions. A security task is never light. The security final-review lens lists them.
-- A light task that blocks or gets "changes" twice reruns at standard automatically.
+  or permissions. A security task is always `standard`, never sonnet or light.
+- A sonnet or light task that blocks, or gets "changes" once, reruns at standard
+  automatically (escalations are counted in the report).
+- Reviews of diffs under 60 changed lines with no security flag run Opus at `medium`;
+  everything else runs Opus at `high`. Mechanical run steps (clean merge plus commands, E2E
+  execution) start on Sonnet and escalate to Opus on any conflict or failure.
 - The user's preference wins when stricter: "Opus for everything" means every task is
-  standard. There is no Haiku tier and reviewers are never lighter than standard; if the
-  user asks for that, say so.
+  `standard`. There is no Haiku tier and reviewers are never lighter than Opus; if the user
+  asks for that, say so.
+
+## Batching
+
+Consecutive tasks in one lane with `batch: "<key>"` (same key, tier `light`) run as one
+implementer and one Opus review over the combined range. Use it for runs of tiny mechanical
+tasks (several doc edits, a few config files) that do not need separate reviews. Ledger
+events (`committed`, `reviewed`) stay per task, so resume works per task. The dry run shows
+one implement and one review agent for the batch; if its review asks for changes or the task
+blocks, the whole batch is the unit. Never batch a standard, sonnet, or security task.
+
+## Adjudicator
+
+Under `autonomy: autonomous` an Opus agent (effort high) is called instead of stopping a lane
+when a task is blocked, an implementer asks a question, the review round cap trips, or
+pre-flight reports conflicts. It sees the spec, plan, task brief, the report or findings,
+and the diff range, and returns one outcome:
+
+| Outcome | Effect |
+|---|---|
+| `answer` | The text becomes the task's note; the task retries. |
+| `clarify_plan` | A ruling that amends the task's brief for this run only; the task retries. |
+| `park` | The findings are recorded as deferred; the task completes. |
+| `unblock` | The smallest change that unblocks dependents, carried to the next task. |
+| `stop` | Allowed only for `destructive` (irreversible operation), `security` (a security-sensitive decision), `outside_side_effect` (outside the run's worktrees), or `plan_broken` (every path is a guess). The run stops, resumable. |
+
+A task adjudicated twice and still blocked ends with `adjudication_cap`. Every ruling is a
+ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
+`preflight.rulings`. Both appear in the hand-back under "Rulings made on your behalf". Under
+`supervised` there is no adjudicator: a blocked task, a question, or the review cap
+(`review_rounds`) stops the run.
+
+## Budgets
+
+- `limits.max_agents`: set to 2 x the dry-run estimate (which includes one Setup agent the
+  launch will not spawn). A refused agent ends its task or phase without work; the run stops
+  with reason `budget`, resumable.
+- `limits.max_rulings`: 25 adjudicator rulings per run.
+- The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
+  notifies. Raise a limit in the manifest to continue; resume needs a new table only if
+  tasks or limits the user has not seen change.
+- A relaunch after a transient stop lowers `max_agents` by the stopped run's
+  `agents_spawned` and `max_rulings` by that run's ledger `ruling` events (floor 0); fewer
+  than 1 agent left is treated as a budget cap.
+
+## Active-run markers and stops
+
+`scripts/active-run write <run_id> <manifest> [status]` writes
+`~/.claude/parallel-lanes/active/<run_id>.json` (`{run_id, manifest, started, status}`) at
+launch; `remove` deletes it at `complete`; `list` prints every marker as JSON. A run that
+ends any other way keeps the marker with its status, and the next session's bootstrap lists
+it so the user can resume with one word.
+
+Transient vs real stops (SKILL.md "Transient stops"): only agent errors, missing results
+(`no result from ...`, `error: ...`), and setup-command retry exhaustion (`setup failed`) are
+transient and relaunch once without asking. `review_rounds`, a supervised blocked or question
+task, `adjudication_cap`, `adjudicator_stop: <condition>`, `budget`, failed integration or
+post-integrate on real failures, `invalid`, and `preflight_conflicts` always stop for the
+user. The session notifies (PushNotification, else a chat notice) on completion, any real
+stop, a budget cap, and a failed relaunch.
+
+## Report
+
+`python3 <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
+workflow transcript directory printed at launch (`agent-*.meta.json` and `agent-*.jsonl`).
+Output: `agents` (per agent: label, phase, task, role, requested and resolved model, effort,
+input, output, cache read, and cache creation tokens), `tiers` (totals per tier), `totals`,
+and `unavailable`, `escalations`, `fix_rounds`, `retries` counts. A field that cannot be read
+is the string `unavailable`, never a guess. The hand-back appends it, saves it beside the
+manifest, and lists "Rulings made on your behalf" from the ledger `ruling` events plus
+`preflight.rulings`.
 
 ## Shadow repos
 
@@ -149,6 +239,10 @@ git -C "<wt>" status --porcelain                        # must print nothing
 git -C "<worktree_root>/feature" branch -d "<branch>"   # lane branches, while feature exists
 git --git-dir="<git_dir>" worktree remove "<wt>"
 ```
+
+`shadow writeback` exit 3, by its message: conflicts = files edited in the folder during the
+run; "cannot be written" = permissions (in both nothing was written; show them and ask);
+"writeback failed at" = a write failed midway; show the paths it lists as already written.
 
 A worktree with uncommitted files stays; list it for the user. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
