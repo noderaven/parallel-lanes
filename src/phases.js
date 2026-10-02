@@ -59,6 +59,25 @@ async function runFinalReview(m, e2e, base, io) {
   return final;
 }
 
+// setup_result (scripts/setup) must name, for every lane, the worktree the
+// run uses for it: its lane worktree, or the feature checkout under profile
+// lite. The script cannot stat paths; scripts/setup guarantees they exist.
+// Returns error strings naming each lane that is missing or different.
+function setupResultErrors(m) {
+  if (!m.setup_result) return [];
+  const errors = [];
+  for (const lane of m.lanes) {
+    const want = m.profile === 'lite' ? featureDir(m) : laneWhere(m, lane).dir;
+    const got = m.setup_result.worktrees[lane.id];
+    if (got === undefined) {
+      errors.push(`setup_result.worktrees: missing a worktree for lane ${lane.id}`);
+    } else if (got !== want) {
+      errors.push(`setup_result.worktrees.${lane.id}: ${got} is not the worktree the run uses for lane ${lane.id} (${want})`);
+    }
+  }
+  return errors;
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
@@ -69,7 +88,8 @@ async function runFinalReview(m, e2e, base, io) {
 // Task status is done, blocked, skipped (done and reviewed earlier), or
 // not_run.
 async function runAll(m, io) {
-  const errors = validateManifest(m);
+  let errors = validateManifest(m);
+  if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
@@ -142,15 +162,26 @@ async function runAll(m, io) {
     io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
   }
 
-  io.phase('Setup');
-  const setup = await call('setup', 'Setup', setupPrompt(m), setupSchema());
-  if (!setup || setup.ok !== true) {
-    return report('stopped', `setup failed: ${setup ? setup.notes : 'no result from setup'}`);
+  // Setup: the session ran scripts/setup and passed its output; without it
+  // (a hand-written manifest) the Setup agent does the same work.
+  let setup = m.setup_result;
+  if (!setup) {
+    io.phase('Setup');
+    setup = await call('setup', 'Setup', setupPrompt(m), setupSchema());
+    if (!setup || setup.ok !== true) {
+      return report('stopped', `setup failed: ${setup ? setup.notes : 'no result from setup'}`);
+    }
   }
   for (const item of setup.discarded || []) io.log(`parallel-lanes: discarded uncommitted change ${item}`);
   if (!present(setup.feature_head)) return report('stopped', 'setup failed: no feature head reported');
   // The feature tip: the base of the next task on the feature branch.
   let tip = setup.feature_head;
+  // Saved start points (ledger run_started events) replace the phase tip
+  // only as the base of the prelude and join lists, so commits an earlier
+  // attempt made at a first task before recording it are reviewed too. A
+  // list that moved no head leaves the tip where the phase put it.
+  const starts = m.start_points || {};
+  const listTip = (list) => (list.results.some((r) => present(r.head)) ? list.head : tip);
 
   io.phase('Pre-flight');
   const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -159,13 +190,14 @@ async function runAll(m, io) {
   if (pre.conflicts.length > 0) return report('preflight_conflicts');
 
   io.phase('Prelude');
-  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), tip, counted, 'Prelude', true);
+  const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
+    counted, 'Prelude', true);
   record(prelude.results);
   if (prelude.stopped !== null) {
     stopAt('prelude', prelude);
     return report('stopped', 'prelude stopped');
   }
-  tip = prelude.head;
+  tip = listTip(prelude);
 
   // Lane agents carry their lane's phase; lanes with nothing left are skipped.
   const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
@@ -196,13 +228,14 @@ async function runAll(m, io) {
   }
 
   io.phase('Join');
-  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), tip, counted, 'Join', true);
+  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), starts.join || tip,
+    counted, 'Join', true);
   record(join.results);
   if (join.stopped !== null) {
     stopAt('join', join);
     return report('stopped', 'join stopped');
   }
-  tip = join.head;
+  tip = listTip(join);
 
   if (m.hooks.e2e) {
     io.phase('E2E');

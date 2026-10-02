@@ -832,3 +832,99 @@ test('integrate allows earlier final-fix commits after the join tip only when ev
   const freshInteg = fresh.calls.find((c) => c.label === 'integrate').prompt;
   assert.ok(!/final-fix commits/.test(freshInteg));
 });
+
+// The output of scripts/setup for a manifest: every lane at the worktree the
+// run uses for it.
+function setupResultFor(m, extra = {}) {
+  const worktrees = Object.fromEntries(m.lanes.map((l) => [l.id, `${m.repo.worktree_root}/lane-${l.id}`]));
+  return { feature_head: 'S0', worktrees, discarded: [], ...extra };
+}
+
+test('setup_result: no setup agent, its feature head starts the prelude, lanes use its paths', async () => {
+  const m = manifest();
+  m.setup_result = setupResultFor(m, { discarded: ['/work/wt/lane-alpha: M src/T2.js'] });
+  const script = { ...phaseScript(), ...taskScript(ALL) };
+  delete script.setup;
+  const { result, calls, logs, phases } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).includes('setup'));
+  assert.equal(labels(calls)[0], 'pre-flight');
+  assert.ok(!phases.includes('Setup'));
+  assert.deepEqual(result.tasks.T1.commits, ['S0', 'T1-h']);
+  assert.ok(calls.find((c) => c.label === 'T1 implement').prompt.includes('S0'));
+  assert.ok(logs.some((l) => l.includes('/work/wt/lane-alpha: M src/T2.js')), JSON.stringify(logs));
+  for (const [id, lane] of [['T2', 'alpha'], ['T3', 'alpha'], ['T4', 'beta']]) {
+    const prompt = calls.find((c) => c.label === `${id} implement`).prompt;
+    assert.ok(prompt.includes(m.setup_result.worktrees[lane]), `${id} works in ${lane}`);
+  }
+});
+
+test('setup_result missing a lane: invalid naming the lane, no agent', async () => {
+  const m = manifest();
+  m.setup_result = setupResultFor(m);
+  delete m.setup_result.worktrees.beta;
+  const { result, calls } = await run(m, {});
+  assert.equal(result.status, 'invalid');
+  assert.ok(result.errors.some((e) => e.includes('beta')), JSON.stringify(result.errors));
+  assert.deepEqual(calls, []);
+  assert.equal(result.agents_spawned, 0);
+});
+
+test('setup_result naming a different path for a lane: invalid naming the lane, no agent', async () => {
+  const m = manifest();
+  m.setup_result = setupResultFor(m);
+  m.setup_result.worktrees.beta = '/elsewhere/lane-beta';
+  const { result, calls } = await run(m, {});
+  assert.equal(result.status, 'invalid');
+  const err = result.errors.find((e) => e.includes('beta'));
+  assert.ok(err, JSON.stringify(result.errors));
+  assert.ok(err.includes('/elsewhere/lane-beta') && err.includes('/work/wt/lane-beta'), err);
+  assert.ok(!result.errors.some((e) => e.includes('alpha')), JSON.stringify(result.errors));
+  assert.deepEqual(calls, []);
+  assert.equal(result.agents_spawned, 0);
+});
+
+test('setup_result under profile lite maps the lane to the feature checkout', async () => {
+  const m = manifest({ profile: 'lite', lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] }] });
+  m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
+  const { result, calls } = await run(m, {});
+  assert.equal(result.status, 'invalid');
+  assert.ok(result.errors.some((e) => e.includes('alpha') && e.includes('/work/repo')), JSON.stringify(result.errors));
+  assert.deepEqual(calls, []);
+});
+
+test('start_points: the saved prelude and join heads are the bases of the first tasks', async () => {
+  const m = manifest({ start_points: { prelude: 'SP0', join: 'SJ0' } });
+  const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.tasks.T1.commits, ['SP0', 'T1-h']);
+  assert.ok(calls.find((c) => c.label === 'T1 review').prompt.includes('range SP0..T1-h'));
+  assert.deepEqual(result.tasks.T5.commits, ['SJ0', 'T5-h']);
+  assert.ok(calls.find((c) => c.label === 'T5 review').prompt.includes('range SJ0..T5-h'));
+  // Lanes still start from the prelude tip.
+  assert.deepEqual(result.tasks.T2.commits, ['T1-h', 'T2-h']);
+});
+
+test('start_points: a review-state first task with a backfill entry still reviews its backfill range', async () => {
+  const m = manifest({
+    done: ['T1'], reviewed: [], backfill: backfillFor(['T1']), start_points: { prelude: 'SP0' },
+  });
+  const script = {
+    ...phaseScript({ setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }] }),
+    ...taskScript(['T2', 'T3', 'T4', 'T5']),
+    'T1 review': [approve()],
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  const rev = calls.find((c) => c.label === 'T1 review').prompt;
+  assert.ok(rev.includes('range T1-old-b..T1-old-h'), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', 'T1-old-h']);
+});
+
+test('start_points: an empty prelude leaves the lanes on the setup feature head', async () => {
+  const m = manifest({ prelude: [], start_points: { prelude: 'SP0' } });
+  const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T2', 'T3', 'T4', 'T5']) });
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.tasks.T2.commits, ['F0', 'T2-h']);
+  assert.ok(calls.find((c) => c.label === 'integrate').prompt.includes('F0 is the feature tip after the prelude'));
+});
