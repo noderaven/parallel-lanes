@@ -287,6 +287,39 @@ test('derive-lanes reads multi-line bullet Files blocks and ignores fenced code'
   ]);
 });
 
+test('derive-lanes treats a Task heading without the colon form as a boundary, not a task', () => {
+  const plan = planFile(
+    [
+      '# Plan',
+      '',
+      '## Task overview',
+      '',
+      'Lanes are described below.',
+      '',
+      '### Task 1: A',
+      '',
+      '**Files:** Create `a.py`',
+      '',
+      '### Task 2 (join): B',
+      '',
+      '**Files:** Create `b.py`',
+      '',
+      '### Task notes',
+      '',
+      '**Files:** Modify `a.py`',
+      '- Consumes: Task 1',
+      '',
+    ].join('\n'),
+  );
+  const { out, stderr } = deriveJson(plan);
+  assert.equal(stderr, '');
+  assert.deepEqual(out.tasks, [
+    { id: '1', title: 'A', files: ['a.py'], deps: [] },
+    { id: '2', title: 'B', files: ['b.py'], deps: [] },
+  ]);
+  assert.deepEqual(out.groups, [['1'], ['2']]);
+});
+
 test('derive-lanes exits 2 on usage errors', () => {
   assert.equal(derive().code, 2);
   assert.equal(derive(FIXTURE, 'extra').code, 2);

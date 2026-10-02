@@ -4,8 +4,9 @@
 usage: derive-lanes PLAN [--max-lanes N]
 
 Tasks are the '#+ Task <ID>: <title>' headings outside fenced code (ids are
-free-form, e.g. 1, 10, T13a). A task's section runs to the next task heading
-of the same or higher level, or any heading of a strictly higher level.
+free-form, e.g. 1, 10, T13a; qualifiers such as '(join)' may precede the
+colon). A '#+ Task ' heading without the colon form is not a task. Heading,
+fence, and section rules live in _plan.py, shared with task-brief.
 
 Per task:
   files  backticked paths in the task's '**Files:**' block, from clauses that
@@ -37,12 +38,14 @@ headings, or repeats a task id.
 """
 
 import json
+import os
 import re
 import sys
 
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-HEADING = re.compile(r"^(#{1,6})\s")
-TASK_HEADING = re.compile(r"^(#{1,6})\s+Task\s+([^\s:(\[\]]+)(.*)$")
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _plan  # noqa: E402
+
 FILES_LINE = re.compile(r"^\s*\*\*Files:?\*\*:?(.*)$")
 BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
 CONSUMES_LINE = re.compile(r"^\s*[-*+]\s+\**Consumes:?\**:?(.*)$", re.IGNORECASE)
@@ -93,55 +96,10 @@ def usage():
     fail(2, "usage: derive-lanes PLAN [--max-lanes N]")
 
 
-def unfenced(lines):
-    """Return a list of booleans: True where a line is outside fenced code."""
-    mask = []
-    fence = None
-    for line in lines:
-        m = FENCE.match(line)
-        if m:
-            marker = m.group(1)
-            if fence is None:
-                fence = marker
-            elif marker[0] == fence[0] and len(marker) >= len(fence) and not line.strip()[len(marker):]:
-                fence = None
-            mask.append(False)
-            continue
-        mask.append(fence is None)
-    return mask
-
-
-def split_sections(lines, mask):
-    """Return [(id, heading_line, section_lines)] with fenced lines removed."""
-    headings = []
-    for i, line in enumerate(lines):
-        if not mask[i]:
-            continue
-        h = HEADING.match(line)
-        if h:
-            t = TASK_HEADING.match(line)
-            headings.append((i, len(h.group(1)), t))
-    tasks = []
-    for n, (start, level, t) in enumerate(headings):
-        if t is None:
-            continue
-        end = len(lines)
-        for i, lvl, other in headings[n + 1:]:
-            if lvl < level or (other is not None and lvl == level):
-                end = i
-                break
-        body = [lines[i] for i in range(start + 1, end) if mask[i]]
-        tasks.append((t.group(2).rstrip("."), lines[start], body))
-    return tasks
-
-
-def title_of(heading, known):
-    """Heading text after the first ':', minus bracketed dependency lists."""
-    rest = TASK_HEADING.match(heading).group(3)
-    if ":" in rest:
-        rest = rest.split(":", 1)[1]
-    rest = BRACKETS.sub(lambda m: "" if ids_in(m.group(1), known) else m.group(0), rest)
-    return " ".join(rest.split())
+def title_of(title, known):
+    """Heading text after the colon, minus bracketed dependency lists."""
+    title = BRACKETS.sub(lambda m: "" if ids_in(m.group(1), known) else m.group(0), title)
+    return " ".join(title.split())
 
 
 def path_of(token):
@@ -166,7 +124,7 @@ def files_blocks(body):
             continue
         items = [m.group(1)]
         i += 1
-        while i < len(body) and body[i].strip() and not HEADING.match(body[i]):
+        while i < len(body) and body[i].strip() and not _plan.HEADING.match(body[i]):
             b = BULLET.match(body[i])
             if b:
                 items.append(b.group(1))
@@ -246,10 +204,11 @@ def components(ids, file_tasks, skip=None):
 
 def derive(text):
     lines = text.splitlines()
-    sections = split_sections(lines, unfenced(lines))
+    mask = _plan.unfenced_mask(lines)
+    sections = _plan.task_sections(lines, mask)
     if not sections:
         fail(3, "no task headings ('#+ Task <ID>: <title>') in plan")
-    order = [task_id for task_id, _, _ in sections]
+    order = [s.id for s in sections]
     seen = set()
     for task_id in order:
         if task_id in seen:
@@ -260,14 +219,16 @@ def derive(text):
     tasks = []
     without_files = []
     file_tasks = {}
-    for task_id, heading, body in sections:
+    for section in sections:
+        task_id, heading = section.id, lines[section.start]
+        body = [lines[i] for i in range(section.start + 1, section.end) if mask[i]]
         has_block, files = parse_files(body)
         if not has_block:
             without_files.append(task_id)
         for path in files:
             file_tasks.setdefault(path, []).append(task_id)
         deps = sorted(parse_deps(task_id, heading, body, seen), key=position.get)
-        tasks.append({"id": task_id, "title": title_of(heading, seen), "files": files, "deps": deps})
+        tasks.append({"id": task_id, "title": title_of(section.title, seen), "files": files, "deps": deps})
 
     if len(without_files) == len(tasks):
         warn("no task has a Files block; every task is its own group")

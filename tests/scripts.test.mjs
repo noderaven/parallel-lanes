@@ -223,6 +223,20 @@ test('task-brief refuses a task id with two headings', () => {
   assert.equal(existsSync(out), false);
 });
 
+test('task-brief requires the colon form and stops at a bare Task heading', () => {
+  const dir = workDir();
+  const plan = join(dir, 'bare.md');
+  writeFileSync(
+    plan,
+    '## Task overview\n\nIntro.\n\n### Task 1: A\n\nBody A.\n\n### Task notes\n\nNotes.\n',
+  );
+  assert.equal(taskBrief(plan, 'overview', join(dir, 'o.md')).code, 3);
+  const out = join(dir, 'one.md');
+  const res = taskBrief(plan, '1', out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(readFileSync(out, 'utf8'), '### Task 1: A\n\nBody A.\n');
+});
+
 test('task-brief exits 2 on a usage error', () => {
   const res = taskBrief('only-one-arg');
   assert.equal(res.code, 2);
