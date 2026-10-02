@@ -264,6 +264,24 @@ test('a refusal during the final review stops the run instead of completing it',
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');
 });
 
+test('a refused final re-review stops the run for budget instead of throwing', async () => {
+  // setup, pre-flight, 10 task agents, integrate, three lenses, final fix (17).
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 17 } });
+  const script = cleanScript();
+  const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
+  script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', declined: [] }];
+  const { result, calls } = await run(m, script);
+  assert.equal(calls.length, 17);
+  assert.equal(labels(calls).at(-1), 'final fix');
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'budget');
+  assert.equal(result.agents_spawned, 17);
+  assert.deepEqual(result.final.fixed, []);
+  assert.deepEqual(result.final.declined.map((d) => d.reason), ['final re-review not run: budget exhausted']);
+  for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');
+});
+
 test('a dead agent retried once completes the run', async () => {
   const script = cleanScript();
   script['T3 implement'] = [null];

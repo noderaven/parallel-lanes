@@ -49,8 +49,11 @@ async function runFinalReview(m, e2e, base, io) {
   }
   const rr = await call('final re-review', finalReReviewPrompt(m, tip, fix.head, attempted),
     finalReReviewSchema());
-  if (!rr) {
-    for (const f of attempted) final.declined.push({ ...f, reason: 'no result from final re-review' });
+  // A refused re-review returns the budget sentinel, which has no findings.
+  if (!rr || !Array.isArray(rr.findings)) {
+    const reason = rr && rr.__budget ? 'final re-review not run: budget exhausted'
+      : 'no result from final re-review';
+    for (const f of attempted) final.declined.push({ ...f, reason });
     return final;
   }
   const openKeys = new Set(rr.findings.map(findingKey));
