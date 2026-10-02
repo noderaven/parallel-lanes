@@ -136,8 +136,29 @@ configuration is needed.
 
 ## 5. Using it
 
-1. Write a plan whose tasks have `### Task <ID>:` headings and list the files each task
-   touches. Superpowers' brainstorming and writing-plans skills produce plans in this format.
+1. Get a plan. The normal way is to describe what you want built and let Superpowers
+   handle it: its brainstorming skill turns the idea into a spec, and its writing-plans
+   skill turns the spec into a plan. You don't write task IDs or headings yourself;
+   writing-plans numbers the tasks and lists the files each one touches.
+
+   You only need to follow a format if you write a plan yourself or bring one from
+   another tool. parallel-lanes looks for two things in each task:
+
+   ```markdown
+   ### Task 3: Add the export endpoint
+
+   **Files:**
+   - Create: `src/api/export.py`
+   - Modify: `src/api/app.py`
+   - Test: `tests/test_export.py`
+   ```
+
+   - A heading of the form `Task <ID>: <title>`, at the same heading level for every
+     task (a deeper task heading would count as part of the task above it). The ID is a single
+     token with no spaces, colons, parentheses, or brackets, such as `3`, `T3`, or `T13a`.
+   - A `**Files:**` block with `Create:`, `Modify:`, or `Test:` lines naming the files in
+     backticks. This is how it works out which tasks can run in parallel: tasks that
+     touch the same files go in the same lane.
 2. Work inside a git repo with a clean working tree; commit or stash first. For a folder
    that isn't a git repo, the skill offers a "shadow repo" that leaves your folder
    untouched until you approve copying the results back.
