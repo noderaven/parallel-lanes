@@ -202,8 +202,8 @@ tool is unavailable, a chat notice only.
 ## Hand-back
 
 The run returns `status`:
-- `invalid`: show `errors`, fix the manifest, back to Confirmation.
-- `preflight_conflicts`: no code was written. Show `preflight.conflicts` and `rulings`; the
+- `invalid`: notify, show `errors`, fix the manifest, back to Confirmation.
+- `preflight_conflicts`: no code was written. Notify, show `preflight.conflicts` and `rulings`; the
   user decides; then Confirmation again.
 - `stopped`: transient: relaunch as above. Otherwise show `reason` and each `stopped_lanes`
   entry (lane, task, reason), notify, keep the marker. The run is resumable: after the user
@@ -239,7 +239,7 @@ never `branch -D`. Keep the manifest and ledger.
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
    nothing more.
-5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees.
+5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees; shadow mode reuses the existing shadow.
 6. Confirmation (same rules), then, after the yes, Launch step 2 again (setup and
    `start_points`), the resume notice, and launch.
 

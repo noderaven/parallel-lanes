@@ -33,7 +33,7 @@ validator in `run.workflow.js` (`validateManifest`) is authoritative;
 | `start_points` | `{prelude, join}` feature heads, copied verbatim from `ledger status` after setup. |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status`. Never by hand. |
-| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (SKILL.md Resume). Required for every done task; each `head` is the next task's review base. |
+| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (see Backfill below). Required for every done task; each `head` is the next task's review base. |
 | `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents. |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `skill_dir` | `<skill_dir>`. |
@@ -100,15 +100,15 @@ Otherwise:
 
 | Tier | Model | Use for |
 |---|---|---|
-| standard | Opus 5.5, effort high | Default. Every task with logic or tests of logic. Every reviewer, pre-flight, adjudicator, resolver, integration, post-integrate, and final review agent. |
+| standard | Opus 5.5, effort high | Default. Every task with logic or tests of logic. Always Opus: pre-flight, adjudicator, resolver, and final review agents, and reviewers (medium for small non-security diffs, see below). Integrate, e2e, and minor-only or docs-only final fixes start on Sonnet high and escalate to Opus. |
 | sonnet | Sonnet 5.5, effort high | Implementers of well-specified tasks with some logic. After the first `changes` verdict the task escalates to Opus. |
-| light | Sonnet 5.5, effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates like sonnet. |
+| light | Sonnet 5.5, effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates to Opus after the second `changes` verdict. |
 
 - `security: true` for tasks touching authentication, authorization, tokens, crypto,
   untrusted input (uploads, parsing external files, request bodies), file paths from users,
   or permissions. A security task is always `standard`, never sonnet or light.
-- A sonnet or light task that blocks, or gets "changes" once, reruns at standard
-  automatically (escalations are counted in the report).
+- A sonnet task escalates to standard after its first `changes` verdict, a light task after
+  its second; either escalates on a block. The rerun is automatic (escalations are counted in the report).
 - Reviews of diffs under 60 changed lines with no security flag run Opus at `medium`;
   everything else runs Opus at `high`. Mechanical run steps (clean merge plus commands, E2E
   execution) start on Sonnet and escalate to Opus on any conflict or failure.
@@ -153,8 +153,9 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   with reason `budget`, resumable.
 - `limits.max_rulings`: 25 adjudicator rulings per run.
 - The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
-  notifies. Raise a limit in the manifest to continue; resume needs a new table only if
-  tasks or limits the user has not seen change.
+  notifies. Raise a limit in the manifest to continue; raise the limit in the manifest, then resume,
+  which goes through Confirmation again (dry run, table, explicit yes). The only edits that
+  need no second table are `setup_result`, `start_points`, and the relaunch budget carry-over.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
   `agents_spawned` and `max_rulings` by that run's ledger `ruling` events (floor 0); fewer
   than 1 agent left is treated as a budget cap.
@@ -185,6 +186,19 @@ and `unavailable`, `escalations`, `fix_rounds`, `retries` counts. A field that c
 is the string `unavailable`, never a guess. The hand-back appends it, saves it beside the
 manifest, and lists "Rulings made on your behalf" from the ledger `ruling` events plus
 `preflight.rulings`.
+
+## Backfill
+
+Resume builds `backfill` for every done task from its `committed` events in
+`<ledger_dir>/<lane>.jsonl`:
+
+- `head` = the last sha of the task's last committed event.
+- `base` = the parent of the first sha of its first committed event, via
+  `git -C <root> rev-parse <sha>^`, or `git --git-dir=<git_dir> rev-parse <sha>^` in shadow
+  mode.
+
+It is required because each `head` is the next task's review base, and done-but-unreviewed
+tasks get a review first. A wrong base silently changes the review range of every done task.
 
 ## Shadow repos
 
