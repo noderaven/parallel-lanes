@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Active-run markers: one JSON file per launched parallel-lanes run, so a later
+# session can see which runs were interrupted and offer to resume them.
+#
+# usage:
+#   active-run write RUN_ID MANIFEST [STATUS]
+#   active-run remove RUN_ID
+#   active-run list
+#
+# Markers live in ${PL_ACTIVE_DIR:-~/.claude/parallel-lanes/active}/<RUN_ID>.json
+# as {run_id, manifest, started, status}; the directory is created with mode
+# 0700. write creates or replaces a marker: STATUS defaults to running, and
+# rewriting an existing marker keeps its started time and updates its status.
+# remove deletes a marker (a missing one is fine). list prints a JSON array of
+# the markers sorted by run id, skipping files that are not valid markers; a
+# missing directory lists as [].
+#
+# Exit 0 on success; 2 on usage error; 3 on an unsafe run id or a marker
+# directory that cannot be created or written.
+set -euo pipefail
+
+dir="${PL_ACTIVE_DIR:-$HOME/.claude/parallel-lanes/active}"
+
+usage() {
+  echo "usage: active-run write RUN_ID MANIFEST [STATUS] | remove RUN_ID | list" >&2
+  exit 2
+}
+
+fail() {
+  echo "active-run: $2" >&2
+  exit "$1"
+}
+
+check_id() {
+  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 3 "unsafe run id '$1'"
+}
+
+# A file's contents as a compact marker object, or nothing if it is not one.
+read_marker() {
+  jq -c 'select(type == "object" and (.run_id | type) == "string"
+    and (.manifest | type) == "string" and (.started | type) == "string"
+    and (.status | type) == "string")' "$1" 2>/dev/null || true
+}
+
+[ "$#" -ge 1 ] || usage
+command -v jq >/dev/null 2>&1 || fail 3 "jq is required"
+
+case "$1" in
+  write)
+    [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
+    run_id="$2" manifest="$3" status="${4-running}"
+    [ -n "$manifest" ] && [ -n "$status" ] || usage
+    check_id "$run_id"
+    (umask 077 && mkdir -p "$dir") 2>/dev/null || fail 3 "cannot create $dir"
+    [ -d "$dir" ] || fail 3 "$dir is not a directory"
+    target="$dir/$run_id.json"
+    started=""
+    if [ -f "$target" ]; then
+      started="$(read_marker "$target" | jq -r '.started' 2>/dev/null || true)"
+    fi
+    [ -n "$started" ] || started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tmp="$(umask 077 && mktemp "$dir/.$run_id.XXXXXX")" || fail 3 "cannot write in $dir"
+    if ! jq -n --arg run_id "$run_id" --arg manifest "$manifest" \
+      --arg started "$started" --arg status "$status" \
+      '{run_id: $run_id, manifest: $manifest, started: $started, status: $status}' >"$tmp" ||
+      ! mv -f "$tmp" "$target"; then
+      rm -f "$tmp"
+      fail 3 "cannot write $target"
+    fi
+    ;;
+  remove)
+    [ "$#" -eq 2 ] || usage
+    check_id "$2"
+    rm -f "$dir/$2.json" || fail 3 "cannot remove $dir/$2.json"
+    ;;
+  list)
+    [ "$#" -eq 1 ] || usage
+    shopt -s nullglob
+    files=()
+    [ -d "$dir" ] && files=("$dir"/*.json)
+    for f in "${files[@]}"; do
+      read_marker "$f"
+    done | jq -s -c 'sort_by(.run_id)'
+    ;;
+  *)
+    usage
+    ;;
+esac

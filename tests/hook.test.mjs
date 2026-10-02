@@ -1,7 +1,7 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -9,9 +9,21 @@ import { SKILL_DIR } from './harness.mjs';
 const NOTICE = join(SKILL_DIR, 'hooks', 'notice.sh');
 const SESSION_START = join(SKILL_DIR, 'hooks', 'session-start.sh');
 const BOOTSTRAP = join(SKILL_DIR, 'hooks', 'bootstrap.md');
+const ACTIVE_RUN = join(SKILL_DIR, 'scripts', 'active-run');
+
+// Every hook run gets its own empty marker directory, so active-run markers
+// on this machine never affect a test.
+const TMP = mkdtempSync(join(tmpdir(), 'pl-hook-active-'));
+after(() => rmSync(TMP, { recursive: true, force: true }));
+let counter = 0;
+function freshActiveDir() {
+  counter += 1;
+  return join(TMP, `case ${counter}`);
+}
 
 function runHook(script, stdin, env = process.env) {
-  const res = spawnSync(BASH, [script], { input: stdin, encoding: 'utf8', env });
+  const full = { PL_ACTIVE_DIR: freshActiveDir(), ...env };
+  const res = spawnSync(BASH, [script], { input: stdin, encoding: 'utf8', env: full });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
@@ -68,6 +80,71 @@ test('session-start: emits SessionStart additionalContext equal to bootstrap.md'
     ctx.includes('the main session at the execution-method handoff, never an agent executing a single task'),
     'bootstrap.md is scoped to the main session',
   );
+});
+
+test('session-start: each active-run marker adds a resume line', () => {
+  const dir = freshActiveDir();
+  const env = { ...process.env, PL_ACTIVE_DIR: dir };
+  for (const [id, manifest] of [['run-1', '/plans/run 1.json'], ['run-2', '/plans/"q".json']]) {
+    const w = spawnSync(BASH, [ACTIVE_RUN, 'write', id, manifest], { encoding: 'utf8', env });
+    assert.equal(w.status, 0, w.stderr);
+  }
+  const res = runHook(SESSION_START, '{"hook_event_name":"SessionStart","source":"resume"}', env);
+  assert.equal(res.code, 0, res.stderr);
+  const out = JSON.parse(res.stdout);
+  assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.equal(
+    out.hookSpecificOutput.additionalContext,
+    readFileSync(BOOTSTRAP, 'utf8') +
+      'Interrupted parallel-lanes run run-1 (manifest /plans/run 1.json): offer the user a one-word resume.\n' +
+      'Interrupted parallel-lanes run run-2 (manifest /plans/"q".json): offer the user a one-word resume.\n',
+  );
+});
+
+test('session-start: control characters in a manifest path stay on one line', () => {
+  const dir = freshActiveDir();
+  const env = { ...process.env, PL_ACTIVE_DIR: dir };
+  const w = spawnSync(BASH, [ACTIVE_RUN, 'write', 'r9', '/a\nb\tc.json'], { encoding: 'utf8', env });
+  assert.equal(w.status, 0, w.stderr);
+  const res = runHook(SESSION_START, '{}', env);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    JSON.parse(res.stdout).hookSpecificOutput.additionalContext,
+    readFileSync(BOOTSTRAP, 'utf8') +
+      'Interrupted parallel-lanes run r9 (manifest /a b c.json): offer the user a one-word resume.\n',
+  );
+});
+
+test('session-start: marker lines start on a new line after a bootstrap.md without one', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pl-hook-root-'));
+  try {
+    mkdirSync(join(root, 'hooks'));
+    mkdirSync(join(root, 'scripts'));
+    copyFileSync(SESSION_START, join(root, 'hooks', 'session-start.sh'));
+    copyFileSync(ACTIVE_RUN, join(root, 'scripts', 'active-run'));
+    writeFileSync(join(root, 'hooks', 'bootstrap.md'), 'Bootstrap text.');
+    const env = { ...process.env, PL_ACTIVE_DIR: freshActiveDir() };
+    const w = spawnSync(BASH, [ACTIVE_RUN, 'write', 'r1', '/m.json'], { encoding: 'utf8', env });
+    assert.equal(w.status, 0, w.stderr);
+    const res = runHook(join(root, 'hooks', 'session-start.sh'), '{}', env);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(
+      JSON.parse(res.stdout).hookSpecificOutput.additionalContext,
+      'Bootstrap text.\nInterrupted parallel-lanes run r1 (manifest /m.json): offer the user a one-word resume.\n',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('session-start: an unreadable marker directory leaves the output unchanged', () => {
+  const dir = freshActiveDir();
+  mkdirSync(dir, { recursive: true });
+  const notDir = join(dir, 'file');
+  copyFileSync(BOOTSTRAP, notDir);
+  const res = runHook(SESSION_START, '{}', { ...process.env, PL_ACTIVE_DIR: notDir });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).hookSpecificOutput.additionalContext, readFileSync(BOOTSTRAP, 'utf8'));
 });
 
 test('bootstrap.md is plain ASCII and under 120 words', () => {
