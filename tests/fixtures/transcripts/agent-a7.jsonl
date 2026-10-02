@@ -1,0 +1,2 @@
+{"type": "assistant", "message": {"model": "claude-sonnet-4-6", "usage": {"input_tokens": 9, "output_tokens": 9, "cache_read_input_tokens": 9, "cache_creation_input_tokens": 9}}, "timestamp": "2026-10-02T10:07:00.000Z"}
+{"type": "user", "message": {"content": "x"}, "timestamp": "2026-10-02T10:07:01.000Z"}

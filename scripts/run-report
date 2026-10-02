@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Per-agent model and token report for a finished workflow run.
+
+usage:
+  python3 run-report TRANSCRIPT_DIR MANIFEST [--out FILE]
+
+TRANSCRIPT_DIR holds agent-*.meta.json (description, workflowPhase, optional
+model) and
+agent-*.jsonl (resolved message.model and usage per line). MANIFEST is the
+run manifest, used to recognise task ids and to derive implement and fix
+effort. Prints JSON (or writes it to FILE):
+
+  {agents: [...], tiers: {<tier>: {...}}, totals: {...},
+   unavailable: N, escalations: N, fix_rounds: N, retries: N}
+
+Anything that cannot be read or derived is the string "unavailable", never a
+guess; totals sum only known values.
+"""
+import glob
+import json
+import os
+import re
+import sys
+
+UNAVAILABLE = "unavailable"
+TOKEN_FIELDS = ("input_tokens", "output_tokens",
+                "cache_read_input_tokens", "cache_creation_input_tokens")
+# Effort of implement and fix roles. Mirrors tierSettings in src/plan.js:
+# standard, sonnet and light all run their implementers at high.
+TIER_EFFORT = {"standard": "high", "sonnet": "high", "light": "high"}
+DEFAULT_EFFORT = "high"
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def manifest_task_ids(manifest):
+    ids = []
+    for t in manifest.get("prelude") or []:
+        ids.append(t.get("id"))
+    for lane in manifest.get("lanes") or []:
+        for t in lane.get("tasks") or []:
+            ids.append(t.get("id"))
+    for t in manifest.get("join") or []:
+        ids.append(t.get("id"))
+    return {i for i in ids if isinstance(i, str)}
+
+
+def manifest_task_tiers(manifest):
+    tiers = {}
+    tasks = list(manifest.get("prelude") or []) + list(manifest.get("join") or [])
+    for lane in manifest.get("lanes") or []:
+        tasks += lane.get("tasks") or []
+    for t in tasks:
+        if isinstance(t.get("id"), str) and isinstance(t.get("tier"), str):
+            tiers[t["id"]] = t["tier"]
+    return tiers
+
+
+def is_task_word(word, ids):
+    if word in ids:
+        return True
+    for m in re.finditer("-", word):
+        if word[:m.start()] in ids and word[m.end():] in ids:
+            return True
+    return False
+
+
+def parse_label(label, ids):
+    """Return (task, role, retried) for an agent label."""
+    retried = False
+    if label.endswith(" retry"):
+        label = label[:-len(" retry")].rstrip()
+        retried = True
+    first, _, rest = label.partition(" ")
+    if rest and is_task_word(first, ids):
+        return first, rest, retried, label
+    return None, label, retried, label
+
+
+def model_tier(model):
+    if isinstance(model, str):
+        low = model.lower()
+        for tier in ("opus", "sonnet"):
+            if tier in low:
+                return tier
+    return None
+
+
+def read_usage(path):
+    """Return (resolved_model, sums) or (None, None) when no usage lines."""
+    model = None
+    sums = {k: 0 for k in TOKEN_FIELDS}
+    seen = False
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                msg = obj.get("message") if isinstance(obj, dict) else None
+                if not isinstance(msg, dict):
+                    continue
+                usage = msg.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                seen = True
+                if isinstance(msg.get("model"), str):
+                    model = msg["model"]
+                for k in TOKEN_FIELDS:
+                    v = usage.get(k)
+                    if isinstance(v, int) and not isinstance(v, bool):
+                        sums[k] += v
+    except OSError:
+        return None, None
+    return (model, sums) if seen else (None, None)
+
+
+def first_timestamp(path):
+    """First timestamp field in a jsonl transcript, or None."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                ts = obj.get("timestamp") if isinstance(obj, dict) else None
+                if isinstance(ts, str) and ts:
+                    return ts
+    except OSError:
+        pass
+    return None
+
+
+def start_key(meta_path):
+    """Chronological sort key: first transcript timestamp, else meta mtime."""
+    from datetime import datetime, timezone
+    ts = first_timestamp(meta_path[:-len(".meta.json")] + ".jsonl")
+    if ts:
+        try:
+            return (datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp(), meta_path)
+        except ValueError:
+            pass
+    try:
+        return (os.path.getmtime(meta_path), meta_path)
+    except OSError:
+        return (0.0, meta_path)
+
+
+def blank_bucket():
+    b = {k: 0 for k in TOKEN_FIELDS}
+    b["agents"] = 0
+    return b
+
+
+def build(transcript_dir, manifest):
+    ids = manifest_task_ids(manifest)
+    manifest_tier = manifest_task_tiers(manifest)
+    metas = sorted(glob.glob(os.path.join(transcript_dir, "agent-*.meta.json")), key=start_key)
+    agents = []
+    for meta_path in metas:
+        stem = meta_path[:-len(".meta.json")]
+        meta = read_json(meta_path)
+        label = next((meta[k] for k in ("description", "label")
+                      if isinstance(meta.get(k), str)), "")
+        phase = next((meta[k] for k in ("workflowPhase", "phase")
+                      if isinstance(meta.get(k), str)), None)
+        task, role, retried, base_label = parse_label(label, ids)
+        requested = meta.get("model") if isinstance(meta.get("model"), str) else None
+        resolved, sums = read_usage(stem + ".jsonl")
+        tier = model_tier(resolved) or model_tier(requested) or UNAVAILABLE
+        if isinstance(meta.get("effort"), str):
+            effort = meta["effort"]
+        elif task is not None and re.match(r"^(implement|fix \d+)$", role):
+            effort = TIER_EFFORT.get(manifest_tier.get(task), DEFAULT_EFFORT)
+        else:
+            effort = UNAVAILABLE
+        entry = {
+            "label": label,
+            "phase": phase,
+            "task": task,
+            "role": role,
+            "tier": tier,
+            "requested_model": requested if requested else UNAVAILABLE,
+            "resolved_model": resolved if resolved else UNAVAILABLE,
+            "effort": effort,
+        }
+        for k in TOKEN_FIELDS:
+            entry[k] = sums[k] if sums is not None else UNAVAILABLE
+        entry["_base"] = base_label
+        entry["_retried"] = retried
+        agents.append(entry)
+
+    tiers = {}
+    totals = blank_bucket()
+    unavailable = 0
+    retries = 0
+    last_model = {}  # stripped label -> (tier, model) of its latest run
+    for a in agents:
+        tier = a["tier"]
+        bucket = tiers.setdefault(tier, blank_bucket())
+        bucket["escalations"] = bucket.get("escalations", 0)
+        bucket["fix_rounds"] = bucket.get("fix_rounds", 0)
+        bucket["agents"] += 1
+        totals["agents"] += 1
+        if a["input_tokens"] == UNAVAILABLE:
+            unavailable += 1
+        else:
+            for k in TOKEN_FIELDS:
+                bucket[k] += a[k]
+                totals[k] += a[k]
+        if a["_retried"]:
+            retries += 1
+        if a["task"] is not None and re.match(r"^fix \d+$", a["role"]):
+            bucket["fix_rounds"] += 1
+        # An escalation: the same label running again at a different model;
+        # counted under the earlier tier.
+        model = a["resolved_model"] if a["resolved_model"] != UNAVAILABLE else a["requested_model"]
+        prev = last_model.get(a["_base"])
+        if prev is not None and model != UNAVAILABLE and prev[1] != UNAVAILABLE \
+                and model_tier(model) != model_tier(prev[1]):
+            tiers[prev[0]]["escalations"] += 1
+        last_model[a["_base"]] = (tier, model)
+
+    for a in agents:
+        del a["_base"]
+        del a["_retried"]
+    return {
+        "agents": agents,
+        "tiers": tiers,
+        "totals": totals,
+        "unavailable": unavailable,
+        "escalations": sum(b["escalations"] for b in tiers.values()),
+        "fix_rounds": sum(b["fix_rounds"] for b in tiers.values()),
+        "retries": retries,
+    }
+
+
+def main(argv):
+    args = argv[1:]
+    out = None
+    if "--out" in args:
+        i = args.index("--out")
+        if i + 1 >= len(args):
+            print("run-report: --out needs a file", file=sys.stderr)
+            return 2
+        out = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 2:
+        print("usage: run-report TRANSCRIPT_DIR MANIFEST [--out FILE]", file=sys.stderr)
+        return 2
+    transcript_dir, manifest_path = args
+    if not os.path.isdir(transcript_dir):
+        print(f"run-report: not a directory: {transcript_dir}", file=sys.stderr)
+        return 2
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"run-report: cannot read manifest: {e}", file=sys.stderr)
+        return 2
+    text = json.dumps(build(transcript_dir, manifest if isinstance(manifest, dict) else {}), indent=2) + "\n"
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(text)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
