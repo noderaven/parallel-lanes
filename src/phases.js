@@ -3,9 +3,10 @@
 // Phase agents act on the repo only through git commands named in their
 // prompts; the script itself never touches files or runs commands.
 
-// Final review: three lenses in parallel, one fix agent, one scoped
-// re-review of tip..fix head. tip is the real feature head: the first head a
-// lens reported, else base (the feature tip the script tracked); on a resume
+// Final review: three lenses in parallel (profile lite: one combined
+// reviewer labelled `final review`), one fix agent, one scoped re-review of
+// tip..fix head. tip is the real feature head: the first head a reviewer
+// reported, else base (the feature tip the script tracked); on a resume
 // after an earlier final fix the two differ. Returns {findings, fixed,
 // declined, cannot_verify}; declined entries carry a reason (declined by the
 // fix agent, not fixed, or still open after the re-review).
@@ -13,9 +14,13 @@ async function runFinalReview(m, e2e, base, io) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
-  const lenses = [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']];
-  const results = await io.parallel(lenses.map(([key]) => () =>
-    call(`final review ${key}`, finalReviewPrompt(m, key, e2e), finalReviewSchema())));
+  // [label, lens name for findings and cannot_verify, prompt]
+  const lenses = m.profile === 'lite'
+    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e })]]
+    : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
+      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e)]);
+  const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
+    call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
   lenses.forEach(([, name], i) => {
     const r = results[i];
@@ -105,7 +110,8 @@ function labelTasks(m, label) {
 //  reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only)}.
 // Task status is done, blocked, skipped (done and reviewed earlier), or
-// not_run.
+// not_run. Under profile lite no pre-flight agent runs (preflight has no
+// conflicts or rulings) and integrate stays null.
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -216,14 +222,22 @@ async function runAll(m, io) {
   // attempt made at a first task before recording it are reviewed too. A
   // list that moved no head leaves the tip where the phase put it.
   const starts = m.start_points || {};
-  const listTip = (list) => (list.results.some((r) => present(r.head)) ? list.head : tip);
+  const moved = (list) => list.results.some((r) => present(r.head));
+  const listTip = (list) => (moved(list) ? list.head : tip);
 
-  io.phase('Pre-flight');
-  const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
-  if (state.refused.length > 0) return budgetReport();
-  if (!pre) return report('stopped', 'no result from pre-flight');
-  preflight = { conflicts: pre.conflicts, rulings: pre.rulings };
-  if (pre.conflicts.length > 0) return report('preflight_conflicts');
+  // Profile lite (spec D2): validateManifest above is the whole pre-flight;
+  // the single lane runs on the feature branch, so there is no integration.
+  const lite = m.profile === 'lite';
+  if (lite) {
+    preflight = { conflicts: [], rulings: [] };
+  } else {
+    io.phase('Pre-flight');
+    const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
+    if (state.refused.length > 0) return budgetReport();
+    if (!pre) return report('stopped', 'no result from pre-flight');
+    preflight = { conflicts: pre.conflicts, rulings: pre.rulings };
+    if (pre.conflicts.length > 0) return report('preflight_conflicts');
+  }
 
   io.phase('Prelude');
   const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
@@ -234,40 +248,65 @@ async function runAll(m, io) {
   if (prelude.stopped !== null) return report('stopped', 'prelude stopped');
   tip = listTip(prelude);
 
-  // Lane agents carry their lane's phase; lanes with nothing left are skipped.
-  const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
-  for (const lr of laneResults) {
-    record(lr.results);
-    if (lr.stopped !== null) stopAt(lr.lane, lr);
-  }
-  if (state.refused.length > 0) return budgetReport();
-  if (stoppedLanes.length > 0) return report('stopped', 'lanes stopped');
-
-  io.phase('Integrate');
-  // A phase result that is done must also report the head it left.
-  const phaseResult = (r, label) => {
-    if (!r) return { status: 'failed', notes: `no result from ${label}` };
-    if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
-    return { status: r.status, notes: r.notes };
-  };
-  const integ = await call('integrate', 'Integrate', integratePrompt(m, tip), statusSchema());
-  if (state.refused.length > 0) return budgetReport();
-  integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
-  if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
-  tip = integ.head;
-  if (m.hooks.post_integrate) {
-    const post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+  // The join's base, and whether it is a phase tip (P1: a backfilled first
+  // task then reviews its own recorded range).
+  let joinBase;
+  let joinFromPhase = true;
+  if (lite) {
+    // The single lane continues the prelude on the feature branch: no lane
+    // worktree, no sync, no integration. When the prelude moved no head the
+    // lane's base is a phase tip (the saved setup start point if any), as
+    // for the prelude itself. The join starts at the lane's last head; lite
+    // records no join start point.
+    const lane = m.lanes[0];
+    const fromPhase = !moved(prelude);
+    const list = await runTaskList(m, lane.tasks, featureWhere(m, lane.id),
+      fromPhase ? starts.prelude || tip : tip, counted, lane.name, fromPhase);
+    record(list.results);
+    if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
-    integrate.post_integrate = phaseResult(post, 'post-integrate');
-    if (integrate.post_integrate.status !== 'done') {
-      return report('stopped', `post-integrate failed: ${integrate.post_integrate.notes}`);
+    if (list.stopped !== null) return report('stopped', 'lanes stopped');
+    if (m.hooks.post_integrate) io.log('parallel-lanes: profile lite: the post_integrate hook is not run');
+    tip = listTip(list);
+    joinBase = tip;
+    joinFromPhase = fromPhase && !moved(list);
+  } else {
+    // Lane agents carry their lane's phase; lanes with nothing left are skipped.
+    const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
+    for (const lr of laneResults) {
+      record(lr.results);
+      if (lr.stopped !== null) stopAt(lr.lane, lr);
     }
-    tip = post.head;
+    if (state.refused.length > 0) return budgetReport();
+    if (stoppedLanes.length > 0) return report('stopped', 'lanes stopped');
+
+    io.phase('Integrate');
+    // A phase result that is done must also report the head it left.
+    const phaseResult = (r, label) => {
+      if (!r) return { status: 'failed', notes: `no result from ${label}` };
+      if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+      return { status: r.status, notes: r.notes };
+    };
+    const integ = await call('integrate', 'Integrate', integratePrompt(m, tip), statusSchema());
+    if (state.refused.length > 0) return budgetReport();
+    integrate = { ...phaseResult(integ, 'integrate'), post_integrate: null };
+    if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
+    tip = integ.head;
+    if (m.hooks.post_integrate) {
+      const post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      if (state.refused.length > 0) return budgetReport();
+      integrate.post_integrate = phaseResult(post, 'post-integrate');
+      if (integrate.post_integrate.status !== 'done') {
+        return report('stopped', `post-integrate failed: ${integrate.post_integrate.notes}`);
+      }
+      tip = post.head;
+    }
+    joinBase = starts.join || tip;
   }
 
   io.phase('Join');
-  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), starts.join || tip,
-    counted, 'Join', true);
+  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), joinBase,
+    counted, 'Join', joinFromPhase);
   record(join.results);
   if (join.stopped !== null) stopAt('join', join);
   if (state.refused.length > 0) return budgetReport();
