@@ -71,7 +71,7 @@ test('harness runs the script body with stubs: a run starts with the setup agent
       return null;
     },
   });
-  assert.deepEqual(labels, ['setup']);
+  assert.deepEqual(labels, ['setup', 'setup retry']);
   assert.equal(result.status, 'stopped');
 });
 

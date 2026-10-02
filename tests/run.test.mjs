@@ -257,18 +257,23 @@ test('pre-flight conflicts stop before any implement', async () => {
   assert.ok(!labels(calls).some((l) => l.endsWith('implement')));
 });
 
-test('a pre-flight agent that returns null stops the run', async () => {
-  const { result, calls } = await run(manifest(), phaseScript({ 'pre-flight': [null] }));
+test('a pre-flight agent that returns null twice stops the run', async () => {
+  const { result, calls } = await run(manifest(),
+    phaseScript({ 'pre-flight': [null], 'pre-flight retry': [null] }));
   assert.equal(result.status, 'stopped');
-  assert.deepEqual(labels(calls), ['setup', 'pre-flight']);
+  assert.equal(result.reason, 'no result from pre-flight');
+  assert.deepEqual(labels(calls), ['setup', 'pre-flight', 'pre-flight retry']);
 });
 
 test('a failed setup stops the run before pre-flight', async () => {
-  for (const r of [null, { ok: false, discarded: [], worktrees: [], notes: 'main checkout is dirty' }]) {
-    const { result, calls } = await run(manifest(), phaseScript({ setup: [r] }));
-    assert.equal(result.status, 'stopped');
-    assert.deepEqual(labels(calls), ['setup']);
-  }
+  const { result, calls } = await run(manifest(), phaseScript({ setup: [null], 'setup retry': [null] }));
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'setup failed: no result from setup');
+  assert.deepEqual(labels(calls), ['setup', 'setup retry']);
+  const failed = { ok: false, discarded: [], worktrees: [], notes: 'main checkout is dirty' };
+  const second = await run(manifest(), phaseScript({ setup: [failed] }));
+  assert.equal(second.result.status, 'stopped');
+  assert.deepEqual(labels(second.calls), ['setup']);
 });
 
 test('setup lists discarded uncommitted changes via log', async () => {
@@ -374,9 +379,10 @@ test('a stopped lane yields stopped and integration does not run', async () => {
 });
 
 test('a stopped prelude stops the run before any lane', async () => {
-  const script = { ...phaseScript(), 'T1 implement': [null] };
+  const script = { ...phaseScript(), 'T1 implement': [null], 'T1 implement retry': [null] };
   const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
   assert.equal(result.status, 'stopped');
+  assert.deepEqual(labels(calls), ['setup', 'pre-flight', 'T1 implement', 'T1 implement retry']);
   assert.deepEqual(result.stopped_lanes.map((s) => s.lane), ['prelude']);
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
 });
@@ -491,15 +497,20 @@ test('no final findings: no fix or re-review agent', async () => {
 });
 
 test('a final review lens that returns null is reported, never counted as clean', async () => {
-  const script = { ...phaseScript({ 'final review correctness': [null] }), ...taskScript(ALL) };
-  const { result } = await run(manifest(), script);
+  const script = {
+    ...phaseScript({ 'final review correctness': [null], 'final review correctness retry': [null] }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.ok(labels(calls).includes('final review correctness retry'));
   assert.equal(result.status, 'complete');
   assert.deepEqual(result.final.cannot_verify, ['the correctness review returned no result']);
 });
 
 test('a final fix agent that returns null leaves every finding declined', async () => {
-  const script = { ...phaseScript({ 'final fix': [null] }), ...taskScript(ALL) };
+  const script = { ...phaseScript({ 'final fix': [null], 'final fix retry': [null] }), ...taskScript(ALL) };
   const { result, calls } = await run(manifest(), script);
+  assert.ok(labels(calls).includes('final fix retry'));
   assert.ok(!labels(calls).includes('final re-review'));
   assert.deepEqual(result.final.fixed, []);
   assert.equal(result.final.declined.length, 2);
@@ -559,8 +570,9 @@ test('an integration that reports done without a head stops before join', async 
 });
 
 test('an e2e agent that returns null is listed under final cannot_verify', async () => {
-  const script = { ...phaseScript({ e2e: [null] }), ...taskScript(ALL) };
-  const { result } = await run(manifest(), script);
+  const script = { ...phaseScript({ e2e: [null], 'e2e retry': [null] }), ...taskScript(ALL) };
+  const { result, calls } = await run(manifest(), script);
+  assert.ok(labels(calls).includes('e2e retry'));
   assert.equal(result.status, 'complete');
   assert.ok(result.final.cannot_verify.includes('the e2e check returned no result'), JSON.stringify(result.final));
 });
