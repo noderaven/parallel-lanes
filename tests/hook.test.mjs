@@ -55,6 +55,10 @@ test('session-start: emits SessionStart additionalContext equal to bootstrap.md'
   assert.equal(ctx, readFileSync(BOOTSTRAP, 'utf8'));
   assert.match(ctx, /parallel-lanes/);
   assert.match(ctx, /precedence/);
+  assert.ok(
+    ctx.includes('the main session at the execution-method handoff, never an agent executing a single task'),
+    'bootstrap.md is scoped to the main session',
+  );
 });
 
 test('bootstrap.md is plain ASCII and under 120 words', () => {

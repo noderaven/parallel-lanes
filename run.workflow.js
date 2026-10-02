@@ -376,6 +376,35 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// Rules every agent gets, task and phase alike.
+function agentRules() {
+  return [
+    'Never amend, rebase, reset, or force-update a branch. Decline commit-message findings with a reason; ' +
+      'they are reported to the user.',
+    'Do not invoke parallel-lanes or any plan-execution skill.',
+  ].join('\n');
+}
+
+// How an agent stays in its checkout: the session running the workflow may
+// sit in another checkout of the same repo, and agents start there.
+function checkoutRules(dir, branch) {
+  const q = shellQuote(dir);
+  return [
+    'Your shell may start in another checkout of this repo, so never rely on the current directory:',
+    `- every shell command starts with cd ${q} && or uses git -C ${q};`,
+    `- every project file path you read or write is absolute under ${dir} (the plan, spec, brief, report,`,
+    '  review, and ledger files named here are the only paths outside it);',
+    `- before each commit, check that git -C ${q} rev-parse --abbrev-ref HEAD prints ${branch}; if it does not,`,
+    '  do not commit: stop and report it.',
+  ].join('\n');
+}
+
+// For agents in the feature checkout (the user's main checkout in git mode).
+function keepFilesRule() {
+  return 'Never run git clean -x or git clean -X, and never delete ignored or untracked files: they may hold ' +
+    "the user's .env files, local databases, or credentials.";
+}
+
 // Shared context every task agent gets.
 function taskContext(m, task, where) {
   const files = taskFiles(m, task);
@@ -389,6 +418,7 @@ function taskContext(m, task, where) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
+    checkoutRules(where.dir, where.branch),
     `Task brief: ${files.brief}. Before reading it, generate it from the current plan with this command (it`,
     'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
     `  ${brief}`,
@@ -401,6 +431,7 @@ function taskContext(m, task, where) {
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'All files you write are plain ASCII. Never commit anything under .superpowers/.',
     'Never push, open pull requests, merge into the base branch, or copy work back to the project.',
+    agentRules(),
     '',
     'Contracts: report blocked for any change to a contract another lane consumes; ' +
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
@@ -472,6 +503,8 @@ function reviewResultText(m, task, where, rounds) {
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
+    'Report a commit message that breaks the commit rules as a minor finding (file "commit <sha>", line 0):',
+    'history is never rewritten, so it cannot hold up the task; it is reported to the user.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
@@ -764,6 +797,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null)
 
   const notes = [...extra];
   if (latest.notes) notes.push(latest.notes);
+  for (const f of verdict.findings || []) notes.push(`minor finding: ${f.file}:${f.line} - ${f.issue}`);
   for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
   return result('done', notes.join('\n'));
 }
@@ -856,12 +890,15 @@ function gitAdmin(m) {
     : `git -C ${shellQuote(m.repo.root)}`;
 }
 
-// Rules every phase agent gets.
-function phaseRules(m) {
+// Rules every phase agent gets. checkout (optional) replaces the checkout
+// rules for the feature checkout (setup works in several checkouts).
+function phaseRules(m, checkout = null) {
   return [
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'All files you write are plain ASCII. Never commit anything under .superpowers/.',
     `Never push, open pull requests, merge into ${m.repo.base_ref}, or copy work back to the project folder.`,
+    agentRules(),
+    checkout === null ? checkoutRules(featureDir(m), m.repo.branch) : checkout,
   ].join('\n');
 }
 
@@ -1015,14 +1052,21 @@ function setupPrompt(m) {
     ...lanes,
     '   For each: if the directory exists as a worktree on its branch, reuse it: list its uncommitted changes',
     '   with git -C <worktree> status --porcelain, add each line to discarded as "<worktree>: <line>", then',
-    '   discard them with git -C <worktree> reset --hard and git -C <worktree> clean -fd (ignored scratch',
-    `   stays). Else if the branch exists: ${admin} worktree add <worktree> <branch>.`,
+    '   discard them with git -C <worktree> reset --hard HEAD (the branch stays on its commit; this is the',
+    '   only reset allowed) and git -C <worktree> clean -fd (ignored scratch stays).',
+    `   Else if the branch exists: ${admin} worktree add <worktree> <branch>.`,
     `   Else: ${admin} worktree add -b <branch> <worktree> ${branch}`,
     '   Do not remove any worktree or delete any branch.',
     '4. Run the setup commands in each checkout (from that directory):',
     ...setupCmds,
     '',
-    phaseRules(m),
+    phaseRules(m, [
+      'Your shell may start in another checkout of this repo, so never rely on the current directory:',
+      `- every shell command starts with cd '<checkout>' && or uses git -C '<checkout>' (or ${admin});`,
+      '- every project file path you read or write is absolute under the checkout it belongs to;',
+      `- setup makes no commits; before step 4, check that git -C ${q(featureDir(m))} rev-parse --abbrev-ref HEAD`,
+      `  prints ${m.repo.branch} and that each lane worktree prints its lane branch; otherwise return ok false.`,
+    ].join('\n')),
     '',
     'Return ok (true only when every step succeeded), discarded (the listed changes), worktrees (the paths',
     `ready for work), feature_head (the full sha printed by ${admin} rev-parse ${branch} after the steps), and`,
@@ -1068,30 +1112,40 @@ function integratePrompt(m, preludeTip) {
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain prints nothing, ` +
       `${admin} worktree remove ${q(w.dir)} then git -C ${dir} branch -d ${q(w.branch)}`;
   });
+  const joinIds = m.join.length > 0 ? m.join.map((t) => t.id).join(', ') : '(none)';
   return [
     `You are the integration agent for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
-    'Return status failed with the reason in notes at the first of steps 1-4 that fails.',
+    'Return status failed with the reason in notes at the first of steps 1-5 that fails.',
     '',
-    `1. git -C ${dir} status --porcelain must print nothing.`,
+    `1. git -C ${dir} status --porcelain must print nothing (this is what clean means below; never make it`,
+    '   so by deleting, cleaning, or stashing files).',
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     '   A branch that is already merged reports already up to date; that is fine. On a conflict, resolve it',
     '   keeping the intent of both lanes (read the plan tasks that touched the file) and commit the merge; if',
     '   you cannot resolve it with confidence, run git merge --abort and fail naming the files.',
-    '3. From a clean tree, rerun setup and then every command:',
+    '3. In the tree step 1 found clean, rerun setup and then every command:',
     commandsText(m, null),
     ...overrides,
     '   Fix only small, obvious integration breakage (commit it per the commit rules); otherwise fail.',
-    `4. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
+    `4. History: ${preludeTip} is the feature tip after the prelude. This command:`,
+    `   git -C ${dir} log --first-parent --format='%H %P %s' ${q(`${preludeTip}..HEAD`)}`,
+    '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
+    '   commits (yours, or from an earlier attempt in this run), and commits an earlier attempt at a join task',
+    `   made (join tasks: ${joinIds}; their recorded commits are in ${m.repo.ledger_dir}/join.jsonl).`,
+    "   Any other commit landed on the feature branch outside the run's steps: fail listing it (do not",
+    '   rewrite history).',
+    `5. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
     '   must list no path under .superpowers/; if it does, fail listing them (do not rewrite history).',
-    '5. Only when steps 1-4 passed, clean up each lane:',
+    '6. Only when steps 1-5 passed, clean up each lane:',
     ...cleanup,
     '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
-    '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 5',
+    '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',
     '   could not remove in notes and still return status done.',
     '',
     `Plan: ${m.plan}`,
+    keepFilesRule(),
     phaseRules(m),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
@@ -1112,6 +1166,7 @@ function postIntegratePrompt(m) {
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    keepFilesRule(),
     phaseRules(m),
     '',
     'Return status done when the instructions pass, otherwise failed; head = the full sha printed by',
@@ -1129,6 +1184,7 @@ function e2ePrompt(m) {
     'Rules: use scratch directories only (mktemp -d, outside the checkout and the project; remove them',
     'when done); never change tracked files or commit; stop every server you start before returning and',
     'confirm its port is free.',
+    keepFilesRule(),
     phaseRules(m),
     '',
     'Return items: one {item, result PASS or FAIL, evidence} per checklist item, evidence being the command',
@@ -1194,13 +1250,15 @@ function finalFixPrompt(m, findings, base) {
     'Findings:',
     findingsText(findings),
     '',
-    'Fix each finding, or decline it with a reason (only for a false positive or an item outside this',
-    "run's scope). Rerun every project command afterwards:",
+    'Fix each finding, or decline it with a reason (only for a false positive, an item outside this',
+    "run's scope, or a commit-message finding: history is never rewritten). Rerun every project command",
+    'afterwards:',
     commandsText(m, null),
     'Commit your fixes per the commit rules.',
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    keepFilesRule(),
     phaseRules(m),
     '',
     implementResultText(featureDir(m)),

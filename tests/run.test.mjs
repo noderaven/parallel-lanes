@@ -240,7 +240,7 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
     assert.ok(p.includes(`git --git-dir='/shadow/abc' worktree remove '/work/wt/lane-${lane}'`), lane);
   }
   assert.ok(!p.includes("git --git-dir='/shadow/abc' branch -d"), 'the bare shadow HEAD is pl-base, not the feature branch');
-  assert.match(p, /first of steps 1-4 that fails/);
+  assert.match(p, /first of steps 1-5 that fails/);
   assert.match(p, /Cleanup never fails the integration/);
 });
 
@@ -605,4 +605,97 @@ test('validator: every done task needs a backfill entry, reviewed or not', () =>
   assert.ok(validateManifest(m).some((e) => e.includes('backfill') && e.includes('T2')));
   m.backfill = { T2: { base: 'b', head: 'h' } };
   assert.deepEqual(validateManifest(m), []);
+});
+
+const HISTORY_RULE = 'Never amend, rebase, reset, or force-update a branch. Decline commit-message findings with a reason; ' +
+  'they are reported to the user.';
+const SKILL_RULE = 'Do not invoke parallel-lanes or any plan-execution skill.';
+const KEEP_FILES_RULE = 'Never run git clean -x or git clean -X, and never delete ignored or untracked files';
+
+// A run that exercises every agent role, including a fix and re-review round.
+async function fullRun(mode) {
+  const m = manifest();
+  if (mode === 'shadow') {
+    m.repo.mode = 'shadow';
+    m.repo.git_dir = '/shadow/abc';
+  }
+  const script = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'changes', findings: [finding('bug')], cannot_verify: [] }],
+    'T2 fix 1': [done('x', 'T2-h2')],
+    'T2 re-review 1': [approve()],
+  };
+  return run(m, script);
+}
+
+test('every prompt carries the history rule, the skill rule, and the checkout rules', async () => {
+  for (const mode of ['git', 'shadow']) {
+    const { calls } = await fullRun(mode);
+    const roles = new Set(labels(calls).map((l) => l.replace(/^T\d+ /, '').replace(/ \d+$/, '')));
+    for (const role of ['setup', 'pre-flight', 'implement', 'review', 'fix', 're-review', 'integrate',
+      'post-integrate', 'e2e', 'final review sp', 'final fix', 'final re-review']) {
+      assert.ok(roles.has(role), `${mode}: the run exercised ${role}`);
+    }
+    for (const c of calls) {
+      const where = `${mode} ${c.label}`;
+      assert.ok(c.prompt.includes(HISTORY_RULE), `${where}: history rule`);
+      assert.ok(c.prompt.includes(SKILL_RULE), `${where}: skill rule`);
+      assert.match(c.prompt, /every shell command starts with cd '[^']+' &&/i, `${where}: cd rule`);
+      assert.match(c.prompt, /every project file path you read or write is absolute under /, `${where}: path rule`);
+      assert.match(c.prompt, /rev-parse --abbrev-ref HEAD/, `${where}: branch check`);
+    }
+  }
+});
+
+test('task and feature prompts name their own checkout and branch in the checkout rules', async () => {
+  const { calls } = await fullRun('git');
+  const prompt = (label) => calls.find((c) => c.label === label).prompt;
+  const t2 = prompt('T2 implement');
+  assert.ok(t2.includes("starts with cd '/work/wt/lane-alpha' && or uses git -C '/work/wt/lane-alpha'"));
+  assert.ok(t2.includes("git -C '/work/wt/lane-alpha' rev-parse --abbrev-ref HEAD prints pl-run-1-alpha"));
+  assert.ok(t2.includes('absolute under /work/wt/lane-alpha'));
+  for (const label of ['T1 implement', 'integrate', 'final fix']) {
+    assert.ok(prompt(label).includes("git -C '/work/repo' rev-parse --abbrev-ref HEAD prints pl/run-1"), label);
+  }
+  const shadow = await fullRun('shadow');
+  const integ = shadow.calls.find((c) => c.label === 'integrate').prompt;
+  assert.ok(integ.includes("git -C '/work/wt/feature' rev-parse --abbrev-ref HEAD prints pl/run-1"));
+});
+
+test('agents on the feature checkout never delete ignored or untracked files', async () => {
+  const { calls } = await fullRun('git');
+  for (const label of ['integrate', 'post-integrate', 'e2e', 'final fix']) {
+    assert.ok(calls.find((c) => c.label === label).prompt.includes(KEEP_FILES_RULE), label);
+  }
+  const integ = calls.find((c) => c.label === 'integrate').prompt;
+  assert.match(integ, /this is what clean means/);
+  assert.ok(!/From a clean tree/.test(integ));
+});
+
+test('integrate checks the first-parent history after the prelude tip', async () => {
+  const { calls } = await fullRun('git');
+  const integ = calls.find((c) => c.label === 'integrate').prompt;
+  assert.ok(integ.includes("log --first-parent --format='%H %P %s' 'T1-h..HEAD'"), integ);
+  assert.ok(integ.includes('/work/ledger/join.jsonl'));
+  assert.match(integ, /first of steps 1-5 that fails/);
+});
+
+test('reviewers report commit-message problems as minor findings that reach the task notes', async () => {
+  const { calls } = await fullRun('git');
+  const rev = calls.find((c) => c.label === 'T1 review').prompt;
+  assert.match(rev, /commit message that breaks the commit rules as a minor finding/);
+  const fix = calls.find((c) => c.label === 'final fix').prompt;
+  assert.match(fix, /commit-message finding/i);
+
+  const m = manifest();
+  const minor = { severity: 'minor', file: 'commit abc1234', line: 0, issue: 'subject has a trailer', fix: 'reword' };
+  const script = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T1 review': [{ verdict: 'approve', findings: [minor], cannot_verify: [] }],
+  };
+  const { result } = await run(m, script);
+  assert.ok(result.tasks.T1.notes.includes('commit abc1234'), result.tasks.T1.notes);
+  assert.ok(result.tasks.T1.notes.includes('subject has a trailer'), result.tasks.T1.notes);
 });
