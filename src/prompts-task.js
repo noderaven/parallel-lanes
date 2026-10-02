@@ -27,14 +27,19 @@ function findingsText(findings) {
     `${i + 1}. [${f.severity}] ${f.file}:${f.line} - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
 }
 
-// Shared context every task agent gets.
-function taskContext(m, task, where) {
+// Shared context every task agent gets. guidance (optional) is
+// {notes, amendments}: notes are decided on the user's behalf in this run (an
+// adjudicator answer, or a note an unblocked task carries to the next one);
+// amendments are adjudicator rulings that amend the task's brief for this run.
+function taskContext(m, task, where, guidance = null) {
   const files = taskFiles(m, task);
   const note = m.notes && m.notes[task.id];
   const brief = `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
     `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
   const ruling = ledgerCommand(m, where.lane,
     { task: task.id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+  const runNotes = (guidance && guidance.notes) || [];
+  const amendments = (guidance && guidance.amendments) || [];
   return [
     `Task ${task.id}: ${task.title}`,
     `Plan: ${m.plan}`,
@@ -45,6 +50,10 @@ function taskContext(m, task, where) {
     'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
     `  ${brief}`,
     ...(note ? [`The user's answer for this task (follow it where it settles a question): ${note}`] : []),
+    ...runNotes.map((n) =>
+      `A note decided on the user's behalf for this task (follow it where it settles a question): ${n}`),
+    ...amendments.map((a) =>
+      `Amendment to the task brief for this run (it overrides the brief where they differ): ${a}`),
     `Implementer report file: ${files.report}`,
     '',
     'Project commands (run from the worktree):',
@@ -111,11 +120,17 @@ function diffSteps(m, task, where, base, head) {
   ].join('\n');
 }
 
-function implementResultText(dir) {
+// The structured result an implement, fix, or final-fix agent returns.
+// question (task agents only) offers the "question" status.
+function implementResultText(dir, question = false) {
   return [
     `Return a structured result: status "done" or "blocked"; head = git -C ${shellQuote(dir)} rev-parse HEAD`,
     'after your last commit; tests = the commands you ran and their outcome; notes = rulings, concerns, or the',
     'reason you are blocked. That result replaces any status reply format named in the instructions above.',
+    ...(question ? [
+      'When you need a question answered before you can continue correctly, return status "question" instead,',
+      'with question = the question (and head as above): do not guess. It is answered and the task reruns.',
+    ] : []),
   ].join('\n');
 }
 
@@ -139,8 +154,9 @@ function reviewResultText(m, task, where, rounds) {
 
 // Prompt for an implementer. base is the task base the script owns (the
 // previous task's head, or the feature tip); retry (optional) is {reason,
-// findings} when a previous attempt in this run blocked or failed review.
-function implementPrompt(m, task, where, base, retry = null) {
+// findings} when a previous attempt in this run blocked or failed review;
+// guidance (optional) is taskContext's.
+function implementPrompt(m, task, where, base, retry = null, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
@@ -153,10 +169,11 @@ function implementPrompt(m, task, where, base, retry = null) {
     sdd === null ? fallbackImplementer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with Task: Task ${task.id}: ${task.title}; [BRIEF_FILE]: ${files.brief}; [directory]: ${where.dir};`,
-      `[REPORT_FILE]: ${files.report}. You cannot ask questions mid-task: report blocked with the question instead.`,
+      `[REPORT_FILE]: ${files.report}. You cannot ask questions mid-task: return status "question" with the`,
+      'question instead (see the structured result below).',
     ].join('\n'),
     '',
-    taskContext(m, task, where),
+    taskContext(m, task, where, guidance),
   ];
   if (where.sync) {
     parts.push('', [
@@ -181,12 +198,12 @@ function implementPrompt(m, task, where, base, retry = null) {
     `  ${committed}`,
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
-  ].join('\n'), '', implementResultText(where.dir));
+  ].join('\n'), '', implementResultText(where.dir, true));
   return parts.join('\n');
 }
 
 // Prompt for the first (full) review of a task's base..head range.
-function reviewPrompt(m, task, where, base, head, rounds = 0) {
+function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   return [
@@ -201,7 +218,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0) {
     '',
     diffSteps(m, task, where, base, head),
     '',
-    taskContext(m, task, where),
+    taskContext(m, task, where, guidance),
     '',
     reviewResultText(m, task, where, rounds),
   ].join('\n');
@@ -209,7 +226,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0) {
 
 // Prompt for a fix agent. report is the latest implement or fix result;
 // head is the branch head the fix builds on.
-function fixPrompt(m, task, where, findings, report, head) {
+function fixPrompt(m, task, where, findings, report, head, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const committed = ledgerCommand(m, where.lane,
@@ -233,19 +250,19 @@ function fixPrompt(m, task, where, findings, report, head) {
     'Latest implementer result:',
     JSON.stringify(report),
     '',
-    taskContext(m, task, where),
+    taskContext(m, task, where, guidance),
     '',
     'After committing, record your fix commits (oldest first) with:',
     `  ${committed}`,
     'If you are blocked, record it with:',
     `  ${blockedCmd}`,
     '',
-    implementResultText(where.dir),
+    implementResultText(where.dir, true),
   ].join('\n');
 }
 
 // Prompt for a scoped re-review of a fix range. round is the fix round.
-function reReviewPrompt(m, task, where, base, head, findings, round = 1) {
+function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   return [
@@ -262,7 +279,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1) {
     '',
     diffSteps(m, task, where, base, head),
     '',
-    taskContext(m, task, where),
+    taskContext(m, task, where, guidance),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
     reviewResultText(m, task, where, round),
@@ -273,10 +290,11 @@ function implementSchema() {
   return {
     type: 'object',
     properties: {
-      status: { type: 'string', enum: ['done', 'blocked'] },
+      status: { type: 'string', enum: ['done', 'blocked', 'question'] },
       head: { type: 'string' },
       tests: { type: 'string' },
       notes: { type: 'string' },
+      question: { type: 'string' },
     },
     required: ['status', 'head', 'tests', 'notes'],
   };
