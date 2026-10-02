@@ -566,6 +566,7 @@ async function runTask(m, task, where, io = { agent, log }) {
   let rounds = 0;
   let changesSeen = 0;
   let latest = null;
+  let verdict = null;
   const extra = [];
 
   const result = (status, notes) =>
@@ -607,10 +608,20 @@ async function runTask(m, task, where, io = { agent, log }) {
     return call('review', reviewPrompt(m, task, where, base, head, rounds), standard, reviewSchema());
   };
 
+  // Escalate a light task: rerun implement at standard from the current
+  // head with the open findings, then review the whole task range again.
+  const rerunAtStandard = async (reason, findings) => {
+    escalate(reason);
+    const blockedWhy = await implement({ reason, findings });
+    if (blockedWhy !== null) return blockedWhy;
+    verdict = await review();
+    return null;
+  };
+
   let why = await implement(null);
   if (why !== null) return result('blocked', why);
 
-  let verdict = await review();
+  verdict = await review();
   for (;;) {
     if (!verdict || (verdict.verdict !== 'approve' && verdict.verdict !== 'changes')) {
       return result('blocked', `no result from ${task.id} ${reviewLabel}`);
@@ -619,10 +630,8 @@ async function runTask(m, task, where, io = { agent, log }) {
     changesSeen += 1;
     const findings = verdict.findings;
     if (changesSeen === 2 && tierUsed === 'light') {
-      escalate('second changes verdict');
-      why = await implement({ reason: 'review requested changes twice', findings });
+      why = await rerunAtStandard('review requested changes twice', findings);
       if (why !== null) return result('blocked', why);
-      verdict = await review();
       continue;
     }
     if (rounds >= m.limits.review_rounds) return result('blocked', 'review_rounds');
@@ -631,6 +640,11 @@ async function runTask(m, task, where, io = { agent, log }) {
     const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest),
       tierSettings(tierUsed), implementSchema());
     why = failure(fix, `${task.id} ${fixLabel}`);
+    if (why !== null && tierUsed === 'light') {
+      why = await rerunAtStandard(why, findings);
+      if (why !== null) return result('blocked', why);
+      continue;
+    }
     if (why !== null) return result('blocked', why);
     const prevHead = head;
     head = fix.head;

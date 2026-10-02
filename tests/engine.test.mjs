@@ -195,6 +195,28 @@ test('a light task escalates to standard after a blocked implement', async () =>
   assert.equal(r.tier_used, 'standard');
 });
 
+for (const [name, fixResult] of [['reports blocked', blocked('h1', 'fix stuck')], ['returns null', null]]) {
+  test(`a light task escalates to standard when its fix round ${name}`, async () => {
+    const m = manifest();
+    const s = stub({
+      'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+      'T2 review': [changes('first'), approve()],
+      'T2 fix 1': [fixResult],
+    });
+    const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, s.io);
+    assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 implement', 'T2 review']);
+    const [, , fix1, impl2, rev2] = s.calls;
+    assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'medium']);
+    assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
+    assert.ok(impl2.prompt.includes('first'), 'the escalated implementer sees the open findings');
+    assert.ok(rev2.prompt.includes('b0') && rev2.prompt.includes('h2'), 'the full task range is reviewed again');
+    assert.equal(r.status, 'done');
+    assert.equal(r.tier_used, 'standard');
+    assert.equal(r.base, 'b0');
+    assert.equal(r.head, 'h2');
+  });
+}
+
 test('a standard task does not escalate; a blocked implement blocks the task', async () => {
   const m = manifest();
   const s = stub({ 'T2 implement': [blocked('b0', 'contract change needed')] });
