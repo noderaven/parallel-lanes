@@ -1,3 +1,52 @@
+// The tasks a unit of work covers. A batch unit (spec D3) is consecutive
+// light tasks with the same batch key run by one implementer and one review:
+// {id: '<first>-<last>', title, files, tier, security, batch, tasks}. A
+// plain task covers itself.
+function unitTasks(task) {
+  return Array.isArray(task.tasks) ? task.tasks : [task];
+}
+
+function isBatch(task) {
+  return Array.isArray(task.tasks);
+}
+
+// 'batch' for a batch unit, 'task' otherwise.
+function unitNoun(task) {
+  return isBatch(task) ? 'batch' : 'task';
+}
+
+// How prompts name a unit: 'Task <id>: <title>', or for a batch
+// 'Batch <first>-<last>: Task <id>: <title>; ...'.
+function unitName(task) {
+  if (!isBatch(task)) return `Task ${task.id}: ${task.title}`;
+  return `Batch ${task.id}: ${task.tasks.map((t) => `Task ${t.id}: ${t.title}`).join('; ')}`;
+}
+
+// The ledger command for one event, for every task of a unit, as indented
+// prompt lines. A batch's events are per task (its commits are attributed to
+// the batch range).
+function ledgerLines(m, task, where, entry) {
+  return unitTasks(task).map((t) => `  ${ledgerCommand(m, where.lane, { task: t.id, ...entry }, where.dir)}`);
+}
+
+// The [BRIEF_FILE] a superpowers prompt is given: the task's brief, or for a
+// batch the briefs taskContext lists.
+function briefRef(m, task) {
+  return isBatch(task) ? 'the task briefs listed below (one per task, in order)' : taskFiles(m, task).brief;
+}
+
+// What a batch agent is told about the batch, or nothing for a plain task.
+function batchLines(task) {
+  if (!isBatch(task)) return [];
+  const ids = task.tasks.map((t) => t.id).join(', ');
+  return [
+    `This is a batch of ${task.tasks.length} tasks (${ids}) run as one unit: one implementer, one review over the`,
+    'combined range, one report file. Its briefs are listed below, one per task. The tasks are implemented in',
+    'that order, one commit per task with the message its brief gives; every ledger event is recorded for each',
+    'task.',
+  ];
+}
+
 // The exact ledger append command for one event. dir is the checkout of
 // the agent that runs it (where.dir for task agents, featureDir(m) for phase
 // agents and lane _run events): like every provided command, it starts there.
@@ -33,27 +82,41 @@ function findingsText(findings) {
 // amendments are adjudicator rulings that amend the task's brief for this run.
 function taskContext(m, task, where, guidance = null) {
   const files = taskFiles(m, task);
-  const note = m.notes && m.notes[task.id];
-  const brief = `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
-    `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
+  const tasks = unitTasks(task);
+  const briefCommand = (t) => `cd ${shellQuote(where.dir)} && python3 ` +
+    `${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ${shellQuote(m.plan)} ${shellQuote(t.id)} ` +
+    `${shellQuote(taskFiles(m, t).brief)}`;
+  const userNote = (t) => m.notes && m.notes[t.id];
+  // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+    { task: tasks[0].id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
+  const briefs = isBatch(task) ? [
+    'Task briefs, one per task. Before reading each, generate it from the current plan with its command (it',
+    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
+    ...tasks.flatMap((t) => [`- Task ${t.id}: ${taskFiles(m, t).brief}`, `  ${briefCommand(t)}`]),
+    ...tasks.filter(userNote).map((t) =>
+      `The user's answer for task ${t.id} (follow it where it settles a question): ${userNote(t)}`),
+  ] : [
+    `Task brief: ${files.brief}. Before reading it, generate it from the current plan with this command (it`,
+    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
+    `  ${briefCommand(task)}`,
+    ...(userNote(task)
+      ? [`The user's answer for this task (follow it where it settles a question): ${userNote(task)}`] : []),
+  ];
   return [
-    `Task ${task.id}: ${task.title}`,
+    unitName(task),
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
     checkoutRules(where.dir, where.branch),
-    `Task brief: ${files.brief}. Before reading it, generate it from the current plan with this command (it`,
-    'overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
-    `  ${brief}`,
-    ...(note ? [`The user's answer for this task (follow it where it settles a question): ${note}`] : []),
+    ...briefs,
     ...runNotes.map((n) =>
-      `A note decided on the user's behalf for this task (follow it where it settles a question): ${n}`),
-    ...amendments.map((a) =>
-      `Amendment to the task brief for this run (it overrides the brief where they differ): ${a}`),
+      `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
+    ...amendments.map((a) => (isBatch(task)
+      ? `Amendment to the batch's task briefs for this run (it overrides the briefs where they differ): ${a}`
+      : `Amendment to the task brief for this run (it overrides the brief where they differ): ${a}`)),
     `Implementer report file: ${files.report}`,
     '',
     'Project commands (run from the worktree):',
@@ -141,7 +204,6 @@ function implementResultText(dir, question = false, from = null) {
 }
 
 function reviewResultText(m, task, where, rounds) {
-  const reviewed = ledgerCommand(m, where.lane, { task: task.id, event: 'reviewed', rounds }, where.dir);
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
@@ -153,8 +215,10 @@ function reviewResultText(m, task, where, rounds) {
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
     'cannot_verify = requirements you could not verify from the diff. That result replaces the output format',
     'named in the instructions above.',
-    'Only when your verdict is approve, record it with:',
-    `  ${reviewed}`,
+    isBatch(task)
+      ? 'Only when your verdict is approve, record it for every task of the batch with:'
+      : 'Only when your verdict is approve, record it with:',
+    ...ledgerLines(m, task, where, { event: 'reviewed', rounds }),
   ].join('\n');
 }
 
@@ -165,16 +229,15 @@ function reviewResultText(m, task, where, rounds) {
 function implementPrompt(m, task, where, base, retry = null, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
-  const committed = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] }, where.dir);
-  const blockedCmd = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'blocked', reason: '<reason>' }, where.dir);
+  const noun = unitNoun(task);
+  const batch = isBatch(task);
   const parts = [
-    `You are implementing Task ${task.id}: ${task.title}`,
+    `You are implementing ${unitName(task)}`,
+    ...batchLines(task),
     '',
     sdd === null ? fallbackImplementer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
-      `with Task: Task ${task.id}: ${task.title}; [BRIEF_FILE]: ${files.brief}; [directory]: ${where.dir};`,
+      `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
       `[REPORT_FILE]: ${files.report}. You cannot ask questions mid-task: return status "question" with the`,
       'question instead (see the structured result below).',
     ].join('\n'),
@@ -189,21 +252,24 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     ].join('\n'));
   }
   parts.push('', [
-    `Task base: ${base}. Everything on this branch after it is this task's work, and its review covers`,
-    `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this task: start from the current`,
+    `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
+    `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
   ].join('\n'));
   if (retry) {
     parts.push('', [
-      `A previous attempt at this task did not succeed: ${retry.reason}`,
+      `A previous attempt at this ${noun} did not succeed: ${retry.reason}`,
       ...(retry.findings ? ['Open review findings:', findingsText(retry.findings)] : []),
     ].join('\n'));
   }
   parts.push('', [
-    'After committing, record your commits (every sha you made for this task, oldest first) with:',
-    `  ${committed}`,
-    'If you are blocked, record it with:',
-    `  ${blockedCmd}`,
+    batch
+      ? 'After committing, record your commits for every task of the batch (each command lists every sha you\n' +
+        'made for this batch, oldest first) with:'
+      : 'After committing, record your commits (every sha you made for this task, oldest first) with:',
+    ...ledgerLines(m, task, where, { event: 'committed', commits: ['<sha>', '<sha>'] }),
+    batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
+    ...ledgerLines(m, task, where, { event: 'blocked', reason: '<reason>' }),
   ].join('\n'), '', implementResultText(where.dir, true, base));
   return parts.join('\n');
 }
@@ -213,11 +279,12 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   return [
-    `You are reviewing Task ${task.id}: ${task.title} (range ${base}..${head}).`,
+    `You are reviewing ${unitName(task)} (range ${base}..${head}).`,
+    ...batchLines(task),
     '',
     sdd === null ? fallbackReviewer() : [
       `Read and follow ${sdd}/task-reviewer-prompt.md: the prompt block inside its fence is your instructions,`,
-      `with [BRIEF_FILE]: ${files.brief}; [GLOBAL_CONSTRAINTS]: the Global Constraints section of the plan and`,
+      `with [BRIEF_FILE]: ${briefRef(m, task)}; [GLOBAL_CONSTRAINTS]: the Global Constraints section of the plan and`,
       `the commit rules below; [REPORT_FILE]: ${files.report}; [BASE_SHA]: ${base}; [HEAD_SHA]: ${head};`,
       '[DIFF_FILE]: the path review-package prints (below).',
     ].join('\n'),
@@ -235,16 +302,14 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
 function fixPrompt(m, task, where, findings, report, head, guidance = null) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
-  const committed = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'committed', commits: ['<sha>', '<sha>'] }, where.dir);
-  const blockedCmd = ledgerCommand(m, where.lane,
-    { task: task.id, event: 'blocked', reason: '<reason>' }, where.dir);
+  const batch = isBatch(task);
   return [
-    `You are fixing review findings for Task ${task.id}: ${task.title}`,
+    `You are fixing review findings for ${unitName(task)}`,
+    ...batchLines(task),
     '',
     sdd === null ? fallbackImplementer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
-      `with Task: Task ${task.id}: ${task.title}; [BRIEF_FILE]: ${files.brief}; [directory]: ${where.dir};`,
+      `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
@@ -258,10 +323,12 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     '',
     taskContext(m, task, where, guidance),
     '',
-    'After committing, record your fix commits (oldest first) with:',
-    `  ${committed}`,
-    'If you are blocked, record it with:',
-    `  ${blockedCmd}`,
+    batch
+      ? 'After committing, record your fix commits (oldest first) for every task of the batch with:'
+      : 'After committing, record your fix commits (oldest first) with:',
+    ...ledgerLines(m, task, where, { event: 'committed', commits: ['<sha>', '<sha>'] }),
+    batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
+    ...ledgerLines(m, task, where, { event: 'blocked', reason: '<reason>' }),
     '',
     implementResultText(where.dir, true, head),
   ].join('\n');
@@ -272,11 +339,12 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   return [
-    `You are re-reviewing fix round ${round} of Task ${task.id}: ${task.title} (fix range ${base}..${head}).`,
+    `You are re-reviewing fix round ${round} of ${unitName(task)} (fix range ${base}..${head}).`,
+    ...batchLines(task),
     '',
     sdd === null ? fallbackReReviewer() : [
       `Read and follow ${sdd}/re-review-prompt.md: the prompt block inside its fence is your instructions,`,
-      `with [BRIEF_FILE]: ${files.brief}; [FINDINGS]: the findings below; [REPORT_FILE]: ${files.report};`,
+      `with [BRIEF_FILE]: ${briefRef(m, task)}; [FINDINGS]: the findings below; [REPORT_FILE]: ${files.report};`,
       `[FIX_BASE_SHA]: ${base}; [HEAD_SHA]: ${head}; [DIFF_FILE]: the path review-package prints (below).`,
     ].join('\n'),
     '',

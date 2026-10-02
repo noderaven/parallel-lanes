@@ -14,7 +14,10 @@ function reviewSettings(task, changedLines) {
   return { model: 'opus', effort: !task.security && small ? 'medium' : 'high' };
 }
 
-// Run one task through implement -> review -> fix/re-review rounds.
+// Run one task through implement -> review -> fix/re-review rounds. task may
+// be a batch unit (batchUnit): its agents use the unit id in their labels
+// (`<first>-<last> implement`), its prompts cover every task of the batch, and
+// it is adjudicated as its first task.
 // Tiers (spec D5): a sonnet or light task implements and fixes on its tier's
 // settings and escalates to standard when an implement or fix does not
 // finish (not on a question), a sonnet task also after the first changes
@@ -128,16 +131,21 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
 
   // What the adjudicator is told about the task: the diff range, the report
   // file, the reason or question, and for a round cap the reviewed ledger
-  // command a park records.
+  // command a park records. For a batch, the tasks it covers come first and
+  // a round cap names the reviewed command of every task.
   const details = (need) => {
     const lines = [
+      ...(isBatch(task) ? [`Batch ${task.id}: tasks ${unitTasks(task).map((t) => t.id).join(', ')} run as one ` +
+        'unit (one implementer, one review over the combined range); your outcome applies to all of them.'] : []),
       `Diff range: ${head === null ? `${base} (no commits yet)` : `${base}..${head}`}`,
       `Implementer report file: ${taskFiles(m, task).report}`,
       `${need.kind === 'question' ? 'Question' : 'Reason'}: ${need.reason}`,
     ];
     if (need.kind === 'round_cap') {
-      const reviewed = ledgerCommand(m, where.lane, { task: task.id, event: 'reviewed', rounds }, where.dir);
-      lines.push('Ledger command for outcome park (the parked task counts as reviewed):', `  ${reviewed}`);
+      lines.push(isBatch(task)
+        ? 'Ledger commands for outcome park (each parked task counts as reviewed):'
+        : 'Ledger command for outcome park (the parked task counts as reviewed):',
+      ...ledgerLines(m, task, where, { event: 'reviewed', rounds }));
     }
     return lines.join('\n');
   };
@@ -151,7 +159,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     if (adjudications >= 2) return result('blocked', 'adjudication_cap');
     adjudications += 1;
     const findings = need.findings || [];
-    const out = await adjudicate(m, { kind: need.kind, task, where, details: details(need), findings }, io);
+    // A batch is adjudicated as its first task.
+    const out = await adjudicate(m,
+      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need), findings }, io);
     if (!out.unavailable) rulings.push(out.text);
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
@@ -247,12 +257,52 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   return result('done', doneNotes(notes));
 }
 
+// One batch unit (spec D3) for consecutive light tasks with the same batch
+// key: id '<first>-<last>', run on the light tier.
+function batchUnit(tasks) {
+  const first = tasks[0];
+  return {
+    id: `${first.id}-${tasks[tasks.length - 1].id}`,
+    title: `batch of ${tasks.map((t) => t.id).join(', ')}`,
+    files: tasks.flatMap((t) => t.files),
+    tier: 'light',
+    security: false,
+    batch: first.batch,
+    tasks,
+  };
+}
+
+// The tasks that run as one unit starting at tasks[i]: tasks[i] and the
+// tasks right after it with the same batch key and state, when that state
+// is run, or review with an identical backfill range (a batch committed in
+// an earlier run). Otherwise (no key, skip state, review without a range,
+// or no matching neighbour) tasks[i] alone.
+function batchGroup(m, tasks, i) {
+  const first = tasks[i];
+  const state = taskState(m, first.id);
+  const backfill = m.backfill || {};
+  const range = backfill[first.id];
+  if (!present(first.batch) || state === 'skip' || (state === 'review' && !range)) return [first];
+  const joins = (t) => {
+    if (t.batch !== first.batch || taskState(m, t.id) !== state) return false;
+    if (state === 'run') return true;
+    const r = backfill[t.id];
+    return Boolean(r) && r.base === range.base && r.head === range.head;
+  };
+  let j = i + 1;
+  while (j < tasks.length && joins(tasks[j])) j += 1;
+  return tasks.slice(i, j);
+}
+
 // Run tasks in order at where, starting from base; skip done-and-reviewed
 // tasks, review done-only tasks first; stop at the first task that is not
 // done. Each task's base is the previous task's head (a skipped task's from
 // its backfill entry); a note an unblocked task carries goes to the next task
 // that runs. Returns {results, stopped:reason|null, head} where head
 // is the last known head (base when no task moved it).
+// Batches (batchGroup) run as one unit through runTask; a finished batch
+// gives each of its tasks a result with the batch range and batch: unit id,
+// and a batch that is not done stops the list at its first task.
 // baseIsPhaseTip: base is a head a phase agent reported (setup's feature head,
 // the integrate or post-integrate head). On a resume that tip can already sit
 // at or past this list's commits, so a done but unreviewed task that no
@@ -262,7 +312,10 @@ async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = fal
   let prev = base;
   let prevIsPhaseTip = baseIsPhaseTip;
   let carried = null;
-  for (const task of tasks) {
+  for (let i = 0; i < tasks.length;) {
+    const group = batchGroup(m, tasks, i);
+    i += group.length;
+    const task = group[0];
     const state = taskState(m, task.id);
     const range = (m.backfill || {})[task.id];
     if (state === 'skip') {
@@ -276,15 +329,18 @@ async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = fal
       }
       continue;
     }
+    const unit = group.length > 1 ? batchUnit(group) : task;
     const taskBase = state === 'review' && range && prevIsPhaseTip ? range.base : prev;
     const r = state === 'review' && !range
       ? {
         task: task.id, status: 'blocked', base: prev, head: null, rounds: 0, tier_used: task.tier,
         notes: 'done but not reviewed, and no backfill commits', rulings: [],
       }
-      : await runTask(m, task, where, taskBase, io, state === 'review' ? range : null, carried);
-    carried = r.next_note ? `from ${task.id}, unblocked by the adjudicator: ${r.next_note}` : null;
-    results.push(r);
+      : await runTask(m, unit, where, taskBase, io, state === 'review' ? range : null, carried);
+    carried = r.next_note ? `from ${unit.id}, unblocked by the adjudicator: ${r.next_note}` : null;
+    if (unit === task) results.push(r);
+    else if (r.status === 'done') for (const t of group) results.push({ ...r, task: t.id, batch: unit.id });
+    else results.push({ ...r, task: task.id, batch: unit.id });
     if (r.status !== 'done') {
       io.log(`${name}: stopped at ${task.id} (${r.notes})`);
       return { results, stopped: r.notes, head: prev };
