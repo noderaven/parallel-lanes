@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "parallel-lanes/manifest.schema.json",
+  "title": "parallel-lanes run manifest",
+  "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; light tasks cannot set security; repo.git_dir required in shadow mode; lane_commands keys and done/reviewed entries must be known ids.",
+  "type": "object",
+  "required": [
+    "version", "run_id", "plan", "spec", "commit_rules", "repo", "commands",
+    "prelude", "lanes", "join", "hooks", "limits", "dry_run", "done",
+    "reviewed", "sp_dir", "skill_dir"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "run_id": { "$ref": "#/$defs/text" },
+    "plan": { "$ref": "#/$defs/text" },
+    "spec": { "$ref": "#/$defs/textOrNull" },
+    "commit_rules": { "$ref": "#/$defs/text" },
+    "repo": {
+      "type": "object",
+      "required": ["mode", "root", "git_dir", "base_ref", "branch", "worktree_root", "ledger_dir"],
+      "properties": {
+        "mode": { "enum": ["git", "shadow"] },
+        "root": { "$ref": "#/$defs/text" },
+        "git_dir": { "$ref": "#/$defs/textOrNull" },
+        "base_ref": { "$ref": "#/$defs/text" },
+        "branch": { "$ref": "#/$defs/text" },
+        "worktree_root": { "$ref": "#/$defs/text" },
+        "ledger_dir": { "$ref": "#/$defs/text" }
+      },
+      "if": { "properties": { "mode": { "const": "shadow" } } },
+      "then": { "properties": { "git_dir": { "$ref": "#/$defs/text" } } }
+    },
+    "commands": {
+      "allOf": [
+        { "$ref": "#/$defs/commandSet" },
+        { "required": ["setup", "test", "lint", "build"] }
+      ]
+    },
+    "lane_commands": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/commandSet" }
+    },
+    "prelude": { "$ref": "#/$defs/taskList" },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "tasks"],
+        "properties": {
+          "id": { "$ref": "#/$defs/text" },
+          "name": { "$ref": "#/$defs/text" },
+          "setup_note": { "$ref": "#/$defs/text" },
+          "tasks": { "$ref": "#/$defs/taskList" }
+        }
+      }
+    },
+    "join": { "$ref": "#/$defs/taskList" },
+    "hooks": {
+      "type": "object",
+      "properties": {
+        "post_integrate": { "$ref": "#/$defs/text" },
+        "e2e": { "$ref": "#/$defs/text" }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": ["review_rounds", "max_parallel_lanes"],
+      "properties": {
+        "review_rounds": { "type": "integer", "minimum": 1 },
+        "max_parallel_lanes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "dry_run": { "type": "boolean" },
+    "done": { "$ref": "#/$defs/textList" },
+    "reviewed": { "$ref": "#/$defs/textList" },
+    "sp_dir": { "$ref": "#/$defs/textOrNull" },
+    "skill_dir": { "$ref": "#/$defs/text" }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1 },
+    "textOrNull": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/text" }] },
+    "textList": { "type": "array", "items": { "$ref": "#/$defs/text" } },
+    "commandSet": {
+      "type": "object",
+      "properties": {
+        "setup": { "$ref": "#/$defs/textList" },
+        "test": { "$ref": "#/$defs/textList" },
+        "lint": { "$ref": "#/$defs/textList" },
+        "build": { "$ref": "#/$defs/textList" }
+      },
+      "additionalProperties": false
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "files", "tier", "security"],
+      "properties": {
+        "id": { "$ref": "#/$defs/text" },
+        "title": { "$ref": "#/$defs/text" },
+        "files": { "$ref": "#/$defs/textList" },
+        "tier": { "enum": ["standard", "light"] },
+        "security": { "type": "boolean" }
+      },
+      "if": { "properties": { "tier": { "const": "light" } } },
+      "then": { "properties": { "security": { "const": false } } }
+    },
+    "taskList": { "type": "array", "items": { "$ref": "#/$defs/task" } }
+  }
+}
