@@ -1,0 +1,220 @@
+# parallel-lanes for Claude Code
+
+A Claude Code skill that runs an approved implementation plan as **parallel lanes** of
+tasks. Each lane gets its own git worktree, and every task gets an implementer agent and a
+reviewer agent. When the lanes finish, it merges them, runs the project's
+test/lint/build commands, runs an optional end-to-end check, and finishes with a final
+review. It's built to pair with the [Superpowers](https://github.com/obra/superpowers)
+plugin: Superpowers handles brainstorming, specs, and plans, and parallel-lanes takes over
+when it's time to execute the plan.
+
+---
+
+## 1. Prerequisites
+
+| Requirement | Why | Check |
+|---|---|---|
+| **Claude Code** with the **Workflow** tool (multi-agent workflows) | Runs the orchestrator `run.workflow.js` | In a Claude Code session, ask: "Do you have the Workflow tool?" |
+| **bash** | Installer, hooks, helper scripts | `bash --version` |
+| **git** 2.31 or later (2.38 or later recommended) | Worktrees, branches, merges | `git --version` |
+| **jq** 1.6 or later | Installer and SessionStart hook | `jq --version` |
+| **python3** 3.8 or later | Lane planning, setup, ledger, reports | `python3 --version` |
+| *Optional:* **node** 18 or later | Only for running the test suite | `node --version` |
+| *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
+
+Platforms: written for macOS and Linux, and tested on Linux. On Windows, install and run
+Claude Code inside **WSL**, because the hooks and scripts need bash.
+
+Without the Workflow tool, the skill steps aside and recommends a normal Superpowers
+execution mode instead. Without Superpowers, it still runs, but agents use simpler
+built-in prompts.
+
+### Installing missing tools
+
+macOS (Homebrew):
+
+```bash
+brew install git jq python node gh
+```
+
+Debian or Ubuntu:
+
+```bash
+sudo apt update && sudo apt install -y git jq python3 nodejs gh
+```
+
+Fedora:
+
+```bash
+sudo dnf install -y git jq python3 nodejs gh
+```
+
+---
+
+## 2. Install the skill
+
+1. Clone the repo. It's private, so the owner has to add you as a collaborator first.
+   The easiest way to authenticate is the GitHub CLI: run `gh auth login` once.
+
+   ```bash
+   gh repo clone noderaven/parallel-lanes
+   cd parallel-lanes
+   ```
+
+   Plain git works too: `git clone https://github.com/noderaven/parallel-lanes.git`.
+
+2. Run the installer:
+
+   ```bash
+   bash install.sh
+   ```
+
+   It does three things:
+   - Copies the skill (without `.git`) to `~/.claude/skills/parallel-lanes`. The clone
+     can be deleted afterwards, or kept for updates.
+   - Backs up `~/.claude/settings.json` (to `settings.json.bak.<timestamp>`), then adds two
+     hooks without touching your other settings:
+     - **SessionStart**: tells each new, cleared, or compacted session that parallel-lanes
+       is the default plan executor, and lists any interrupted runs so you can resume them.
+     - **PostToolUse (Skill)**: shows a "parallel-lanes invoked" notice when the skill fires.
+   - Checks for Superpowers and tells you if it's missing.
+
+   If you use a custom config directory, run it with that directory instead:
+   `CLAUDE_CONFIG_DIR=/path/to/config bash install.sh`.
+
+3. **Restart Claude Code** so the hooks load. Running `/clear` in an open session also
+   works.
+
+---
+
+## 3. Install Superpowers (recommended)
+
+Skip this if the installer didn't warn you about it. Inside Claude Code, run:
+
+```
+/plugin marketplace add obra/superpowers
+/plugin install superpowers@superpowers-dev
+```
+
+Then restart Claude Code. parallel-lanes finds Superpowers automatically at run time. No
+configuration is needed.
+
+---
+
+## 4. Verify
+
+1. The files are in place:
+
+   ```bash
+   ls ~/.claude/skills/parallel-lanes/SKILL.md
+   ```
+
+2. The hooks are registered (you should see `session-start.sh` and `notice.sh`):
+
+   ```bash
+   jq '.hooks.SessionStart, .hooks.PostToolUse' ~/.claude/settings.json
+   ```
+
+3. In a new Claude Code session, ask: "Is the parallel-lanes skill available?"
+
+4. Optional: run the test suite (385 tests):
+
+   ```bash
+   cd ~/.claude/skills/parallel-lanes && node --test tests/
+   ```
+
+5. Optional: to make parallel-lanes the default even more firmly, add this paragraph to
+   `~/.claude/CLAUDE.md`. The SessionStart hook already covers this, so it isn't required.
+
+   > In the main session, when executing approved implementation plans, parallel-lanes is
+   > the default and takes precedence over superpowers' execution options. Use
+   > superpowers' Subagent-driven or Native only when parallel-lanes steps aside or I
+   > explicitly ask for them. Agents running a single task inside a parallel-lanes run must
+   > not invoke it.
+
+---
+
+## 5. Using it
+
+1. Write a plan whose tasks have `### Task <ID>:` headings and list the files each task
+   touches. Superpowers' brainstorming and writing-plans skills produce plans in this format.
+2. Work inside a git repo with a clean working tree; commit or stash first. For a folder
+   that isn't a git repo, the skill offers a "shadow repo" that leaves your folder
+   untouched until you approve copying the results back.
+3. When you approve the plan and Claude reaches the "how should I execute this?" step,
+   parallel-lanes fires automatically. You can also ask directly: "execute this plan with
+   parallel lanes."
+4. Pick **Parallel lanes**, review the dry-run table (tasks, lanes, model tiers, agent
+   count, budgets), and answer **yes**. Nothing runs before that yes.
+5. Watch progress with `/workflows`. When the run finishes, you get a report, and Claude
+   offers to open a PR. It never pushes, opens a PR, or merges without a separate yes.
+
+If a run stops (a budget cap, a question it can't settle, or a closed session), the next
+session lists it, and you can resume with one word. Finished tasks are skipped.
+
+### How a run works
+
+1. **Assess.** `scripts/derive-lanes` groups the tasks into lanes (at most
+   `min(5, CPU cores + 2)`), a *prelude* (shared groundwork that runs first), and a *join*
+   (tasks that need the merged result). Plans with only 1-2 tasks are handed back to
+   Superpowers.
+2. **Manifest.** Claude writes a JSON manifest covering lanes, model tier per task
+   (`standard`, `sonnet`, or `light`; security-sensitive tasks are always `standard`),
+   project commands, commit rules taken from your CLAUDE.md, and budgets.
+3. **Dry run and consent.** The workflow validates the manifest without spawning anything,
+   and Claude shows the table. "Just run it" and auto mode do not skip it.
+4. **Execute.** `scripts/setup` creates the feature branch and lane worktrees, then the
+   phases run: pre-flight conflict check, prelude, lanes in parallel, integration, join,
+   E2E, and a final review with three lenses and one fix round.
+5. **Hand-back.** The report covers each task's commits, review rounds, model and token
+   usage, rulings made on your behalf, and the E2E result.
+
+Other things to know:
+
+- **Autonomy.** In `autonomous` mode (the default), an adjudicator agent settles blocked
+  tasks and review deadlocks, capped at 25 rulings per run. In `supervised` mode, those
+  stop the run for you instead. You can switch modes when the table is shown.
+- **Transient failures** (agent errors, missing results) relaunch once automatically.
+  Anything substantive stops the run and asks you.
+- **Where files go.** Manifests and ledgers are stored beside the plan, or under
+  `~/.claude/parallel-lanes/runs/` when the plan is inside the repo. Worktrees go in a
+  sibling directory such as `<repo>-wt-<run_id>`. In git mode the run adds branches to
+  your repo, but no run files are written inside the project folder.
+
+---
+
+## 6. Update or uninstall
+
+- **Update:** in your clone, run `git pull && bash install.sh`. It replaces the
+  installed skill and does not add the hooks twice.
+- **Uninstall:** run `bash install.sh --uninstall`. It removes both hooks (after backing up
+  settings) and `~/.claude/skills/parallel-lanes`. Run records in
+  `~/.claude/parallel-lanes/` are kept; delete that folder by hand if you don't want them.
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `install: jq is required but not installed` (or git, python3) | Install the tool (section 1) and rerun. |
+| `settings.json is not valid JSON` | Fix the syntax error in `~/.claude/settings.json`, then rerun. |
+| Claude says `not a fit (Workflow tool unavailable)` | Your Claude Code build lacks the Workflow tool. Update Claude Code, or use Superpowers' Subagent-driven mode. |
+| `superpowers not found; agents use built-in prompts` | Install Superpowers (section 3) and restart Claude Code. |
+| The skill never fires at plan execution | Restart Claude Code so the SessionStart hook loads, and check section 4, step 2. Invoking it by name also works. |
+| `setup: the main checkout ... has uncommitted changes` | Commit or stash your changes, then ask Claude to run or resume the plan again. |
+| You want to undo the settings change | Restore the newest `~/.claude/settings.json.bak.*` file. |
+
+---
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `install.sh` | Installer, updater, and uninstaller |
+| `SKILL.md` | The skill: flow, hard rules, notices |
+| `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
+| `run.workflow.js` | The orchestrator, built from `src/` by `scripts/build` |
+| `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
+| `hooks/` | The SessionStart and notice hooks |
+| `tests/` | `node --test tests/` |
