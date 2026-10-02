@@ -1015,12 +1015,12 @@ function integratePrompt(m) {
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain prints nothing, ` +
-      `${admin} worktree remove ${q(w.dir)} then ${admin} branch -d ${q(w.branch)}`;
+      `${admin} worktree remove ${q(w.dir)} then git -C ${dir} branch -d ${q(w.branch)}`;
   });
   return [
     `You are the integration agent for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
-    'Return status failed with the reason in notes at the first step that fails.',
+    'Return status failed with the reason in notes at the first of steps 1-4 that fails.',
     '',
     `1. git -C ${dir} status --porcelain must print nothing.`,
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
@@ -1037,7 +1037,8 @@ function integratePrompt(m) {
     '5. Only when steps 1-4 passed, clean up each lane:',
     ...cleanup,
     '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
-    '   force a removal or a branch deletion.',
+    '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 5',
+    '   could not remove in notes and still return status done.',
     '',
     `Plan: ${m.plan}`,
     phaseRules(m),

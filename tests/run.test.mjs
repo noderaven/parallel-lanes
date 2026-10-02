@@ -210,6 +210,22 @@ test('integrate prompt: lane order, --no-ff, scratch check, clean-only cleanup',
   assert.ok(p.includes('npm test') && p.includes('npm ci'));
   assert.match(p, /worktree remove/);
   assert.ok(!p.includes('--force'), 'never force-removes a worktree');
+  assert.match(p, /Cleanup never fails the integration/);
+});
+
+test('shadow integrate prompt: lane branches are deleted from the feature worktree, cleanup is non-fatal', async () => {
+  const m = manifest();
+  m.repo.mode = 'shadow';
+  m.repo.git_dir = '/shadow/abc';
+  const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+  const p = calls.find((c) => c.label === 'integrate').prompt;
+  for (const lane of ['alpha', 'beta']) {
+    assert.ok(p.includes(`git -C '/work/wt/feature' branch -d 'pl-run-1-${lane}'`), lane);
+    assert.ok(p.includes(`git --git-dir='/shadow/abc' worktree remove '/work/wt/lane-${lane}'`), lane);
+  }
+  assert.ok(!p.includes("git --git-dir='/shadow/abc' branch -d"), 'the bare shadow HEAD is pl-base, not the feature branch');
+  assert.match(p, /first of steps 1-4 that fails/);
+  assert.match(p, /Cleanup never fails the integration/);
 });
 
 test('pre-flight conflicts stop before any implement', async () => {
