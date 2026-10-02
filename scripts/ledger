@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Per-lane append-only event ledger.
+
+usage:
+  ledger append DIR LANE JSON
+  ledger status DIR
+
+append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
+0700. JSON must be an object with a non-empty string 'task' and an 'event' of:
+  committed  with 'commits': non-empty list of strings
+  reviewed   with 'rounds': integer >= 0
+  ruling     with 'text': string
+  blocked    with 'reason': string
+
+status reads every DIR/*.jsonl and prints
+  {"done": [...], "reviewed": [...], "blocked": [...]}
+done: tasks with a 'committed' event. reviewed: tasks with a 'reviewed' event
+after their last 'committed'. blocked: tasks with a 'blocked' event and no
+'committed' after it. A missing DIR has empty lists.
+
+Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
+name or an unreadable ledger.
+"""
+
+import json
+import os
+import re
+import sys
+
+LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+REQUIRED = {
+    "committed": "commits",
+    "reviewed": "rounds",
+    "ruling": "text",
+    "blocked": "reason",
+}
+
+
+def fail(code, message):
+    print(f"ledger: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def entry_error(entry):
+    """Return why entry is not a valid ledger event, or None."""
+    if not isinstance(entry, dict):
+        return "entry must be a JSON object"
+    task = entry.get("task")
+    if not isinstance(task, str) or not task:
+        return "'task' must be a non-empty string"
+    event = entry.get("event")
+    if event not in REQUIRED:
+        return f"'event' must be one of {', '.join(REQUIRED)}"
+    key = REQUIRED[event]
+    value = entry.get(key)
+    if event == "committed":
+        ok = isinstance(value, list) and value and all(isinstance(c, str) and c for c in value)
+        if not ok:
+            return "'commits' must be a non-empty list of strings"
+    elif event == "reviewed":
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "'rounds' must be an integer >= 0"
+    elif not isinstance(value, str):
+        return f"'{key}' must be a string"
+    return None
+
+
+def append(directory, lane, raw):
+    if not LANE.match(lane):
+        fail(3, f"unsafe lane name {lane!r}")
+    try:
+        entry = json.loads(raw)
+    except json.JSONDecodeError as e:
+        fail(2, f"invalid JSON: {e}")
+    error = entry_error(entry)
+    if error:
+        fail(2, error)
+    if not os.path.isdir(directory):
+        os.makedirs(directory, mode=0o700)
+        os.chmod(directory, 0o700)
+    line = json.dumps(entry, ensure_ascii=True, separators=(",", ":")) + "\n"
+    path = os.path.join(directory, f"{lane}.jsonl")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line.encode("ascii"))
+    finally:
+        os.close(fd)
+
+
+def status(directory):
+    done, reviewed, blocked = {}, {}, {}
+    if os.path.isdir(directory):
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".jsonl"))
+        for name in names:
+            path = os.path.join(directory, name)
+            try:
+                with open(path, encoding="ascii") as f:
+                    lines = f.read().splitlines()
+            except (OSError, UnicodeDecodeError) as e:
+                fail(3, f"cannot read {path}: {e}")
+            for number, line in enumerate(lines, 1):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    entry = None
+                error = "invalid JSON" if entry is None else entry_error(entry)
+                if error:
+                    fail(3, f"{path}:{number}: {error}")
+                task, event = entry["task"], entry["event"]
+                if event == "committed":
+                    done[task] = True
+                    reviewed[task] = False
+                    blocked[task] = False
+                elif event == "reviewed":
+                    reviewed[task] = task in done
+                elif event == "blocked":
+                    blocked[task] = True
+    result = {
+        "done": list(done),
+        "reviewed": [t for t, v in reviewed.items() if v],
+        "blocked": [t for t, v in blocked.items() if v],
+    }
+    print(json.dumps(result))
+
+
+def main(argv):
+    if len(argv) == 4 and argv[0] == "append" and argv[1]:
+        append(argv[1], argv[2], argv[3])
+    elif len(argv) == 2 and argv[0] == "status" and argv[1]:
+        status(argv[1])
+    else:
+        fail(2, "usage: ledger append DIR LANE JSON | ledger status DIR")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

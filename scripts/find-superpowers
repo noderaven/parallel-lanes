@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Print the absolute skills directory of the newest superpowers install.
+#
+# An install qualifies when it has
+# skills/subagent-driven-development/implementer-prompt.md. Its version comes
+# from package.json, else .claude-plugin/plugin.json (0 when neither has one).
+# Versions compare numerically (6.10.0 > 6.4.2).
+#
+# Default search: ~/.claude/remote/plugins/*/*/ and
+# ~/.claude/plugins/cache/*/superpowers/*/.
+# PL_SEARCH_ROOTS (colon-separated directories) replaces the default; each
+# immediate subdirectory of a root is a candidate install.
+#
+# Exit 0 with the path on stdout; 2 on usage error; 3 (no output) if none found.
+set -euo pipefail
+
+if [ "$#" -ne 0 ]; then
+  echo "usage: find-superpowers" >&2
+  exit 2
+fi
+
+shopt -s nullglob
+
+candidates=()
+if [ -n "${PL_SEARCH_ROOTS:-}" ]; then
+  IFS=':' read -r -a roots <<< "$PL_SEARCH_ROOTS"
+  for root in "${roots[@]}"; do
+    [ -n "$root" ] || continue
+    candidates+=("$root"/*/)
+  done
+else
+  candidates+=("$HOME"/.claude/remote/plugins/*/*/)
+  candidates+=("$HOME"/.claude/plugins/cache/*/superpowers/*/)
+fi
+
+# First "version": "x.y.z" value in a JSON file, or nothing.
+read_version() {
+  [ -f "$1" ] || return 0
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9A-Za-z.+-]*\)".*/\1/p' "$1" |
+    sed -n '1p'
+}
+
+entries=""
+for dir in "${candidates[@]}"; do
+  dir="${dir%/}"
+  [ -f "$dir/skills/subagent-driven-development/implementer-prompt.md" ] || continue
+  version="$(read_version "$dir/package.json")"
+  if [ -z "$version" ]; then
+    version="$(read_version "$dir/.claude-plugin/plugin.json")"
+  fi
+  abs="$(cd "$dir/skills" && pwd)"
+  entries+="${version:-0}"$'\t'"$abs"$'\n'
+done
+
+if [ -z "$entries" ]; then
+  exit 3
+fi
+
+best="$(printf '%s' "$entries" | sort -s -t $'\t' -k1,1V | tail -n 1)"
+printf '%s\n' "${best#*$'\t'}"
