@@ -53,8 +53,17 @@ function assertError(errors, ...fragments) {
   );
 }
 
-test('harness runs the script body with stubs', async () => {
-  assert.equal(await loadScript({ args: validManifest() }), undefined);
+test('harness runs the script body with stubs: a run starts with the setup agent', async () => {
+  const labels = [];
+  const result = await loadScript({
+    args: validManifest(),
+    agent: async (prompt, opts) => {
+      labels.push(opts.label);
+      return null;
+    },
+  });
+  assert.deepEqual(labels, ['setup']);
+  assert.equal(result.status, 'stopped');
 });
 
 test('valid minimal manifest has no errors', () => {
