@@ -14,6 +14,8 @@ function agentRules() {
     'Never amend, rebase, reset, or force-update a branch. Decline commit-message findings with a reason; ' +
       'they are reported to the user.',
     'Do not invoke parallel-lanes or any plan-execution skill.',
+    'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
+      "previous one's output: every separate call costs a full turn.",
   ].join('\n');
 }
 

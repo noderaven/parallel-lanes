@@ -6,10 +6,12 @@ const {
   runTask, runLane, runLanes,
   implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
   implementSchema, implementResultText, finalFixSchema, reviewSettings,
+  finalFixPrompt, agentRules,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
   'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
   'implementSchema', 'implementResultText', 'finalFixSchema', 'reviewSettings',
+  'finalFixPrompt', 'agentRules',
 ]);
 
 function task(id, extra = {}) {
@@ -360,8 +362,9 @@ test('every prompt carries the shared requirements', () => {
       assert.ok(text.includes('/work/my plan.md'), `${where}: plan path`);
       assert.ok(text.includes('/work/spec.md'), `${where}: spec path`);
       assert.ok(
-        text.includes("'/skills/parallel-lanes/scripts/task-brief' '/work/my plan.md' 'T2' '/work/ledger/briefs/T2.md'"),
-        `${where}: task-brief command`,
+        text.includes("'/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' '/work/my plan.md' ") &&
+          text.includes("--brief 'T2' '/work/ledger/briefs/T2.md'"),
+        `${where}: start-task brief command`,
       );
       assert.ok(text.includes('/work/wt/lane-alpha'), `${where}: worktree path`);
       assert.ok(text.includes('npm test') && text.includes('npm ci'), `${where}: project commands`);
@@ -375,9 +378,10 @@ test('every prompt carries the shared requirements', () => {
 
 test('each prompt names the ledger event its agent records', () => {
   const p = allPrompts(manifest());
-  assert.ok(p.implement.includes('"event":"committed"'));
+  assert.ok(p.implement.includes("scripts/finish-task' "), 'implement records committed via finish-task');
   assert.ok(p.implement.includes('"event":"blocked"'));
-  assert.ok(p.fix.includes('"event":"committed"'));
+  assert.ok(p.fix.includes("scripts/finish-task' "), 'fix records committed via finish-task');
+  assert.ok(p.fix.includes('"event":"blocked"'));
   assert.ok(p.review.includes('"event":"reviewed","rounds":0'));
   assert.ok(p.reReview.includes('"event":"reviewed","rounds":1'));
   for (const name of ['review', 'reReview']) assert.match(p[name], /read-only/);
@@ -397,11 +401,12 @@ test('task prompts run provided commands from the task worktree', () => {
   const p = allPrompts(manifest());
   const prefix = "cd '/work/wt/lane-alpha' && ";
   for (const [name, text] of Object.entries(p)) {
-    const lines = text.split('\n').filter((l) => /scripts\/(ledger|task-brief|review-package)' /.test(l));
+    const lines = text.split('\n')
+      .filter((l) => /scripts\/(ledger|task-brief|review-package|start-task|finish-task)' /.test(l));
     assert.ok(lines.length > 0, name);
     for (const line of lines) assert.ok(line.trim().startsWith(prefix), `${name}: ${line.trim()}`);
   }
-  assert.ok(p.review.includes(`${prefix}mkdir -p '/work/ledger/reviews' && bash `), 'review-package order');
+  assert.ok(p.review.includes(`${prefix}python3 '/skills/parallel-lanes/scripts/start-task' `), 'start-task first');
 });
 
 test('lane_commands override the project commands for that lane', () => {
@@ -980,8 +985,101 @@ test('implementResultText asks for changed_lines over the agent range; the one-a
   assert.ok(plain.includes("git -C '/work/repo' diff --shortstat <start> HEAD"));
   const p = allPrompts(manifest());
   assert.match(p.implement, /changed_lines/);
-  assert.ok(p.implement.includes("diff --shortstat 'b0' HEAD"), 'implement counts from the task base');
-  assert.ok(p.fix.includes("diff --shortstat 'h1' HEAD"), 'a fix counts from the head it builds on');
+  assert.ok(p.implement.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'b0' "),
+    'implement counts from the task base');
+  assert.ok(p.fix.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'h1' "),
+    'a fix counts from the head it builds on');
+});
+
+test('implement prompt opens with start-task and syncs when the lane needs it', () => {
+  const m = manifest();
+  const synced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
+  assert.ok(synced.includes(
+    "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
+    "'/work/my plan.md' --sync 'pl/run-1' --brief 'T2' '/work/ledger/briefs/T2.md'"), synced);
+  const plain = implementPrompt(m, task('T2'), WHERE, 'b0');
+  assert.ok(plain.includes(
+    "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
+    "'/work/my plan.md' --brief 'T2' '/work/ledger/briefs/T2.md'"), plain);
+  assert.ok(!plain.includes('--sync'));
+});
+
+test('review prompts pass the review package to start-task', () => {
+  const p = allPrompts(manifest());
+  const pkg = (base, head) => "--package '/sp/skills/subagent-driven-development/scripts/review-package' " +
+    `'${base}' '${head}' '/work/ledger/reviews/T2-${base}..${head}.diff'`;
+  assert.ok(p.review.includes(pkg('b0', 'h1')), p.review);
+  assert.ok(p.reReview.includes(pkg('h1', 'h2')), p.reReview);
+  for (const name of ['review', 'reReview']) {
+    assert.ok(p[name].includes("scripts/start-task' "), name);
+    assert.ok(!p[name].includes('mkdir -p'), name);
+  }
+  for (const name of ['implement', 'fix']) assert.ok(!p[name].includes('--package'), name);
+});
+
+test('review prompts without superpowers keep the git log and diff steps', () => {
+  const p = allPrompts(manifest({ sp_dir: null }));
+  assert.ok(!p.review.includes('--package'));
+  assert.ok(!p.reReview.includes('--package'));
+  assert.ok(p.review.includes("git -C '/work/wt/lane-alpha' diff 'b0..h1'"));
+  assert.ok(p.review.includes("git -C '/work/wt/lane-alpha' log --oneline 'b0..h1'"));
+  assert.ok(p.reReview.includes("git -C '/work/wt/lane-alpha' diff 'h1..h2'"));
+});
+
+test('implement and fix prompts record commits with finish-task from their start commit', () => {
+  const p = allPrompts(manifest());
+  const finish = (from) => "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/finish-task' " +
+    `'/work/wt/lane-alpha' 'pl-run-1-alpha' '${from}' '/work/ledger' 'alpha' --task 'T2' --commit`;
+  assert.ok(p.implement.includes(finish('b0')), p.implement);
+  assert.ok(p.fix.includes(finish('h1')), p.fix);
+  for (const name of ['implement', 'fix']) {
+    assert.ok(!p[name].includes('"event":"committed"'), `${name}: no separate committed ledger command`);
+  }
+});
+
+test('batch prompts pass every task to start-task and finish-task', () => {
+  const m = manifest();
+  const unit = {
+    id: 'T3-T4', title: 'Task T3', files: ['src/T3.js', 'src/T4.js'], tier: 'light', security: false, batch: 'x',
+    tasks: [task('T3', { tier: 'light', batch: 'x' }), task('T4', { tier: 'light', batch: 'x' })],
+  };
+  const fs = [finding('the bug')];
+  const p = {
+    implement: implementPrompt(m, unit, WHERE, 'b0'),
+    review: reviewPrompt(m, unit, WHERE, 'b0', 'h1'),
+    fix: fixPrompt(m, unit, WHERE, fs, done('b0', 'h1'), 'h1'),
+    reReview: reReviewPrompt(m, unit, WHERE, 'h1', 'h2', fs),
+  };
+  for (const [name, text] of Object.entries(p)) {
+    assert.ok(text.includes("--brief 'T3' '/work/ledger/briefs/T3.md' --brief 'T4' '/work/ledger/briefs/T4.md'"),
+      `${name}: every brief`);
+  }
+  for (const name of ['implement', 'fix']) {
+    assert.ok(p[name].includes("--task 'T3' --task 'T4' --commit"), `${name}: every task`);
+  }
+  assert.ok(p.review.includes("'/work/ledger/reviews/T3-T4-b0..h1.diff'"), 'one package for the batch range');
+});
+
+test('task prompts carry no separate brief, fast-forward, or shortstat command', () => {
+  for (const spDir of ['/sp/skills', null]) {
+    const m = manifest({ sp_dir: spDir });
+    const p = allPrompts(m);
+    p.implementSynced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
+    for (const [name, text] of Object.entries(p)) {
+      for (const banned of ['scripts/task-brief', 'merge --ff-only', '--shortstat']) {
+        assert.ok(!text.includes(banned), `${name} (sp_dir ${spDir}): ${banned}`);
+      }
+    }
+  }
+});
+
+test('the final fix prompt still counts changed_lines with shortstat', () => {
+  const text = finalFixPrompt(manifest(), [finding('the bug')], 'tip0');
+  assert.ok(text.includes('diff --shortstat'), text);
+});
+
+test('every agent gets the combine-commands rule', () => {
+  assert.ok(agentRules().includes('Combine independent shell commands into one call'));
 });
 
 test('autonomous: a park or unblock without commits gives the adjudicator settled commands at base', async () => {

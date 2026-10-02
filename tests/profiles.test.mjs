@@ -134,7 +134,8 @@ test('lite: the lane works in the feature checkout on the feature branch with le
     assert.ok(prompt.includes('Worktree: /work/repo (branch pl/run-1)'), prompt);
     assert.ok(!prompt.includes('lane-alpha'), `${id} names no lane worktree`);
     assert.ok(!prompt.includes('pl-run-1-alpha'), `${id} names no lane branch`);
-    assert.ok(!prompt.includes('merge --ff-only'), `${id} has no sync step`);
+    assert.ok(prompt.includes("scripts/start-task' "), `${id} opens with start-task`);
+    assert.ok(!prompt.includes('--sync'), `${id} has no sync step`);
     assert.ok(prompt.includes("'/work/ledger' 'alpha' "), `${id} ledger lane is the lane id`);
     assert.equal(calls.find((c) => c.label === `${id} implement`).phase, 'Lane alpha');
   }

@@ -166,7 +166,8 @@ test('happy path: complete, phases in order, report filled in', async () => {
   const t2 = calls.find((c) => c.label === 'T2 implement');
   assert.ok(t2.prompt.includes('Worktree: /work/wt/lane-alpha (branch pl-run-1-alpha)'));
   assert.ok(t2.prompt.includes("append '/work/ledger' 'alpha'"));
-  assert.ok(t2.prompt.includes("merge --ff-only 'pl/run-1'"), 'lane picks up the prelude commits');
+  assert.ok(t2.prompt.includes("scripts/start-task' '/work/wt/lane-alpha' '/work/my plan.md' --sync 'pl/run-1' "),
+    'lane picks up the prelude commits');
 
   // The script owns every review base: setup's feature head, then each
   // task's head; lanes start at the prelude tip, join at the integrated tip.
@@ -758,20 +759,22 @@ function agentCheckout(label, featureDir) {
   return featureDir;
 }
 
-// Lines of a prompt that run a provided script: ledger, task-brief, or
-// review-package.
-const PROVIDED = /scripts\/ledger' append|scripts\/task-brief' |scripts\/review-package' /;
+// Lines of a prompt that run a provided script: ledger, task-brief,
+// review-package, start-task, or finish-task.
+const PROVIDED =
+  /scripts\/ledger' append|scripts\/task-brief' |scripts\/review-package' |scripts\/start-task' |scripts\/finish-task' /;
 
-test('every provided ledger, task-brief, and review-package command starts in the agent checkout', async () => {
+test('every provided ledger, start-task, finish-task, and review-package command starts in the agent checkout', async () => {
   for (const [mode, featureDir] of [['git', '/work/repo'], ['shadow', '/work/wt/feature']]) {
     const { calls } = await fullRun(mode);
-    const seen = { ledger: 0, brief: 0, review: 0 };
+    const seen = { ledger: 0, brief: 0, review: 0, finish: 0 };
     for (const c of calls) {
       const prefix = `cd '${agentCheckout(c.label, featureDir)}' && `;
       for (const line of c.prompt.split('\n').filter((l) => PROVIDED.test(l))) {
         assert.ok(line.trim().startsWith(prefix), `${mode} ${c.label}: ${line.trim()}`);
         if (line.includes('scripts/ledger')) seen.ledger += 1;
-        if (line.includes('scripts/task-brief')) seen.brief += 1;
+        if (line.includes('scripts/task-brief') || line.includes('--brief ')) seen.brief += 1;
+        if (line.includes('scripts/finish-task')) seen.finish += 1;
         if (line.includes('review-package')) seen.review += 1;
       }
     }
