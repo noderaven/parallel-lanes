@@ -1,5 +1,7 @@
 # parallel-lanes for Claude Code
 
+[![tests](https://github.com/noderaven/parallel-lanes/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/noderaven/parallel-lanes/actions/workflows/tests.yml?query=branch%3Amain)
+
 A Claude Code skill that runs an approved implementation plan as **parallel lanes** of
 tasks. Each lane gets its own git worktree, and every task gets an implementer agent and a
 reviewer agent. When the lanes finish, it merges them, runs the project's
