@@ -78,7 +78,7 @@ fi
 
 mkdir -p "$claude_dir/skills"
 if [ "$src" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then
-  echo "Skill already at $dest; registering hooks only"
+  echo "Skill already at $dest; installing the agent type and registering hooks only"
 else
   if [ -e "$dest" ]; then
     echo "Updating existing $dest"

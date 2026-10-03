@@ -76,6 +76,15 @@ function findingsText(findings) {
     `${i + 1}. [${f.severity}] ${f.file}:${f.line} - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
 }
 
+// The note for a finding with file "start-task" (reviewStartFailure): the
+// reviewer's start command failed, which no code change in the worktree can
+// fix. Empty when no finding has that file.
+function startFindingNote(findings) {
+  if (!Array.isArray(findings) || !findings.some((f) => f && f.file === 'start-task')) return [];
+  return ['A finding with file "start-task" is the reviewer\'s start command failing (a setup problem, not the',
+    'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
+}
+
 // Shared context every task agent gets. guidance (optional) is
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
@@ -90,13 +99,13 @@ function taskContext(m, task, where, guidance = null) {
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
-    'Task briefs, one per task. The start command below regenerates each from the current plan and prints it',
+    'Task briefs, one per task. The start command in this prompt regenerates each from the current plan and prints it',
     '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
     ...tasks.map((t) => `- Task ${t.id}: ${taskFiles(m, t).brief}`),
     ...tasks.filter(userNote).map((t) =>
       `The user's answer for task ${t.id} (follow it where it settles a question): ${userNote(t)}`),
   ] : [
-    `Task brief: ${files.brief}. The start command below regenerates it from the current plan and prints it`,
+    `Task brief: ${files.brief}. The start command in this prompt regenerates it from the current plan and prints it`,
     '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you).',
     ...(userNote(task)
       ? [`The user's answer for this task (follow it where it settles a question): ${userNote(task)}`] : []),
@@ -288,7 +297,9 @@ function finishText(batch, shas) {
 }
 
 function finishFailure() {
-  return 'A non-zero exit records nothing: fix the cause (a wrong sha, the wrong branch) and rerun it, or report blocked.';
+  return 'A refusal (exit 3) records nothing; only a failed ledger write can leave part of a batch recorded, and a\n' +
+    'rerun just repeats those events. On a non-zero exit fix the cause (a wrong sha, the wrong branch) and rerun it,\n' +
+    'or report blocked.';
 }
 
 // Prompt for an implementer. base is the task base the script owns (the
@@ -324,7 +335,8 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
   if (retry) {
     parts.push('', [
       `A previous attempt at this ${noun} did not succeed: ${retry.reason}`,
-      ...(retry.findings ? ['Open review findings:', findingsText(retry.findings)] : []),
+      ...(retry.findings
+        ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
   parts.push('', [
@@ -338,10 +350,11 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
 }
 
 // What a non-zero start-task exit means for a reviewer, who has no blocked
-// status: a "changes" verdict, so a failed start never approves.
+// status: a "changes" verdict, so a failed start never approves. The finding
+// names file "start-task", which fixPrompt treats as a setup failure.
 function reviewStartFailure() {
-  return 'stop and report blocked with its message: return verdict "changes" with one critical finding (file\n' +
-    '"start-task", line 0) that quotes it, and record no ledger line.';
+  return 'stop and return verdict "changes" with one critical finding (file "start-task", line 0) that quotes its\n' +
+    'message, and record no ledger line.';
 }
 
 // Prompt for the first (full) review of a task's base..head range.
@@ -388,6 +401,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
     findingsText(findings),
+    ...startFindingNote(findings),
     '',
     'Latest implementer result:',
     JSON.stringify(report),

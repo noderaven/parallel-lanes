@@ -597,6 +597,15 @@ function findingsText(findings) {
     `${i + 1}. [${f.severity}] ${f.file}:${f.line} - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
 }
 
+// The note for a finding with file "start-task" (reviewStartFailure): the
+// reviewer's start command failed, which no code change in the worktree can
+// fix. Empty when no finding has that file.
+function startFindingNote(findings) {
+  if (!Array.isArray(findings) || !findings.some((f) => f && f.file === 'start-task')) return [];
+  return ['A finding with file "start-task" is the reviewer\'s start command failing (a setup problem, not the',
+    'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
+}
+
 // Shared context every task agent gets. guidance (optional) is
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
@@ -611,13 +620,13 @@ function taskContext(m, task, where, guidance = null) {
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
-    'Task briefs, one per task. The start command below regenerates each from the current plan and prints it',
+    'Task briefs, one per task. The start command in this prompt regenerates each from the current plan and prints it',
     '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you):',
     ...tasks.map((t) => `- Task ${t.id}: ${taskFiles(m, t).brief}`),
     ...tasks.filter(userNote).map((t) =>
       `The user's answer for task ${t.id} (follow it where it settles a question): ${userNote(t)}`),
   ] : [
-    `Task brief: ${files.brief}. The start command below regenerates it from the current plan and prints it`,
+    `Task brief: ${files.brief}. The start command in this prompt regenerates it from the current plan and prints it`,
     '(it overwrites any older copy, so plan fixes made since an earlier attempt reach you).',
     ...(userNote(task)
       ? [`The user's answer for this task (follow it where it settles a question): ${userNote(task)}`] : []),
@@ -809,7 +818,9 @@ function finishText(batch, shas) {
 }
 
 function finishFailure() {
-  return 'A non-zero exit records nothing: fix the cause (a wrong sha, the wrong branch) and rerun it, or report blocked.';
+  return 'A refusal (exit 3) records nothing; only a failed ledger write can leave part of a batch recorded, and a\n' +
+    'rerun just repeats those events. On a non-zero exit fix the cause (a wrong sha, the wrong branch) and rerun it,\n' +
+    'or report blocked.';
 }
 
 // Prompt for an implementer. base is the task base the script owns (the
@@ -845,7 +856,8 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
   if (retry) {
     parts.push('', [
       `A previous attempt at this ${noun} did not succeed: ${retry.reason}`,
-      ...(retry.findings ? ['Open review findings:', findingsText(retry.findings)] : []),
+      ...(retry.findings
+        ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
   parts.push('', [
@@ -859,10 +871,11 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
 }
 
 // What a non-zero start-task exit means for a reviewer, who has no blocked
-// status: a "changes" verdict, so a failed start never approves.
+// status: a "changes" verdict, so a failed start never approves. The finding
+// names file "start-task", which fixPrompt treats as a setup failure.
 function reviewStartFailure() {
-  return 'stop and report blocked with its message: return verdict "changes" with one critical finding (file\n' +
-    '"start-task", line 0) that quotes it, and record no ledger line.';
+  return 'stop and return verdict "changes" with one critical finding (file "start-task", line 0) that quotes its\n' +
+    'message, and record no ledger line.';
 }
 
 // Prompt for the first (full) review of a task's base..head range.
@@ -909,6 +922,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
     findingsText(findings),
+    ...startFindingNote(findings),
     '',
     'Latest implementer result:',
     JSON.stringify(report),
@@ -1810,23 +1824,26 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused, untyped?}), and refuses calls past the
-// limits of effectiveLimits(m). A refused call spawns nothing and returns the
+// state ({agents, rulings, refused, untyped?, typedNulls?}), and refuses
+// calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
 // finish. The other io members pass through unchanged.
 //
 // Agent type: when agentTypeFor(m, label) names one, the spawn carries
-// agentType. A typed spawn that throws started no agent (the definition is
-// missing or broken), so its count is undone and it is retried once as
-// "<label> retry" without agentType through the normal checks. It also sets
-// the latch state.untyped (created on first use; missing means false): from
-// then on every spawn of the run, in any lane, goes out untyped, so a broken
-// definition costs one uncounted failure instead of doubling every agent and
-// ruling. A typed spawn that returns null is a dead agent like any other:
-// counted, retried untyped, latch untouched. Untyped spawns retry on null
-// only; their throw propagates.
+// agentType. A typed spawn that throws or returns null is retried once as
+// "<label> retry" without agentType through the normal checks. Counting is
+// the same as for any spawn: the failed typed spawn stays counted (it may
+// have run before it failed), and the retry counts again. The latch
+// state.untyped (created on first use; missing means false) then sends every
+// later spawn of the run, in any lane, out untyped, so a missing or broken
+// definition cannot double every agent: it is set by the first typed spawn
+// that throws, and by the second typed spawn that returns null while its
+// untyped retry returns a result (state.typedNulls counts those; one dead
+// agent alone is not a sign of a broken type). runAll reports the latch as
+// agent_type_fallback. Untyped spawns retry on null only; their throw
+// propagates.
 function makeIo(m, baseIo, state) {
   const limits = effectiveLimits(m);
   const refuse = (label) => {
@@ -1850,33 +1867,42 @@ function makeIo(m, baseIo, state) {
     agent: async (prompt, opts) => {
       const retry = () => spawn(prompt, { ...opts, label: `${opts.label} retry` });
       const agentType = state.untyped ? null : agentTypeFor(m, opts.label);
-      let r;
       if (agentType === null) {
-        r = await spawn(prompt, opts);
-      } else {
-        try {
-          r = await spawn(prompt, { ...opts, agentType });
-        } catch (e) {
-          // Only a started spawn throws, so the count it took is undone.
-          state.agents -= 1;
-          if (isRuling(opts.label)) state.rulings -= 1;
-          state.untyped = true;
-          baseIo.log(`parallel-lanes: ${opts.label} failed as agent type ${agentType}`
-            + ` (${e && e.message ? e.message : e}); it and every later agent run on the default type`);
-          return retry();
+        const r = await spawn(prompt, opts);
+        if (r !== null && r !== undefined) return r;
+        return retry();
+      }
+      const fallBack = (why) => {
+        if (!state.untyped) {
+          baseIo.log(`parallel-lanes: ${opts.label} failed as agent type ${agentType} (${why});`
+            + ' it and every later agent run on the default type');
         }
+        state.untyped = true;
+      };
+      let r;
+      try {
+        r = await spawn(prompt, { ...opts, agentType });
+      } catch (e) {
+        fallBack(e && e.message ? e.message : String(e));
+        return retry();
       }
       if (r !== null && r !== undefined) return r;
-      return retry();
+      const again = await retry();
+      if (again !== null && again !== undefined && !(again && again.__budget)) {
+        state.typedNulls = (state.typedNulls || 0) + 1;
+        if (state.typedNulls >= 2) fallBack('a second typed agent returned no result and its untyped retry did');
+      }
+      return again;
     },
   };
 }
 
 // The custom agent type for a spawn: m.agent_type, except for the hook agents
-// (e2e and post-integrate), whose instructions may need any tool.
+// (e2e and post-integrate) and the post-integrate fix, which must keep the
+// post-integrate hook passing: hook instructions may need any tool.
 function agentTypeFor(m, label) {
   if (typeof m.agent_type !== 'string' || m.agent_type.length === 0) return null;
-  if (/^(e2e|post-integrate)( retry)?$/.test(label)) return null;
+  if (/^(e2e|post-integrate|post-integrate fix)( retry)?$/.test(label)) return null;
   return m.agent_type;
 }
 
@@ -2449,7 +2475,9 @@ function preflightResolved(m, text) {
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
 //  rulings_spent (adjudications that ran; a relaunch subtracts it from
 //  limits.max_rulings), reason (stopped runs only), errors (invalid only),
-//  budget:{agents, rulings, limits} (reason budget only)}.
+//  budget:{agents, rulings, limits} (reason budget only),
+//  agent_type_fallback: true (only when a failing agent_type switched the
+//  rest of the run to the default agent type; see makeIo)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
 // (C2); they also reach the final fix wave. Task status is done, blocked,
 // skipped (done and reviewed earlier), or not_run. Under profile lite no
@@ -2526,6 +2554,7 @@ async function runAll(m, io) {
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
       : {}),
+    ...(state.untyped ? { agent_type_fallback: true } : {}),
   });
   // The run stops (resumable) once an agent was refused: runAll checks
   // state.refused after every phase step, ahead of any other stop reason.

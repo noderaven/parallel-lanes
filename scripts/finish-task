@@ -6,9 +6,12 @@ usage: finish-task DIR BRANCH FROM LEDGER_DIR LANE
 
 Refuses with exit 3, recording nothing, when DIR's branch
 (git rev-parse --abbrev-ref HEAD) is not BRANCH, when FROM or any SHA does
-not resolve to a commit, or when a SHA is FROM itself or not in FROM..HEAD
-(FROM an ancestor of SHA and SHA an ancestor of HEAD). Everything is checked
-before the first append.
+not resolve to a commit, when a SHA is FROM itself or not in FROM..HEAD
+(FROM an ancestor of SHA and SHA an ancestor of HEAD), when LANE is not a
+safe ledger lane name, or when LEDGER_DIR exists and is not a directory.
+Everything is checked before the first append, so only a failed ledger
+write can leave a partial record (the events before it); a rerun then
+repeats those committed events, which ledger status tolerates.
 
 Then appends {"task": ID, "event": "committed", "commits": [<full shas in the
 given order>]} for every ID via scripts/ledger append LEDGER_DIR LANE, and
@@ -23,8 +26,8 @@ so DIR alone names the repository.
 
 Exit 0 on success; 1 if git merge-base or git diff --shortstat fails; 2 on
 usage error; 3 on a refusal (DIR's branch unreadable or not BRANCH, an
-unresolvable FROM or SHA, a SHA outside FROM..HEAD); the ledger's code if an
-append fails.
+unresolvable FROM or SHA, a SHA outside FROM..HEAD, an unsafe LANE, a
+LEDGER_DIR that is not a directory); the ledger's code if an append fails.
 """
 
 import argparse
@@ -39,6 +42,8 @@ SHORTSTAT = re.compile(r"(\d+) (insertion|deletion)")
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+# The lane names scripts/ledger accepts (its LANE pattern).
+LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 
 
@@ -85,6 +90,11 @@ def parse(argv):
 def main(argv):
     args = parse(argv)
     directory = args.dir
+
+    if not LANE.fullmatch(args.lane):
+        fail(3, f"unsafe lane name {args.lane!r}; nothing recorded")
+    if os.path.exists(args.ledger_dir) and not os.path.isdir(args.ledger_dir):
+        fail(3, f"ledger path {args.ledger_dir!r} is not a directory; nothing recorded")
 
     res = git(directory, "rev-parse", "--abbrev-ref", "HEAD")
     if res.returncode != 0:

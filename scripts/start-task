@@ -78,7 +78,7 @@ def main(argv):
     branch = rev_parse(3, directory, "--abbrev-ref", "HEAD")
 
     if args.sync is not None:
-        res = git(directory, "merge", "--ff-only", args.sync)
+        res = git(directory, "merge", "--ff-only", "--end-of-options", args.sync)
         if res.returncode != 0:
             detail = (res.stderr or res.stdout).strip()
             fail(3, f"fast-forward of {directory!r} to {args.sync!r} failed: {detail}")

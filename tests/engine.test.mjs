@@ -409,6 +409,22 @@ test('task prompts run provided commands from the task worktree', () => {
   assert.ok(p.review.includes(`${prefix}python3 '/skills/parallel-lanes/scripts/start-task' `), 'start-task first');
 });
 
+test('a reviewer start failure is a start-task finding the fix and retry prompts route to blocked', () => {
+  const m = manifest();
+  const p = allPrompts(m);
+  for (const text of [p.review, p.reReview]) {
+    assert.ok(text.includes('stop and return verdict "changes" with one critical finding (file "start-task", line 0)'));
+    assert.ok(!text.includes('report blocked with its message'));
+  }
+  const note = 'A finding with file "start-task" is the reviewer\'s start command failing';
+  assert.ok(!p.fix.includes(note), 'no note without a start-task finding');
+  const startFinding = { severity: 'critical', file: 'start-task', line: 0, issue: 'exit 1', fix: 'n/a' };
+  assert.ok(fixPrompt(m, task('T2'), WHERE, [startFinding], done('b0', 'h1'), 'h1').includes(note));
+  const retry = { reason: 'review cap', findings: [startFinding] };
+  assert.ok(implementPrompt(m, task('T2'), WHERE, 'b0', retry).includes(note));
+  for (const text of Object.values(p)) assert.ok(text.includes('The start command in this prompt regenerates'));
+});
+
 test('lane_commands override the project commands for that lane', () => {
   const m = manifest({ lane_commands: { alpha: { test: ['uv run pytest -q'] } } });
   const text = implementPrompt(m, task('T2'), WHERE, 'b0');

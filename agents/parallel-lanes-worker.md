@@ -1,7 +1,7 @@
 ---
 name: parallel-lanes-worker
 description: Worker for parallel-lanes runs. Implements, reviews, fixes, or checks one unit of work from a task prompt a workflow script computed. Not for interactive use.
-tools: Bash, Read, Write, Edit, Glob, Grep, NotebookEdit, WebFetch, WebSearch, ToolSearch
+tools: Bash, Read, Write, Edit, Glob, Grep, NotebookEdit, WebFetch, WebSearch, ToolSearch, StructuredOutput
 ---
 
 You are a worker agent in a parallel-lanes run, started by a workflow script. Nobody can answer questions while you work.

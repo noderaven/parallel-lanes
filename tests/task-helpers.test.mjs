@@ -166,6 +166,17 @@ test('start-task --sync exits 3 when the fast-forward fails and writes no brief'
   assert.equal(existsSync(out), false);
 });
 
+test('start-task --sync reads a value starting with a dash as a branch, not an option', () => {
+  const c = newCase();
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--sync=--no-ff', '--brief', 'T1', out);
+  assert.equal(res.code, 3);
+  assert.match(res.stderr, /--no-ff - not something we can merge/);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), head);
+  assert.equal(existsSync(out), false);
+});
+
 test('start-task exits 3 for a task with no heading', () => {
   const c = newCase();
   const out = join(c.root, 'briefs', 'T9.md');
@@ -304,6 +315,24 @@ test('finish-task refuses an unknown sha', () => {
     assert.equal(res.stdout, '');
     assert.deepEqual(done(c), []);
   }
+});
+
+test('finish-task refuses an unsafe lane or a ledger path that is not a directory, recording nothing', () => {
+  const c = newCase();
+  const from = git(c.lane, 'rev-parse', 'HEAD');
+  const sha = commit(c.lane, 'b.txt', 'x\n', 'add b');
+  const bad = finishTask(c.lane, 'lane-a', from, c.ledgerDir, '../a', '--task', 'T1', '--task', 'T2', '--commit', sha);
+  assert.equal(bad.code, 3);
+  assert.match(bad.stderr, /unsafe lane name/);
+  assert.equal(bad.stdout, '');
+  assert.deepEqual(done(c), []);
+  const file = join(c.root, 'ledger file');
+  write(file, '');
+  const res = finishTask(c.lane, 'lane-a', from, file, 'a', '--task', 'T1', '--commit', sha);
+  assert.equal(res.code, 3);
+  assert.match(res.stderr, /not a directory/);
+  assert.equal(res.stdout, '');
+  assert.equal(readFileSync(file, 'utf8'), '');
 });
 
 test('finish-task without --commit exits 2', () => {

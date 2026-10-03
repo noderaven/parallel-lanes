@@ -186,8 +186,9 @@ const agentTypes = (calls) => calls.map((c) => ('agentType' in c ? c.agentType :
 test('agentTypeFor names the agent type for every label but the hook agents', () => {
   const m = typed();
   assert.equal(agentTypeFor(m, 'T2 implement'), 'parallel-lanes-worker');
-  assert.equal(agentTypeFor(m, 'post-integrate fix'), 'parallel-lanes-worker');
-  for (const label of ['e2e', 'e2e retry', 'post-integrate', 'post-integrate retry']) {
+  assert.equal(agentTypeFor(m, 'post-integrate re-review'), 'parallel-lanes-worker');
+  for (const label of ['e2e', 'e2e retry', 'post-integrate', 'post-integrate retry',
+    'post-integrate fix', 'post-integrate fix retry']) {
     assert.equal(agentTypeFor(m, label), null, label);
   }
   assert.equal(agentTypeFor(manifest(), 'T2 implement'), null);
@@ -218,7 +219,7 @@ test('makeIo adds no agentType without agent_type', async () => {
 });
 
 test('makeIo retries a failed typed spawn without agentType', async (t) => {
-  await t.test('the first spawn throws: the throw is not counted and later spawns go untyped', async () => {
+  await t.test('the first spawn throws: both are counted and later spawns go untyped', async () => {
     const { io, calls } = baseIo({
       'T2 implement': [new Error('agent type parallel-lanes-worker not found')],
       'T2 implement retry': [{ status: 'done' }],
@@ -229,7 +230,7 @@ test('makeIo retries a failed typed spawn without agentType', async (t) => {
     assert.deepEqual(labels(calls), ['T2 implement', 'T2 implement retry']);
     assert.deepEqual(agentTypes(calls), ['parallel-lanes-worker', null]);
     assert.equal(calls[1].phase, 'Lane alpha');
-    assert.equal(state.agents, 1);
+    assert.equal(state.agents, 2);
     assert.equal(state.untyped, true);
   });
   await t.test('the first spawn returns null: a dead agent, counted, and the type is kept', async () => {
@@ -245,7 +246,7 @@ test('makeIo retries a failed typed spawn without agentType', async (t) => {
 });
 
 test('makeIo spawns untyped after a typed spawn throws', async () => {
-  const { io, calls } = baseIo({
+  const { io, calls, logs } = baseIo({
     'T2 implement': [new Error('agent type parallel-lanes-worker not found')],
     'T2 implement retry': [{ status: 'done' }],
     'T3 implement': [{ status: 'done' }],
@@ -260,10 +261,42 @@ test('makeIo spawns untyped after a typed spawn throws', async () => {
   assert.deepEqual(labels(calls),
     ['T2 implement', 'T2 implement retry', 'T3 implement', 'T4 review', 'T4 review retry']);
   assert.deepEqual(agentTypes(calls), ['parallel-lanes-worker', null, null, null, null]);
-  assert.equal(state.agents, calls.length - 1, 'every agent that started is counted, the throw is not');
+  assert.equal(state.agents, calls.length, 'every spawn is counted, the failed typed one too');
+  assert.equal(logs.filter((l) => /default type/.test(l)).length, 1);
 });
 
-test('a typed adjudication that throws spends one ruling, for its retry', async () => {
+test('makeIo spawns untyped after two typed agents return null and their retries succeed', async () => {
+  const { io, calls } = baseIo({
+    'T2 implement': [null],
+    'T2 implement retry': [{ status: 'done' }],
+    'T3 implement': [null],
+    'T3 implement retry': [{ status: 'done' }],
+    'T4 implement': [{ status: 'done' }],
+  });
+  const state = newState();
+  const wrapped = makeIo(typed(), io, state);
+  await wrapped.agent('P', { label: 'T2 implement' });
+  assert.ok(!state.untyped, 'one dead typed agent keeps the type');
+  await wrapped.agent('P', { label: 'T3 implement' });
+  assert.equal(state.untyped, true);
+  assert.deepEqual(await wrapped.agent('P', { label: 'T4 implement' }), { status: 'done' });
+  assert.deepEqual(agentTypes(calls), ['parallel-lanes-worker', null, 'parallel-lanes-worker', null, null]);
+  assert.equal(state.agents, 5);
+});
+
+test('a typed null whose retry also fails does not count toward the fallback', async () => {
+  const { io } = baseIo({
+    'T2 implement': [null], 'T2 implement retry': [null],
+    'T3 implement': [null], 'T3 implement retry': [null],
+  });
+  const state = newState();
+  const wrapped = makeIo(typed(), io, state);
+  assert.equal(await wrapped.agent('P', { label: 'T2 implement' }), null);
+  assert.equal(await wrapped.agent('P', { label: 'T3 implement' }), null);
+  assert.ok(!state.untyped);
+});
+
+test('a typed adjudication that throws spends a ruling for each attempt', async () => {
   const { io, calls } = baseIo({
     'T2 adjudicate': [new Error('agent type parallel-lanes-worker not found')],
     'T2 adjudicate retry': [{ outcome: 'answer' }],
@@ -272,18 +305,19 @@ test('a typed adjudication that throws spends one ruling, for its retry', async 
   const r = await makeIo(typed(), io, state).agent('P', { label: 'T2 adjudicate' });
   assert.deepEqual(r, { outcome: 'answer' });
   assert.deepEqual(labels(calls), ['T2 adjudicate', 'T2 adjudicate retry']);
-  assert.equal(state.rulings, 1);
-  assert.equal(state.agents, 1);
+  assert.equal(state.rulings, 2);
+  assert.equal(state.agents, 2);
 });
 
-test('the retry of a typed spawn that throws passes the budget checks', async () => {
+test('the retry of a typed spawn that throws goes through the budget checks', async () => {
   const { io, calls } = baseIo({ 'T2 implement': [new Error('broken definition')], 'T2 implement retry': [1] });
   const state = newState();
   const m = typed({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
   const wrapped = makeIo(m, io, state);
-  assert.equal(await wrapped.agent('P', { label: 'T2 implement' }), 1);
-  assert.equal(state.agents, 1, 'the uncounted throw left room for the retry under max_agents 1');
-  assert.deepEqual(labels(calls), ['T2 implement', 'T2 implement retry']);
+  assert.deepEqual(await wrapped.agent('P', { label: 'T2 implement' }), { __budget: true });
+  assert.equal(state.agents, 1, 'the failed typed spawn holds its count');
+  assert.deepEqual(state.refused, ['T2 implement retry']);
+  assert.deepEqual(labels(calls), ['T2 implement']);
 });
 
 test("makeIo lets an untyped spawn's throw propagate", async () => {
@@ -324,6 +358,7 @@ async function run(m, script, delays = {}) {
     if (!queue || queue.length === 0) throw new Error(`unscripted agent call: ${opts.label}`);
     const r = queue.shift();
     if (delays[opts.label]) await new Promise((res) => setTimeout(res, delays[opts.label]));
+    if (r instanceof Error) throw r;
     return r;
   };
   const parallel = (thunks) => Promise.all(thunks.map((t) => t().catch(() => null)));
@@ -338,6 +373,20 @@ test('a clean run under the default budget completes and counts every agent', as
   assert.equal(result.agents_spawned, calls.length);
   assert.equal(result.rulings_spent, 0);
   assert.equal(result.budget, undefined);
+});
+
+test('a run reports agent_type_fallback only when a failing agent type switched it to the default', async () => {
+  const clean = await run(typed(), cleanScript());
+  assert.equal(clean.result.status, 'complete');
+  assert.equal(clean.result.agent_type_fallback, undefined);
+  const script = cleanScript();
+  script['setup retry'] = script.setup;
+  script.setup = [new Error('agent type parallel-lanes-worker not found')];
+  const { result, calls } = await run(typed(), script);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.agent_type_fallback, true);
+  assert.equal(result.agents_spawned, calls.length);
+  assert.deepEqual(agentTypes(calls).slice(0, 3), ['parallel-lanes-worker', null, null]);
 });
 
 test('cap reached while two lanes run: in-flight agents finish, no new agents start, stopped/budget', async () => {
