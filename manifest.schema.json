@@ -129,6 +129,7 @@
       }
     },
     "sp_dir": { "$ref": "#/$defs/textOrNull" },
+    "agent_type": { "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[a-z0-9-]+$" }] },
     "skill_dir": { "$ref": "#/$defs/text" }
   },
   "$defs": {

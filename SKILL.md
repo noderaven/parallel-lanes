@@ -111,7 +111,7 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    (e.g. "Opus for everything" means all `standard`).
 5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md,
    the plan's conventions, CONTRIBUTING). Every agent prompt carries it.
-6. `commands`, paths, `run_id`, `autonomy` (`autonomous` default), `limits`
+6. `commands`, paths, `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits`
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
@@ -132,7 +132,7 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    25 (reference.md "Budgets") so the table shows them.
 2. Show a header (mode, base and feature branch, worktree_root, `profile`, `autonomy`,
    `limits.max_agents`, `limits.max_rulings`, lanes at once = `lanes_effective`, superpowers
-   or built-in prompts, commit_rules, accepted merges, tasks left out of the run, batches)
+   or built-in prompts, agent type, commit_rules, accepted merges, tasks left out of the run, batches)
    and this table, one row per task in run order (prelude, lanes, join), then one row for
    the run-level agents and a total M:
 
@@ -216,7 +216,7 @@ its output, and keep that file beside the manifest. Per task: status, commits (`
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" (reference.md "Report"). Then
 integration and post-integrate notes, E2E PASS/FAIL, final review (fixed, declined with
-reasons, cannot verify), `agents_spawned` (reference.md "Report").
+reasons, cannot verify), `agents_spawned`, `agent_type_fallback` (reference.md "Report").
 
 Then offer the next step; act only on an explicit yes:
 - Git mode: a PR from `branch` into `base_ref` (follow the user's PR policy).
@@ -231,7 +231,7 @@ never `branch -D`. Keep the manifest and ledger.
 ## Resume
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
-   (earlier work from a hand-run attempt): reference.md "Adopting earlier work" first.
+   (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
 2. `python3 <skill_dir>/scripts/ledger status <ledger_dir>` prints `{done, reviewed,
    blocked, start_points, carry}`. Set the manifest's `done` and `reviewed` to those lists (a
    `settled` task is in both; never ask again). Put each `carry` entry into

@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
 const {
-  validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern,
+  validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern, agentTypePattern,
   effectiveAutonomy, effectiveLimits, planAgents, tierSettings,
 } = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
   'runIdPattern',
   'laneIdPattern',
+  'agentTypePattern',
   'effectiveAutonomy',
   'effectiveLimits',
   'planAgents',
@@ -349,6 +350,22 @@ test('schema documents every addendum field', () => {
   assert.ok('batch' in schema.$defs.task.properties);
   assert.deepEqual([...p.setup_result.required].sort(), ['discarded', 'feature_head', 'worktrees']);
   assert.deepEqual(Object.keys(p.start_points.properties).sort(), ['join', 'prelude']);
+  assert.deepEqual(p.agent_type, { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[a-z0-9-]+$' }] });
+});
+
+test('agent_type is optional, null, or a lowercase name', () => {
+  assert.equal(agentTypePattern(), '^[a-z0-9-]+$');
+  const message = 'agent_type: must be null or a name matching ^[a-z0-9-]+$';
+  const m = validManifest();
+  assert.deepEqual(validateManifest(m), []);
+  for (const value of [null, 'parallel-lanes-worker']) {
+    m.agent_type = value;
+    assert.deepEqual(validateManifest(m), [], `agent_type ${JSON.stringify(value)}`);
+  }
+  for (const value of ['', 'Bad Name', 7]) {
+    m.agent_type = value;
+    assert.deepEqual(validateManifest(m), [message], `agent_type ${JSON.stringify(value)}`);
+  }
 });
 
 test('lite profile with hooks.post_integrate is reported naming the rule', () => {

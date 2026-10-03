@@ -66,9 +66,12 @@ sudo dnf install -y git jq python3 nodejs
    bash install.sh
    ```
 
-   It does three things:
+   It does four things:
    - Copies the skill (without `.git`) to `~/.claude/skills/parallel-lanes`. The clone
      can be deleted afterwards, or kept for updates.
+   - Installs the `parallel-lanes-worker` agent type to
+     `~/.claude/agents/parallel-lanes-worker.md`. Runs use it to give each agent a smaller
+     context, and fall back to the default agent type without it.
    - Backs up `~/.claude/settings.json` (to `settings.json.bak.<timestamp>`), then adds two
      hooks without touching your other settings:
      - **SessionStart**: tells each new, cleared, or compacted session that parallel-lanes
@@ -114,7 +117,7 @@ configuration is needed.
 
 3. In a new Claude Code session, ask: "Is the parallel-lanes skill available?"
 
-4. Optional: run the test suite (385 tests):
+4. Optional: run the test suite:
 
    ```bash
    cd ~/.claude/skills/parallel-lanes && node --test tests/
@@ -206,7 +209,8 @@ Other things to know:
 - **Update:** in your clone, run `git pull && bash install.sh`. It replaces the
   installed skill and does not add the hooks twice.
 - **Uninstall:** run `bash install.sh --uninstall`. It removes both hooks (after backing up
-  settings) and `~/.claude/skills/parallel-lanes`. Run records in
+  settings), the agent file `~/.claude/agents/parallel-lanes-worker.md`, and
+  `~/.claude/skills/parallel-lanes`. Run records in
   `~/.claude/parallel-lanes/` are kept; delete that folder by hand if you don't want them.
 
 ---
@@ -232,9 +236,11 @@ Other things to know:
 | `install.sh` | Installer, updater, and uninstaller |
 | `SKILL.md` | The skill: flow, hard rules, notices |
 | `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
+| `adopt.md` | Adopting earlier work from a hand-run attempt, with a worked example |
 | `run.workflow.js` | The orchestrator, built from `src/` by `scripts/build` |
 | `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
+| `agents/` | The `parallel-lanes-worker` agent definition |
 | `tests/` | `node --test tests/` |
 
 ## License

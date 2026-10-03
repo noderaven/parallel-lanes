@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Closing bookkeeping for an implementer in one call.
+
+usage: finish-task DIR BRANCH FROM LEDGER_DIR LANE
+                   --task ID [--task ID ...] --commit SHA [--commit SHA ...]
+
+Refuses with exit 3, recording nothing, when DIR's branch
+(git rev-parse --abbrev-ref HEAD) is not BRANCH, when FROM or any SHA does
+not resolve to a commit, when a SHA is FROM itself or not in FROM..HEAD
+(FROM an ancestor of SHA and SHA an ancestor of HEAD), when LANE is not a
+safe ledger lane name, or when LEDGER_DIR exists and is not a directory.
+Everything is checked before the first append, so only a failed ledger
+write can leave a partial record (the events before it); a rerun then
+repeats those committed events, which ledger status tolerates.
+
+Then appends {"task": ID, "event": "committed", "commits": [<full shas in the
+given order>]} for every ID via scripts/ledger append LEDGER_DIR LANE, and
+prints one JSON line:
+  {"head": <full sha of HEAD>, "changed_lines": <insertions plus deletions of
+   git diff --shortstat FROM HEAD, 0 when empty>, "commits": [...],
+   "branch": BRANCH}
+
+GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+GIT_COMMON_DIR are removed from the environment of every git and ledger call,
+so DIR alone names the repository.
+
+Exit 0 on success; 1 if git merge-base or git diff --shortstat fails; 2 on
+usage error; 3 on a refusal (DIR's branch unreadable or not BRANCH, an
+unresolvable FROM or SHA, a SHA outside FROM..HEAD, an unsafe LANE, a
+LEDGER_DIR that is not a directory); the ledger's code if an append fails.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+SHORTSTAT = re.compile(r"(\d+) (insertion|deletion)")
+# Variables that would point git at another repo than the one named.
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+# The lane names scripts/ledger accepts (its LANE pattern).
+LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+
+
+def fail(code, message):
+    print(f"finish-task: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def git(directory, *args):
+    return subprocess.run(
+        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
+    )
+
+
+def commit_sha(directory, ref):
+    res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}")
+    if res.returncode != 0 or not res.stdout.strip():
+        fail(3, f"{ref!r} does not resolve to a commit in {directory!r}")
+    return res.stdout.strip()
+
+
+def is_ancestor(directory, older, newer):
+    res = git(directory, "merge-base", "--is-ancestor", older, newer)
+    if res.returncode not in (0, 1):
+        fail(1, f"git merge-base failed in {directory!r}: {res.stderr.strip()}")
+    return res.returncode == 0
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(prog="finish-task")
+    parser.add_argument("dir", metavar="DIR")
+    parser.add_argument("branch", metavar="BRANCH")
+    parser.add_argument("from_", metavar="FROM")
+    parser.add_argument("ledger_dir", metavar="LEDGER_DIR")
+    parser.add_argument("lane", metavar="LANE")
+    parser.add_argument("--task", action="append", required=True, metavar="ID")
+    parser.add_argument("--commit", action="append", required=True, metavar="SHA")
+    args = parser.parse_args(argv)
+    if not all(args.task):
+        parser.error("--task ID must be non-empty")
+    return args
+
+
+def main(argv):
+    args = parse(argv)
+    directory = args.dir
+
+    if not LANE.fullmatch(args.lane):
+        fail(3, f"unsafe lane name {args.lane!r}; nothing recorded")
+    if os.path.exists(args.ledger_dir) and not os.path.isdir(args.ledger_dir):
+        fail(3, f"ledger path {args.ledger_dir!r} is not a directory; nothing recorded")
+
+    res = git(directory, "rev-parse", "--abbrev-ref", "HEAD")
+    if res.returncode != 0:
+        fail(3, f"cannot read the branch of {directory!r}: {res.stderr.strip()}")
+    actual = res.stdout.strip()
+    if actual != args.branch:
+        fail(3, f"{directory!r} is on {actual!r}, not {args.branch!r}; nothing recorded")
+
+    head = commit_sha(directory, "HEAD")
+    base = commit_sha(directory, args.from_)
+    commits = []
+    for ref in args.commit:
+        sha = commit_sha(directory, ref)
+        if sha == base:
+            fail(3, f"commit {ref!r} is FROM itself, not a task commit; nothing recorded")
+        if not (is_ancestor(directory, base, sha) and is_ancestor(directory, sha, head)):
+            fail(3, f"commit {ref!r} is not in {args.from_}..HEAD; nothing recorded")
+        commits.append(sha)
+
+    res = git(directory, "diff", "--shortstat", base, head)
+    if res.returncode != 0:
+        fail(1, f"git diff --shortstat failed in {directory!r}: {res.stderr.strip()}")
+    changed = sum(int(n) for n, _ in SHORTSTAT.findall(res.stdout))
+
+    ledger = os.path.join(HERE, "ledger")
+    for task in args.task:
+        entry = json.dumps({"task": task, "event": "committed", "commits": commits})
+        res = subprocess.run(
+            [sys.executable, ledger, "append", args.ledger_dir, args.lane, entry], env=ENV
+        )
+        if res.returncode != 0:
+            sys.exit(res.returncode)
+
+    print(json.dumps({"head": head, "changed_lines": changed, "commits": commits, "branch": args.branch}))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

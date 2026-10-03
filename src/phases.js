@@ -154,7 +154,9 @@ function preflightResolved(m, text) {
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
 //  rulings_spent (adjudications that ran; a relaunch subtracts it from
 //  limits.max_rulings), reason (stopped runs only), errors (invalid only),
-//  budget:{agents, rulings, limits} (reason budget only)}.
+//  budget:{agents, rulings, limits} (reason budget only),
+//  agent_type_fallback: true (only when a failing agent_type switched the
+//  rest of the run to the default agent type; see makeIo)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
 // (C2); they also reach the final fix wave. Task status is done, blocked,
 // skipped (done and reviewed earlier), or not_run. Under profile lite no
@@ -231,6 +233,7 @@ async function runAll(m, io) {
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
       : {}),
+    ...(state.untyped ? { agent_type_fallback: true } : {}),
   });
   // The run stops (resumable) once an agent was refused: runAll checks
   // state.refused after every phase step, ahead of any other stop reason.

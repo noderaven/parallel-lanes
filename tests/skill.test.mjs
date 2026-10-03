@@ -6,6 +6,7 @@ import { SKILL_DIR, loadScript } from './harness.mjs';
 
 const SKILL_MD = join(SKILL_DIR, 'SKILL.md');
 const REFERENCE_MD = join(SKILL_DIR, 'reference.md');
+const ADOPT_MD = join(SKILL_DIR, 'adopt.md');
 
 const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
   'execution-method handoff), or when resuming a stopped parallel-lanes run.';
@@ -95,8 +96,8 @@ test('SKILL.md frontmatter has the exact name and description', () => {
   assert.ok(!fields.description.includes(': ') && !fields.description.includes(' #'));
 });
 
-test('SKILL.md and reference.md are plain ASCII', () => {
-  for (const path of [SKILL_MD, REFERENCE_MD]) {
+test('SKILL.md, reference.md, and adopt.md are plain ASCII', () => {
+  for (const path of [SKILL_MD, REFERENCE_MD, ADOPT_MD]) {
     const bytes = read(path);
     const bad = bytes.findIndex((b) => b > 0x7e || (b < 0x20 && b !== 0x0a));
     assert.equal(bad, -1, `${path} has a non-ASCII or control byte at offset ${bad}`);
@@ -138,8 +139,8 @@ test('the resume notice the script logs matches the SKILL.md template', async ()
   assert.match(notices[0], templateRegex(NOTICES.resume));
 });
 
-test('every helper script SKILL.md and reference.md name exists', () => {
-  for (const path of [SKILL_MD, REFERENCE_MD]) {
+test('every helper script SKILL.md, reference.md, and adopt.md name exists', () => {
+  for (const path of [SKILL_MD, REFERENCE_MD, ADOPT_MD]) {
     const text = read(path).toString('utf8');
     const named = new Set([...text.matchAll(/scripts\/([A-Za-z0-9_.-]+)/g)].map((m) => m[1]));
     assert.ok(named.size > 0, `${path} names no helper script`);
@@ -162,9 +163,24 @@ test('run files of a plan inside the project go under ~/.claude/parallel-lanes/r
   assert.ok(skill.includes('~/.claude/parallel-lanes/runs/*/*.lanes.json'), 'SKILL.md resume lookup misses runs/');
 });
 
+test('adopt.md holds the adoption steps and the worked example', () => {
+  const adopt = read(ADOPT_MD).toString('utf8');
+  const reference = read(REFERENCE_MD).toString('utf8');
+  const skill = read(SKILL_MD).toString('utf8');
+  assert.ok(adopt.includes('## Adopting earlier work'), 'adopt.md lacks the adoption section');
+  assert.ok(adopt.includes('## Worked example'), 'adopt.md lacks the worked example');
+  assert.ok(!reference.includes('## Adopting earlier work'), 'reference.md still has the adoption section');
+  assert.ok(!reference.includes('## Worked example'), 'reference.md still has the worked example');
+  assert.ok(skill.includes('<skill_dir>/adopt.md'), 'SKILL.md does not point at adopt.md');
+  assert.ok(!skill.includes('reference.md "Adopting earlier work"'), 'SKILL.md still points at reference.md for adoption');
+});
+
 test('reference.md cleanup never runs git in a shadow project folder', () => {
   const reference = read(REFERENCE_MD).toString('utf8');
-  const cleanup = reference.slice(reference.indexOf('## Cleanup'), reference.indexOf('## Worked example'));
+  const start = reference.indexOf('## Cleanup');
+  assert.ok(start >= 0, 'reference.md lacks a Cleanup section');
+  const next = reference.indexOf('\n## ', start + 1);
+  const cleanup = reference.slice(start, next === -1 ? undefined : next);
   assert.ok(cleanup.includes('git --git-dir="<git_dir>" worktree remove'), cleanup);
   assert.ok(cleanup.includes('git -C "<worktree_root>/feature" branch -d'), cleanup);
   assert.match(cleanup, /not a repo/);
