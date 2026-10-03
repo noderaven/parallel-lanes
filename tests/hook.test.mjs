@@ -46,10 +46,50 @@ function skillEvent(skill, toolName = 'Skill') {
   });
 }
 
+const VERSION = readFileSync(join(SKILL_DIR, 'VERSION'), 'utf8').trim();
+
+test('VERSION holds one x.y.z version line', () => {
+  assert.match(readFileSync(join(SKILL_DIR, 'VERSION'), 'utf8'), /^[0-9]+\.[0-9]+\.[0-9]+\n$/);
+});
+
 for (const name of ['parallel-lanes', 'something:parallel-lanes']) {
-  test(`notice: ${name} prints the invocation system message`, () => {
+  test(`notice: ${name} prints the invocation system message with the version`, () => {
     const res = runHook(NOTICE, skillEvent(name));
     assert.equal(res.code, 0);
+    assert.deepEqual(JSON.parse(res.stdout), { systemMessage: `parallel-lanes v${VERSION} invoked` });
+  });
+}
+
+// Runs a copy of notice.sh from a skill root whose VERSION file holds
+// CONTENT (no VERSION file when CONTENT is null).
+function noticeWithVersion(content) {
+  const root = mkdtempSync(join(tmpdir(), 'pl-hook-version-'));
+  try {
+    mkdirSync(join(root, 'hooks'));
+    copyFileSync(NOTICE, join(root, 'hooks', 'notice.sh'));
+    if (content !== null) writeFileSync(join(root, 'VERSION'), content);
+    return runHook(join(root, 'hooks', 'notice.sh'), skillEvent('parallel-lanes'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('notice: a VERSION without a trailing newline still shows the version', () => {
+  const res = noticeWithVersion('2.3.4');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout), { systemMessage: 'parallel-lanes v2.3.4 invoked' });
+});
+
+for (const [label, content] of [
+  ['a missing VERSION', null],
+  ['an empty VERSION', ''],
+  ['a VERSION that is not x.y.z', 'v1.2\n'],
+  ['a VERSION with JSON-breaking text', '1.2.3"}\n'],
+  ['a VERSION with a second line', '1.2.3\nextra\n'],
+]) {
+  test(`notice: ${label} falls back to the plain message`, () => {
+    const res = noticeWithVersion(content);
+    assert.equal(res.code, 0, res.stderr);
     assert.deepEqual(JSON.parse(res.stdout), { systemMessage: 'parallel-lanes invoked' });
   });
 }

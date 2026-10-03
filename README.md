@@ -79,7 +79,8 @@ sudo dnf install -y git jq python3 nodejs
      hooks without touching your other settings:
      - **SessionStart**: tells each new, cleared, or compacted session that parallel-lanes
        is the default plan executor, and lists any interrupted runs so you can resume them.
-     - **PostToolUse (Skill)**: shows a "parallel-lanes invoked" notice when the skill fires.
+     - **PostToolUse (Skill)**: shows a notice with the installed version, such as
+       "parallel-lanes v1.1.0 invoked", when the skill fires.
    - Checks for Superpowers and tells you if it's missing.
 
    If you use a custom config directory, run it with that directory instead:
@@ -237,6 +238,7 @@ Other things to know:
 | Path | What it is |
 |---|---|
 | `install.sh` | Installer, updater, and uninstaller |
+| `VERSION` | The skill's version, shown in the invocation notice. Bump it in each release. |
 | `SKILL.md` | The skill: flow, hard rules, notices |
 | `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
 | `adopt.md` | Adopting earlier work from a hand-run attempt, with a worked example |
