@@ -202,7 +202,9 @@ and call out any agent whose `resolved_models` names a model other than the one 
 a task result's `rulings` has an entry starting `refused (security-gated):`, the security gate
 refused the adjudicator's park or unblock: list that ruling with the prefix, never as one that
 took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
-such entry) is listed as a stop ruling, as written.
+such entry) is listed as a stop ruling, as written. When the run result has
+`agent_type_fallback: true`, say in the report that the run switched to the default agent type
+partway through (see `agent_type` under Manifest fields).
 
 ## Backfill
 

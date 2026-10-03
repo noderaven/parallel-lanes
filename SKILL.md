@@ -216,7 +216,7 @@ its output, and keep that file beside the manifest. Per task: status, commits (`
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" (reference.md "Report"). Then
 integration and post-integrate notes, E2E PASS/FAIL, final review (fixed, declined with
-reasons, cannot verify), `agents_spawned` (reference.md "Report").
+reasons, cannot verify), `agents_spawned`, `agent_type_fallback` (reference.md "Report").
 
 Then offer the next step; act only on an explicit yes:
 - Git mode: a PR from `branch` into `base_ref` (follow the user's PR policy).

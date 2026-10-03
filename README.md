@@ -117,7 +117,7 @@ configuration is needed.
 
 3. In a new Claude Code session, ask: "Is the parallel-lanes skill available?"
 
-4. Optional: run the test suite (385 tests):
+4. Optional: run the test suite:
 
    ```bash
    cd ~/.claude/skills/parallel-lanes && node --test tests/
@@ -236,6 +236,7 @@ Other things to know:
 | `install.sh` | Installer, updater, and uninstaller |
 | `SKILL.md` | The skill: flow, hard rules, notices |
 | `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
+| `adopt.md` | Adopting earlier work from a hand-run attempt, with a worked example |
 | `run.workflow.js` | The orchestrator, built from `src/` by `scripts/build` |
 | `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
