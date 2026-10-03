@@ -82,9 +82,7 @@ case "$1" in
   list)
     [ "$#" -eq 1 ] || usage
     shopt -s nullglob
-    files=()
-    [ -d "$dir" ] && files=("$dir"/*.json)
-    for f in "${files[@]}"; do
+    for f in "$dir"/*.json; do
       read_marker "$f"
     done | jq -s -c 'sort_by(.run_id)'
     ;;

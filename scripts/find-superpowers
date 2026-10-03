@@ -24,7 +24,7 @@ shopt -s nullglob
 candidates=()
 if [ -n "${PL_SEARCH_ROOTS:-}" ]; then
   IFS=':' read -r -a roots <<< "$PL_SEARCH_ROOTS"
-  for root in "${roots[@]}"; do
+  for root in ${roots[@]+"${roots[@]}"}; do
     [ -n "$root" ] || continue
     candidates+=("$root"/*/)
   done
@@ -41,7 +41,7 @@ read_version() {
 }
 
 entries=""
-for dir in "${candidates[@]}"; do
+for dir in ${candidates[@]+"${candidates[@]}"}; do
   dir="${dir%/}"
   [ -f "$dir/skills/subagent-driven-development/implementer-prompt.md" ] || continue
   version="$(read_version "$dir/package.json")"

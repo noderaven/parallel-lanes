@@ -92,6 +92,13 @@ test('find-superpowers exits 3 with no output when nothing is installed', () => 
   assert.equal(res.stdout, '');
 });
 
+test('find-superpowers exits 3 when the search roots have no candidates at all', () => {
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: `${workDir()}:` });
+  assert.equal(res.code, 3);
+  assert.equal(res.stdout, '');
+  assert.equal(res.stderr, '');
+});
+
 test('find-superpowers rejects arguments with exit 2', () => {
   const res = run('bash', 'find-superpowers', ['extra'], { PL_SEARCH_ROOTS: workDir() });
   assert.equal(res.code, 2);
