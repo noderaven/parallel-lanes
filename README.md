@@ -22,7 +22,8 @@ when it's time to execute the plan.
 | *Optional:* **node** 18 or later | Only for running the test suite | `node --version` |
 | *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
 
-Platforms: written for macOS and Linux, and tested on Linux. On Windows, install and run
+Platforms: macOS and Linux. CI runs the test suite on both, with the stock bash 3.2 on
+macOS, so no newer bash is needed. On Windows, install and run
 Claude Code inside **WSL**, because the hooks and scripts need bash.
 
 Without the Workflow tool, the skill steps aside and recommends a normal Superpowers
