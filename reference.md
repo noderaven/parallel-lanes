@@ -102,9 +102,9 @@ Otherwise:
 
 | Tier | Model | Use for |
 |---|---|---|
-| standard | Opus 5.5, effort high | Default. Every task with logic or tests of logic. Always Opus: pre-flight, adjudicator, resolver, and final review agents, and reviewers (medium for small non-security diffs, see below). Integrate, e2e, and minor-only or docs-only final fixes start on Sonnet high and escalate to Opus. |
-| sonnet | Sonnet 5.5, effort high | Implementers of well-specified tasks with some logic. After the first `changes` verdict the task escalates to Opus. |
-| light | Sonnet 5.5, effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates to Opus after the second `changes` verdict. |
+| standard | Opus (current), effort high | Default. Every task with logic or tests of logic. Always Opus: pre-flight, adjudicator, resolver, and final review agents, and reviewers (medium for small non-security diffs, see below). Integrate, e2e, and minor-only or docs-only final fixes start on Sonnet high and escalate to Opus. |
+| sonnet | Sonnet (current), effort high | Implementers of well-specified tasks with some logic. After the first `changes` verdict the task escalates to Opus. |
+| light | Sonnet (current), effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates to Opus after the second `changes` verdict. |
 
 - `security: true` for tasks touching authentication, authorization, tokens, crypto,
   untrusted input (uploads, parsing external files, request bodies), file paths from users,
