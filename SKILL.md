@@ -16,7 +16,7 @@ set up and launch the bundled `run.workflow.js`, and hand back.
 fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers, report) are in
 `<skill_dir>/reference.md`; read it before building a manifest.
 
-**Hard rules. Violating the letter of a rule is violating its spirit.**
+**Hard rules.**
 1. Your first output when this skill fires is the invoked notice, before any tool call.
 2. No multi-agent execution without BOTH the user's explicit choice of Parallel lanes AND an
    explicit yes to the dry-run table you showed in this conversation.
@@ -244,17 +244,6 @@ never `branch -D`. Keep the manifest and ledger.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees; shadow mode reuses the existing shadow.
 6. Confirmation (same rules), then, after the yes, Launch step 2 again (setup and
    `start_points`), the resume notice, and launch.
-
-## Rationalizations
-
-| Thought | Reality |
-|---|---|
-| "The user said just run it, skip the table" | The table is the consent for a many-agent run. Dry run, table, yes. Always. |
-| "They already said execute the plan / yes" | Only a yes to the table shown in this conversation counts. |
-| "Run `scripts/setup` now so the table is exact" | Setup creates branches and discards worktree edits. Only after the yes. |
-| "A small workflow script of my own is faster" | It drops review, the ledger, resume, and checks. Use run.workflow.js. |
-| "Relaunch this stop, it is probably transient" | Only the listed causes. `review_rounds`, `adjudication_cap`, budget: stop and notify. |
-| "Sonnet is fine for this security task" | Security tasks are always standard. |
 
 ## Red flags - stop
 
