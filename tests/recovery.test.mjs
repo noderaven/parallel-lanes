@@ -292,7 +292,7 @@ test('run_ended events add up to the budget spent across launches', () => {
   const c = newCase();
   append(c, { task: '_run', event: 'run_ended', status: 'stopped', agents: 5, rulings: 2 });
   append(c, { task: '_run', event: 'run_ended', status: 'unaccepted', agents: 3, rulings: 0 });
-  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 8, rulings: 2 });
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 8, rulings: 2, unrecorded_launches: 0 });
   const bad = py('ledger', 'append', c.ledger, '_run', JSON.stringify({ task: '_run', event: 'run_ended', status: 'x', agents: -1, rulings: 0 }));
   assert.equal(bad.code, 2);
 });
@@ -347,4 +347,29 @@ test('a commit made before an interruption stays in its task range on the rerun'
   assert.deepEqual(status.inconsistent, []);
   assert.deepEqual(status.ranges.T1, { base: c.start, head: b });
   assert.deepEqual(ok(py('ledger', 'backfill', c.ledger, c.manifest)).backfill, { T1: { base: c.start, head: b } });
+});
+
+test('spent counts adjudicator rulings even when a launch never recorded its end', () => {
+  const c = newCase();
+  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start });
+  append(c, { task: '_run', event: 'run_ended', status: 'stopped', agents: 4, rulings: 1 });
+  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start });
+  // The second launch's session died: its rulings are in the ledger, its end is not.
+  append(c, { task: 'T1', event: 'ruling', by: 'adjudicator', text: 'Ruling: a - b - c' });
+  append(c, { task: 'T2', event: 'ruling', by: 'adjudicator', text: 'Ruling: d - e - f' });
+  append(c, { task: 'T2', event: 'ruling', text: 'Ruling: an implementer ruling - x - y' });
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 4, rulings: 2, unrecorded_launches: 1 });
+});
+
+test('a declared path with non-ASCII characters is matched, not reported as undeclared', () => {
+  const c = newCase();
+  withManifest(c, [ptask('T1', { files: ['caf\u00e9 menu.txt'] }), ptask('T2')]);
+  commit(c, 'caf\u00e9 menu.txt');
+  finish(c, c.start, '--task', 'T1');
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger, '--manifest', c.manifest)).undeclared, {});
+  const brief = join(c.ledger, 'briefs', 'T1.md');
+  const res = py('start-task', c.repo, c.plan, '--scope', c.start, 'HEAD', '--declared', 'caf\u00e9 menu.txt',
+    '--brief', 'T1', brief);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\n(none)\n"), res.stdout);
 });

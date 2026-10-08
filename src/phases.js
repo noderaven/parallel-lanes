@@ -47,8 +47,17 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
   };
   if (findings.length === 0) return final;
-  const settle = (dispositions, rr, why, delivered = null) =>
+  // A fix that committed is reviewed only by a re-review of its head: else
+  // its commits are delivered unreviewed (unreviewed_fix, acceptance
+  // final_fix_unreviewed), whatever the findings' severity.
+  const settle = (dispositions, rr, why, delivered = null) => {
     Object.assign(final, settleFinalFindings(findings, dispositions, rr, why, delivered));
+    const problem = reReviewProblem(rr, why, delivered);
+    if (final.head !== tip && problem !== null) {
+      final.unreviewed_fix = `the final fix ${tip}..${final.head} was not re-reviewed at ${final.head}: ${problem}`;
+    }
+    return final;
+  };
 
   // Final fix tier (spec decision 5): Sonnet when every finding is minor or
   // every finding is in documentation; otherwise Opus. A Sonnet fix that does

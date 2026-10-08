@@ -272,7 +272,7 @@ function parityAgent(label) {
   if (label === 'e2e') return { head: 'E0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
   if (label.startsWith('final review')) return { findings: [{ ...FINDING }], cannot_verify: [] };
   if (label === 'final fix') {
-    return { status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] };
+    return { status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] };
   }
   if (label === 'final re-review') return { head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
   if (label === 'verify') return { head: 'f1', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };

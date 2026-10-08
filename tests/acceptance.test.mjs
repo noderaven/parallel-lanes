@@ -73,3 +73,20 @@ test('checks that leave the checkout dirty are a warning, not a failure', () => 
   assert.deepEqual(a.warnings, [`the project checks left uncommitted changes in the checkout at ${SHA}`
     + ' (git status was not clean afterwards)']);
 });
+
+test('a verify result that does not say whether the checkout is clean is a warning', () => {
+  const input = passing();
+  const { clean, ...rest } = input.verify;
+  void clean;
+  const a = acceptanceOf({ ...input, verify: rest });
+  assert.equal(a.status, 'accepted');
+  assert.deepEqual(a.warnings, [`the project checks did not report whether the checkout was clean at ${SHA}`]);
+});
+
+test('a final fix nobody re-reviewed at the delivered revision is missing evidence', () => {
+  const input = passing();
+  input.final = { ...input.final, unreviewed_fix: 'the final fix T0..d1 was not re-reviewed: no result from final re-review' };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['final_fix_unreviewed', 'missing']]);
+});

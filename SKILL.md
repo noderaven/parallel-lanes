@@ -8,7 +8,7 @@ description: Use when an approved implementation plan is about to be executed (a
 ## Overview
 
 Runs an approved plan as parallel lanes (a worktree each), every task implemented and
-reviewed, then integration, checks, E2E, and final reviews. Your job is fixed: build a
+reviewed, then integration, checks, E2E, and final reviews. Your job: build a
 manifest, show the dry-run table, set up and launch the bundled `run.workflow.js`, and hand
 back.
 
@@ -29,7 +29,7 @@ fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers
 
 ## Notices
 
-Print these lines exactly (each may follow a short visual marker of your choice).
+Print these lines exactly (each may follow a visual marker of your choice).
 
 | When | Line |
 |---|---|
@@ -89,7 +89,7 @@ X is about 2 x runnable tasks + 10; the table gives the exact number. "Go ahead"
 
 ## Building the manifest
 
-Field-by-field guide: reference.md "Manifest fields". In order:
+Fields: reference.md "Manifest fields". In order:
 
 1. Superpowers: `bash <skill_dir>/scripts/find-superpowers`. Exit 0: `sp_dir` = the printed
    path. Exit 3: print `parallel-lanes: superpowers not found; agents use built-in prompts`
@@ -213,7 +213,8 @@ The run returns `status`:
 - `complete`: lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
-  with `ledger accept <ledger_dir> <repo root> <delivered_sha> "<what was accepted>"`.
+  with `python3 <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
+  "<what>"`.
 
 Report: run `python3 <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch, append
@@ -245,7 +246,8 @@ never `branch -D`. Keep the manifest and ledger.
    task up: reference.md "Backfill"); put each `carry` entry into `notes`. Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
-   spec. `scripts/coverage <plan> <manifest file>` must exit 0 again.
+   spec. `python3 <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
+   (else fix the manifest's tasks or `excluded`).
 3. `backfill`: `python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
    Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.

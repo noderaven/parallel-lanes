@@ -70,15 +70,18 @@ no brief_sha256. Both are left out of reviewed, so a resume reviews them
 again. inputs: {"plan_changed", "spec_changed"}: true or false against the
 hashes the latest setup run_started recorded (the last launch; with --plan /
 --spec), null when nothing was recorded or no file was given.
-spent: the sums of 'agents' and 'rulings' over every run_ended event (the
-budget earlier launches used). accepted: every accepted event, in order.
+spent: {"agents", "rulings", "unrecorded_launches"}: the sums of 'agents'
+and 'rulings' over every run_ended event (the budget earlier launches used);
+rulings is at least the number of 'ruling' events with "by": "adjudicator"
+(they survive a session that died); unrecorded_launches is the number of
+setup run_started events without a run_ended (their agents are not counted). accepted: every accepted event, in order.
 With --manifest MANIFEST (and --plan), a reviewed task whose depends_on names a
 stale task is stale too ("it depends on <id>, whose approval is stale"),
 transitively, in run order. undeclared (with --manifest; else {}): {task:
 [paths]} for each task with a recorded range and a non-empty files list whose
 range changes a path (git diff --name-only --no-renames base head) that is not
 in its files, nor in the files of a task with the same range (a batch);
-paths compare normalized and case-insensitively.
+paths compare normalized and case-insensitively, non-ASCII ones unquoted.
 A missing DIR has empty lists, no start points, and no carry.
 
 accept appends {"task": "_run", "event": "accepted", "head": <full sha>,
@@ -317,6 +320,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
     started = {}  # task -> base of its latest started event
     start_mismatch = {}  # task -> reason, the first one found
     spent = {"agents": 0, "rulings": 0}
+    ended, launches, adjudicated = 0, 0, 0
     accepted = []
     for entry in events:
         task, event = entry["task"], entry["event"]
@@ -335,6 +339,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         elif event == "run_ended":
             spent["agents"] += entry["agents"]
             spent["rulings"] += entry["rulings"]
+            ended += 1
         elif event == "accepted":
             accepted.append({"head": entry["head"], "text": entry["text"]})
         elif event == "committed":
@@ -363,7 +368,10 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             blocked[task] = True
         elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
             last_ruling[task] = entry["text"]
+            adjudicated += 1
         elif event == "run_started":
+            if entry["phase"] == "setup":
+                launches += 1
             key = START_POINTS[entry["phase"]]
             start_points.setdefault(key, entry["head"])
             # The latest launch's hashes: inputs report changes since then.
@@ -427,6 +435,11 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
                     changed = True
     excluded = {s["task"] for s in stale} | set(unbound)
 
+    # A launch whose session died records no run_ended; the rulings its
+    # adjudicator wrote to the ledger still count.
+    spent["rulings"] = max(spent["rulings"], adjudicated)
+    spent["unrecorded_launches"] = max(0, launches - ended)
+
     undeclared = {}
     if manifest is not None:
         undeclared = undeclared_files(manifest, ranges)
@@ -482,7 +495,8 @@ def repo_git(m):
     prefix = [f"--git-dir={repo['git_dir']}"] if repo.get("mode") == "shadow" else ["-C", repo["root"]]
 
     def git(*args):
-        return subprocess.run(["git", *prefix, *args], capture_output=True, text=True, env=ENV)
+        return subprocess.run(["git", *prefix, *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape", env=ENV)
     return git
 
 
@@ -511,7 +525,7 @@ def undeclared_files(m, ranges):
         for other in tasks:
             if ranges.get(other["id"]) == rng:
                 allowed.update(k for k in map(path_key, other.get("files") or []) if k is not None)
-        res = git("diff", "--name-only", "--no-renames", rng["base"], rng["head"])
+        res = git("-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", rng["base"], rng["head"])
         if res.returncode != 0:
             continue
         extra = sorted(p for p in res.stdout.splitlines() if p and path_key(p) not in allowed)

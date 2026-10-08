@@ -73,7 +73,8 @@ def fail(code, message):
 
 def git(directory, *args):
     return subprocess.run(
-        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
+        ["git", "-C", directory, *args], capture_output=True, text=True, encoding="utf-8",
+        errors="surrogateescape", env=ENV
     )
 
 
@@ -192,7 +193,8 @@ def main(argv):
         out.append(f"===== review package =====\n{res.stdout}")
 
     if args.scope is not None:
-        res = git(directory, "diff", "--name-only", "--no-renames", "--end-of-options", *args.scope)
+        res = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                  "--end-of-options", *args.scope)
         if res.returncode != 0:
             fail(1, f"git diff {' '.join(args.scope)} failed in {directory!r}: {res.stderr.strip()}")
         declared = {path_key(p) for p in args.declared}

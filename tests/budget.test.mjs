@@ -456,7 +456,7 @@ test('the project checks run at the final fix head even when the budget refused 
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
   script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true }];
   const { result, calls } = await run(m, script);
   assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
@@ -481,7 +481,7 @@ test('a refused final re-review stops the run for budget instead of throwing', a
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
   script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }];
   const { result, calls } = await run(m, script);
   assert.equal(calls.length, 17);

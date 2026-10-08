@@ -24,8 +24,19 @@ function withFindingIds(findings, prefix = 'F') {
 // re-review at all). rr is the re-review result {head, results, new_findings},
 // or null when none ran (whyNot says why). New findings are open with ids N1...
 // Answers are checked across fields, not just for shape: a re-review of
-// another revision than delivered (the fix head) settles nothing, and two
-// different answers for one id (dispositions or results) leave it open.
+// another revision than delivered (the fix head) settles nothing (its new
+// findings are still kept, open), a disposition without evidence settles
+// nothing, and two different answers for one id leave it open.
+// reReviewProblem says why a re-review result settles nothing, or null.
+function reReviewProblem(rr, whyNot, delivered) {
+  if (rr === null) return whyNot;
+  if (delivered !== null && rr.head !== delivered) {
+    return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
+      : 'the final re-review did not say which revision it judged';
+  }
+  return null;
+}
+
 function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-reviewed', delivered = null) {
   // id -> the one answer given, or null when the answers disagree.
   const byId = (list, ok) => {
@@ -39,11 +50,7 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
   };
   const said = byId(dispositions, (d) => d.status === 'fixed' || d.status === 'declined');
   const verdict = rr && Array.isArray(rr.results) ? byId(rr.results, () => true) : new Map();
-  let none = rr === null ? whyNot : null;
-  if (none === null && delivered !== null && rr.head !== delivered) {
-    none = present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
-      : 'the final re-review did not say which revision it judged';
-  }
+  const none = reReviewProblem(rr, whyNot, delivered);
   const fixed = [];
   const declined = [];
   const open = [];
@@ -54,12 +61,13 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     if (none !== null) open.push({ ...withNotes, reason: none });
     else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
     else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
+    else if (d && !present(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
     } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
     else fixed.push(withNotes);
   }
-  const fresh = rr && none === null && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
+  const fresh = rr && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
   for (const f of fresh) open.push({ ...f, reason: 'new in the final fix' });
   return { fixed, declined, open };
 }
@@ -112,8 +120,10 @@ function acceptanceOf(input) {
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
-  if (want.length > 0 && verify && verify.head === sha && verify.clean === false) {
-    warnings.push(`the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`);
+  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+    warnings.push(verify.clean === false
+      ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
+      : `the project checks did not report whether the checkout was clean at ${sha}`);
   }
 
   if (m.hooks.e2e) {
@@ -136,6 +146,7 @@ function acceptanceOf(input) {
 
   if (input.fix_unreviewed) add('fix_unreviewed', 'missing', 'a post-integration fix was not re-reviewed');
   if (final) {
+    if (final.unreviewed_fix) add('final_fix_unreviewed', 'missing', final.unreviewed_fix);
     for (const lens of final.missing_lenses || []) add('review_missing', 'missing', `the ${lens} final review returned no result`);
     const open = final.open || [];
     const blocking = open.filter(isBlocking);

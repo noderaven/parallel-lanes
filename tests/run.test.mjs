@@ -72,7 +72,7 @@ function phaseScript(extra = {}) {
     'final review security': [{ findings: [finding('dup issue'), finding('sec issue', 'src/b.js', 9)], cannot_verify: [], head: 'T5-h' }],
     'final review correctness': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
     'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [
-      { id: 'F1', status: 'fixed', reason: 'fixed' }, { id: 'F2', status: 'fixed', reason: 'fixed' },
+      { id: 'F1', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' }, { id: 'F2', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' },
     ] }],
     'final re-review': [{ head: 'f1', results: [
       { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'resolved', evidence: 'gone' },
@@ -531,7 +531,7 @@ test('final fix gets the deduped findings once, by id; a decline the re-review a
     ...phaseScript({
       'final fix': [{
         status: 'done', head: 'f1', tests: 'pass', notes: '',
-        dispositions: [{ id: 'F1', status: 'fixed', reason: 'done' }, { id: 'F2', status: 'declined', reason: 'false positive' }],
+        dispositions: [{ id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' }],
       }],
     }),
     ...taskScript(ALL),
@@ -574,7 +574,7 @@ test('a finding the re-review still sees open stays open even after it moved a l
 test('a finding without a disposition or a re-review result is open, never fixed', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }],
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
       'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
         { severity: 'important', file: 'src/c.js', line: 2, issue: 'the fix broke c', fix: 'restore' },
       ] }],
@@ -649,6 +649,47 @@ test('a decline the re-reviewer overrules stays open and blocks acceptance', asy
   assert.deepEqual(result.final.declined, []);
   assert.deepEqual(result.final.open.map((f) => f.id), ['F2']);
   assert.equal(result.acceptance.status, 'rejected');
+});
+
+// Reviewer of 1.2.1: a final fix whose commits no re-review of the delivered
+// revision covered is missing evidence, even when every finding is minor,
+// and the new findings that re-review reported are kept.
+test('a final fix the re-review did not cover at the delivered revision keeps the run from being accepted', async () => {
+  const minor = { ...finding('naming'), severity: 'minor' };
+  // Fresh result queues for each run (the stub consumes them).
+  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const base = () => ({
+    'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+    'final review security': none(), 'final review correctness': none(),
+    'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+      { id: 'F1', status: 'fixed', reason: 'renamed', evidence: 'src/a.js:3' }] }],
+  });
+  const wrongHead = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [{ head: 'T5-h', results: [
+    { id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
+    { severity: 'critical', file: 'src/c.js', line: 2, issue: 'the fix opened a hole', fix: 'close it' }] }] }), ...taskScript(ALL) });
+  assert.deepEqual(wrongHead.result.final.open.map((f) => f.id), ['F1', 'N1']);
+  assert.equal(wrongHead.result.acceptance.status, 'rejected');
+  assert.ok(wrongHead.result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'));
+
+  const noReview = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [null], 'final re-review retry': [null] }), ...taskScript(ALL) });
+  assert.equal(noReview.result.acceptance.status, 'unverified', JSON.stringify(noReview.result.acceptance));
+  assert.deepEqual(noReview.result.acceptance.reasons.map((r) => r.kind), ['final_fix_unreviewed']);
+  assert.match(noReview.result.acceptance.reasons[0].detail, /T5-h\.\.f1/);
+});
+
+test('a disposition without evidence does not settle its finding', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+        { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'false positive' },
+      ] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  assert.deepEqual(result.final.fixed.map((f) => f.id), ['F1']);
+  assert.deepEqual(result.final.open.map((f) => [f.id, f.reason]), [['F2', 'the final fix gave no evidence for it']]);
 });
 
 test('no final findings: no fix or re-review agent', async () => {
@@ -774,7 +815,7 @@ test('a final fix with no commits is still re-reviewed: its claims are checked, 
   const script = {
     ...phaseScript({
       'final fix': [{ status: 'done', head: 'T5-h', tests: '', notes: '', dispositions: [
-        { id: 'F1', status: 'fixed', reason: 'already fine' }, { id: 'F2', status: 'declined', reason: 'out of scope' },
+        { id: 'F1', status: 'fixed', reason: 'already fine', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/a.js:3' },
       ] }],
       'final re-review': [{ head: 'T5-h', results: [
         { id: 'F1', status: 'open', evidence: 'nothing changed' }, { id: 'F2', status: 'resolved', evidence: 'out of scope indeed' },
@@ -1832,7 +1873,7 @@ test('acceptance: minor findings and cannot-verify items are warnings, not reaso
   const result = await acceptanceOf({
     'final review sp': [{ findings: [minor], cannot_verify: ['load under 1k users'], head: 'T5-h' }],
     'final review security': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style' }] }],
+    'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
     'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
   });
   assert.equal(result.acceptance.status, 'accepted');

@@ -185,7 +185,8 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   `max_agents`: the checks are cheap and deterministic, so the evidence after the last change
   exists even when the budget is spent. When the budget stops the run after the join (in E2E or
   the final review), the stopped report carries `verify` at the feature head it reached; it
-  counts in `agents_spawned`, which can then exceed the cap by one.
+  counts in `agents_spawned`, which can then exceed the cap by one, or two when a verify that
+  returned nothing is retried.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
   `agents_spawned` and `max_rulings` by its `rulings_spent`, the adjudications that ran
   (floor 0). Never count ledger `ruling` events for this: implementers record their own
@@ -194,9 +195,12 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   record what it spent:
   `python3 <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
   (`status`: the run status, or `unaccepted` for complete but not accepted). `ledger status`
-  sums them as `spent`. On a resume, set `limits.max_rulings` to 25 minus `spent.rulings`
-  (floor 0; the user may raise it at the table), keep `max_agents` at 2 x the new dry-run
-  estimate (the work left), and show `spent.agents` and `spent.rulings` in the table header.
+  sums them as `spent`; `spent.rulings` is at least the adjudicator's own `ruling` events (they
+  survive a session that died), and `spent.unrecorded_launches` counts launches that recorded
+  no end (their agents are not in `spent.agents`: say so). On a resume, set
+  `limits.max_rulings` to the run's ruling cap (25, or what the user set at the first table)
+  minus `spent.rulings` (floor 0; the user may raise it at the table), keep `max_agents` at 2 x
+  the new dry-run estimate (the work left), and show `spent` in the table header.
 - Every launch is a new Workflow call (never `resumeFromRunId`), so no agent result is
   replayed from a cache: `agents_spawned` counts spawns that ran (a retry is a spawn of its
   own). Agent count is the only budget the run enforces; tokens and time per agent are reported
@@ -251,9 +255,10 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 `scripts/run-checks` result at `delivered_sha`), `e2e_failed`, `e2e_missing`, `e2e_stale`
 (`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
-`review_missing` (a final lens with no result), `fix_unreviewed`, `deferred_task`,
-`task_not_done`. Warnings (open minor findings, cannot-verify items, checks that left the
-checkout dirty) never block. The checks evidence is the
+`review_missing` (a final lens with no result), `fix_unreviewed`, `final_fix_unreviewed` (the
+final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`.
+Warnings (open minor findings, cannot-verify items, checks that left the checkout dirty or did
+not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
 it is not caught by the run. Show the
@@ -264,8 +269,9 @@ and shown as accepted by the user, never folded into `accepted`.
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
 The fixer gives each id a disposition with its evidence; the re-review names the revision it
-judged (`head`). A re-review of another revision than the fix head settles nothing, and two
-different dispositions or results for one id leave it open.
+judged (`head`). A disposition without evidence, a re-review of another revision than the fix
+head, or two different dispositions or results for one id leave the finding open (the new
+findings such a re-review reports are kept).
 `ledger status <ledger_dir> --manifest <manifest file>` lists under `undeclared` the files each
 task's recorded range changed outside its `files` (from git; a batch's files count for each of
 its tasks): list them in the report so the user can see work that went beyond the plan.

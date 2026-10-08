@@ -194,7 +194,7 @@ function verifySchema() {
       ok: { type: 'boolean' },
       clean: { type: 'boolean' },
     },
-    required: ['head', 'results', 'ok'],
+    required: ['head', 'results', 'ok', 'clean'],
   };
 }
 
