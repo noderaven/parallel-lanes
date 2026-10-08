@@ -2493,10 +2493,10 @@ function preflightResolved(m, text) {
 // The undeclared dependencies pre-flight reported, split into the entries
 // the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
-// the manifest, and name a task that is not done yet.
+// the manifest, and name a task that is not done and reviewed (a done task
+// still to review keeps its entry: its reviewer and fix agents use it).
 function preflightUndeclared(m, entries) {
   const ids = new Set([...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join].map((t) => t.id));
-  const done = new Set(m.done);
   const kept = [];
   const dropped = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -2507,7 +2507,7 @@ function preflightUndeclared(m, entries) {
     else if (!ids.has(entry.task)) drop(`task ${entry.task} is not in the run`);
     else if (!ids.has(entry.producer)) drop(`producer ${entry.producer} is not in the run`);
     else if (entry.task === entry.producer) drop('task and producer are the same');
-    else if (done.has(entry.task)) drop(`task ${entry.task} is already done`);
+    else if (taskState(m, entry.task) === 'skip') drop(`task ${entry.task} is already done and reviewed`);
     else kept.push({ task: entry.task, producer: entry.producer, what: entry.what });
   }
   return { kept, dropped };

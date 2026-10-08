@@ -1114,6 +1114,24 @@ test('undeclared entries do not stop a supervised run', async () => {
   assert.ok(calls.find((c) => c.label === 'T4 implement').prompt.includes("--also 'T4' 'T2'"));
 });
 
+test('undeclared entries for a done but unreviewed task reach its reviewer', async () => {
+  const m = manifest({
+    done: ['T1', 'T2'],
+    reviewed: ['T1'],
+    backfill: { T1: { base: 'p0', head: 'p1' }, T2: { base: 'old-b', head: 'old-h' } },
+  });
+  const entries = [
+    { task: 'T2', producer: 'T1', what: 'reads the T1 format' },
+    { task: 'T1', producer: 'T3', what: 'a done and reviewed task' },
+  ];
+  const script = { ...undeclaredScript(entries), ...taskScript(['T3', 'T4', 'T5']), 'T2 review': [approve()] };
+  const { result, calls, logs } = await run(m, script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(calls.find((c) => c.label === 'T2 review').prompt.includes("--also 'T2' 'T1'"));
+  assert.deepEqual(result.preflight.undeclared, [entries[0]]);
+  assert.ok(logs.some((l) => l.includes('dropped undeclared entry') && l.includes('"task":"T1"')), JSON.stringify(logs));
+});
+
 test('a producer id with a dot is shell-quoted in --also', async () => {
   const m = manifest({ prelude: [task('1.5')] });
   const script = {

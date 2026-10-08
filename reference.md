@@ -207,8 +207,8 @@ refused the adjudicator's park or unblock: list that ruling with the prefix, nev
 took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
 such entry) is listed as a stop ruling, as written. `preflight.undeclared` lists the
 dependencies pre-flight found that a task relies on without naming the producer in its
-Consumes (`{task, producer, what}`, after dropping entries with an unknown or done task, an
-unknown producer, or a task equal to its producer); the hand-back lists them under
+Consumes (`{task, producer, what}`, after dropping entries with an unknown or done-and-reviewed task, an
+unknown producer, or a task equal to its producer; a task done and reviewed is dropped, one done but still to review is kept); the hand-back lists them under
 "Dependencies pre-flight added" so the user can name them in the plan. When the run result has
 `agent_type_fallback: true`, say in the report that the run switched to the default agent type
 partway through (see `agent_type` under Manifest fields).

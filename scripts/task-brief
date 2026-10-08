@@ -14,9 +14,12 @@ Heading and section rules live in _plan.py, shared with derive-lanes.
 Referenced tasks come from the section's Consumes bullet (the first
 '- Consumes:' line outside fenced code, plus its deeper-indented continuation
 lines) and from the --also ids. In the bullet, an id with both a letter and a
-digit (G1) matches as a whole word; any other id (4, 1.5) matches only after
-'Task' or 'Tasks', including lists such as 'Tasks 3, 6 and 9'. Only ids with a
-heading in the plan count from the bullet; the task itself never counts.
+digit (G1) matches as a whole word ('G1.5' does not name G1); any other id
+(4, 1.5) matches only after 'Task' or 'Tasks', including lists such as
+'Tasks 3, 6 and 9'. A list item after a separator counts only where the list can
+end (before a comma, ';', ')', the end of a sentence or line, "'s", 'and' or
+'or'), so 'Task 4 and 3 mi' names Task 4 only, and 'Tasks 5 and 9 are done'
+names Task 5 only. Only ids with a heading in the plan count from the bullet; the task itself never counts.
 
 After the section, for each referenced task in plan order:
 
@@ -26,7 +29,9 @@ After the section, for each referenced task in plan order:
 
 The Produces block is the first '- Produces:' line outside fenced code in that
 task's section and every following line up to the first non-blank line indented
-no deeper than the bullet. A task without one gets its heading followed by
+no deeper than the bullet, except that a fenced code block opened inside the
+block (or right after the bullet line, even at the bullet's indent) runs to its
+closing fence. A task without one gets its heading followed by
 'Task <ID> has no Produces block in the plan.' Then one line per --also id with
 no heading: 'Task <ID> has no heading in the plan.' One blank line separates
 each appended part. With no Consumes bullet and no --also ids the brief is the
@@ -47,10 +52,16 @@ import _plan  # noqa: E402
 
 USAGE = "usage: task-brief PLAN TASK_ID OUT [--also ID ...]"
 
-# 'Task <ID>' or 'Tasks <ID>, <ID> and <ID>'; an id may carry "'s".
-_LIST_ID = r"\w+(?:[.-]\w+)*(?:'s)?"
+# 'Task <ID>' or 'Tasks <ID>, <ID> and <ID>'; an id may carry "'s". An id
+# after a separator counts only when the list can end there: "'s", a comma,
+# ';', ':', ')', ']', a '.' not followed by a word character, the end of the
+# line, or 'and'/'or'. So 'Task 4 and 3 mi' names Task 4 only.
+_ID = r"\w+(?:[.-]\w+)*"
+_LIST_ID = rf"{_ID}(?:'s)?"
+_LIST_END = r"(?:\s*(?:[,;:)\]]|\.(?!\w)|$)|\s+(?:and|or)\b)"
+_LIST_ITEM = rf"{_ID}(?:'s|(?={_LIST_END}))"
 _LIST_SEP = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
-TASK_LIST = re.compile(rf"\bTasks?\s+({_LIST_ID}(?:{_LIST_SEP}{_LIST_ID})*)")
+TASK_LIST = re.compile(rf"\bTasks?\s+({_LIST_ID}(?:{_LIST_SEP}{_LIST_ITEM})*)", re.M)
 LIST_ID = re.compile(r"\w+(?:[.-]\w+)*")
 
 
@@ -69,9 +80,27 @@ def bullet_span(lines, mask, label):
             continue
         depth = len(m.group(1))
         end = i + 1
-        while end < len(lines) and (
-            not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > depth
-        ):
+        fence = None  # marker of a fence opened inside the block
+        bare = True  # no content line since the bullet line
+        while end < len(lines):
+            line = lines[end]
+            fm = _plan.FENCE.match(line)
+            if fence is not None:
+                # Once a fence opens inside the block, it ends the block only
+                # by closing.
+                if (fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence)
+                        and not line.strip()[len(fm.group(1)):]):
+                    fence = None
+            elif not line.strip():
+                pass
+            elif len(line) - len(line.lstrip()) > depth or (fm and bare):
+                # A fence right after the bullet line is its continuation.
+                if fm:
+                    fence = fm.group(1)
+            else:
+                break
+            if line.strip():
+                bare = False
             end += 1
         while not lines[end - 1].strip():
             end -= 1
@@ -95,7 +124,7 @@ def consumed_ids(block_text, known_ids, self_id):
     found = set()
     for task_id in known_ids:
         if has_letter_and_digit(task_id) and re.search(
-            rf"(?<![\w.-]){re.escape(task_id)}(?![\w-])", block_text
+            rf"(?<![\w.-]){re.escape(task_id)}(?![\w-]|\.\w)", block_text
         ):
             found.add(task_id)
     for m in TASK_LIST.finditer(block_text):

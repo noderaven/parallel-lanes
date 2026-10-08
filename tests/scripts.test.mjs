@@ -715,3 +715,58 @@ test('ledger: carry holds the last adjudicator ruling after the last commit of a
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c9'] });
   assert.deepEqual(status(dir).carry, {});
 });
+
+test('task-brief does not read G1.5 as a reference to G1', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task G1: First', '', '- Produces: `one()`.', '',
+    '### Task G1.5: Between', '', '- Produces: `onefive()`.', '',
+    '### Task C1: Consumer', '', "- Consumes: G1.5's output.", '',
+    '### Task C2: Other consumer', '', '- Consumes: G1. Also G1.5.', '',
+  ].join('\n');
+  const a = briefFor(plan, 'C1');
+  assert.equal(a.res.code, 0, a.res.stderr);
+  assert.deepEqual(appendedHeadings(a.brief).map((h) => h.split(':')[0]), ['## Produces of Task G1.5']);
+  const b = briefFor(plan, 'C2');
+  assert.deepEqual(appendedHeadings(b.brief).map((h) => h.split(':')[0]), [
+    '## Produces of Task G1', '## Produces of Task G1.5',
+  ]);
+});
+
+test('task-brief ends a Task list at an item that is followed by a word', () => {
+  const lines = ['# Plan', ''];
+  for (const id of ['3', '4', '10']) lines.push(`### Task ${id}: Number ${id}`, '', `- Produces: out${id}.`, '');
+  lines.push('### Task 8: Consumer', '', '- Consumes: Task 10 and 3 mi a week; Task 4 and 3 mi.', '');
+  const { res, brief } = briefFor(lines.join('\n'), '8');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief).map((h) => h.split(':')[0]), [
+    '## Produces of Task 4', '## Produces of Task 10',
+  ]);
+});
+
+test('task-brief copies a fenced contract that starts right after the Produces bullet', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task A1: Producer', '',
+    '- Produces:', '```js', '- not a bullet', 'export const a = 1;', '```', '',
+    '- Next bullet.', '',
+    '### Task C1: Consumer', '', '- Consumes: A1', '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(brief.endsWith(
+    '(consumed by this task)\n\n- Produces:\n```js\n- not a bullet\nexport const a = 1;\n```\n'), brief);
+});
+
+test('task-brief runs a fence opened inside a Produces block to its close', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task A1: Producer', '',
+    '- Produces: the api.', '  ```js', 'less indented body', '- also not a bullet', '  ```', '',
+    '- Next bullet.', '',
+    '### Task C1: Consumer', '', '- Consumes: A1', '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(brief.endsWith('- Produces: the api.\n  ```js\nless indented body\n- also not a bullet\n  ```\n'), brief);
+});
