@@ -14,6 +14,23 @@ function reviewSettings(task, changedLines) {
   return { model: 'opus', effort: !task.security && small ? 'medium' : 'high' };
 }
 
+// A review or re-review result checked across its fields, not just its
+// shape: an approve that carries a critical or important finding is acted on
+// as changes (the gate never takes a self-contradicting approval; contradicted
+// says so), and changes with no findings gives the fixer nothing to fix, so it
+// is unusable (invalid says why). A budget sentinel or a missing result passes
+// through as it is.
+function checkedReview(v) {
+  if (!v || v.__budget) return v;
+  if (v.verdict !== 'approve' && v.verdict !== 'changes') return { ...v, invalid: `unknown verdict ${v.verdict}` };
+  const findings = Array.isArray(v.findings) ? v.findings : [];
+  if (v.verdict === 'approve' && findings.some(isBlocking)) {
+    return { ...v, verdict: 'changes', findings, contradicted: true };
+  }
+  if (v.verdict === 'changes' && findings.length === 0) return { ...v, findings, invalid: 'changes with no findings' };
+  return { ...v, findings };
+}
+
 // Run one task through implement -> review -> fix/re-review rounds. task may
 // be a batch unit (batchUnit): its agents use the unit id in their labels
 // (`<first>-<last> implement`), its prompts cover every task of the batch, and
@@ -25,8 +42,8 @@ function reviewSettings(task, changedLines) {
 // standard from the current head with the open findings, then reviews the
 // whole task range. Reviews use reviewSettings with the changed_lines of the
 // implement or fix result under review.
-// Returns {task, status:'done'|'blocked', base, head, rounds, tier_used,
-// notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
+// Returns {task, status:'done'|'deferred'|'blocked', base, head, rounds,
+// tier_used, notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
 // 'adjudicator_stop: <condition>').
 // base is owned by the script (the previous task's head, or the feature tip):
@@ -41,15 +58,22 @@ function reviewSettings(task, changedLines) {
 // with no result, the review round cap), the adjudicator decides instead,
 // at most twice per task. answer and clarify_plan rerun implement with the
 // ruling as a note or a brief amendment, then review the whole task range;
-// park and unblock complete the task as it is (head = base when nothing was
-// committed); stop blocks the task. rulings lists each ruling text. A
-// security-flagged task with critical or important findings open cannot be
-// parked or unblocked: it stops with 'adjudicator_stop: security'.
+// park and unblock end the task as deferred, never done: the range is the
+// one the adjudicator recorded from git (finish-task --settled, its head
+// returned), which keeps commits a blocked agent made attributed to this task;
+// a deferred task keeps the run from being accepted. stop blocks the task.
+// rulings lists each ruling text. A security-flagged task is never parked or
+// unblocked (deferring a security requirement is the user's call, whatever
+// the findings say): it stops with 'adjudicator_stop: security'. With
+// allow_deferral false no task is: 'adjudicator_stop: deferral_not_allowed'.
 async function runTask(m, task, where, base, io = { agent, log }, resume = null, note = null) {
   const phaseName = lanePhase(m, where.lane);
   const autonomous = effectiveAutonomy(m) === 'autonomous';
   let tierUsed = task.tier;
   let head = null;
+  // Where an agent that did not finish left the branch (its reported head):
+  // separate from head, the accepted implementation.
+  let observed = null;
   let rounds = 0;
   let changesSeen = 0;
   let latest = null;
@@ -100,19 +124,21 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       const fail = failure(r, `${task.id} implement`, past);
       if (fail === null) {
         head = r.head;
+        observed = null;
         latest = r;
         return null;
       }
+      if (r && !r.__budget && present(r.head) && r.head !== past) observed = r.head;
       if (!escalates(fail)) return fail;
       escalate(fail.reason);
       retry = { reason: fail.reason, findings: null };
     }
   };
   let reviewLabel = 'review';
-  const review = () => {
+  const review = async () => {
     reviewLabel = 'review';
-    return call('review', reviewPrompt(m, task, where, base, head, rounds, guidance),
-      reviewSettings(task, latest.changed_lines), reviewSchema());
+    return checkedReview(await call('review', reviewPrompt(m, task, where, base, head, rounds, guidance),
+      reviewSettings(task, latest.changed_lines), reviewSchema()));
   };
 
   // Escalate a sonnet or light task: rerun implement at standard from the
@@ -134,33 +160,41 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     return [...notes, ...more].join('\n');
   };
 
-  // A security-flagged task (spec C1) with critical or important findings
-  // open: parking or unblocking it is a security-sensitive decision the user
-  // makes, so the adjudicator cannot settle it.
-  const securityGated = (findings) => unitTasks(task).some((t) => t.security === true)
-    && (findings || []).some((f) => f.severity === 'critical' || f.severity === 'important');
+  // Parking or unblocking defers the task's requirements. A security task's
+  // are never deferred by the adjudicator, and allow_deferral false means no
+  // task's are: the reason, or null when deferral is open.
+  const deferralRefused = () => {
+    if (unitTasks(task).some((t) => t.security === true)) return 'security';
+    if (m.allow_deferral === false) return 'deferral_not_allowed';
+    return null;
+  };
 
-  // What the adjudicator is told about the task: the diff range, the report
-  // file, the reason or question, and the settled ledger commands a park or
-  // unblock records (a settled task counts as done and reviewed on a resume,
-  // with the range the command names). For a batch, the tasks it covers come
-  // first and each command names every task. A security-gated task gets no
-  // settled commands.
-  const details = (need, findings) => {
-    const at = head === null ? base : head;
+  // What the adjudicator is told about the task: the diff range (including
+  // commits an agent that did not finish left), the report file, the reason
+  // or question, and the finish-task --settled command a park or unblock
+  // runs (it records the range git has and prints its head, which the
+  // adjudicator returns). For a batch, the tasks it covers come first and the
+  // command names every task. With deferral refused there is no command.
+  const details = (need) => {
+    const at = observed !== null ? observed : head;
     const lines = [
       ...(isBatch(task) ? [`Batch ${task.id}: tasks ${unitTasks(task).map((t) => t.id).join(', ')} run as one ` +
         'unit (one implementer, one review over the combined range); your outcome applies to all of them.'] : []),
-      `Diff range: ${head === null ? `${base} (no commits yet)` : `${base}..${head}`}`,
+      `Diff range: ${at === null ? `${base} (no commits reported yet; check the checkout)` : `${base}..${at}`}`,
       `Implementer report file: ${taskFiles(m, task).report}`,
       `${need.kind === 'question' ? 'Question' : 'Reason'}: ${need.reason}`,
     ];
-    if (!securityGated(findings)) {
+    const refused = deferralRefused();
+    if (refused === null) {
       for (const outcome of ['park', 'unblock']) {
-        lines.push(`Ledger ${isBatch(task) ? 'commands' : 'command'} for outcome ${outcome} (the settled ` +
-          `${isBatch(task) ? 'tasks count' : 'task counts'} as done and reviewed on a resume):`,
-        ...ledgerLines(m, task, where, { event: 'settled', outcome, base, head: at }));
+        lines.push(`For outcome ${outcome}, run this command; it records the task as deferred (never accepted) with`,
+          'the range git has, and prints JSON whose head you return as head:',
+          `  ${finishCommand(m, task, where, base, outcome)}`);
       }
+    } else {
+      lines.push(refused === 'security'
+        ? 'This task is security-flagged: park and unblock are not available; a deferral is the user\'s decision.'
+        : 'Deferral is not allowed in this run (allow_deferral false): park and unblock are not available.');
     }
     return lines.join('\n');
   };
@@ -176,33 +210,41 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     adjudications += 1;
     const findings = need.findings || [];
     // A batch is adjudicated as its first task.
-    const out = await adjudicate(m,
-      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need, findings), findings }, io);
-    const gated = (out.outcome === 'park' || out.outcome === 'unblock') && securityGated(findings);
-    // A park or unblock the security gate refuses never took effect, so it is
-    // listed as refused, not as a ruling made on the user's behalf.
-    if (!out.unavailable && !out.invalid) rulings.push(gated ? `refused (security-gated): ${out.text}` : out.text);
+    let out = await adjudicate(m,
+      { kind: need.kind, task: unitTasks(task)[0], where, details: details(need), findings }, io);
+    const deferring = out.outcome === 'park' || out.outcome === 'unblock';
+    const refused = deferring ? deferralRefused() : null;
+    // An open park or unblock must say where the settled range ends: the head
+    // finish-task --settled printed. Without it the range is unknown, so the
+    // result is invalid (a plan_broken stop that is not a ruling).
+    if (deferring && refused === null && !present(out.head)) {
+      out = { outcome: 'stop', text: 'adjudicator chose park or unblock without the settled head',
+        stop_condition: 'plan_broken', invalid: true };
+    }
+    // A park or unblock the policy refuses never took effect, so it is listed
+    // as refused, not as a ruling made on the user's behalf.
+    if (!out.unavailable && !out.invalid) {
+      rulings.push(refused === 'security' ? `refused (security-gated): ${out.text}`
+        : refused !== null ? `refused (${refused}): ${out.text}` : out.text);
+    }
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
       return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
     }
-    if (gated) {
-      io.log(`${task.id}: ${out.outcome} refused: security-flagged task with critical or important findings open`);
-      return result('blocked', 'adjudicator_stop: security');
+    if (refused !== null) {
+      io.log(`${task.id}: ${out.outcome} refused (${refused})`);
+      return result('blocked', `adjudicator_stop: ${refused}`);
     }
-    if (out.outcome === 'park' || out.outcome === 'unblock') {
-      if (head === null) head = base;
-      if (out.outcome === 'park') {
-        return result('done', doneNotes([
-          `parked (${need.kind}): ${need.reason}`,
-          `adjudicator: ${out.text}`,
-          ...findings.map((f) => `deferred (parked): ${f.file}:${f.line} - ${f.issue}`),
-        ]));
-      }
-      return result('done', doneNotes([
-        `unblocked (${need.kind}): ${need.reason}`,
-        `carried to the next task: ${out.text}`,
-      ]), { next_note: out.text });
+    if (deferring) {
+      // The range finish-task --settled recorded: its head, read from git.
+      head = out.head;
+      const verb = out.outcome === 'park' ? 'parked' : 'unblocked';
+      const notes = doneNotes([
+        `deferred, not accepted: ${verb} (${need.kind}): ${need.reason}`,
+        `adjudicator: ${out.text}`,
+        ...findings.map((f) => `deferred finding [${f.severity}]: ${f.file}:${f.line} - ${f.issue}`),
+      ]);
+      return result('deferred', notes, out.outcome === 'unblock' ? { next_note: out.text } : {});
     }
     if (out.outcome === 'answer') guidance.notes.push(out.text);
     else guidance.amendments.push(out.text);
@@ -241,9 +283,14 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       need = { kind: 'budget', reason: `${task.id} ${reviewLabel} was not run` };
       continue;
     }
-    if (!verdict || (verdict.verdict !== 'approve' && verdict.verdict !== 'changes')) {
-      need = { kind: 'blocked', reason: `no result from ${task.id} ${reviewLabel}`, findings: open };
+    if (!verdict || verdict.invalid) {
+      const why = verdict ? `invalid result from ${task.id} ${reviewLabel}: ${verdict.invalid}`
+        : `no result from ${task.id} ${reviewLabel}`;
+      need = { kind: 'blocked', reason: why, findings: open };
       continue;
+    }
+    if (verdict.contradicted) {
+      io.log(`${task.id}: ${reviewLabel} approved with a critical or important finding; acting on it as changes`);
     }
     if (verdict.verdict === 'approve') break;
     changesSeen += 1;
@@ -266,21 +313,22 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance),
       tierSettings(tierUsed), implementSchema());
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
+    if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
     else if (fail === null) {
       const prevHead = head;
       head = fix.head;
       latest = fix;
       reviewLabel = `re-review ${rounds}`;
-      verdict = await call(reviewLabel,
+      verdict = checkedReview(await call(reviewLabel,
         reReviewPrompt(m, task, where, prevHead, head, findings, rounds, guidance),
-        reviewSettings(task, fix.changed_lines), reviewSchema());
+        reviewSettings(task, fix.changed_lines), reviewSchema()));
     }
     if (fail !== null) need = { ...fail, findings };
   }
 
   const notes = [];
-  for (const f of verdict.findings || []) notes.push(`minor finding: ${f.file}:${f.line} - ${f.issue}`);
+  for (const f of verdict.findings || []) notes.push(`${f.severity} finding: ${f.file}:${f.line} - ${f.issue}`);
   for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
   return result('done', doneNotes(notes));
 }
@@ -339,7 +387,18 @@ async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = fal
   const results = [];
   let prev = base;
   let prevIsPhaseTip = baseIsPhaseTip;
-  let carried = null;
+  // Notes unblocked tasks carry, by the task id they go to: the later tasks
+  // of the list that declare a dependency on the unblocked task, else the
+  // next task (a plan without depends_on).
+  const carried = new Map();
+  const carry = (unit, i, text) => {
+    const ids = unitTasks(unit).map((t) => t.id);
+    const later = tasks.slice(i);
+    const dependents = later.filter((t) => (t.depends_on || []).some((d) => ids.includes(d.id)));
+    for (const t of dependents.length > 0 ? dependents : later.slice(0, 1)) {
+      carried.set(t.id, [...(carried.get(t.id) || []), `from ${unit.id}, unblocked by the adjudicator: ${text}`]);
+    }
+  };
   for (let i = 0; i < tasks.length;) {
     const group = batchGroup(m, tasks, i);
     i += group.length;
@@ -364,12 +423,14 @@ async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = fal
         task: task.id, status: 'blocked', base: prev, head: null, rounds: 0, tier_used: task.tier,
         notes: 'done but not reviewed, and no backfill commits', rulings: [],
       }
-      : await runTask(m, unit, where, taskBase, io, state === 'review' ? range : null, carried);
-    carried = r.next_note ? `from ${unit.id}, unblocked by the adjudicator: ${r.next_note}` : null;
+      : await runTask(m, unit, where, taskBase, io, state === 'review' ? range : null,
+        unitTasks(unit).flatMap((t) => carried.get(t.id) || []).join('\n') || null);
+    if (r.next_note) carry(unit, i, r.next_note);
+    const finished = r.status === 'done' || r.status === 'deferred';
     if (unit === task) results.push(r);
-    else if (r.status === 'done') for (const t of group) results.push({ ...r, task: t.id, batch: unit.id });
+    else if (finished) for (const t of group) results.push({ ...r, task: t.id, batch: unit.id });
     else results.push({ ...r, task: task.id, batch: unit.id });
-    if (r.status !== 'done') {
+    if (!finished) {
       io.log(`${name}: stopped at ${task.id} (${r.notes})`);
       return { results, stopped: r.notes, head: prev };
     }

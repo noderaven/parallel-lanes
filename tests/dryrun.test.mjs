@@ -102,7 +102,6 @@ test('full plan lists every role in run order with phase, lane and task', () => 
   const agents = planAgents(manifest({ hooks: { post_integrate: 'check contracts', e2e: 'run e2e' } }));
   const rows = agents.map((a) => [a.phase, a.lane, a.task, a.role]);
   assert.deepEqual(rows, [
-    ['Setup', null, null, 'setup'],
     ['Pre-flight', null, null, 'preflight'],
     ['Prelude', null, 'T1', 'implement'],
     ['Prelude', null, 'T1', 'review'],
@@ -122,6 +121,9 @@ test('full plan lists every role in run order with phase, lane and task', () => 
     ['Final review', null, null, 'final_review_correctness'],
     ['Final review', null, null, 'final_fix'],
     ['Final review', null, null, 'final_re_review'],
+    ['Verify', null, null, 'verify'],
+    ['Verify', null, null, 'e2e_recheck'],
+    ['Verify', null, null, 'post_integrate_recheck'],
   ]);
 });
 
@@ -157,7 +159,7 @@ test('a sonnet task implementer runs at sonnet/high and its reviewer at opus/hig
 test('integrate and e2e run at sonnet/high; every other agent but a light implementer at opus/high', () => {
   const m = manifest({ hooks: { post_integrate: 'check', e2e: 'run' } });
   m.join[0].tier = 'light';
-  const sonnet = new Set(['integrate', 'e2e']);
+  const sonnet = new Set(['integrate', 'e2e', 'verify', 'e2e_recheck']);
   for (const a of planAgents(m)) {
     const want = sonnet.has(a.role) || (a.task === 'T5' && a.role === 'implement')
       ? ['sonnet', 'high'] : ['opus', 'high'];
@@ -165,19 +167,23 @@ test('integrate and e2e run at sonnet/high; every other agent but a light implem
   }
 });
 
-test('no setup agent when setup_result is present', () => {
-  const m = manifest({ setup_result: setupResult() });
-  const agents = planAgents(m);
-  assert.deepEqual(agents.filter((a) => a.role === 'setup'), []);
-  assert.equal(agents.length, planAgents(manifest()).length - 1);
-  assert.equal(agents[0].role, 'preflight');
+test('the plan never lists a setup agent: scripts/setup runs before the launch', () => {
+  for (const m of [manifest(), manifest({ setup_result: setupResult() })]) {
+    const agents = planAgents(m);
+    assert.deepEqual(agents.filter((a) => a.role === 'setup'), []);
+    assert.equal(agents[0].role, 'preflight');
+  }
+});
+
+test('no verify agent when the project has no test, lint or build command', () => {
+  const m = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
+  assert.deepEqual(planAgents(m).filter((a) => a.phase === 'Verify'), []);
 });
 
 test('lite plan: no pre-flight, integrate or post-integrate; one combined final reviewer', () => {
   const agents = planAgents(liteManifest({ hooks: { e2e: 'run e2e' } }));
   const rows = agents.map((a) => [a.phase, a.lane, a.task, a.role, a.model]);
   assert.deepEqual(rows, [
-    ['Setup', null, null, 'setup', 'opus'],
     ['Prelude', null, 'T1', 'implement', 'opus'],
     ['Prelude', null, 'T1', 'review', 'opus'],
     ['Lane alpha', 'alpha', 'T2', 'implement', 'opus'],
@@ -190,6 +196,8 @@ test('lite plan: no pre-flight, integrate or post-integrate; one combined final 
     ['Final review', null, null, 'final_review_combined', 'opus'],
     ['Final review', null, null, 'final_fix', 'opus'],
     ['Final review', null, null, 'final_re_review', 'opus'],
+    ['Verify', null, null, 'verify', 'sonnet'],
+    ['Verify', null, null, 'e2e_recheck', 'sonnet'],
   ]);
 });
 
@@ -256,17 +264,20 @@ test('lanes_effective counts lanes with work, capped by max_parallel_lanes', asy
 // the same models and efforts.
 const FINDING = { severity: 'important', file: 'src/a.js', line: 3, issue: 'one issue', fix: 'fix it' };
 
+// The final fix commits f1, so the rechecks run at f1 (the delivered head).
 function parityAgent(label) {
-  if (label === 'setup') {
-    return { ok: true, discarded: [], worktrees: [], feature_head: 'F0', notes: '' };
-  }
-  if (label === 'pre-flight') return { conflicts: [], rulings: [] };
+  if (label === 'pre-flight') return { conflicts: [], rulings: [], undeclared: [] };
   if (label === 'integrate') return { status: 'done', head: 'I1', notes: 'merged' };
   if (label === 'post-integrate') return { status: 'done', head: 'P1', notes: 'ok' };
-  if (label === 'e2e') return { items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
+  if (label === 'e2e') return { head: 'E0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
   if (label.startsWith('final review')) return { findings: [{ ...FINDING }], cannot_verify: [] };
-  if (label === 'final fix') return { status: 'done', head: 'f1', tests: 'pass', notes: '', declined: [] };
-  if (label === 'final re-review') return { findings: [] };
+  if (label === 'final fix') {
+    return { status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] };
+  }
+  if (label === 'final re-review') return { results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
+  if (label === 'verify') return { head: 'f1', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };
+  if (label === 'e2e recheck') return { head: 'f1', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
+  if (label === 'post-integrate recheck') return { status: 'done', head: 'f1', notes: 'ok' };
   const implement = /^(\S+) implement$/.exec(label);
   if (implement) return { status: 'done', head: `${implement[1]}-h`, tests: 'pass', notes: '' };
   if (/^\S+ review$/.test(label)) return { verdict: 'approve', findings: [], cannot_verify: [] };
@@ -276,7 +287,12 @@ function parityAgent(label) {
 async function parityRun(m) {
   const calls = [];
   const result = await loadScript({
-    args: { ...m, dry_run: false },
+    args: {
+      ...m,
+      dry_run: false,
+      setup_result: m.setup_result || (m.profile === 'lite'
+        ? { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } } : setupResult()),
+    },
     agent: async (prompt, opts) => {
       calls.push(opts);
       return parityAgent(opts.label);
@@ -293,6 +309,7 @@ async function assertParity(m) {
   const { result, calls } = await parityRun(m);
   assert.equal(result.status, 'complete', JSON.stringify(result));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['one issue']);
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
   assert.equal(result.agents_spawned, calls.length);
   assert.equal(result.agents_spawned, planned.length,
     `spawned ${calls.map((c) => c.label).join(', ')}; planned ${planned.map((a) => `${a.task || ''} ${a.role}`).join(', ')}`);

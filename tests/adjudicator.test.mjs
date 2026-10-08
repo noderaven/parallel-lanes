@@ -132,7 +132,7 @@ test('adjudicatorPrompt: task-brief command when a task is set, cd-prefixed', ()
 test('the adjudicator brief command carries consumes_extra', () => {
   const p = adjudicatorPrompt(manifest({ consumes_extra: { T2: ['T1'] } }), blockedCtx());
   const line = p.split('\n').find((l) => l.includes('scripts/task-brief'));
-  assert.ok(line.endsWith("'/work/ledger/briefs/T2.md' --also 'T1'"), line);
+  assert.ok(line.endsWith("'/work/ledger/briefs/T2.md' --root '/work/ledger' --also 'T1'"), line);
   const other = adjudicatorPrompt(manifest({ consumes_extra: { T2: ['T1'] } }), blockedCtx({ task: task('T3') }));
   assert.ok(!other.includes('--also'), 'only the named task gets --also');
 });
@@ -173,9 +173,10 @@ test('adjudicatorPrompt: every provided ledger command starts with cd to the age
   }
 });
 
-test('adjudicatorPrompt: tells the agent to run ledger commands named in details', () => {
+test('adjudicatorPrompt: tells the agent to run the settled command named in details and return its head', () => {
   const p = adjudicatorPrompt(manifest(), blockedCtx({ kind: 'round_cap' }));
-  assert.ok(/ledger command/.test(p) && /details|above/.test(p));
+  assert.ok(/run the command the details above give/.test(p), p);
+  assert.ok(/head = the head that command printed/.test(p));
   assert.ok(p.includes('round_cap') || /review round cap/i.test(p), 'round cap kind');
 });
 

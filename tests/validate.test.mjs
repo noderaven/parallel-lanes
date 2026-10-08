@@ -53,6 +53,9 @@ function validManifest() {
     reviewed: [],
     sp_dir: null,
     skill_dir: '/skills/parallel-lanes',
+    setup_result: {
+      feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
+    },
   };
 }
 
@@ -63,7 +66,7 @@ function assertError(errors, ...fragments) {
   );
 }
 
-test('harness runs the script body with stubs: a run starts with the setup agent', async () => {
+test('harness runs the script body with stubs: a run starts with the pre-flight agent', async () => {
   const labels = [];
   const result = await loadScript({
     args: validManifest(),
@@ -72,8 +75,93 @@ test('harness runs the script body with stubs: a run starts with the setup agent
       return null;
     },
   });
-  assert.deepEqual(labels, ['setup', 'setup retry']);
+  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry']);
   assert.equal(result.status, 'stopped');
+});
+
+// --- review findings 4 and 9, and the explicit records -----------------------
+
+test('a launch needs setup_result; a dry run does not', () => {
+  const m = validManifest();
+  delete m.setup_result;
+  assertError(validateManifest(m), 'setup_result: missing');
+  assert.deepEqual(validateManifest({ ...m, dry_run: true }), []);
+});
+
+test('a task id that is not a safe file name is reported', () => {
+  for (const id of ['../../victim', 'a/b', '.hidden', '-x']) {
+    const m = validManifest();
+    m.join[0].id = id;
+    assertError(validateManifest(m), JSON.stringify(id), 'must match');
+  }
+});
+
+test('a file that is absolute or leaves the project is reported', () => {
+  for (const f of ['/etc/passwd', '../outside.js', 'src/../../x.js']) {
+    const m = validManifest();
+    m.lanes[0].tasks[0].files = [f];
+    assertError(validateManifest(m), JSON.stringify(f), 'leaves the project');
+  }
+});
+
+test('two lanes claiming one file through an alias or another case are reported', () => {
+  for (const alias of ['src/../src/a.js', './src//a.js', 'SRC/a.js']) {
+    const m = validManifest();
+    m.lanes[1].tasks[0].files.push(alias);
+    assertError(validateManifest(m), 'claimed by lanes alpha and beta');
+  }
+});
+
+test('a recorded overlap lets two lanes share a file; a bad record is reported', () => {
+  const m = validManifest();
+  m.lanes[1].tasks[0].files.push('src/a.js');
+  m.overlaps = [{ file: 'src/a.js', tasks: ['T2', 'T3'], reason: 'both register a route', merge_owner: 'T2' }];
+  assert.deepEqual(validateManifest(m), []);
+  m.overlaps[0].merge_owner = 'T9';
+  assertError(validateManifest(m), 'merge_owner');
+  m.overlaps[0] = { file: 'src/a.js', tasks: ['T2', 'T4'], reason: 'x', merge_owner: 'T2' };
+  assertError(validateManifest(m), 'task T4 does not list src/a.js');
+});
+
+test('depends_on: unknown ids, cycles, and code dependencies the run order cannot meet are reported', () => {
+  const dep = (id, kind = 'code') => ({ id, kind });
+  let m = validManifest();
+  m.lanes[0].tasks[0].depends_on = [dep('T1'), dep('T3', 'contract')];
+  m.join[0].depends_on = [dep('T2'), dep('T3')];
+  assert.deepEqual(validateManifest(m), [], 'prelude, contract and join dependencies are met');
+  m = validManifest();
+  m.lanes[0].tasks[0].depends_on = [dep('T3')];
+  assertError(validateManifest(m), 'code dependency on T3', 'cannot be met');
+  m = validManifest();
+  m.prelude[0].depends_on = [dep('T4')];
+  assertError(validateManifest(m), 'code dependency on T4');
+  m = validManifest();
+  m.lanes[0].tasks[0].depends_on = [dep('T9')];
+  assertError(validateManifest(m), 'unknown task T9');
+  m = validManifest();
+  m.lanes[0].tasks[0].depends_on = [dep('T3', 'contract')];
+  m.lanes[1].tasks[0].depends_on = [dep('T2', 'contract')];
+  assertError(validateManifest(m), 'dependency cycle');
+  m = validManifest();
+  m.lanes[0].tasks[0].depends_on = [{ id: 'T1', kind: 'maybe' }];
+  assertError(validateManifest(m), "depends_on must be a list of {id, kind: 'code' or 'contract'}");
+});
+
+test('excluded, deferred and allow_deferral are checked', () => {
+  let m = validManifest();
+  m.excluded = [{ id: 'T9', reason: 'operator step' }];
+  assert.deepEqual(validateManifest(m), []);
+  m.excluded.push({ id: 'T2', reason: 'x' }, { id: 'T9', reason: 'again' }, { id: 'T10' });
+  const errors = validateManifest(m);
+  assertError(errors, 'task T2 is also in the run');
+  assertError(errors, 'task T9 appears more than once');
+  assertError(errors, 'excluded[3]: must be {id, reason}');
+  m = validManifest();
+  m.deferred = ['T2'];
+  assertError(validateManifest(m), 'deferred: task T2 is not done');
+  m = validManifest();
+  m.allow_deferral = 'no';
+  assertError(validateManifest(m), 'allow_deferral: must be a boolean');
 });
 
 test('valid minimal manifest has no errors', () => {
@@ -167,6 +255,7 @@ function liteManifest(laneTasks = 2) {
     name: 'Lane alpha',
     tasks: Array.from({ length: laneTasks }, (_, i) => task(`L${i + 1}`, [`src/l${i + 1}.js`])),
   }];
+  m.setup_result = { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } };
   return m;
 }
 

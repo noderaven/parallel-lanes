@@ -2,13 +2,13 @@ export const meta = {
   name: 'parallel-lanes',
   description: 'Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
-    { title: 'Setup', detail: 'feature branch and lane worktrees' },
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
     { title: 'Integrate', detail: 'merge lanes, rerun all commands' },
     { title: 'Join', detail: 'tasks on the merged branch' },
     { title: 'E2E', detail: 'end-to-end hook' },
     { title: 'Final review', detail: 'three lenses, one fix round' },
+    { title: 'Verify', detail: 'checks at the delivered revision, acceptance' },
   ],
 };
 

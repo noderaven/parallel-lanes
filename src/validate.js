@@ -19,6 +19,32 @@ function laneIdPattern() {
   return '^[A-Za-z0-9_][A-Za-z0-9._-]*$';
 }
 
+// Task ids name brief, report and review files in the ledger dir, so they
+// must be safe file names (no '/', no leading '.' or '-'): the same pattern
+// as lane ids. scripts/_brief.py, task-brief, start-task, finish-task and
+// derive-lanes enforce it too; manifest.schema.json repeats it.
+function taskIdPattern() {
+  return laneIdPattern();
+}
+
+// A project-relative file path, normalized: '.' and empty segments dropped,
+// '..' resolved. Returns null for an absolute path or one that leaves the
+// project.
+function normalizePath(path) {
+  if (typeof path !== 'string' || path.length === 0 || path.startsWith('/')) return null;
+  const out = [];
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (out.length === 0) return null;
+      out.pop();
+    } else {
+      out.push(part);
+    }
+  }
+  return out.length > 0 ? out.join('/') : null;
+}
+
 // agent_type names a custom agent definition (scripts/find-agent-type prints
 // it); manifest.schema.json repeats the pattern.
 function agentTypePattern() {
@@ -109,10 +135,22 @@ function validateManifest(m) {
     allTasks.push(t);
     const name = isText(t.id) ? `task ${t.id}` : where;
     if (!isText(t.id)) err(`${where}.id: must be a non-empty string`);
-    else if (taskIds.has(t.id)) err(`task ${t.id}: id appears more than once`);
+    else if (!new RegExp(taskIdPattern()).test(t.id)) {
+      err(`${where}.id: task id ${JSON.stringify(t.id)} must match ${taskIdPattern()} (it names files)`);
+    } else if (taskIds.has(t.id)) err(`task ${t.id}: id appears more than once`);
     else taskIds.add(t.id);
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
+    else {
+      for (const f of t.files) {
+        if (normalizePath(f) === null) err(`${name}: file ${JSON.stringify(f)} is absolute or leaves the project`);
+      }
+    }
+    if ('depends_on' in t) {
+      const ok = Array.isArray(t.depends_on) && t.depends_on.every((d) => isObject(d) && isText(d.id)
+        && (d.kind === 'code' || d.kind === 'contract'));
+      if (!ok) err(`${name}: depends_on must be a list of {id, kind: 'code' or 'contract'}`);
+    }
     if (t.tier !== 'standard' && t.tier !== 'sonnet' && t.tier !== 'light') {
       err(`${name}: tier must be 'standard', 'sonnet' or 'light'`);
     }
@@ -135,8 +173,34 @@ function validateManifest(m) {
 
   if ('prelude' in m) checkTaskList('prelude', m.prelude);
 
-  // Lanes: shape, unique lane ids, and no file claimed by two lanes.
+  // Deliberate overlaps: a file two lanes both change, with the tasks, why,
+  // and the task whose version wins at the merge. Keyed by the normalized,
+  // lower-cased path (a case-insensitive file system makes 'A.js' and 'a.js'
+  // one file).
+  const fileKey = (f) => (normalizePath(f) || f).toLowerCase();
+  const overlapFor = new Map();
+  if ('overlaps' in m) {
+    if (!Array.isArray(m.overlaps)) {
+      err('overlaps: must be a list');
+    } else {
+      m.overlaps.forEach((o, i) => {
+        const where = `overlaps[${i}]`;
+        if (!isObject(o) || !isText(o.file) || !isTextList(o.tasks) || o.tasks.length < 2
+          || !isText(o.reason) || !isText(o.merge_owner)) {
+          err(`${where}: must be {file, tasks (2 or more ids), reason, merge_owner}`);
+          return;
+        }
+        if (normalizePath(o.file) === null) err(`${where}.file: ${JSON.stringify(o.file)} is absolute or leaves the project`);
+        if (!o.tasks.includes(o.merge_owner)) err(`${where}.merge_owner: must be one of its tasks`);
+        overlapFor.set(fileKey(o.file), o);
+      });
+    }
+  }
+
+  // Lanes: shape, unique lane ids, and no file claimed by two lanes unless an
+  // overlaps entry records it.
   const laneIds = new Set();
+  const laneOfTask = new Map();
   if ('lanes' in m) {
     if (!Array.isArray(m.lanes)) {
       err('lanes: must be a list');
@@ -158,20 +222,129 @@ function validateManifest(m) {
         if ('setup_note' in lane && !isText(lane.setup_note)) err(`${where}.setup_note: must be a non-empty string`);
         checkTaskList(`${where}.tasks`, lane.tasks);
         if (!isText(lane.id) || !Array.isArray(lane.tasks)) return;
-        const files = new Set();
+        const files = new Map();
         for (const t of lane.tasks) {
-          if (isObject(t) && isTextList(t.files)) t.files.forEach((f) => files.add(f));
+          if (!isObject(t)) continue;
+          if (isText(t.id)) laneOfTask.set(t.id, lane.id);
+          if (isTextList(t.files)) t.files.forEach((f) => files.set(fileKey(f), { f, task: t.id }));
         }
-        for (const f of files) {
-          const owner = fileOwner.get(f);
-          if (owner === undefined) fileOwner.set(f, lane.id);
-          else if (owner !== lane.id) err(`file ${f}: claimed by lanes ${owner} and ${lane.id}`);
+        for (const [key, { f, task }] of files) {
+          const owner = fileOwner.get(key);
+          if (owner === undefined) {
+            fileOwner.set(key, { lane: lane.id, task, f });
+            continue;
+          }
+          if (owner.lane === lane.id) continue;
+          const o = overlapFor.get(key);
+          if (!o || !o.tasks.includes(task) || !o.tasks.includes(owner.task)) {
+            err(`file ${f}: claimed by lanes ${owner.lane} and ${lane.id}` +
+              (owner.f !== f ? ` (as ${owner.f} and ${f})` : '') +
+              '; record a deliberate overlap in overlaps or keep it in one lane');
+          }
         }
       });
     }
   }
 
   if ('join' in m) checkTaskList('join', m.join);
+
+  // Every overlaps entry names known tasks that list its file.
+  if (Array.isArray(m.overlaps)) {
+    const files = new Map();
+    for (const t of allTasks) if (isObject(t) && isText(t.id) && isTextList(t.files)) files.set(t.id, t.files.map(fileKey));
+    m.overlaps.forEach((o, i) => {
+      if (!isObject(o) || !isTextList(o.tasks)) return;
+      for (const id of o.tasks) {
+        if (!files.has(id)) err(`overlaps[${i}]: unknown task id ${id}`);
+        else if (isText(o.file) && !files.get(id).includes(fileKey(o.file))) {
+          err(`overlaps[${i}]: task ${id} does not list ${o.file} in its files`);
+        }
+      }
+    });
+  }
+
+  // Dependencies: known ids, no cycles, and a code dependency that can be
+  // met by the run order (the dependency runs earlier and its commits are in
+  // the dependent's checkout): a prelude task, an earlier task of the same
+  // lane, or anything before a join task.
+  const position = new Map();
+  const groupOf = new Map();
+  let index = 0;
+  const place = (list, group) => {
+    if (!Array.isArray(list)) return;
+    for (const t of list) {
+      if (!isObject(t) || !isText(t.id)) continue;
+      position.set(t.id, index);
+      groupOf.set(t.id, group);
+      index += 1;
+    }
+  };
+  place(m.prelude, 'prelude');
+  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
+  place(m.join, 'join');
+  const deps = new Map();
+  for (const t of allTasks) {
+    if (!isObject(t) || !isText(t.id) || !Array.isArray(t.depends_on)) continue;
+    deps.set(t.id, []);
+    for (const d of t.depends_on) {
+      if (!isObject(d) || !isText(d.id)) continue;
+      if (!taskIds.has(d.id)) {
+        err(`task ${t.id}: depends_on names unknown task ${d.id}`);
+        continue;
+      }
+      if (d.id === t.id) {
+        err(`task ${t.id}: depends on itself`);
+        continue;
+      }
+      deps.get(t.id).push(d.id);
+      if (d.kind !== 'code') continue;
+      const [mine, theirs] = [groupOf.get(t.id), groupOf.get(d.id)];
+      const met = position.get(d.id) < position.get(t.id)
+        && (theirs === 'prelude' || theirs === mine || mine === 'join');
+      if (!met) {
+        err(`task ${t.id}: code dependency on ${d.id} (${theirs}) cannot be met from ${mine}; ` +
+          'move the task to join or the same lane, or make it a contract dependency');
+      }
+    }
+  }
+  const visiting = new Set();
+  const visited = new Set();
+  const cycle = (id) => {
+    if (visited.has(id)) return false;
+    if (visiting.has(id)) return true;
+    visiting.add(id);
+    const found = (deps.get(id) || []).some(cycle);
+    visiting.delete(id);
+    visited.add(id);
+    return found;
+  };
+  for (const id of deps.keys()) {
+    if (cycle(id)) {
+      err(`depends_on: a dependency cycle runs through task ${id}`);
+      break;
+    }
+  }
+
+  // excluded: plan tasks the run leaves out (after-merge, operator, manual,
+  // handled by a hook), each with the reason; scripts/coverage checks them
+  // against the plan.
+  if ('excluded' in m) {
+    if (!Array.isArray(m.excluded)) {
+      err('excluded: must be a list');
+    } else {
+      const seen = new Set();
+      m.excluded.forEach((e, i) => {
+        if (!isObject(e) || !isText(e.id) || !isText(e.reason)) {
+          err(`excluded[${i}]: must be {id, reason}`);
+          return;
+        }
+        if (taskIds.has(e.id)) err(`excluded[${i}]: task ${e.id} is also in the run`);
+        if (seen.has(e.id)) err(`excluded[${i}]: task ${e.id} appears more than once`);
+        seen.add(e.id);
+      });
+    }
+  }
+  if ('allow_deferral' in m && typeof m.allow_deferral !== 'boolean') err('allow_deferral: must be a boolean');
 
   if ('lane_commands' in m) {
     if (!isObject(m.lane_commands)) {
@@ -211,7 +384,7 @@ function validateManifest(m) {
     }
   }
 
-  for (const key of ['done', 'reviewed']) {
+  for (const key of ['done', 'reviewed', 'deferred']) {
     if (!(key in m)) continue;
     if (!isTextList(m[key])) {
       err(`${key}: must be a list of task ids`);
@@ -220,6 +393,11 @@ function validateManifest(m) {
     for (const id of m[key]) {
       if (!taskIds.has(id)) err(`${key}: unknown task id ${id}`);
     }
+  }
+  // deferred: tasks the ledger lists as parked or unblocked (ledger status);
+  // they are done for scheduling but keep the run from being accepted.
+  if (isTextList(m.deferred) && isTextList(m.done)) {
+    for (const id of m.deferred) if (!m.done.includes(id)) err(`deferred: task ${id} is not done`);
   }
 
   // notes: the user's answers to blocked questions, one text per task id;
@@ -280,6 +458,10 @@ function validateManifest(m) {
   // setup_result: the output of scripts/setup. Every lane needs a worktree
   // entry so a run never starts a lane without its checkout (the run itself
   // checks each path against the one it uses).
+  // A launch (dry_run false) needs it: scripts/setup is the only setup.
+  if (m.dry_run === false && !('setup_result' in m)) {
+    err('setup_result: missing; run scripts/setup after the yes to the table and add its output');
+  }
   if ('setup_result' in m) {
     const r = m.setup_result;
     if (!isObject(r)) {
@@ -287,6 +469,10 @@ function validateManifest(m) {
     } else {
       if (!isText(r.feature_head)) err('setup_result.feature_head: must be a non-empty string');
       if (!isTextList(r.discarded)) err('setup_result.discarded: must be a list of non-empty strings');
+      if ('preserved' in r && !(Array.isArray(r.preserved) && r.preserved.every((p) => isObject(p)
+        && isText(p.worktree) && isText(p.ref) && isText(p.commit)))) {
+        err('setup_result.preserved: must be a list of {worktree, ref, commit}');
+      }
       if (!isObject(r.worktrees)) {
         err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');
       } else {

@@ -39,6 +39,9 @@ function manifest(overrides = {}) {
     reviewed: [],
     sp_dir: null,
     skill_dir: '/skills/parallel-lanes',
+    setup_result: {
+      feature_head: 'F0', discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
+    },
     ...overrides,
   };
 }
@@ -335,12 +338,12 @@ const approve = () => ({ verdict: 'approve', findings: [], cannot_verify: [] });
 
 function cleanScript() {
   const script = {
-    setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'F0', notes: '' }],
-    'pre-flight': [{ conflicts: [], rulings: [] }],
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
     integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
     'final review sp': [{ findings: [], cannot_verify: [] }],
     'final review security': [{ findings: [], cannot_verify: [] }],
     'final review correctness': [{ findings: [], cannot_verify: [] }],
+    verify: [{ head: 'T5-h', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }],
   };
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) {
     script[`${id} implement`] = [done(`${id}-b`, `${id}-h`)];
@@ -380,8 +383,8 @@ test('a run reports agent_type_fallback only when a failing agent type switched 
   assert.equal(clean.result.status, 'complete');
   assert.equal(clean.result.agent_type_fallback, undefined);
   const script = cleanScript();
-  script['setup retry'] = script.setup;
-  script.setup = [new Error('agent type parallel-lanes-worker not found')];
+  script['pre-flight retry'] = script['pre-flight'];
+  script['pre-flight'] = [new Error('agent type parallel-lanes-worker not found')];
   const { result, calls } = await run(typed(), script);
   assert.equal(result.status, 'complete');
   assert.equal(result.agent_type_fallback, true);
@@ -390,17 +393,17 @@ test('a run reports agent_type_fallback only when a failing agent type switched 
 });
 
 test('cap reached while two lanes run: in-flight agents finish, no new agents start, stopped/budget', async () => {
-  const limits = { review_rounds: 5, max_parallel_lanes: 3, max_agents: 7 };
+  const limits = { review_rounds: 5, max_parallel_lanes: 3, max_agents: 6 };
   const m = manifest({ limits });
-  // setup, pre-flight, T1 implement, T1 review, T2 implement, T4 implement,
-  // T2 review (7, still running when T4 review is refused).
+  // pre-flight, T1 implement, T1 review, T2 implement, T4 implement,
+  // T2 review (6, still running when T4 review is refused).
   const { result, calls } = await run(m, cleanScript(), { 'T2 review': 20 });
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
-  assert.deepEqual(result.budget, { agents: 7, rulings: 0, limits: { max_agents: 7, max_rulings: 25 } });
-  assert.equal(result.agents_spawned, 7);
+  assert.deepEqual(result.budget, { agents: 6, rulings: 0, limits: { max_agents: 6, max_rulings: 25 } });
+  assert.equal(result.agents_spawned, 6);
   assert.deepEqual(labels(calls), [
-    'setup', 'pre-flight', 'T1 implement', 'T1 review', 'T2 implement', 'T4 implement', 'T2 review',
+    'pre-flight', 'T1 implement', 'T1 review', 'T2 implement', 'T4 implement', 'T2 review',
   ]);
   assert.equal(result.tasks.T1.status, 'done');
   assert.deepEqual(result.tasks.T1.commits, ['F0', 'T1-h']);
@@ -414,19 +417,18 @@ test('cap reached while two lanes run: in-flight agents finish, no new agents st
   assert.equal(result.integrate, null);
 });
 
-test('a refused phase agent stops the run for budget ahead of its own stop reason', async () => {
+test('a refused agent stops the run for budget ahead of its own stop reason', async () => {
   const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
   const { result, calls } = await run(m, cleanScript());
-  assert.deepEqual(labels(calls), ['setup']);
+  assert.deepEqual(labels(calls), ['pre-flight']);
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
-  assert.equal(result.preflight, null);
   assert.equal(result.agents_spawned, 1);
-  assert.equal(result.tasks.T1.status, 'not_run');
+  assert.equal(result.tasks.T1.notes, 'budget exhausted: T1 implement was not run');
 });
 
 test('a refusal during the final review stops the run instead of completing it', async () => {
-  // setup, pre-flight, 10 task agents, integrate, then the three lenses.
+  // pre-flight, 10 task agents, integrate, then two of the three lenses.
   const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 14 } });
   const { result, calls } = await run(m, cleanScript());
   assert.equal(calls.length, 14);
@@ -436,20 +438,20 @@ test('a refusal during the final review stops the run instead of completing it',
 });
 
 test('a refused final re-review stops the run for budget instead of throwing', async () => {
-  // setup, pre-flight, 10 task agents, integrate, three lenses, final fix (17).
-  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 17 } });
+  // pre-flight, 10 task agents, integrate, three lenses, final fix (16).
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 16 } });
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', declined: [] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }];
   const { result, calls } = await run(m, script);
-  assert.equal(calls.length, 17);
+  assert.equal(calls.length, 16);
   assert.equal(labels(calls).at(-1), 'final fix');
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
-  assert.equal(result.agents_spawned, 17);
+  assert.equal(result.agents_spawned, 16);
   assert.deepEqual(result.final.fixed, []);
-  assert.deepEqual(result.final.declined.map((d) => d.reason), ['final re-review not run: budget exhausted']);
+  assert.deepEqual(result.final.open.map((d) => d.reason), ['final re-review not run: budget exhausted']);
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');
 });
 

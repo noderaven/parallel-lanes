@@ -10,7 +10,7 @@ function gitAdmin(m) {
 function phaseRules(m, checkout = null) {
   return [
     `Commit rules (follow exactly): ${m.commit_rules}`,
-    'All files you write are plain ASCII. Never commit anything under .superpowers/.',
+    'Never commit anything under .superpowers/.',
     `Never push, open pull requests, merge into ${m.repo.base_ref}, or copy work back to the project folder.`,
     agentRules(),
     checkout === null ? checkoutRules(featureDir(m), m.repo.branch) : checkout,
@@ -50,20 +50,6 @@ function statusSchema() {
   };
 }
 
-function setupSchema() {
-  return {
-    type: 'object',
-    properties: {
-      ok: { type: 'boolean' },
-      discarded: { type: 'array', items: { type: 'string' } },
-      worktrees: { type: 'array', items: { type: 'string' } },
-      feature_head: { type: 'string' },
-      notes: { type: 'string' },
-    },
-    required: ['ok', 'discarded', 'worktrees', 'feature_head', 'notes'],
-  };
-}
-
 function preflightSchema() {
   return {
     type: 'object',
@@ -91,6 +77,7 @@ function e2eSchema() {
   return {
     type: 'object',
     properties: {
+      head: { type: 'string' },
       items: {
         type: 'array',
         items: {
@@ -104,7 +91,7 @@ function e2eSchema() {
         },
       },
     },
-    required: ['items'],
+    required: ['head', 'items'],
   };
 }
 
@@ -123,31 +110,33 @@ function finalReviewSchema() {
   };
 }
 
+// dispositions: one {id, status 'fixed' or 'declined', reason} per finding
+// id the fix prompt lists; an id without one counts as not addressed.
 function finalFixSchema() {
   const impl = implementSchema();
   return {
     type: 'object',
     properties: {
       ...impl.properties,
-      declined: {
+      dispositions: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
-            file: { type: 'string' },
-            line: { type: 'integer' },
-            issue: { type: 'string' },
+            id: { type: 'string' },
+            status: { type: 'string', enum: ['fixed', 'declined'] },
             reason: { type: 'string' },
           },
-          required: ['file', 'line', 'issue', 'reason'],
+          required: ['id', 'status', 'reason'],
         },
       },
     },
-    required: [...impl.required, 'declined'],
+    required: [...impl.required, 'dispositions'],
   };
 }
 
-function finalReReviewSchema() {
+// The post-integrate re-review: the findings of a fix range.
+function postIntegrateReReviewSchema() {
   return {
     type: 'object',
     properties: { findings: reviewSchema().properties.findings },
@@ -155,76 +144,56 @@ function finalReReviewSchema() {
   };
 }
 
-function setupPrompt(m) {
-  const admin = gitAdmin(m);
-  const q = shellQuote;
-  const branch = q(m.repo.branch);
-  const feature = m.repo.mode === 'shadow' ? [
-    `Shadow mode: the project folder ${m.repo.root} is not a git repo; the shadow repo ${m.repo.git_dir}`,
-    'and its baseline already exist. Never modify the project folder.',
-    `1. Create the feature branch if it does not exist: ${admin} branch ${branch} ${q(m.repo.base_ref)}`,
-    `   Feature worktree ${q(featureDir(m))}: if it does not exist, ${admin} worktree add ${q(featureDir(m))} ${branch}.`,
-    '   If it exists (a resumed run) it must be on that branch; reuse it: list its uncommitted changes with',
-    `   git -C ${q(featureDir(m))} status --porcelain, add each line to discarded as "${featureDir(m)}: <line>",`,
-    `   then discard them with git -C ${q(featureDir(m))} reset --hard HEAD and git -C ${q(featureDir(m))} clean -fd`,
-    '   (ignored scratch stays). This worktree is the run\'s own, never the project folder.',
-  ] : [
-    `Git mode: the main checkout is ${m.repo.root}.`,
-    `1. git -C ${q(m.repo.root)} status --porcelain must print nothing; otherwise return ok false listing`,
-    '   the changes (never discard work in the main checkout).',
-    `   Create the feature branch if it does not exist: ${admin} branch ${branch} ${q(m.repo.base_ref)}`,
-    `   Then check it out: git -C ${q(m.repo.root)} switch ${branch}`,
-  ];
-  // Profile lite: the lane works in the feature checkout, so there is no
-  // lane worktree or branch; a lane setup override runs there too.
-  const lite = m.profile === 'lite';
-  const lanes = lite ? [
-    '3. Profile lite: create no lane worktree and no lane branch;',
-    ...m.lanes.map((lane) => `   lane ${lane.id} works in the feature checkout ${featureDir(m)} on ${m.repo.branch}.`),
-  ] : [
-    '3. Lane worktrees (create or reuse):',
-    ...m.lanes.map((lane) => {
-      const w = laneWhere(m, lane);
-      const note = lane.setup_note ? `\n     Note: ${lane.setup_note}` : '';
-      return `   - lane ${lane.id}: worktree ${q(w.dir)} on branch ${q(w.branch)}${note}`;
-    }),
-    '   For each: if the directory exists as a worktree on its branch, reuse it: list its uncommitted changes',
-    '   with git -C <worktree> status --porcelain, add each line to discarded as "<worktree>: <line>", then',
-    '   discard them with git -C <worktree> reset --hard HEAD (the branch stays on its commit; this is the',
-    '   only reset allowed) and git -C <worktree> clean -fd (ignored scratch stays).',
-    `   Else if the branch exists: ${admin} worktree add <worktree> <branch>.`,
-    `   Else: ${admin} worktree add -b <branch> <worktree> ${branch}`,
-    '   Do not remove any worktree or delete any branch.',
-  ];
-  const setupCmds = [`   - ${featureDir(m)}: ${commandList(m, null, 'setup')}`];
-  for (const lane of m.lanes) {
-    const cmds = commandList(m, lane.id, 'setup');
-    if (!lite) setupCmds.push(`   - ${laneWhere(m, lane).dir}: ${cmds}`);
-    else if (cmds !== commandList(m, null, 'setup')) setupCmds.push(`   - ${featureDir(m)} (lane ${lane.id}): ${cmds}`);
-  }
-  const branchCheck = lite ? ';' : ' and that each lane worktree prints its lane branch;';
-  return [
-    `You are the setup agent for parallel-lanes run ${m.run_id}.`,
-    'Stop at the first step that fails and return ok false with the reason in notes.',
-    '',
-    ...feature,
-    `2. ${admin} worktree prune (it only drops records of worktrees whose directory is gone).`,
-    ...lanes,
-    '4. Run the setup commands in each checkout (from that directory):',
-    ...setupCmds,
-    '',
-    phaseRules(m, [
-      'Your shell may start in another checkout of this repo, so never rely on the current directory:',
-      `- every shell command starts with cd '<checkout>' && or uses git -C '<checkout>' (or ${admin});`,
-      '- every project file path you read or write is absolute under the checkout it belongs to;',
-      `- setup makes no commits; before step 4, check that git -C ${q(featureDir(m))} rev-parse --abbrev-ref HEAD`,
-      `  prints ${m.repo.branch}${branchCheck} otherwise return ok false.`,
-    ].join('\n')),
-    '',
-    'Return ok (true only when every step succeeded), discarded (the listed changes), worktrees (the paths',
-    `ready for work), feature_head (the full sha printed by ${admin} rev-parse ${branch} after the steps), and`,
-    'notes.',
-  ].join('\n');
+// The final re-review: one {id, status, evidence} per finding id under
+// verification (resolved: the defect is gone, or the decline is right), and
+// new_findings for problems the fix introduced.
+function finalReReviewSchema() {
+  return {
+    type: 'object',
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            status: { type: 'string', enum: ['resolved', 'open'] },
+            evidence: { type: 'string' },
+          },
+          required: ['id', 'status', 'evidence'],
+        },
+      },
+      new_findings: reviewSchema().properties.findings,
+    },
+    required: ['results', 'new_findings'],
+  };
+}
+
+// The verify step's result: the JSON scripts/run-checks printed.
+function verifySchema() {
+  return {
+    type: 'object',
+    properties: {
+      checkout: { type: 'string' },
+      branch: { type: 'string' },
+      head: { type: 'string' },
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            group: { type: 'string' },
+            command: { type: 'string' },
+            exit: { type: 'integer' },
+          },
+          required: ['group', 'command', 'exit'],
+        },
+      },
+      ok: { type: 'boolean' },
+      clean: { type: 'boolean' },
+    },
+    required: ['head', 'results', 'ok'],
+  };
 }
 
 function preflightPrompt(m) {
@@ -305,7 +274,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
   const overrides = m.lanes
     .filter((lane) => m.lane_commands && m.lane_commands[lane.id])
-    .map((lane) => `Lane ${lane.id} commands (with its overrides; run these too):\n${commandsText(m, lane.id)}`);
+    .map((lane) => `Lane ${lane.id} commands (with its overrides; run these too):\n${commandsText(m, lane.id, featureDir(m))}`);
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain prints nothing, ` +
@@ -350,6 +319,11 @@ function integratePrompt(m, preludeTip, opts = {}) {
     : testFailure === 'heal'
       ? ', and tests_failed (true when a project command still fails after the merges).'
       : '.';
+  const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
+    '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
+    ...m.overlaps.map((o) => `   - ${o.file}: tasks ${o.tasks.join(', ')}; on a conflict keep both changes, and where they`
+      + ` cannot both stand keep task ${o.merge_owner}'s. Why: ${o.reason}`),
+  ] : [];
   const review = reviewConflicts ? [
     'Resolution review: the merge conflicts in this run were already resolved by a prior agent in merge',
     `commits after ${preludeTip}. Before cleanup, review those resolution merges against both lanes' intent`,
@@ -368,9 +342,10 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     ...conflictLine,
+    ...overlaps,
     ...deletedBranch,
     '3. In the tree step 1 found clean, rerun setup and then every command:',
-    commandsText(m, null),
+    commandsText(m, null, featureDir(m)),
     ...overrides,
     testFailureLine,
     `4. History: ${preludeTip} is the feature tip after the prelude. This command:`,
@@ -450,7 +425,7 @@ function postIntegrateFixPrompt(m, failure) {
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
     'Rerun every project command afterwards and confirm they pass:',
-    commandsText(m, null),
+    commandsText(m, null, featureDir(m)),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
     `Plan: ${m.plan}`,
@@ -483,23 +458,31 @@ function postIntegrateReReviewPrompt(m, base, head) {
   ].join('\n');
 }
 
-function postIntegratePrompt(m) {
+// checkOnly: a recheck at the delivered revision after later commits; the
+// agent verifies only and changes nothing.
+function postIntegratePrompt(m, checkOnly = false) {
+  const change = checkOnly ? [
+    'This is a recheck of the delivered revision: verify only. Change no file, make no commit, and do not',
+    'record a start point; if the instructions would need a change, return status failed naming it.',
+  ] : [
+    'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
+    'the project commands afterwards:',
+    commandsText(m, null, featureDir(m)),
+  ];
   return [
     `You are the post-integration agent for parallel-lanes run ${m.run_id}.`,
     `The lanes are merged into ${m.repo.branch} in ${featureDir(m)}; work there and do not switch branches.`,
     'Follow these project instructions:',
     m.hooks.post_integrate,
     '',
-    'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
-    'the project commands afterwards:',
-    commandsText(m, null),
+    ...change,
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     keepFilesRule(),
     phaseRules(m),
     '',
-    joinStartPointLine(m),
+    ...(checkOnly ? [] : [joinStartPointLine(m)]),
     '',
     'Return status done when the instructions pass, otherwise failed; head = the full sha printed by',
     `git -C ${shellQuote(featureDir(m))} rev-parse HEAD when you finish; notes = what you checked and found.`,
@@ -519,8 +502,9 @@ function e2ePrompt(m) {
     keepFilesRule(),
     phaseRules(m),
     '',
-    'Return items: one {item, result PASS or FAIL, evidence} per checklist item, evidence being the command',
-    'and output or observation that decided it.',
+    `Return head = the full sha printed by git -C ${shellQuote(featureDir(m))} rev-parse HEAD before you start (the`,
+    'revision your checks cover), and items: one {item, result PASS or FAIL, evidence} per checklist item,',
+    'evidence being the command and output or observation that decided it.',
   ].join('\n');
 }
 
@@ -571,9 +555,8 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
-    'Also scan every commit message in the range and the whole diff for anything the commit rules forbid,',
-    'including AI tool or assistant names, co-author trailers, and comments that reveal AI involvement; report',
-    'each as a finding (for a commit message use file "commit <sha>" and line 0).',
+    'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
+    'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
@@ -608,13 +591,13 @@ function finalFixPrompt(m, findings, base) {
   return [
     `You are fixing the final review findings for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on ${m.repo.branch} (now at ${base}); do not switch branches.`,
-    'Findings:',
+    'Findings (each with its id in brackets):',
     findingsText(findings),
     '',
     'Fix each finding, or decline it with a reason (only for a false positive, an item outside this',
-    "run's scope, or a commit-message finding: history is never rewritten). Rerun every project command",
-    'afterwards:',
-    commandsText(m, null),
+    "run's scope, or a commit-message finding: history is never rewritten). A reviewer checks every",
+    'decline. Rerun every project command afterwards:',
+    commandsText(m, null, featureDir(m)),
     'Commit your fixes per the commit rules.',
     '',
     `Plan: ${m.plan}`,
@@ -622,27 +605,57 @@ function finalFixPrompt(m, findings, base) {
     keepFilesRule(),
     phaseRules(m),
     '',
-    implementResultText(featureDir(m)),
-    'Also return declined = [{file, line, issue, reason}] for each finding you did not fix.',
+    implementResultText(featureDir(m), false, base),
+    'Also return dispositions = one {id, status "fixed" or "declined", reason} for every finding id above (reason:',
+    'what you changed, or why you declined it). A finding without a disposition counts as not addressed.',
   ].join('\n');
 }
 
+// findings carry their id and the fixer's disposition ({status, reason}, or
+// none when the fixer gave none).
 function finalReReviewPrompt(m, base, head, findings) {
   const dir = shellQuote(featureDir(m));
+  const said = (f) => (f.disposition
+    ? `   fixer: ${f.disposition.status} - ${f.disposition.reason}`
+    : '   fixer: no disposition (treat it as not addressed unless the defect is verifiably gone)');
   return [
-    `You are re-reviewing the final fixes for parallel-lanes run ${m.run_id} (fix range ${base}..${head}).`,
+    `You are re-reviewing the final fixes for parallel-lanes run ${m.run_id} (fix range ${base}..${head}`
+      + `${base === head ? ', no fix commits' : ''}).`,
     'You are read-only: never modify the checkout, the index, HEAD, or any branch.',
     'Read the fix with:',
     `  git -C ${dir} log ${shellQuote(`${base}..${head}`)}`,
     `  git -C ${dir} diff ${shellQuote(`${base}..${head}`)}`,
-    'Findings the fix addressed:',
-    findingsText(findings),
+    'Findings under verification, with what the fixer said about each:',
+    findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     '',
-    'Verify each one no longer exists (file:line evidence) and check the fix for new critical or important',
-    'problems. Do not re-review code the fix did not touch.',
+    'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
+    'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
+    'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
+    'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     phaseRules(m),
     '',
-    'Return findings = every finding still open plus every new problem, same shape as the list above.',
+    'Return results = one {id, status "resolved" or "open", evidence} per id above (an id you leave out counts',
+    'as open), and new_findings = the new problems, each {severity, file, line, issue, fix}.',
+  ].join('\n');
+}
+
+// The verify step: every project check at the delivered revision, through
+// scripts/run-checks, whose JSON the agent returns as it printed it.
+function verifyPrompt(m, sha) {
+  const dir = featureDir(m);
+  const cmd = checksCommand(m, null, dir, `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  return [
+    `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
+    `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
+    `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
+    '   with results [] and ok false.',
+    `2. Run the project's setup commands first: ${commandList(m, null, 'setup')}`,
+    `3. Run, as one call: ${cmd}`,
+    '',
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
   ].join('\n');
 }
 
