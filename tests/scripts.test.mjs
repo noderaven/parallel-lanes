@@ -249,6 +249,251 @@ test('task-brief exits 2 on a usage error', () => {
   assert.equal(res.code, 2);
 });
 
+// Writes planText to a fresh plan file and runs task-brief for id with any
+// extra args. Returns the result and the brief text (null when not written).
+function briefFor(planText, id, ...extra) {
+  const dir = workDir();
+  const plan = join(dir, 'plan file.md');
+  writeFileSync(plan, planText);
+  const out = join(dir, 'briefs', `${id} brief.md`);
+  const res = taskBrief(plan, id, out, ...extra);
+  return { res, brief: existsSync(out) ? readFileSync(out, 'utf8') : null };
+}
+
+const appendedHeadings = (brief) =>
+  brief.split('\n').filter((l) => l.startsWith('## Produces of Task '));
+
+const CONSUMER = [
+  '### Task C1: Consumer',
+  '',
+  '**Interfaces:**',
+  '- Consumes: G1, G2; `DAYS` (core).',
+  '- Produces: `check(plan)`.',
+  '',
+  'Body of C1.',
+];
+const PRODUCERS = [
+  '### Task G1: Generator',
+  '',
+  '**Interfaces:**',
+  '- Consumes: nothing.',
+  '- Produces:',
+  '  - `gen(n)` returns a list of weeks.',
+  '    Each week has a stage divider.',
+  '',
+  '  - Dividers sit at the top, one per week.',
+  '',
+  'Body of G1.',
+  '',
+  '### Task G2: Second generator',
+  '',
+  '- Produces: `days()` returns DAYS.',
+  '  Continued on a deeper line.',
+  '- Another bullet.',
+  '',
+];
+
+test('task-brief appends the Produces of tasks named in Consumes', () => {
+  const plan = ['# Plan', '', ...CONSUMER, '', ...PRODUCERS].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  const own = [...CONSUMER, ''].join('\n');
+  const g1 = [
+    '## Produces of Task G1: Generator (consumed by this task)',
+    '',
+    '- Produces:',
+    '  - `gen(n)` returns a list of weeks.',
+    '    Each week has a stage divider.',
+    '',
+    '  - Dividers sit at the top, one per week.',
+  ].join('\n');
+  const g2 = [
+    '## Produces of Task G2: Second generator (consumed by this task)',
+    '',
+    '- Produces: `days()` returns DAYS.',
+    '  Continued on a deeper line.',
+  ].join('\n');
+  assert.equal(brief, `${own}\n${g1}\n\n${g2}\n`);
+});
+
+test('task-brief reads numeric ids only after Task or Tasks', () => {
+  const lines = ['# Plan', ''];
+  for (const id of ['2', '3', '4', '5', '6', '9', '10', '13']) {
+    lines.push(`### Task ${id}: Number ${id}`, '', `- Produces: out${id}.`, '');
+  }
+  lines.push(
+    '### Task 8: Consumer',
+    '',
+    "- Consumes: the API contract (Task 4); Task 3's output; Tasks 10 and 13; Tasks 5, 6 and 9; 3 mi a week 2",
+    '',
+  );
+  const { res, brief } = briefFor(lines.join('\n'), '8');
+  assert.equal(res.code, 0, res.stderr);
+  const ids = appendedHeadings(brief).map((h) => h.match(/^## Produces of Task (\S+):/)[1]);
+  assert.deepEqual(ids, ['3', '4', '5', '6', '9', '10', '13']);
+});
+
+test('task-brief stops a Produces block at the next bullet at its indent', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '**Interfaces:**',
+    '- Produces: `api()`.',
+    '  - returns 404 no_profile when the profile is absent or invalid.',
+    '',
+    '- [ ] **Step 1: Write the failing test**',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(!brief.includes('Step 1'), brief);
+  assert.ok(
+    brief.endsWith(
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+        '- Produces: `api()`.\n' +
+        '  - returns 404 no_profile when the profile is absent or invalid.\n',
+    ),
+    JSON.stringify(brief),
+  );
+});
+
+test('task-brief copies a single-line Produces block', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo(x)` returns a string.',
+    'Prose after the bullet.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\n- Consumes: A1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      '- Produces: `foo(x)` returns a string.\n',
+  );
+});
+
+test('task-brief notes a missing Produces block and exits 0', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    'No interfaces here.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\n- Consumes: A1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      'Task A1 has no Produces block in the plan.\n',
+  );
+});
+
+test('task-brief notes an --also id with no heading and exits 0', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo()`.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    'Body of B1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1', '--also', 'Z9', '--also', 'A1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\nBody of B1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      '- Produces: `foo()`.\n\n' +
+      'Task Z9 has no heading in the plan.\n',
+  );
+});
+
+test('task-brief leaves a brief without a Consumes bullet unchanged', () => {
+  const { res, brief } = briefFor(PLAN, 'T13a');
+  assert.equal(res.code, 0, res.stderr);
+  const lines = PLAN.split('\n');
+  const start = lines.indexOf('### Task T13a: Lettered');
+  const end = lines.indexOf('### Task T13b: Next');
+  assert.equal(brief, `${lines.slice(start, end - 1).join('\n')}\n`);
+  assert.equal(appendedHeadings(brief).length, 0);
+});
+
+test('task-brief reads a Consumes bullet without an Interfaces heading', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo()`.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    'Some prose first.',
+    '',
+    '- Consumes: the foo helper',
+    '  from A1, used twice.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief), [
+    '## Produces of Task A1: Producer (consumed by this task)',
+  ]);
+});
+
+test('task-brief skips self-references, duplicates, and ids inside code fences', () => {
+  const plan = [
+    '### Task G1: Producer',
+    '',
+    '- Produces: `g1()`.',
+    '',
+    '### Task G9: Fenced only',
+    '',
+    '- Produces: `g9()`.',
+    '',
+    '### Task C1: Consumer',
+    '',
+    '```markdown',
+    '- Consumes: G9',
+    '```',
+    '',
+    '- Consumes: C1 itself, G1 and again G1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1', '--also', 'G1', '--also', 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief), [
+    '## Produces of Task G1: Producer (consumed by this task)',
+  ]);
+  assert.ok(!brief.includes('g9()'), brief);
+  assert.ok(!brief.includes('has no'), brief);
+});
+
+test('task-brief exits 2 for --also without an id', () => {
+  const plan = '### Task A1: One\n\nBody.\n';
+  for (const extra of [['--also'], ['--also', ''], ['--other', 'A1']]) {
+    const { res, brief } = briefFor(plan, 'A1', ...extra);
+    assert.equal(res.code, 2, `${extra.join(' ')}: ${res.stderr}`);
+    assert.equal(brief, null);
+  }
+});
+
 // --- ledger --------------------------------------------------------------------
 
 function appendOk(dir, lane, entry) {
