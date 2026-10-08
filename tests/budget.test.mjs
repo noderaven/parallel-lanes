@@ -436,13 +436,43 @@ test('a refused agent stops the run for budget ahead of its own stop reason', as
 });
 
 test('a refusal during the final review stops the run instead of completing it', async () => {
-  // pre-flight, 10 task agents, integrate, then two of the three lenses.
+  // pre-flight, 10 task agents, integrate, then two of the three lenses, and
+  // the project checks at the feature head (they run over the cap).
   const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 14 } });
   const { result, calls } = await run(m, cleanScript());
-  assert.equal(calls.length, 14);
+  assert.equal(calls.length, 15);
+  assert.equal(labels(calls).at(-1), 'verify');
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
+  assert.equal(result.verify.head, 'T5-h');
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');
+});
+
+// Review finding 2: cheap deterministic checks run after the last change
+// even when the review budget is spent, so a budget stop still says whether
+// the code that exists passes.
+test('the project checks run at the final fix head even when the budget refused its re-review', async () => {
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 16 } });
+  const script = cleanScript();
+  const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
+  script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
+  script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true }];
+  const { result, calls } = await run(m, script);
+  assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
+  assert.ok(calls.at(-1).prompt.includes('rev-parse HEAD must print FX'), calls.at(-1).prompt);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'budget');
+  assert.equal(result.agents_spawned, 17, 'the checks are counted, over the cap');
+  assert.deepEqual(result.verify.results.map((r) => r.exit), [1]);
+  assert.equal(result.acceptance, null, 'a stopped run is never accepted');
+});
+
+test('the checks do not run over the cap when no code exists past the lanes', async () => {
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
+  const { result, calls } = await run(m, cleanScript());
+  assert.deepEqual(labels(calls), ['pre-flight']);
+  assert.equal(result.verify, null);
 });
 
 test('a refused final re-review stops the run for budget instead of throwing', async () => {
@@ -451,13 +481,14 @@ test('a refused final re-review stops the run for budget instead of throwing', a
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }];
+  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
+  script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }];
   const { result, calls } = await run(m, script);
-  assert.equal(calls.length, 16);
-  assert.equal(labels(calls).at(-1), 'final fix');
+  assert.equal(calls.length, 17);
+  assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
-  assert.equal(result.agents_spawned, 16);
+  assert.equal(result.agents_spawned, 17);
   assert.deepEqual(result.final.fixed, []);
   assert.deepEqual(result.final.open.map((d) => d.reason), ['final re-review not run: budget exhausted']);
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');

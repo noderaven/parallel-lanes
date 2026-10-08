@@ -123,6 +123,19 @@ test('a recorded overlap lets two lanes share a file; a bad record is reported',
   assertError(validateManifest(m), 'task T4 does not list src/a.js');
 });
 
+test('an overlap may say how the merged file is checked; the integrator is told to check it', async () => {
+  const { integratePrompt } = await loadHelpers(['integratePrompt']);
+  const m = validManifest();
+  m.lanes[1].tasks[0].files.push('src/a.js');
+  m.overlaps = [{ file: 'src/a.js', tasks: ['T2', 'T3'], reason: 'both register a route', merge_owner: 'T2',
+    validation: 'npm test -- routes' }];
+  assert.deepEqual(validateManifest(m), []);
+  const p = integratePrompt(m, 'p0', {});
+  assert.ok(p.includes('src/a.js') && p.includes('after the merge, check it: npm test -- routes'), p);
+  m.overlaps[0].validation = '';
+  assertError(validateManifest(m), 'overlaps[0].validation');
+});
+
 test('depends_on: unknown ids, cycles, and code dependencies the run order cannot meet are reported', () => {
   const dep = (id, kind = 'code') => ({ id, kind });
   let m = validManifest();
@@ -449,6 +462,7 @@ test('schema documents the explicit records and the task id pattern the validato
   assert.deepEqual(schema.$defs.task.properties.depends_on.items.properties.kind.enum, ['code', 'contract']);
   for (const key of ['overlaps', 'excluded', 'allow_deferral', 'deferred']) assert.ok(key in p, key);
   assert.deepEqual([...p.overlaps.items.required].sort(), ['file', 'merge_owner', 'reason', 'tasks']);
+  assert.ok('validation' in p.overlaps.items.properties);
   assert.ok('preserved' in p.setup_result.properties);
   assert.ok(schema.allOf.some((r) => r.then && r.then.required && r.then.required.includes('setup_result')));
 });

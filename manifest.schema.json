@@ -331,6 +331,10 @@
           },
           "merge_owner": {
             "$ref": "#/$defs/text"
+          },
+          "validation": {
+            "$ref": "#/$defs/text",
+            "description": "Optional: how the merged file is checked (a command, or what to look at); the integration agent runs it."
           }
         }
       }

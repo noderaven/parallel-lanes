@@ -4,8 +4,9 @@
 usage:
   ledger append DIR LANE JSON
   ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING
-  ledger status DIR [--plan PLAN] [--spec SPEC]
+  ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST]
   ledger backfill DIR MANIFEST
+  ledger accept DIR CHECKOUT HEAD TEXT
 
 append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
 0700. JSON must be an object with a safe non-empty string 'task' (or "_run")
@@ -22,6 +23,13 @@ and an 'event' of:
                non-empty strings; optional 'commits': list of strings
   reopened     with 'reason': string (an approval that no longer holds: the
                task counts as not reviewed again)
+  started      with 'base': non-empty string (the task base, recorded by
+               start-task --record-start before the implementer writes)
+  run_ended    with 'status': non-empty string, and 'agents' and 'rulings':
+               integers >= 0 (what one launch spent)
+  accepted     with 'text': non-empty string and 'head': non-empty string (the
+               user explicitly accepted that revision despite named reasons or
+               warnings; 'ledger accept' writes it)
 
 reviewed appends a reviewed event for TASK with ROUNDS, the sha256 of TASK's
 own section in PLAN (what the review approved against; _brief.section_sha256)
@@ -34,7 +42,9 @@ for TASK, or when HEAD is not a commit that CHECKOUT's HEAD contains.
 status reads every DIR/*.jsonl and prints
   {"done": [...], "reviewed": [...], "blocked": [...], "deferred": [...],
    "start_points": {...}, "carry": {...}, "ranges": {...}, "legacy": [...],
-   "inconsistent": [...], "stale": [...], "unbound": [...], "inputs": {...}}
+   "inconsistent": [...], "stale": [...], "unbound": [...], "inputs": {...},
+   "spent": {"agents", "rulings"}, "accepted": [{head, text}],
+   "undeclared": {...}}
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
 'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
 with a 'blocked' event and no 'committed' or 'settled' after it. deferred:
@@ -45,7 +55,9 @@ accepted). ranges: {task: {base, head}} from the base of the task's first
 events record a base. legacy: done tasks with a 'committed' event that records
 no base (written before finish-task recorded ranges; ledger backfill derives
 their base). inconsistent: [{task, reason}] when one event's base is not the
-previous event's head. start_points: "prelude" is the head of the earliest
+previous event's head, or when a task's first event does not start at the
+base of the latest 'started' event before it (or a later 'started' event
+names neither the task base nor its last head). start_points: "prelude" is the head of the earliest
 run_started event with phase "setup", "join" the head of the earliest with
 phase "join". carry: for each task whose last 'committed' or 'settled' event
 is a 'settled' with outcome "unblock", the text of that task's last 'ruling'
@@ -58,7 +70,23 @@ no brief_sha256. Both are left out of reviewed, so a resume reviews them
 again. inputs: {"plan_changed", "spec_changed"}: true or false against the
 hashes the latest setup run_started recorded (the last launch; with --plan /
 --spec), null when nothing was recorded or no file was given.
+spent: {"agents", "rulings", "unrecorded_launches"}: the sums of 'agents'
+and 'rulings' over every run_ended event (the budget earlier launches used);
+rulings is at least the number of 'ruling' events with "by": "adjudicator"
+(they survive a session that died); unrecorded_launches is the number of
+setup run_started events without a run_ended (their agents are not counted). accepted: every accepted event, in order.
+With --manifest MANIFEST (and --plan), a reviewed task whose depends_on names a
+stale task is stale too ("it depends on <id>, whose approval is stale"),
+transitively, in run order. undeclared (with --manifest; else {}): {task:
+[paths]} for each task with a recorded range and a non-empty files list whose
+range changes a path (git diff --name-only --no-renames base head) that is not
+in its files, nor in the files of a task with the same range (a batch);
+paths compare normalized and case-insensitively, non-ASCII ones unquoted.
 A missing DIR has empty lists, no start points, and no carry.
+
+accept appends {"task": "_run", "event": "accepted", "head": <full sha>,
+"text": TEXT} to DIR/_run.jsonl. It refuses (exit 3) when HEAD is not a commit
+in CHECKOUT, and (exit 2) when TEXT is empty.
 
 backfill reads the manifest's task lists (prelude, lanes in order, join), its
 repo, and start_points, and prints {"backfill": {task: {base, head}},
@@ -79,6 +107,7 @@ or task name, an unreadable ledger, plan or manifest, or a backfill error.
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -97,6 +126,9 @@ REQUIRED = {
     "run_started": "head",
     "settled": "outcome",
     "reopened": "reason",
+    "started": "base",
+    "run_ended": "status",
+    "accepted": "text",
 }
 SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
@@ -161,6 +193,17 @@ def entry_error(entry):
         if "commits" in entry and not (isinstance(entry["commits"], list)
                                        and all(is_text(c) for c in entry["commits"])):
             return "'commits' must be a list of strings"
+    elif event in ("started", "run_ended"):
+        if not is_text(value):
+            return f"'{key}' must be a non-empty string"
+        if event == "run_ended":
+            for field in ("agents", "rulings"):
+                v = entry.get(field)
+                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                    return f"'{field}' must be an integer >= 0"
+    elif event == "accepted":
+        if not is_text(value) or not is_text(entry.get("head")):
+            return "'text' and 'head' must be non-empty strings"
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
     return None
@@ -268,15 +311,38 @@ def read_events(directory):
     return events
 
 
-def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=None):
+def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=None, manifest=None):
     done, reviewed_by, blocked, start_points = {}, {}, {}, {}
     last_ruling, unblocked, deferred = {}, {}, {}
     review_event = {}
     history = {}  # task -> committed/settled events in order
     setup_hashes = None
+    started = {}  # task -> base of its latest started event
+    start_mismatch = {}  # task -> reason, the first one found
+    spent = {"agents": 0, "rulings": 0}
+    ended, launches, adjudicated = 0, 0, 0
+    accepted = []
     for entry in events:
         task, event = entry["task"], entry["event"]
-        if event == "committed":
+        if event in ("committed", "settled") and "base" in entry and task not in start_mismatch:
+            want = started.get(task)
+            if task not in history and want is not None and entry["base"] != want:
+                start_mismatch[task] = (f"its first recorded range starts at {entry['base']}, not at the base "
+                                        f"{want} it started at")
+        if event == "started":
+            evs = history.get(task)
+            if evs and "base" in evs[0] and entry["base"] not in (evs[0]["base"], evs[-1].get("head")) \
+                    and task not in start_mismatch:
+                start_mismatch[task] = (f"it started at {entry['base']}, neither the task base "
+                                        f"{evs[0]['base']} nor its last head")
+            started[task] = entry["base"]
+        elif event == "run_ended":
+            spent["agents"] += entry["agents"]
+            spent["rulings"] += entry["rulings"]
+            ended += 1
+        elif event == "accepted":
+            accepted.append({"head": entry["head"], "text": entry["text"]})
+        elif event == "committed":
             unblocked[task] = False
             deferred[task] = False
             last_ruling.pop(task, None)
@@ -302,7 +368,10 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             blocked[task] = True
         elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
             last_ruling[task] = entry["text"]
+            adjudicated += 1
         elif event == "run_started":
+            if entry["phase"] == "setup":
+                launches += 1
             key = START_POINTS[entry["phase"]]
             start_points.setdefault(key, entry["head"])
             # The latest launch's hashes: inputs report changes since then.
@@ -323,6 +392,9 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
                                      f"{evs[0]['base']} nor the previous head {prev['head']}"})
                 break
         ranges[task] = {"base": evs[0]["base"], "head": evs[-1]["head"]}
+    for task, reason in start_mismatch.items():
+        if not any(i["task"] == task for i in inconsistent):
+            inconsistent.append({"task": task, "reason": reason})
 
     stale, unbound = [], []
     if plan_given:
@@ -343,7 +415,34 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             elif "head" in rev and task in ranges and rev["head"] != ranges[task]["head"]:
                 stale.append({"task": task, "reason":
                               f"the review approved {rev['head']}, not the recorded head {ranges[task]['head']}"})
+    if manifest is not None and stale:
+        # A dependent built on, or against, a stale approval is reviewed again
+        # too: transitively, in run order.
+        order = manifest_tasks(manifest)
+        stale_ids = {s["task"] for s in stale}
+        changed = True
+        while changed:
+            changed = False
+            for t in order:
+                tid = t["id"]
+                if tid in stale_ids or reviewed_by.get(tid) != "review" or tid in unbound:
+                    continue
+                dep = next((d["id"] for d in t.get("depends_on") or []
+                            if isinstance(d, dict) and d.get("id") in stale_ids), None)
+                if dep is not None:
+                    stale.append({"task": tid, "reason": f"it depends on {dep}, whose approval is stale"})
+                    stale_ids.add(tid)
+                    changed = True
     excluded = {s["task"] for s in stale} | set(unbound)
+
+    # A launch whose session died records no run_ended; the rulings its
+    # adjudicator wrote to the ledger still count.
+    spent["rulings"] = max(spent["rulings"], adjudicated)
+    spent["unrecorded_launches"] = max(0, launches - ended)
+
+    undeclared = {}
+    if manifest is not None:
+        undeclared = undeclared_files(manifest, ranges)
 
     inputs = {"plan_changed": None, "spec_changed": None}
     if setup_hashes is not None:
@@ -364,30 +463,100 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         "stale": stale,
         "unbound": unbound,
         "inputs": inputs,
+        "spent": spent,
+        "accepted": accepted,
+        "undeclared": undeclared,
     }, history
 
 
-def status(directory, plan=None, spec=None):
-    plan_text = read_text(plan, "plan") if plan is not None else None
-    result, _ = summarize(read_events(directory), plan_text, plan is not None,
-                          file_sha256(spec) if spec is not None else None,
-                          file_sha256(plan) if plan is not None else None)
-    print(json.dumps(result))
-
-
-def backfill(directory, manifest_path):
+def load_manifest(manifest_path):
+    """The manifest, with its task lists checked to be readable."""
     try:
         with open(manifest_path, encoding="utf-8") as f:
             m = json.load(f)
-        repo = m["repo"]
-        lists = [("prelude", m["prelude"])] + [(lane["id"], lane["tasks"]) for lane in m["lanes"]] \
-            + [("join", m["join"])]
+        m["repo"]["root"]
+        task_lists(m)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as e:
         fail(3, f"cannot read manifest {manifest_path!r}: {e}")
+    return m
+
+
+def task_lists(m):
+    return [("prelude", m["prelude"])] + [(lane["id"], lane["tasks"]) for lane in m["lanes"]] \
+        + [("join", m["join"])]
+
+
+def manifest_tasks(m):
+    return [t for _, tasks in task_lists(m) for t in tasks]
+
+
+def repo_git(m):
+    repo = m["repo"]
     prefix = [f"--git-dir={repo['git_dir']}"] if repo.get("mode") == "shadow" else ["-C", repo["root"]]
 
     def git(*args):
-        return subprocess.run(["git", *prefix, *args], capture_output=True, text=True, env=ENV)
+        return subprocess.run(["git", *prefix, *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape", env=ENV)
+    return git
+
+
+def path_key(path):
+    """A project-relative path as validate.js compares it: normalized and
+    lower-cased; None for an absolute path or one that leaves the project."""
+    if not isinstance(path, str) or path.startswith("/"):
+        return None
+    norm = posixpath.normpath(path)
+    if norm == ".." or norm.startswith("../"):
+        return None
+    return norm.lower()
+
+
+def undeclared_files(m, ranges):
+    git = repo_git(m)
+    tasks = manifest_tasks(m)
+    out = {}
+    for t in tasks:
+        tid = t["id"]
+        rng = ranges.get(tid)
+        if rng is None or not t.get("files"):
+            continue
+        # A batch shares one range: the files of every task on it are declared.
+        allowed = set()
+        for other in tasks:
+            if ranges.get(other["id"]) == rng:
+                allowed.update(k for k in map(path_key, other.get("files") or []) if k is not None)
+        res = git("-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", rng["base"], rng["head"])
+        if res.returncode != 0:
+            continue
+        extra = sorted(p for p in res.stdout.splitlines() if p and path_key(p) not in allowed)
+        if extra:
+            out[tid] = extra
+    return out
+
+
+def status(directory, plan=None, spec=None, manifest_path=None):
+    plan_text = read_text(plan, "plan") if plan is not None else None
+    manifest = load_manifest(manifest_path) if manifest_path is not None else None
+    result, _ = summarize(read_events(directory), plan_text, plan is not None,
+                          file_sha256(spec) if spec is not None else None,
+                          file_sha256(plan) if plan is not None else None, manifest)
+    print(json.dumps(result))
+
+
+def accept(directory, checkout, head, text):
+    if not text:
+        fail(2, "TEXT must say what the user accepted")
+    res = subprocess.run(["git", "-C", checkout, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                          f"{head}^{{commit}}"], capture_output=True, text=True, env=ENV)
+    if res.returncode != 0 or not res.stdout.strip():
+        fail(3, f"{head!r} is not a commit in {checkout!r}; nothing recorded")
+    write_entry(directory, "_run", {"task": "_run", "event": "accepted", "head": res.stdout.strip(), "text": text})
+
+
+def backfill(directory, manifest_path):
+    m = load_manifest(manifest_path)
+    lists = task_lists(m)
+    git = repo_git(m)
 
     summary, history = summarize(read_events(directory))
     done = set(summary["done"])
@@ -451,19 +620,22 @@ def main(argv):
             fail(3, f"unsafe task id {argv[3]!r}")
         reviewed(*argv[1:])
     elif len(argv) >= 2 and argv[0] == "status" and argv[1]:
-        opts = {"--plan": None, "--spec": None}
+        opts = {"--plan": None, "--spec": None, "--manifest": None}
         rest = argv[2:]
         while rest:
             if len(rest) < 2 or rest[0] not in opts or opts[rest[0]] is not None or not rest[1]:
-                fail(2, "usage: ledger status DIR [--plan PLAN] [--spec SPEC]")
+                fail(2, "usage: ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST]")
             opts[rest[0]] = rest[1]
             rest = rest[2:]
-        status(argv[1], opts["--plan"], opts["--spec"])
+        status(argv[1], opts["--plan"], opts["--spec"], opts["--manifest"])
     elif len(argv) == 3 and argv[0] == "backfill" and argv[1] and argv[2]:
         backfill(argv[1], argv[2])
+    elif len(argv) == 5 and argv[0] == "accept" and all(argv[1:4]):
+        accept(*argv[1:])
     else:
         fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING"
-                " | ledger status DIR [--plan PLAN] [--spec SPEC] | ledger backfill DIR MANIFEST")
+                " | ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST] | ledger backfill DIR MANIFEST"
+                " | ledger accept DIR CHECKOUT HEAD TEXT")
 
 
 if __name__ == "__main__":

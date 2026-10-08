@@ -174,7 +174,8 @@ function validateManifest(m) {
   if ('prelude' in m) checkTaskList('prelude', m.prelude);
 
   // Deliberate overlaps: a file two lanes both change, with the tasks, why,
-  // and the task whose version wins at the merge. Keyed by the normalized,
+  // the task whose version wins at the merge, and optionally how the merged
+  // file is checked (validation). Keyed by the normalized,
   // lower-cased path (a case-insensitive file system makes 'A.js' and 'a.js'
   // one file).
   const fileKey = (f) => (normalizePath(f) || f).toLowerCase();
@@ -192,6 +193,9 @@ function validateManifest(m) {
         }
         if (normalizePath(o.file) === null) err(`${where}.file: ${JSON.stringify(o.file)} is absolute or leaves the project`);
         if (!o.tasks.includes(o.merge_owner)) err(`${where}.merge_owner: must be one of its tasks`);
+        if ('validation' in o && !isText(o.validation)) {
+          err(`${where}.validation: must be a non-empty string (how the merged file is checked)`);
+        }
         overlapFor.set(fileKey(o.file), o);
       });
     }

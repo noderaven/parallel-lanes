@@ -209,10 +209,21 @@ function diffSteps(m, task, where, base, head) {
   return '[DIFF_FILE] is the path the start command printed under its "===== review package =====" line.';
 }
 
+// The Files list of a unit, each path once, in task order: what a review's
+// scope check compares the range against.
+function declaredFiles(task) {
+  const out = [];
+  for (const t of unitTasks(task)) for (const f of t.files || []) if (!out.includes(f)) out.push(f);
+  return out;
+}
+
 // The start-task command a task agent runs first: the optional fast-forward
 // to the feature branch (opts.sync), every brief of the unit regenerated from
 // the current plan and printed, and with opts.pkg = {base, head} and
-// superpowers present the review package for base..head.
+// superpowers present the review package for base..head. With opts.pkg and a
+// Files list it also lists the files base..head changes outside that list
+// (--scope); with opts.start (the task base, implement only) it records that
+// base in the ledger once the briefs are written (--record-start).
 function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
@@ -233,6 +244,14 @@ function startCommand(m, task, where, opts = {}) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
     for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
+  const declared = declaredFiles(task);
+  if (pkg && declared.length > 0) {
+    parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
+      ...declared.flatMap((f) => ['--declared', shellQuote(f)]));
+  }
+  if (present(opts.start)) {
+    parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
+  }
   return parts.join(' ');
 }
 
@@ -245,6 +264,8 @@ function startBlock(m, task, where, opts, failure) {
       ? 'regenerates every task brief from the current plan and prints it'
       : 'regenerates the task brief from the current plan and prints it',
     ...(opts.pkg && m.sp_dir !== null ? ['builds the review package'] : []),
+    ...(opts.pkg && declaredFiles(task).length > 0 ? ["lists the files the range changes outside the Files list"] : []),
+    ...(present(opts.start) ? ['records the task base in the ledger'] : []),
   ];
   const files = isBatch(task) ? 'brief files' : 'brief file';
   return [
@@ -385,7 +406,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     '',
     taskContext(m, task, where, guidance),
     '',
-    startBlock(m, task, where, { sync: where.sync || null },
+    startBlock(m, task, where, { sync: where.sync || null, start: base },
       'stop and report blocked with its message (a failed fast-forward is reported, never forced).'),
   ];
   parts.push('', [
@@ -418,6 +439,18 @@ function reviewStartFailure() {
     'message, and record no ledger line.';
 }
 
+// What a reviewer does with the start command's scope list, or nothing when
+// the unit has no Files list to compare against.
+function scopeLines(task) {
+  if (declaredFiles(task).length === 0) return [];
+  return [
+    "The start command lists, under its \"===== files changed outside the task's Files list =====\" line, every",
+    `file the range changes that the ${unitNoun(task)}'s Files list does not name. Judge each: a change the task did`,
+    "not need (above all to a file another task or lane owns) is an important finding on that file; a change the",
+    'task needed is fine.',
+  ];
+}
+
 // Prompt for the first (full) review of a task's base..head range.
 function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
   const files = taskFiles(m, task);
@@ -435,6 +468,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     '',
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
+    ...scopeLines(task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -504,6 +538,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     '',
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
+    ...scopeLines(task),
     '',
     taskContext(m, task, where, guidance),
     '',

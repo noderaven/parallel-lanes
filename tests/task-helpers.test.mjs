@@ -280,6 +280,47 @@ test('start-task ignores GIT_DIR and friends pointing at another repo', () => {
   assert.equal(readFileSync(out, 'utf8'), `${c.lane}\nunset\n`);
 });
 
+test('start-task --record-start records the task base for every briefed task before any work', () => {
+  const c = newCase();
+  const out1 = join(c.root, 'briefs', 'T1.md');
+  const out2 = join(c.root, 'briefs', 'T2.md');
+  const res = startTask(c.lane, c.plan, '--record-start', c.ledgerDir, 'lane-a', 'HEAD',
+    '--brief', 'T1', out1, '--brief', 'T2', out2);
+  assert.equal(res.code, 0, res.stderr);
+  const events = readFileSync(join(c.ledgerDir, 'lane-a.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(events, [
+    { task: 'T1', event: 'started', base: c.initial },
+    { task: 'T2', event: 'started', base: c.initial },
+  ]);
+  const bad = startTask(c.lane, c.plan, '--record-start', join(c.root, 'other ledger'), 'lane-a', '0'.repeat(40),
+    '--brief', 'T1', out1);
+  assert.equal(bad.code, 3);
+  assert.ok(!existsSync(join(c.root, 'other ledger')), 'a refused start records nothing');
+});
+
+test('start-task --scope lists the files a range changes outside the declared ones', () => {
+  const c = newCase();
+  const base = git(c.lane, 'rev-parse', 'HEAD');
+  write(join(c.lane, 'src', 'a.js'), 'a\n');
+  write(join(c.lane, 'src', 'b.js'), 'b\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'work');
+  git(c.lane, 'mv', 'a.txt', 'moved.txt');
+  git(c.lane, 'commit', '-q', '-m', 'rename');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--scope', base, head, '--declared', './SRC/a.js', '--declared', 'moved.txt',
+    '--brief', 'T1', out);
+  assert.equal(res.code, 0, res.stderr);
+  // A rename changes both paths; the declared ones match normalized and
+  // case-insensitively.
+  assert.ok(res.stdout.endsWith('===== files changed outside the task\'s Files list =====\na.txt\nsrc/b.js\n'), res.stdout);
+  const none = startTask(c.lane, c.plan, '--scope', base, head, '--declared', 'src/a.js', '--declared', 'src/b.js',
+    '--declared', 'a.txt', '--declared', 'moved.txt', '--brief', 'T1', out);
+  assert.ok(none.stdout.endsWith("===== files changed outside the task's Files list =====\n(none)\n"), none.stdout);
+  assert.equal(startTask(c.lane, c.plan, '--scope', base, head, '--brief', 'T1', out).code, 2);
+});
+
 test('start-task without --brief exits 2', () => {
   const c = newCase();
   const res = startTask(c.lane, c.plan);

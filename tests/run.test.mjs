@@ -72,9 +72,9 @@ function phaseScript(extra = {}) {
     'final review security': [{ findings: [finding('dup issue'), finding('sec issue', 'src/b.js', 9)], cannot_verify: [], head: 'T5-h' }],
     'final review correctness': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
     'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [
-      { id: 'F1', status: 'fixed', reason: 'fixed' }, { id: 'F2', status: 'fixed', reason: 'fixed' },
+      { id: 'F1', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' }, { id: 'F2', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' },
     ] }],
-    'final re-review': [{ results: [
+    'final re-review': [{ head: 'f1', results: [
       { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'resolved', evidence: 'gone' },
     ], new_findings: [] }],
     verify: [verified('f1')],
@@ -318,6 +318,39 @@ test('resume with every task done and reviewed: no task agents, integration stil
   assert.ok(!logs.some((l) => l.includes('launching')));
 });
 
+// The review's CI scenario "interrupt after final fixes": the earlier run's
+// final fix committed FX0, then the session ended before its checks. The
+// resume runs no task agent, judges the code at FX0 afresh, and accepts only
+// on evidence gathered at FX0 in this run.
+test('resume after the final fixes: no task agents, fresh review and checks at the fixed head', async () => {
+  const m = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
+  const lens = () => [{ findings: [], cannot_verify: [], head: 'FX0' }];
+  const script = phaseScript({
+    e2e: [{ head: 'FX0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    'final review sp': lens(), 'final review security': lens(), 'final review correctness': lens(),
+    verify: [verified('FX0')],
+    'post-integrate recheck': [{ status: 'done', head: 'FX0', notes: 'contracts ok at FX0' }],
+  });
+  const { result, calls } = await run(m, script);
+  assert.ok(!calls.some((c) => / (implement|review|fix \d+|re-review \d+)$/.test(c.label)), labels(calls).join(', '));
+  for (const id of ALL) assert.equal(result.tasks[id].status, 'skipped', id);
+  assert.equal(result.delivered_sha, 'FX0');
+  assert.equal(result.verify.head, 'FX0');
+  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes('rev-parse HEAD must print FX0'));
+  assert.ok(labels(calls).includes('post-integrate recheck'), 'the post-integrate check covered P1, not FX0');
+  assert.equal(result.acceptance.status, 'accepted');
+
+  // Without checks at FX0 in this run, nothing from before counts.
+  const stale = await run(m, phaseScript({
+    e2e: [{ head: 'FX0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    'final review sp': lens(), 'final review security': lens(), 'final review correctness': lens(),
+    verify: [verified('P1')],
+    'post-integrate recheck': [{ status: 'done', head: 'FX0', notes: 'ok' }],
+  }));
+  assert.equal(stale.result.acceptance.status, 'unverified');
+  assert.deepEqual(stale.result.acceptance.reasons.map((r) => r.kind), ['checks_stale']);
+});
+
 test('resume with only lane tasks done and reviewed: lanes skipped, empty lanes do not crash', async () => {
   const m = manifest({
     prelude: [], join: [], done: ['T2', 'T3', 'T4'], reviewed: ['T2', 'T3', 'T4'], backfill: backfillFor(['T2', 'T3', 'T4']),
@@ -498,7 +531,7 @@ test('final fix gets the deduped findings once, by id; a decline the re-review a
     ...phaseScript({
       'final fix': [{
         status: 'done', head: 'f1', tests: 'pass', notes: '',
-        dispositions: [{ id: 'F1', status: 'fixed', reason: 'done' }, { id: 'F2', status: 'declined', reason: 'false positive' }],
+        dispositions: [{ id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' }],
       }],
     }),
     ...taskScript(ALL),
@@ -521,7 +554,7 @@ test('a finding the re-review still sees open stays open even after it moved a l
   const script = {
     ...phaseScript({
       'final review security': [{ findings: [finding('dup issue'), { ...finding('authz bypass', 'src/auth.js', 10), severity: 'critical' }], cannot_verify: [], head: 'T5-h' }],
-      'final re-review': [{ results: [
+      'final re-review': [{ head: 'f1', results: [
         { id: 'F1', status: 'resolved', evidence: 'gone' },
         { id: 'F2', status: 'open', evidence: 'still bypassable, now at src/auth.js:11' },
       ], new_findings: [] }],
@@ -541,8 +574,8 @@ test('a finding the re-review still sees open stays open even after it moved a l
 test('a finding without a disposition or a re-review result is open, never fixed', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }],
-      'final re-review': [{ results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
+      'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
         { severity: 'important', file: 'src/c.js', line: 2, issue: 'the fix broke c', fix: 'restore' },
       ] }],
     }),
@@ -553,6 +586,110 @@ test('a finding without a disposition or a re-review result is open, never fixed
   assert.deepEqual(result.final.open.map((f) => f.id), ['F2', 'N1']);
   assert.match(result.final.open[0].reason, /no result for it/);
   assert.equal(result.acceptance.status, 'rejected');
+});
+
+// 1.2.1: a disposition says what shows it, the re-review names the revision
+// it judged, and contradictory answers never settle a finding.
+test('a final re-review of another revision than the delivered one leaves every finding open', async () => {
+  const script = {
+    ...phaseScript({
+      'final re-review': [{ head: 'T5-h', results: [
+        { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'resolved', evidence: 'gone' },
+      ], new_findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  assert.deepEqual(result.final.fixed, []);
+  assert.deepEqual(result.final.open.map((f) => f.id), ['F1', 'F2']);
+  assert.match(result.final.open[0].reason, /judged T5-h, not the delivered f1/);
+  assert.equal(result.acceptance.status, 'rejected');
+});
+
+test('contradictory dispositions or re-review results for one id leave it open', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+        { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'fixed', reason: 'done', evidence: 'src/b.js:9' },
+        { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'n/a' },
+      ] }],
+      'final re-review': [{ head: 'f1', results: [
+        { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F1', status: 'open', evidence: 'still there' },
+        { id: 'F2', status: 'resolved', evidence: 'gone' },
+      ], new_findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  assert.deepEqual(result.final.fixed, []);
+  assert.deepEqual(result.final.open.map((f) => [f.id, f.reason]), [
+    ['F1', 'the final re-review gave contradictory results for it'],
+    ['F2', 'the final fix gave contradictory dispositions for it'],
+  ]);
+});
+
+test('a decline the re-reviewer overrules stays open and blocks acceptance', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+        { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'the input is trusted' },
+      ] }],
+      'final re-review': [{ head: 'f1', results: [
+        { id: 'F1', status: 'resolved', evidence: 'gone' },
+        { id: 'F2', status: 'open', evidence: 'the input comes from the request: src/b.js:9' },
+      ], new_findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  const rr = calls.find((c) => c.label === 'final re-review').prompt;
+  assert.ok(rr.includes('fixer: declined - false positive (evidence: the input is trusted)'), rr);
+  assert.deepEqual(result.final.declined, []);
+  assert.deepEqual(result.final.open.map((f) => f.id), ['F2']);
+  assert.equal(result.acceptance.status, 'rejected');
+});
+
+// Reviewer of 1.2.1: a final fix whose commits no re-review of the delivered
+// revision covered is missing evidence, even when every finding is minor,
+// and the new findings that re-review reported are kept.
+test('a final fix the re-review did not cover at the delivered revision keeps the run from being accepted', async () => {
+  const minor = { ...finding('naming'), severity: 'minor' };
+  // Fresh result queues for each run (the stub consumes them).
+  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const base = () => ({
+    'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+    'final review security': none(), 'final review correctness': none(),
+    'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+      { id: 'F1', status: 'fixed', reason: 'renamed', evidence: 'src/a.js:3' }] }],
+  });
+  const wrongHead = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [{ head: 'T5-h', results: [
+    { id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
+    { severity: 'critical', file: 'src/c.js', line: 2, issue: 'the fix opened a hole', fix: 'close it' }] }] }), ...taskScript(ALL) });
+  assert.deepEqual(wrongHead.result.final.open.map((f) => f.id), ['F1', 'N1']);
+  assert.equal(wrongHead.result.acceptance.status, 'rejected');
+  assert.ok(wrongHead.result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'));
+
+  const noReview = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [null], 'final re-review retry': [null] }), ...taskScript(ALL) });
+  assert.equal(noReview.result.acceptance.status, 'unverified', JSON.stringify(noReview.result.acceptance));
+  assert.deepEqual(noReview.result.acceptance.reasons.map((r) => r.kind), ['final_fix_unreviewed']);
+  assert.match(noReview.result.acceptance.reasons[0].detail, /T5-h\.\.f1/);
+});
+
+test('a disposition without evidence does not settle its finding', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+        { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'false positive' },
+      ] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  assert.deepEqual(result.final.fixed.map((f) => f.id), ['F1']);
+  assert.deepEqual(result.final.open.map((f) => [f.id, f.reason]), [['F2', 'the final fix gave no evidence for it']]);
 });
 
 test('no final findings: no fix or re-review agent', async () => {
@@ -678,9 +815,9 @@ test('a final fix with no commits is still re-reviewed: its claims are checked, 
   const script = {
     ...phaseScript({
       'final fix': [{ status: 'done', head: 'T5-h', tests: '', notes: '', dispositions: [
-        { id: 'F1', status: 'fixed', reason: 'already fine' }, { id: 'F2', status: 'declined', reason: 'out of scope' },
+        { id: 'F1', status: 'fixed', reason: 'already fine', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/a.js:3' },
       ] }],
-      'final re-review': [{ results: [
+      'final re-review': [{ head: 'T5-h', results: [
         { id: 'F1', status: 'open', evidence: 'nothing changed' }, { id: 'F2', status: 'resolved', evidence: 'out of scope indeed' },
       ], new_findings: [] }],
       verify: [verified('T5-h')],
@@ -937,7 +1074,7 @@ test('final review lenses report the feature head; the final fix starts from the
     'final review security': lens([]),
     'final review correctness': lens([]),
     'final fix': [{ status: 'done', head: 'FF2', tests: '', notes: '', dispositions: [] }],
-    'final re-review': [{ results: [], new_findings: [] }],
+    'final re-review': [{ head: 'FF2', results: [], new_findings: [] }],
     verify: [verified('FF2')],
   });
   const second = await run(m, noop);
@@ -1518,6 +1655,29 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   assert.equal(nul.result.status, 'complete');
 });
 
+// Reviewer of 1.2.1: commits a Sonnet final fix made stay delivered when its
+// Opus rerun reports no head, so they are never left unreviewed silently.
+test('a Sonnet final fix that committed and stopped keeps its head when the Opus rerun reports none', async () => {
+  const minor = { ...finding('naming'), severity: 'minor' };
+  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const { result, calls } = await run(manifest(), {
+    ...phaseScript({
+      'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+      'final review security': none(), 'final review correctness': none(),
+      'final fix': [
+        { status: 'blocked', head: 'S1', tests: '', notes: 'ran out of room', dispositions: [] },
+        { status: 'blocked', tests: '', notes: 'could not finish either', dispositions: [] },
+      ],
+      verify: [verified('S1')],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(result.delivered_sha, 'S1');
+  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes('rev-parse HEAD must print S1'));
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'), JSON.stringify(result.acceptance));
+});
+
 test('supervised integrate conflict escalates to one opus rerun with no resolver', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const script = {
@@ -1736,8 +1896,8 @@ test('acceptance: minor findings and cannot-verify items are warnings, not reaso
   const result = await acceptanceOf({
     'final review sp': [{ findings: [minor], cannot_verify: ['load under 1k users'], head: 'T5-h' }],
     'final review security': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style' }] }],
-    'final re-review': [{ results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
+    'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
+    'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
   });
   assert.equal(result.acceptance.status, 'accepted');
   assert.deepEqual(result.acceptance.reasons, []);

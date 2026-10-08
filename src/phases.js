@@ -47,7 +47,17 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
   };
   if (findings.length === 0) return final;
-  const settle = (dispositions, rr, why) => Object.assign(final, settleFinalFindings(findings, dispositions, rr, why));
+  // A fix that committed is reviewed only by a re-review of its head: else
+  // its commits are delivered unreviewed (unreviewed_fix, acceptance
+  // final_fix_unreviewed), whatever the findings' severity.
+  const settle = (dispositions, rr, why, delivered = null) => {
+    Object.assign(final, settleFinalFindings(findings, dispositions, rr, why, delivered));
+    const problem = reReviewProblem(rr, why, delivered);
+    if (final.head !== tip && problem !== null) {
+      final.unreviewed_fix = `the final fix ${tip}..${final.head} was not re-reviewed at ${final.head}: ${problem}`;
+    }
+    return final;
+  };
 
   // Final fix tier (spec decision 5): Sonnet when every finding is minor or
   // every finding is in documentation; otherwise Opus. A Sonnet fix that does
@@ -58,20 +68,24 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
+  // fix's head stands unless its Opus rerun reports a head of its own.
+  if (fix && present(fix.head)) final.head = fix.head;
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  // Whatever the fix agent did, commits it reports are delivered code.
   if (fix && present(fix.head)) final.head = fix.head;
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
-  const verifying = findings.map((f) => ({ ...f, disposition: dispositions.find((d) => d && d.id === f.id) || null }));
+  // The fixer's word on each finding, for the re-reviewer: every disposition
+  // given for its id (more than one shows the contradiction).
+  const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
   const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
       : 'no result from final re-review');
   }
-  return settle(dispositions, rr);
+  return settle(dispositions, rr, undefined, final.head);
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -559,15 +573,31 @@ async function runAll(m, io) {
     return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
       : { items: [], checked_sha: null, notes: `no result from ${label}` };
   };
+  // The project checks at sha (scripts/run-checks through the verify agent).
+  // They are cheap and deterministic, so they run past the agent cap: after
+  // the last change the run has evidence even when the budget is spent.
+  const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
+    { ...sonnetHigh, overBudget: true });
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  // A budget stop once every task is in: the checks still run at the
+  // feature head the run reached, and the stopped report carries them.
+  const budgetStopWithChecks = async (sha) => {
+    if (hasChecks && present(sha)) {
+      io.phase('Verify');
+      verify = await verifyAt(sha);
+    }
+    return budgetReport();
+  };
+
   if (m.hooks.e2e) {
     io.phase('E2E');
     e2e = await runE2e('e2e', 'E2E');
-    if (state.refused.length > 0) return budgetReport();
+    if (state.refused.length > 0) return budgetStopWithChecks(tip);
   }
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetReport();
+  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
   delivered = final.head;
@@ -577,10 +607,7 @@ async function runAll(m, io) {
   // post-integrate checks rerun only when a later commit made their evidence
   // stale (the post-integrate one check-only).
   io.phase('Verify');
-  if (checksCommand(m, null, featureDir(m)) !== null) {
-    verify = await callM('verify', 'Verify', verifyPrompt(m, delivered), verifySchema(), sonnetHigh);
-    if (state.refused.length > 0) return budgetReport();
-  }
+  if (hasChecks) verify = await verifyAt(delivered);
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
     e2e = await runE2e('e2e recheck', 'Verify');
     if (state.refused.length > 0) return budgetReport();

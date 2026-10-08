@@ -233,7 +233,8 @@ function validateManifest(m) {
   if ('prelude' in m) checkTaskList('prelude', m.prelude);
 
   // Deliberate overlaps: a file two lanes both change, with the tasks, why,
-  // and the task whose version wins at the merge. Keyed by the normalized,
+  // the task whose version wins at the merge, and optionally how the merged
+  // file is checked (validation). Keyed by the normalized,
   // lower-cased path (a case-insensitive file system makes 'A.js' and 'a.js'
   // one file).
   const fileKey = (f) => (normalizePath(f) || f).toLowerCase();
@@ -251,6 +252,9 @@ function validateManifest(m) {
         }
         if (normalizePath(o.file) === null) err(`${where}.file: ${JSON.stringify(o.file)} is absolute or leaves the project`);
         if (!o.tasks.includes(o.merge_owner)) err(`${where}.merge_owner: must be one of its tasks`);
+        if ('validation' in o && !isText(o.validation)) {
+          err(`${where}.validation: must be a non-empty string (how the merged file is checked)`);
+        }
         overlapFor.set(fileKey(o.file), o);
       });
     }
@@ -922,10 +926,21 @@ function diffSteps(m, task, where, base, head) {
   return '[DIFF_FILE] is the path the start command printed under its "===== review package =====" line.';
 }
 
+// The Files list of a unit, each path once, in task order: what a review's
+// scope check compares the range against.
+function declaredFiles(task) {
+  const out = [];
+  for (const t of unitTasks(task)) for (const f of t.files || []) if (!out.includes(f)) out.push(f);
+  return out;
+}
+
 // The start-task command a task agent runs first: the optional fast-forward
 // to the feature branch (opts.sync), every brief of the unit regenerated from
 // the current plan and printed, and with opts.pkg = {base, head} and
-// superpowers present the review package for base..head.
+// superpowers present the review package for base..head. With opts.pkg and a
+// Files list it also lists the files base..head changes outside that list
+// (--scope); with opts.start (the task base, implement only) it records that
+// base in the ledger once the briefs are written (--record-start).
 function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
@@ -946,6 +961,14 @@ function startCommand(m, task, where, opts = {}) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
     for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
+  const declared = declaredFiles(task);
+  if (pkg && declared.length > 0) {
+    parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
+      ...declared.flatMap((f) => ['--declared', shellQuote(f)]));
+  }
+  if (present(opts.start)) {
+    parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
+  }
   return parts.join(' ');
 }
 
@@ -958,6 +981,8 @@ function startBlock(m, task, where, opts, failure) {
       ? 'regenerates every task brief from the current plan and prints it'
       : 'regenerates the task brief from the current plan and prints it',
     ...(opts.pkg && m.sp_dir !== null ? ['builds the review package'] : []),
+    ...(opts.pkg && declaredFiles(task).length > 0 ? ["lists the files the range changes outside the Files list"] : []),
+    ...(present(opts.start) ? ['records the task base in the ledger'] : []),
   ];
   const files = isBatch(task) ? 'brief files' : 'brief file';
   return [
@@ -1098,7 +1123,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     '',
     taskContext(m, task, where, guidance),
     '',
-    startBlock(m, task, where, { sync: where.sync || null },
+    startBlock(m, task, where, { sync: where.sync || null, start: base },
       'stop and report blocked with its message (a failed fast-forward is reported, never forced).'),
   ];
   parts.push('', [
@@ -1131,6 +1156,18 @@ function reviewStartFailure() {
     'message, and record no ledger line.';
 }
 
+// What a reviewer does with the start command's scope list, or nothing when
+// the unit has no Files list to compare against.
+function scopeLines(task) {
+  if (declaredFiles(task).length === 0) return [];
+  return [
+    "The start command lists, under its \"===== files changed outside the task's Files list =====\" line, every",
+    `file the range changes that the ${unitNoun(task)}'s Files list does not name. Judge each: a change the task did`,
+    "not need (above all to a file another task or lane owns) is an important finding on that file; a change the",
+    'task needed is fine.',
+  ];
+}
+
 // Prompt for the first (full) review of a task's base..head range.
 function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
   const files = taskFiles(m, task);
@@ -1148,6 +1185,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     '',
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
+    ...scopeLines(task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -1217,6 +1255,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     '',
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
+    ...scopeLines(task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -1393,8 +1432,9 @@ function finalFixSchema() {
             id: { type: 'string' },
             status: { type: 'string', enum: ['fixed', 'declined'] },
             reason: { type: 'string' },
+            evidence: { type: 'string' },
           },
-          required: ['id', 'status', 'reason'],
+          required: ['id', 'status', 'reason', 'evidence'],
         },
       },
     },
@@ -1418,6 +1458,7 @@ function finalReReviewSchema() {
   return {
     type: 'object',
     properties: {
+      head: { type: 'string' },
       results: {
         type: 'array',
         items: {
@@ -1432,7 +1473,7 @@ function finalReReviewSchema() {
       },
       new_findings: reviewSchema().properties.findings,
     },
-    required: ['results', 'new_findings'],
+    required: ['head', 'results', 'new_findings'],
   };
 }
 
@@ -1459,7 +1500,7 @@ function verifySchema() {
       ok: { type: 'boolean' },
       clean: { type: 'boolean' },
     },
-    required: ['head', 'results', 'ok'],
+    required: ['head', 'results', 'ok', 'clean'],
   };
 }
 
@@ -1589,7 +1630,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
     '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
     ...m.overlaps.map((o) => `   - ${o.file}: tasks ${o.tasks.join(', ')}; on a conflict keep both changes, and where they`
-      + ` cannot both stand keep task ${o.merge_owner}'s. Why: ${o.reason}`),
+      + ` cannot both stand keep task ${o.merge_owner}'s. Why: ${o.reason}`
+      + (present(o.validation) ? `; after the merge, check it: ${o.validation}` : '')),
   ] : [];
   const review = reviewConflicts ? [
     'Resolution review: the merge conflicts in this run were already resolved by a prior agent in merge',
@@ -1873,17 +1915,20 @@ function finalFixPrompt(m, findings, base) {
     phaseRules(m),
     '',
     implementResultText(featureDir(m), false, base),
-    'Also return dispositions = one {id, status "fixed" or "declined", reason} for every finding id above (reason:',
-    'what you changed, or why you declined it). A finding without a disposition counts as not addressed.',
+    'Also return dispositions = one {id, status "fixed" or "declined", reason, evidence} for every finding id above',
+    '(reason: what you changed, or why you declined it; evidence: the file:line and commit of the change, or what',
+    'shows the decline is right). A finding without a disposition counts as not addressed; two different ones for',
+    'one id leave it open.',
   ].join('\n');
 }
 
-// findings carry their id and the fixer's disposition ({status, reason}, or
-// none when the fixer gave none).
+// findings carry their id and the fixer's dispositions for it
+// ([{status, reason, evidence}]; none when the fixer gave none).
 function finalReReviewPrompt(m, base, head, findings) {
   const dir = shellQuote(featureDir(m));
-  const said = (f) => (f.disposition
-    ? `   fixer: ${f.disposition.status} - ${f.disposition.reason}`
+  const said = (f) => ((f.dispositions || []).length > 0
+    ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
+      + (present(d.evidence) ? ` (evidence: ${d.evidence})` : '')).join('\n')
     : '   fixer: no disposition (treat it as not addressed unless the defect is verifiably gone)');
   return [
     `You are re-reviewing the final fixes for parallel-lanes run ${m.run_id} (fix range ${base}..${head}`
@@ -1901,8 +1946,10 @@ function finalReReviewPrompt(m, base, head, findings) {
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     phaseRules(m),
     '',
-    'Return results = one {id, status "resolved" or "open", evidence} per id above (an id you leave out counts',
-    'as open), and new_findings = the new problems, each {severity, file, line, issue, fix}.',
+    `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
+    '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
+    'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
+    'fix}.',
   ].join('\n');
 }
 
@@ -2120,7 +2167,10 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
-// finish. The other io members pass through unchanged.
+// finish. The one exception is a call with opts.overBudget (the verify agent:
+// cheap, deterministic project checks after the last change): it runs and is
+// counted even past the cap or after a refusal; the flag is not passed on.
+// The other io members pass through unchanged.
 //
 // Agent type: when agentTypeFor(m, label) names one, the spawn carries
 // agentType. A typed spawn that throws or returns null is retried once as
@@ -2143,9 +2193,10 @@ function makeIo(m, baseIo, state) {
     return { __budget: true };
   };
   const isRuling = (label) => / adjudicate( retry)?$/.test(label);
-  const spawn = (prompt, opts) => {
+  const spawn = (prompt, given) => {
+    const { overBudget, ...opts } = given;
     const label = opts.label;
-    if (state.refused.length > 0 || state.agents >= limits.max_agents) return refuse(label);
+    if (!overBudget && (state.refused.length > 0 || state.agents >= limits.max_agents)) return refuse(label);
     const ruling = isRuling(label);
     if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
     // Only calls that run count: state.rulings is the adjudications spent.
@@ -2704,17 +2755,36 @@ function withFindingIds(findings, prefix = 'F') {
 // fixed (the fixer fixed it and the re-review found it resolved), declined
 // (the fixer declined it and the re-review agreed), or open (anything else:
 // no disposition, a re-review that says open or leaves the id out, or no
-// re-review at all). rr is the re-review result {results, new_findings}, or
-// null when none ran (whyNot says why). New findings are open with ids N1...
-function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-reviewed') {
-  const said = new Map();
-  for (const d of Array.isArray(dispositions) ? dispositions : []) {
-    if (d && typeof d.id === 'string' && (d.status === 'fixed' || d.status === 'declined')) said.set(d.id, d);
+// re-review at all). rr is the re-review result {head, results, new_findings},
+// or null when none ran (whyNot says why). New findings are open with ids N1...
+// Answers are checked across fields, not just for shape: a re-review of
+// another revision than delivered (the fix head) settles nothing (its new
+// findings are still kept, open), a disposition without evidence settles
+// nothing, and two different answers for one id leave it open.
+// reReviewProblem says why a re-review result settles nothing, or null.
+function reReviewProblem(rr, whyNot, delivered) {
+  if (rr === null) return whyNot;
+  if (delivered !== null && rr.head !== delivered) {
+    return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
+      : 'the final re-review did not say which revision it judged';
   }
-  const verdict = new Map();
-  if (rr && Array.isArray(rr.results)) {
-    for (const r of rr.results) if (r && typeof r.id === 'string') verdict.set(r.id, r);
-  }
+  return null;
+}
+
+function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-reviewed', delivered = null) {
+  // id -> the one answer given, or null when the answers disagree.
+  const byId = (list, ok) => {
+    const out = new Map();
+    for (const x of Array.isArray(list) ? list : []) {
+      if (!x || typeof x.id !== 'string' || !ok(x)) continue;
+      const prev = out.get(x.id);
+      out.set(x.id, prev === undefined || (prev !== null && prev.status === x.status) ? (prev || x) : null);
+    }
+    return out;
+  };
+  const said = byId(dispositions, (d) => d.status === 'fixed' || d.status === 'declined');
+  const verdict = rr && Array.isArray(rr.results) ? byId(rr.results, () => true) : new Map();
+  const none = reReviewProblem(rr, whyNot, delivered);
   const fixed = [];
   const declined = [];
   const open = [];
@@ -2722,7 +2792,10 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     const d = said.get(f.id) || null;
     const v = verdict.get(f.id) || null;
     const withNotes = { ...f, disposition: d, review: v };
-    if (rr === null) open.push({ ...withNotes, reason: whyNot });
+    if (none !== null) open.push({ ...withNotes, reason: none });
+    else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
+    else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
+    else if (d && !present(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
     } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
@@ -2778,6 +2851,14 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
+  // Checks that leave files behind (build output that is not ignored, a
+  // generated file) do not change what was delivered, but the user should
+  // know the checkout was not clean after them.
+  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+    warnings.push(verify.clean === false
+      ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
+      : `the project checks did not report whether the checkout was clean at ${sha}`);
+  }
 
   if (m.hooks.e2e) {
     if (!e2e || !Array.isArray(e2e.items) || e2e.items.length === 0) {
@@ -2799,6 +2880,7 @@ function acceptanceOf(input) {
 
   if (input.fix_unreviewed) add('fix_unreviewed', 'missing', 'a post-integration fix was not re-reviewed');
   if (final) {
+    if (final.unreviewed_fix) add('final_fix_unreviewed', 'missing', final.unreviewed_fix);
     for (const lens of final.missing_lenses || []) add('review_missing', 'missing', `the ${lens} final review returned no result`);
     const open = final.open || [];
     const blocking = open.filter(isBlocking);
@@ -2865,7 +2947,17 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
   };
   if (findings.length === 0) return final;
-  const settle = (dispositions, rr, why) => Object.assign(final, settleFinalFindings(findings, dispositions, rr, why));
+  // A fix that committed is reviewed only by a re-review of its head: else
+  // its commits are delivered unreviewed (unreviewed_fix, acceptance
+  // final_fix_unreviewed), whatever the findings' severity.
+  const settle = (dispositions, rr, why, delivered = null) => {
+    Object.assign(final, settleFinalFindings(findings, dispositions, rr, why, delivered));
+    const problem = reReviewProblem(rr, why, delivered);
+    if (final.head !== tip && problem !== null) {
+      final.unreviewed_fix = `the final fix ${tip}..${final.head} was not re-reviewed at ${final.head}: ${problem}`;
+    }
+    return final;
+  };
 
   // Final fix tier (spec decision 5): Sonnet when every finding is minor or
   // every finding is in documentation; otherwise Opus. A Sonnet fix that does
@@ -2876,20 +2968,24 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
+  // fix's head stands unless its Opus rerun reports a head of its own.
+  if (fix && present(fix.head)) final.head = fix.head;
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  // Whatever the fix agent did, commits it reports are delivered code.
   if (fix && present(fix.head)) final.head = fix.head;
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
-  const verifying = findings.map((f) => ({ ...f, disposition: dispositions.find((d) => d && d.id === f.id) || null }));
+  // The fixer's word on each finding, for the re-reviewer: every disposition
+  // given for its id (more than one shows the contradiction).
+  const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
   const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
       : 'no result from final re-review');
   }
-  return settle(dispositions, rr);
+  return settle(dispositions, rr, undefined, final.head);
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -3377,15 +3473,31 @@ async function runAll(m, io) {
     return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
       : { items: [], checked_sha: null, notes: `no result from ${label}` };
   };
+  // The project checks at sha (scripts/run-checks through the verify agent).
+  // They are cheap and deterministic, so they run past the agent cap: after
+  // the last change the run has evidence even when the budget is spent.
+  const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
+    { ...sonnetHigh, overBudget: true });
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  // A budget stop once every task is in: the checks still run at the
+  // feature head the run reached, and the stopped report carries them.
+  const budgetStopWithChecks = async (sha) => {
+    if (hasChecks && present(sha)) {
+      io.phase('Verify');
+      verify = await verifyAt(sha);
+    }
+    return budgetReport();
+  };
+
   if (m.hooks.e2e) {
     io.phase('E2E');
     e2e = await runE2e('e2e', 'E2E');
-    if (state.refused.length > 0) return budgetReport();
+    if (state.refused.length > 0) return budgetStopWithChecks(tip);
   }
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetReport();
+  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
   delivered = final.head;
@@ -3395,10 +3507,7 @@ async function runAll(m, io) {
   // post-integrate checks rerun only when a later commit made their evidence
   // stale (the post-integrate one check-only).
   io.phase('Verify');
-  if (checksCommand(m, null, featureDir(m)) !== null) {
-    verify = await callM('verify', 'Verify', verifyPrompt(m, delivered), verifySchema(), sonnetHigh);
-    if (state.refused.length > 0) return budgetReport();
-  }
+  if (hasChecks) verify = await verifyAt(delivered);
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
     e2e = await runE2e('e2e recheck', 'Verify');
     if (state.refused.length > 0) return budgetReport();

@@ -7,10 +7,10 @@ description: Use when an approved implementation plan is about to be executed (a
 
 ## Overview
 
-Runs an approved plan as parallel lanes of tasks, each lane in its own worktree, every task
-implemented and reviewed with superpowers' per-task prompts, then integration, checks, E2E,
-and final reviews. Your job is fixed: build a manifest, show the dry-run table,
-set up and launch the bundled `run.workflow.js`, and hand back.
+Runs an approved plan as parallel lanes (a worktree each), every task implemented and
+reviewed, then integration, checks, E2E, and final reviews. Your job: build a
+manifest, show the dry-run table, set up and launch the bundled `run.workflow.js`, and hand
+back.
 
 `<skill_dir>` below means the absolute directory that holds this SKILL.md. Details (manifest
 fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers, report) are in
@@ -29,8 +29,7 @@ fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers
 
 ## Notices
 
-Print these lines exactly. In chat, prefix each with a short visual marker of your choice;
-the text after the marker is fixed.
+Print these lines exactly (each may follow a visual marker of your choice).
 
 | When | Line |
 |---|---|
@@ -61,8 +60,8 @@ executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = i
 
 ## Assessment
 
-CPU count: `python3 -c 'import os; print(os.cpu_count() or 1)'` (portable; macOS lacks
-`nproc`); cap = min(5, count + 2). Run
+CPU count: `python3 -c 'import os; print(os.cpu_count() or 1)'` (not `nproc`); cap =
+min(5, count + 2). Run
 `python3 <skill_dir>/scripts/derive-lanes <plan> --max-lanes <cap>` and turn its facts into
 lanes, prelude, and join per reference.md "Building lanes" (exit 3: no parseable task
 headings; step aside). Runnable tasks exclude ones the plan marks after-merge, operator, or
@@ -90,7 +89,7 @@ X is about 2 x runnable tasks + 10; the table gives the exact number. "Go ahead"
 
 ## Building the manifest
 
-Field-by-field guide: reference.md "Manifest fields". In order:
+Fields: reference.md "Manifest fields". In order:
 
 1. Superpowers: `bash <skill_dir>/scripts/find-superpowers`. Exit 0: `sp_dir` = the printed
    path. Exit 3: print `parallel-lanes: superpowers not found; agents use built-in prompts`
@@ -156,7 +155,7 @@ this. Say the table is the one required check, show it, and wait.
 
 1. Script path: before the first Workflow call, copy `<skill_dir>/run.workflow.js` into the
    session scratchpad directory (never into the project) and use that copy as `scriptPath`
-   for the dry run, the real launch, relaunches, and resumes (the Workflow tool rejects a
+   for every Workflow call (the Workflow tool rejects a
    `scriptPath` under ~/.claude/skills). With no scratchpad, pass the file contents as
    `script` and reuse the `scriptPath` the result prints.
 2. Setup, only after the explicit yes to the table, immediately before the real launch. First
@@ -174,10 +173,11 @@ this. Say the table is the one required check, show it, and wait.
    when `done` is non-empty.
 4. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
-5. At the end, once no transient relaunch follows (keep the lock through one):
-   `scripts/active-run release <run_id> --remove` only for `complete` with
-   `acceptance.status` `accepted`; otherwise `scripts/active-run release <run_id> <status>`
-   (`unaccepted` for complete but not accepted), so a later session offers the resume.
+5. Record each launch's spend (reference.md "Budgets"). At the end, once no transient
+   relaunch follows (keep the lock through one): `scripts/active-run release <run_id>
+   --remove` only for `complete` with `acceptance.status` `accepted`; otherwise
+   `scripts/active-run release <run_id> <status>` (`unaccepted` for complete but not
+   accepted), so a later session offers the resume.
 
 ## Transient stops (relaunch once, no prompt)
 
@@ -186,10 +186,9 @@ an agent error, a missing result, or setup-command retry exhaustion. The causes 
 `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
 stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
 `error:`, or `setup failed`, or reads `integration failed: no result from ...` or
-`post-integrate failed: no result from ...`. Every other cause (`review_rounds`, a supervised
-blocked or question task, `adjudication_cap`, `adjudicator_stop`, budget, a failed
-integration or post-integrate on real failures) and status `invalid` or `preflight_conflicts`
-are NOT transient: never relaunch; stop and notify.
+`post-integrate failed: no result from ...`. Every other cause (`review_rounds`,
+`adjudication_cap`, `adjudicator_stop`, a real failure) and status `invalid` or
+`preflight_conflicts` are NOT transient: never relaunch; stop and notify.
 
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
@@ -213,7 +212,9 @@ The run returns `status`:
   answers or fixes the plan, go to Resume.
 - `complete`: lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
-  The user fixes and resumes, or explicitly accepts a named reason (record that in the report).
+  The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
+  with `python3 <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
+  "<what>"`.
 
 Report: run `python3 <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch, append
@@ -221,8 +222,9 @@ its output, and keep that file beside the manifest. Per task: status, commits (`
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md
 "Report"). Then integration and post-integrate notes, E2E PASS/FAIL and the revision it
-checked, final review (fixed, declined, open, cannot verify), `agents_spawned`,
-`agent_type_fallback`.
+checked, final review (fixed, declined, open, cannot verify), acceptance warnings,
+`agents_spawned`, `agent_type_fallback`, and the `undeclared` files of `ledger status
+<ledger_dir> --manifest <manifest file>` (changed outside their task's Files list).
 
 Then, for accepted work (or reasons the user accepted), offer the next step; act only on an
 explicit yes:
@@ -239,19 +241,21 @@ never `branch -D`. Keep the manifest and ledger.
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
    (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
-2. `python3 <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> [--spec <spec>]`.
-   Set `done`, `reviewed`, and `deferred` from it (taking a deferred task up: reference.md
-   "Backfill"); put each `carry` entry into `notes`.
-   Tasks in `stale` or `unbound` are left out of `reviewed`, so they are reviewed again: tell
-   the user which and why, and say so when `inputs` reports a changed plan or spec.
+2. `python3 <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
+   file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
+   task up: reference.md "Backfill"); put each `carry` entry into `notes`. Tasks in `stale`
+   (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
+   again: tell the user which and why, and say so when `inputs` reports a changed plan or
+   spec. `python3 <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
+   (else fix the manifest's tasks or `excluded`).
 3. `backfill`: `python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
    Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees; shadow mode reuses the existing shadow.
-6. Confirmation (same rules), then, after the yes, Launch step 2 again (setup and
-   `start_points`), the resume notice, and launch.
+6. Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
+   then, after the yes, Launch step 2 again, the resume notice, and launch.
 
 ## Red flags - stop
 

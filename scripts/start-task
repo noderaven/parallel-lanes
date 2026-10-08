@@ -2,7 +2,8 @@
 """Opening bookkeeping for an implementer or reviewer in one call.
 
 usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
-                  [--artifacts ROOT]
+                  [--artifacts ROOT] [--record-start LEDGER_DIR LANE BASE]
+                  [--scope BASE HEAD --declared PATH [--declared PATH ...]]
                   --brief TASK_ID OUT [--brief TASK_ID OUT ...]
                   [--also TASK_ID PRODUCER_ID ...]
 
@@ -19,6 +20,16 @@ In order:
   --artifacts  every brief OUT (task-brief --root ROOT) and the package OUT
              must resolve, symlinks included, to a path inside ROOT (the run's
              ledger directory); otherwise exit 3 before anything is written.
+  --record-start  once everything above succeeded, appends {"task": TASK_ID,
+             "event": "started", "base": <full sha of BASE>} for every --brief
+             TASK_ID to LEDGER_DIR/LANE.jsonl (scripts/ledger append): the
+             task base, recorded before the implementer writes. BASE must be
+             a commit in DIR, else exit 3 before anything is written.
+  --scope    prints the paths git diff --name-only --no-renames BASE HEAD
+             (in DIR) changes that are not a --declared PATH (normalized and
+             case-insensitive; a rename changes both paths), one per line
+             after a "===== files changed outside the task's Files list ====="
+             line, or "(none)". --scope without --declared exits 2.
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
 GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
 GIT_COMMON_DIR are removed from the environment of git, task-brief and the
@@ -29,15 +40,19 @@ stdout, only on success:
   head: <full sha of DIR's HEAD after any sync>
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
   ===== review package =====           then the script's stdout (--package)
+  ===== files changed outside ... ===== then the paths (--scope)
 
 Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
-brief cannot be read, or the package script fails; 2 on usage error; 3 if DIR
-is not a git worktree, the fast-forward fails, or an OUT is outside --artifacts;
-task-brief's code if a brief fails.
+brief cannot be read, the package script fails, or the --scope diff fails; 2
+on usage error; 3 if DIR is not a git worktree, the fast-forward fails, an OUT
+is outside --artifacts, or the --record-start BASE is not a commit;
+task-brief's code if a brief fails, the ledger's if a started append fails.
 """
 
 import argparse
+import json
 import os
+import posixpath
 import subprocess
 import sys
 
@@ -58,7 +73,8 @@ def fail(code, message):
 
 def git(directory, *args):
     return subprocess.run(
-        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
+        ["git", "-C", directory, *args], capture_output=True, text=True, encoding="utf-8",
+        errors="surrogateescape", env=ENV
     )
 
 
@@ -84,7 +100,12 @@ def parse(argv):
         "--also", nargs=2, action="append", default=[], metavar=("TASK_ID", "PRODUCER_ID")
     )
     parser.add_argument("--artifacts", metavar="ROOT")
+    parser.add_argument("--record-start", nargs=3, metavar=("LEDGER_DIR", "LANE", "BASE"))
+    parser.add_argument("--scope", nargs=2, metavar=("BASE", "HEAD"))
+    parser.add_argument("--declared", action="append", default=[], metavar="PATH")
     args = parser.parse_args(argv)
+    if args.scope is not None and not args.declared:
+        parser.error("--scope needs at least one --declared PATH")
     for task_id, _ in args.brief:
         if not _brief.is_safe_id(task_id):
             parser.error(f"unsafe task id {task_id!r}")
@@ -107,6 +128,11 @@ def contained(path, root):
     return os.path.commonpath([resolved, root]) == root
 
 
+def path_key(path):
+    """A project-relative path as validate.js and the ledger compare it."""
+    return posixpath.normpath(path).lower()
+
+
 def main(argv):
     args = parse(argv)
     directory = args.dir
@@ -116,6 +142,13 @@ def main(argv):
             if os.path.islink(path) or not contained(path, args.artifacts):
                 fail(3, f"artifact path {path!r} is outside {args.artifacts!r}; nothing written")
     branch = rev_parse(3, directory, "--abbrev-ref", "HEAD")
+    start_base = None
+    if args.record_start is not None:
+        res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                  f"{args.record_start[2]}^{{commit}}")
+        if res.returncode != 0 or not res.stdout.strip():
+            fail(3, f"--record-start base {args.record_start[2]!r} is not a commit in {directory!r}; nothing written")
+        start_base = res.stdout.strip()
 
     if args.sync is not None:
         res = git(directory, "merge", "--ff-only", "--end-of-options", args.sync)
@@ -158,6 +191,26 @@ def main(argv):
         if res.returncode != 0:
             fail(1, f"package script {script!r} exited {res.returncode}")
         out.append(f"===== review package =====\n{res.stdout}")
+
+    if args.scope is not None:
+        res = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                  "--end-of-options", *args.scope)
+        if res.returncode != 0:
+            fail(1, f"git diff {' '.join(args.scope)} failed in {directory!r}: {res.stderr.strip()}")
+        declared = {path_key(p) for p in args.declared}
+        outside = sorted(p for p in res.stdout.splitlines() if p and path_key(p) not in declared)
+        out.append("===== files changed outside the task's Files list =====\n"
+                   + ("\n".join(outside) if outside else "(none)") + "\n")
+
+    if start_base is not None:
+        ledger_dir, lane, _ = args.record_start
+        for task_id, _ in args.brief:
+            entry = json.dumps({"task": task_id, "event": "started", "base": start_base})
+            res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "append", ledger_dir, lane, entry],
+                                 env=ENV, capture_output=True, text=True)
+            if res.returncode != 0:
+                sys.stderr.write(res.stderr)
+                sys.exit(res.returncode)
 
     sys.stdout.write("".join(out))
 

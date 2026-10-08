@@ -234,3 +234,142 @@ test('a reopened event voids an earlier approval', () => {
   assert.deepEqual(status.reviewed, []);
   assert.deepEqual(status.done, ['T1']);
 });
+
+// 1.2.1: the review gaps. A stale approval takes its dependents with it, a
+// task's changed files are compared with its Files list, budgets spent in
+// earlier launches add up, the task base is recorded before any write, and a
+// user's explicit acceptance is its own record.
+const PLAN3 = `${PLAN}\n### Task T3: three\n\nDo three.\n`;
+function withManifest(c, prelude, plan = PLAN3) {
+  write(c.plan, plan);
+  const m = JSON.parse(readFileSync(c.manifest, 'utf8'));
+  m.prelude = prelude;
+  write(c.manifest, JSON.stringify(m));
+}
+const ptask = (id, more = {}) => ({ id, title: id, files: [], tier: 'standard', security: false, ...more });
+
+test('ledger status --manifest makes the dependents of a stale task stale too, transitively', () => {
+  const c = newCase();
+  withManifest(c, [ptask('T1'), ptask('T2', { depends_on: [{ id: 'T1', kind: 'code' }] }),
+    ptask('T3', { depends_on: [{ id: 'T2', kind: 'contract' }] })]);
+  let from = c.start;
+  for (const id of ['T1', 'T2', 'T3']) {
+    const h = commit(c, `${id}.txt`);
+    finish(c, from, '--task', id);
+    ok(py('ledger', 'reviewed', c.ledger, 'prelude', id, '0', c.plan, c.repo, h, '0'));
+    from = h;
+  }
+  write(c.plan, PLAN3.replace('Do one.', 'Do one, and validate the input.'));
+  const without = ok(py('ledger', 'status', c.ledger, '--plan', c.plan));
+  assert.deepEqual(without.stale.map((s) => s.task), ['T1']);
+  const status = ok(py('ledger', 'status', c.ledger, '--plan', c.plan, '--manifest', c.manifest));
+  assert.deepEqual(status.stale, [
+    { task: 'T1', reason: "the task's section of the plan changed since its review" },
+    { task: 'T2', reason: 'it depends on T1, whose approval is stale' },
+    { task: 'T3', reason: 'it depends on T2, whose approval is stale' },
+  ]);
+  assert.deepEqual(status.reviewed, []);
+});
+
+test('ledger status --manifest lists the files a task changed outside its Files list', () => {
+  const c = newCase();
+  withManifest(c, [ptask('T1', { files: ['./A.txt'] }), ptask('T2')]);
+  write(join(c.repo, 'a.txt'), 'a\n');
+  write(join(c.repo, 'b.txt'), 'b\n');
+  git(c.repo, 'add', '.');
+  git(c.repo, 'commit', '-q', '-m', 'T1');
+  const h1 = git(c.repo, 'rev-parse', 'HEAD');
+  finish(c, c.start, '--task', 'T1');
+  commit(c, 'c.txt');
+  finish(c, h1, '--task', 'T2');
+  const status = ok(py('ledger', 'status', c.ledger, '--manifest', c.manifest));
+  // T1 declared a.txt (case and ./ do not matter); T2 declared nothing, so
+  // there is nothing to compare against.
+  assert.deepEqual(status.undeclared, { T1: ['b.txt'] });
+});
+
+test('run_ended events add up to the budget spent across launches', () => {
+  const c = newCase();
+  append(c, { task: '_run', event: 'run_ended', status: 'stopped', agents: 5, rulings: 2 });
+  append(c, { task: '_run', event: 'run_ended', status: 'unaccepted', agents: 3, rulings: 0 });
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 8, rulings: 2, unrecorded_launches: 0 });
+  const bad = py('ledger', 'append', c.ledger, '_run', JSON.stringify({ task: '_run', event: 'run_ended', status: 'x', agents: -1, rulings: 0 }));
+  assert.equal(bad.code, 2);
+});
+
+test('a task range must start at the base its latest started event recorded', () => {
+  const c = newCase();
+  const a = commit(c, 'a.txt');
+  append(c, { task: 'T1', event: 'started', base: a });
+  append(c, { task: 'T1', event: 'started', base: c.start });
+  commit(c, 'b.txt');
+  finish(c, c.start, '--task', 'T1');
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).inconsistent, [], 'the latest start wins');
+
+  const d = newCase();
+  const x = commit(d, 'a.txt');
+  append(d, { task: 'T1', event: 'started', base: d.start });
+  commit(d, 'b.txt');
+  finish(d, x, '--task', 'T1');
+  const status = ok(py('ledger', 'status', d.ledger));
+  assert.equal(status.inconsistent.length, 1);
+  assert.match(status.inconsistent[0].reason, /started at/);
+  assert.equal(py('ledger', 'backfill', d.ledger, d.manifest).code, 3);
+});
+
+test('ledger accept records an explicit acceptance of the delivered revision', () => {
+  const c = newCase();
+  const h = commit(c, 'a.txt');
+  ok(py('ledger', 'accept', c.ledger, c.repo, h, 'the user accepts open minor finding F2'));
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).accepted,
+    [{ head: h, text: 'the user accepts open minor finding F2' }]);
+  assert.equal(py('ledger', 'accept', c.ledger, c.repo, '0'.repeat(40), 'x').code, 3);
+  assert.equal(py('ledger', 'accept', c.ledger, c.repo, h, '').code, 2);
+});
+
+// The review's CI scenario "interrupt after a commit but before the ledger
+// append": the implementer committed A and the session ended before
+// finish-task. The rerun starts at the same task base (start-task records
+// it), keeps A, adds B, and finish-task records the whole range from git.
+test('a commit made before an interruption stays in its task range on the rerun', () => {
+  const c = newCase();
+  const startTask = (...args) => py('start-task', c.repo, c.plan, ...args);
+  const brief = join(c.ledger, 'briefs', 'T1.md');
+  assert.equal(startTask('--record-start', c.ledger, 'prelude', c.start, '--brief', 'T1', brief).code, 0);
+  const a = commit(c, 'a.txt');
+  // Interrupted: nothing recorded but the start.
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).done, []);
+  assert.equal(startTask('--record-start', c.ledger, 'prelude', c.start, '--brief', 'T1', brief).code, 0);
+  const b = commit(c, 'b.txt');
+  const out = finish(c, c.start, '--task', 'T1');
+  assert.deepEqual(out.commits, [a, b]);
+  const status = ok(py('ledger', 'status', c.ledger));
+  assert.deepEqual(status.inconsistent, []);
+  assert.deepEqual(status.ranges.T1, { base: c.start, head: b });
+  assert.deepEqual(ok(py('ledger', 'backfill', c.ledger, c.manifest)).backfill, { T1: { base: c.start, head: b } });
+});
+
+test('spent counts adjudicator rulings even when a launch never recorded its end', () => {
+  const c = newCase();
+  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start });
+  append(c, { task: '_run', event: 'run_ended', status: 'stopped', agents: 4, rulings: 1 });
+  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start });
+  // The second launch's session died: its rulings are in the ledger, its end is not.
+  append(c, { task: 'T1', event: 'ruling', by: 'adjudicator', text: 'Ruling: a - b - c' });
+  append(c, { task: 'T2', event: 'ruling', by: 'adjudicator', text: 'Ruling: d - e - f' });
+  append(c, { task: 'T2', event: 'ruling', text: 'Ruling: an implementer ruling - x - y' });
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 4, rulings: 2, unrecorded_launches: 1 });
+});
+
+test('a declared path with non-ASCII characters is matched, not reported as undeclared', () => {
+  const c = newCase();
+  withManifest(c, [ptask('T1', { files: ['caf\u00e9 menu.txt'] }), ptask('T2')]);
+  commit(c, 'caf\u00e9 menu.txt');
+  finish(c, c.start, '--task', 'T1');
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger, '--manifest', c.manifest)).undeclared, {});
+  const brief = join(c.ledger, 'briefs', 'T1.md');
+  const res = py('start-task', c.repo, c.plan, '--scope', c.start, 'HEAD', '--declared', 'caf\u00e9 menu.txt',
+    '--brief', 'T1', brief);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\n(none)\n"), res.stdout);
+});
