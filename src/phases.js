@@ -146,10 +146,47 @@ function preflightResolved(m, text) {
   return { ...m, notes };
 }
 
+// The undeclared dependencies pre-flight reported, split into the entries
+// the run keeps and the ones it drops with a reason: an entry must be an
+// object with string task, producer and what, name two different task ids of
+// the manifest, and name a task that is not done yet.
+function preflightUndeclared(m, entries) {
+  const ids = new Set([...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join].map((t) => t.id));
+  const done = new Set(m.done);
+  const kept = [];
+  const dropped = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const drop = (reason) => dropped.push({ entry, reason });
+    const shaped = entry !== null && typeof entry === 'object' && !Array.isArray(entry) &&
+      ['task', 'producer', 'what'].every((k) => typeof entry[k] === 'string');
+    if (!shaped) drop('not an object with string task, producer and what');
+    else if (!ids.has(entry.task)) drop(`task ${entry.task} is not in the run`);
+    else if (!ids.has(entry.producer)) drop(`producer ${entry.producer} is not in the run`);
+    else if (entry.task === entry.producer) drop('task and producer are the same');
+    else if (done.has(entry.task)) drop(`task ${entry.task} is already done`);
+    else kept.push({ task: entry.task, producer: entry.producer, what: entry.what });
+  }
+  return { kept, dropped };
+}
+
+// A copy of the manifest with consumes_extra: {<task>: [<producer>, ...]}
+// from the kept undeclared entries, producers in entry order without
+// duplicates. startCommand and the adjudicator's task-brief command pass
+// them as --also, so each producer's Produces block reaches the task's
+// briefs for this run (the manifest file is not changed).
+function withConsumesExtra(m, kept) {
+  const extra = {};
+  for (const e of kept) {
+    const list = extra[e.task] || (extra[e.task] = []);
+    if (!list.includes(e.producer)) list.push(e.producer);
+  }
+  return { ...m, consumes_extra: extra };
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
-//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings},
+//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items}|null,
 //  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
 //  rulings_spent (adjudications that ran; a relaunch subtracts it from
@@ -160,9 +197,9 @@ function preflightResolved(m, text) {
 // integrate.fix_review lists the findings of the post-integrate re-reviews
 // (C2); they also reach the final fix wave. Task status is done, blocked,
 // skipped (done and reviewed earlier), or not_run. Under profile lite no
-// pre-flight agent runs (preflight has no conflicts or rulings) and
-// integrate stays null (validateManifest rejects lite with a post_integrate
-// hook, so no configured hook is skipped).
+// pre-flight agent runs (preflight has no conflicts, rulings or undeclared
+// entries) and integrate stays null (validateManifest rejects lite with a
+// post_integrate hook, so no configured hook is skipped).
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -288,13 +325,21 @@ async function runAll(m, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [] };
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
     if (state.refused.length > 0) return budgetReport();
     if (!pre) return report('stopped', 'no result from pre-flight');
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings] };
+    // Undeclared dependencies only add context: they reach the briefs of
+    // their task and never stop the run or call the adjudicator.
+    const { kept, dropped } = preflightUndeclared(m, pre.undeclared);
+    for (const d of dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped undeclared entry ${JSON.stringify(d.entry)} (${d.reason})`);
+    }
+    for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
+    m = withConsumesExtra(m, kept);
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');

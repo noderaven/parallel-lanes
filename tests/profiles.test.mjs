@@ -116,7 +116,7 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes('(now at T4-h)'));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['combined issue']);
   assert.deepEqual(result.final.cannot_verify, ['combined: e2e: none']);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: [] });
+  assert.deepEqual(result.preflight, { conflicts: [], rulings: [], undeclared: [] });
   assert.equal(result.integrate, null);
   assert.equal(result.agents_spawned, calls.length);
 });

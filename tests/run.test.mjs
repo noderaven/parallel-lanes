@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript } from './harness.mjs';
 
-const { planAgents, validateManifest, dedupeFindings } = await loadHelpers([
-  'planAgents', 'validateManifest', 'dedupeFindings',
+const { planAgents, validateManifest, dedupeFindings, preflightPrompt, preflightSchema } = await loadHelpers([
+  'planAgents', 'validateManifest', 'dedupeFindings', 'preflightPrompt', 'preflightSchema',
 ]);
 
 function task(id, extra = {}) {
@@ -53,7 +53,7 @@ const finding = (issue, file = 'src/a.js', line = 3) => ({ severity: 'important'
 function phaseScript(extra = {}) {
   return {
     setup: [{ ok: true, discarded: [], worktrees: ['/work/wt/lane-alpha', '/work/wt/lane-beta'], feature_head: 'F0', notes: '' }],
-    'pre-flight': [{ conflicts: [], rulings: ['Ruling: x - y - z'] }],
+    'pre-flight': [{ conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] }],
     integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
     'post-integrate': [{ status: 'done', head: 'P1', notes: 'contracts ok' }],
     e2e: [{ items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
@@ -144,7 +144,7 @@ test('happy path: complete, phases in order, report filled in', async () => {
     assert.deepEqual(t.commits, [bases[id], `${id}-h`]);
   }
   assert.deepEqual(result.stopped_lanes, []);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'] });
+  assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] });
   assert.equal(result.integrate.status, 'done');
   assert.equal(result.integrate.post_integrate.status, 'done');
   assert.deepEqual(result.e2e.items.map((i) => i.result), ['PASS']);
@@ -253,7 +253,7 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
 
 test('pre-flight conflicts stop before any implement (supervised)', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [] }] });
+  const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [], undeclared: [] }] });
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'preflight_conflicts');
   assert.deepEqual(result.preflight.conflicts, ['plan contradicts spec on X']);
@@ -1002,7 +1002,7 @@ const JOIN_START = /run_started.*"phase":"join"/;
 
 test('autonomous pre-flight conflict: an adjudicator answer continues the run and binds every task', async () => {
   const script = {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
     ...taskScript(ALL),
     'run adjudicate': [{ outcome: 'answer', text: 'use the v2 contract' }],
   };
@@ -1022,7 +1022,7 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
 
 test('autonomous pre-flight conflict: park continues, stop yields preflight_conflicts, unavailable stops', async () => {
   const withAdj = (adj) => ({
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
     ...taskScript(ALL),
     'run adjudicate': adj,
   });
@@ -1031,19 +1031,150 @@ test('autonomous pre-flight conflict: park continues, stop yields preflight_conf
   assert.ok(park.result.preflight.rulings.includes('defer the overlap'));
 
   const stop = await run(manifest(), {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
     'run adjudicate': [{ outcome: 'stop', text: 'security call', stop_condition: 'security' }],
   });
   assert.equal(stop.result.status, 'preflight_conflicts');
   assert.ok(!labels(stop.calls).some((l) => l.endsWith('implement')));
 
   const un = await run(manifest(), {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
     'run adjudicate': [null],
     'run adjudicate retry': [null],
   });
   assert.equal(un.result.status, 'stopped');
   assert.equal(un.result.reason, 'no result from run adjudicate');
+});
+
+// ---- pre-flight undeclared dependencies (consumed contracts) ----
+
+const undeclaredScript = (entries, extra = {}) =>
+  phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: entries }], ...extra });
+
+test('pre-flight undeclared entries reach every brief of their task', async () => {
+  const entry = { task: 'T2', producer: 'T1', what: 'reads the T1 format' };
+  const script = {
+    ...undeclaredScript([entry]),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'changes', findings: [finding('wrong format')], cannot_verify: [] }],
+    'T2 fix 1': [done('T2-h', 'T2-h2')],
+    'T2 re-review 1': [approve()],
+  };
+  const { result, calls, logs } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const label of ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']) {
+    const c = calls.find((x) => x.label === label);
+    assert.ok(c, label);
+    assert.ok(c.prompt.includes("--also 'T2' 'T1'"), label);
+  }
+  for (const c of calls.filter((x) => x.label.startsWith('T1 '))) {
+    assert.ok(!c.prompt.includes('--also'), c.label);
+  }
+  assert.ok(logs.includes('parallel-lanes: pre-flight: T2 also consumes T1 (reads the T1 format)'), JSON.stringify(logs));
+  assert.deepEqual(result.preflight.undeclared, [entry]);
+});
+
+test('pre-flight drops malformed undeclared entries', async () => {
+  const entries = [
+    { task: 'T2', producer: 'T1' },
+    { task: 2, producer: 'T1', what: 'numeric task' },
+    { task: 'T2', producer: 'T9', what: 'unknown producer' },
+    { task: 'T3', producer: 'T3', what: 'itself' },
+    { task: 'T1', producer: 'T4', what: 'a done task' },
+    'T2 needs T1',
+  ];
+  const m = manifest({ done: ['T1'], reviewed: ['T1'], backfill: backfillFor(['T1']) });
+  const script = {
+    ...undeclaredScript(entries, {
+      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }],
+    }),
+    ...taskScript(['T2', 'T3', 'T4', 'T5']),
+  };
+  const { result, calls, logs } = await run(m, script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of calls) assert.ok(!c.prompt.includes('--also'), c.label);
+  const dropped = logs.filter((l) => l.startsWith('parallel-lanes: pre-flight: dropped undeclared entry '));
+  assert.equal(dropped.length, entries.length, JSON.stringify(logs));
+  for (const e of entries) {
+    assert.ok(dropped.some((l) => l.includes(`entry ${JSON.stringify(e)} (`)), JSON.stringify(e));
+  }
+  assert.ok(!logs.some((l) => l.includes('also consumes')), JSON.stringify(logs));
+  assert.deepEqual(result.preflight.undeclared, []);
+});
+
+test('undeclared entries do not stop a supervised run', async () => {
+  const script = {
+    ...undeclaredScript([{ task: 'T4', producer: 'T2', what: 'calls the T2 parser' }]),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(labels(calls).includes('T1 implement'), 'the run reaches the prelude');
+  assert.ok(!labels(calls).some((l) => l.includes('adjudicate')), labels(calls).join(', '));
+  assert.ok(calls.find((c) => c.label === 'T4 implement').prompt.includes("--also 'T4' 'T2'"));
+});
+
+test('a producer id with a dot is shell-quoted in --also', async () => {
+  const m = manifest({ prelude: [task('1.5')] });
+  const script = {
+    ...undeclaredScript([{ task: 'T2', producer: '1.5', what: 'reads the 1.5 schema' }]),
+    ...taskScript(['1.5', 'T2', 'T3', 'T4', 'T5']),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(calls.find((c) => c.label === 'T2 implement').prompt.includes("--also 'T2' '1.5'"));
+});
+
+test('a batch gets --also per task', async () => {
+  const m = manifest({
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2', { tier: 'light', batch: 'x' }), task('T3', { tier: 'light', batch: 'x' })] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T4')] },
+    ],
+  });
+  const script = {
+    ...undeclaredScript([{ task: 'T3', producer: 'T1', what: 'uses the T1 helper' }]),
+    ...taskScript(['T1', 'T4', 'T5']),
+    'T2-T3 implement': [done('T2-b', 'T3-h')],
+    'T2-T3 review': [approve()],
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const p = calls.find((c) => c.label === 'T2-T3 implement').prompt;
+  assert.ok(p.includes("--also 'T3' 'T1'"), p);
+  assert.ok(!p.includes("--also 'T2'"), p);
+});
+
+test('profile lite reports no undeclared entries', async () => {
+  const m = manifest({
+    profile: 'lite', hooks: {}, lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2'), task('T3')] }],
+    join: [task('T4')],
+  });
+  m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/repo' }, discarded: [] };
+  const script = {
+    ...taskScript(['T1', 'T2', 'T3', 'T4']),
+    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(!labels(calls).includes('pre-flight'), labels(calls).join(', '));
+  assert.deepEqual(result.preflight.undeclared, []);
+  for (const c of calls) assert.ok(!c.prompt.includes('--also'), c.label);
+});
+
+test('the pre-flight prompt has check 4 and its schema requires undeclared', () => {
+  const p = preflightPrompt(manifest());
+  const check4 = [
+    '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
+    '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
+    '   without naming that task in its Consumes. Return each in undeclared as',
+    '   {task, producer, what}, what in one sentence.',
+  ].join('\n');
+  assert.ok(p.includes(check4), p);
+  const s = preflightSchema();
+  assert.ok(s.required.includes('undeclared'));
+  assert.deepEqual(s.properties.undeclared.items.required, ['task', 'producer', 'what']);
+  for (const f of ['task', 'producer', 'what']) assert.equal(s.properties.undeclared.items.properties[f].type, 'string');
 });
 
 test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the opus rerun reviews it', async () => {

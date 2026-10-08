@@ -67,7 +67,8 @@ function adjudicatorPrompt(m, ctx) {
   if (task) {
     const files = taskFiles(m, task);
     const brief = `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
-      `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
+      `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}` +
+      ((m.consumes_extra || {})[task.id] || []).map((p) => ` --also ${shellQuote(p)}`).join('');
     parts.push(
       `Task brief: ${files.brief}. Generate it from the current plan before reading it with:`,
       `  ${brief}`,

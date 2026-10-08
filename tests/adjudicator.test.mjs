@@ -129,6 +129,14 @@ test('adjudicatorPrompt: task-brief command when a task is set, cd-prefixed', ()
   assert.ok(p.includes(brief), 'task-brief command');
 });
 
+test('the adjudicator brief command carries consumes_extra', () => {
+  const p = adjudicatorPrompt(manifest({ consumes_extra: { T2: ['T1'] } }), blockedCtx());
+  const line = p.split('\n').find((l) => l.includes('scripts/task-brief'));
+  assert.ok(line.endsWith("'/work/ledger/briefs/T2.md' --also 'T1'"), line);
+  const other = adjudicatorPrompt(manifest({ consumes_extra: { T2: ['T1'] } }), blockedCtx({ task: task('T3') }));
+  assert.ok(!other.includes('--also'), 'only the named task gets --also');
+});
+
 test('adjudicatorPrompt: no task-brief command when task is null', () => {
   const p = adjudicatorPrompt(manifest(), preflightCtx());
   assert.ok(!p.includes('scripts/task-brief'), 'no task-brief command');
