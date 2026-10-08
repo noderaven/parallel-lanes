@@ -141,6 +141,50 @@ test('start-task regenerates and prints each brief', () => {
   assert.ok(res.stdout.indexOf('brief T1') < res.stdout.indexOf('brief T2'));
 });
 
+test("start-task passes --also to the named task's brief only", () => {
+  const c = newCase();
+  write(c.plan, [
+    PLAN,
+    '### Task P: Producer',
+    '',
+    'Body of task P.',
+    '',
+    '- Produces: `made()` returns 7.',
+    '',
+  ].join('\n'));
+  const out1 = join(c.root, 'briefs', 'T1.md');
+  const out2 = join(c.root, 'briefs', 'T2.md');
+  const res = startTask(
+    c.lane, c.plan, '--brief', 'T1', out1, '--brief', 'T2', out2, '--also', 'T2', 'P',
+  );
+  assert.equal(res.code, 0, res.stderr);
+  const appended = [
+    '## Produces of Task P: Producer (consumed by this task)',
+    '',
+    '- Produces: `made()` returns 7.',
+    '',
+  ].join('\n');
+  const text2 = readFileSync(out2, 'utf8');
+  assert.ok(text2.endsWith(`\n\n${appended}`), text2);
+  assert.ok(!readFileSync(out1, 'utf8').includes('## Produces of Task P'));
+  assert.ok(res.stdout.includes(`===== brief T2: ${out2} =====\n${text2}`), res.stdout);
+});
+
+test('start-task exits 2 for --also naming a task without --brief', () => {
+  const c = newCase();
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  git(c.project, 'checkout', '-q', 'feature');
+  commit(c.project, 'b.txt', 'prelude\n', 'prelude');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(
+    c.lane, c.plan, '--sync', 'feature', '--brief', 'T1', out, '--also', 'T2', 'T1',
+  );
+  assert.equal(res.code, 2);
+  assert.match(res.stderr, /T2/);
+  assert.equal(existsSync(out), false);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), head);
+});
+
 test('start-task --sync fast-forwards the worktree first', () => {
   const c = newCase();
   git(c.project, 'checkout', '-q', 'feature');

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Extract one task's section from a plan into a brief file.
+"""Extract one task's section from a plan into a brief file, followed by the
+Produces blocks of the tasks it consumes.
 
-usage: task-brief PLAN TASK_ID OUT
+usage: task-brief PLAN TASK_ID OUT [--also ID ...]
 
 The section starts at the heading '#+ Task <TASK_ID>: ...' (the id compared
 literally and whole, so 'Task 1' does not match 'Task 10', 'Task 1a', or
@@ -10,17 +11,47 @@ the next '#+ Task ' heading of the same or higher level, or before any heading
 of a strictly higher level. Headings inside fenced code blocks are ignored.
 Heading and section rules live in _plan.py, shared with derive-lanes.
 
-Exit 0 on success; 2 on usage error; 3 if the plan is unreadable, the heading
-is missing or duplicated, or the section has no content. Nothing is written
-unless the exit is 0.
+Referenced tasks come from the section's Consumes bullet (the first
+'- Consumes:' line outside fenced code, plus its deeper-indented continuation
+lines) and from the --also ids. In the bullet, an id with both a letter and a
+digit (G1) matches as a whole word; any other id (4, 1.5) matches only after
+'Task' or 'Tasks', including lists such as 'Tasks 3, 6 and 9'. Only ids with a
+heading in the plan count from the bullet; the task itself never counts.
+
+After the section, for each referenced task in plan order:
+
+    ## Produces of Task <ID>: <title> (consumed by this task)
+
+    <the Produces block, verbatim>
+
+The Produces block is the first '- Produces:' line outside fenced code in that
+task's section and every following line up to the first non-blank line indented
+no deeper than the bullet. A task without one gets its heading followed by
+'Task <ID> has no Produces block in the plan.' Then one line per --also id with
+no heading: 'Task <ID> has no heading in the plan.' One blank line separates
+each appended part. With no Consumes bullet and no --also ids the brief is the
+section alone.
+
+Exit 0 on success; 2 on usage error (an --also without an id, any other
+option); 3 if the plan is unreadable, the heading is missing or duplicated, or
+the section has no content. Nothing is written unless the exit is 0.
 """
 
 import os
+import re
 import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _plan  # noqa: E402
+
+USAGE = "usage: task-brief PLAN TASK_ID OUT [--also ID ...]"
+
+# 'Task <ID>' or 'Tasks <ID>, <ID> and <ID>'; an id may carry "'s".
+_LIST_ID = r"\w+(?:[.-]\w+)*(?:'s)?"
+_LIST_SEP = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+TASK_LIST = re.compile(rf"\bTasks?\s+({_LIST_ID}(?:{_LIST_SEP}{_LIST_ID})*)")
+LIST_ID = re.compile(r"\w+(?:[.-]\w+)*")
 
 
 def fail(code, message):
@@ -28,31 +59,127 @@ def fail(code, message):
     sys.exit(code)
 
 
-def extract(text, task_id):
-    lines = text.splitlines()
-    starts = [s for s in _plan.task_sections(lines) if s.id == task_id]
+def bullet_span(lines, mask, label):
+    """Return (start, end) of the first '- <label>:' bullet outside fenced
+    code and its continuation, trailing blank lines excluded; None if absent."""
+    bullet = re.compile(rf"^(\s*)- {re.escape(label)}:")
+    for i, line in enumerate(lines):
+        m = bullet.match(line) if mask[i] else None
+        if not m:
+            continue
+        depth = len(m.group(1))
+        end = i + 1
+        while end < len(lines) and (
+            not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > depth
+        ):
+            end += 1
+        while not lines[end - 1].strip():
+            end -= 1
+        return i, end
+    return None
+
+
+def bullet_block(lines, mask, label):
+    """Return the lines of the first '- <label>:' bullet outside fenced code
+    and its continuation, trailing blank lines removed; None when absent."""
+    span = bullet_span(lines, mask, label)
+    return lines[span[0]:span[1]] if span else None
+
+
+def has_letter_and_digit(task_id):
+    return any(c.isalpha() for c in task_id) and any(c.isdigit() for c in task_id)
+
+
+def consumed_ids(block_text, known_ids, self_id):
+    """Return the ids in known_ids that block_text names, without self_id."""
+    found = set()
+    for task_id in known_ids:
+        if has_letter_and_digit(task_id) and re.search(
+            rf"(?<![\w.-]){re.escape(task_id)}(?![\w-])", block_text
+        ):
+            found.add(task_id)
+    for m in TASK_LIST.finditer(block_text):
+        for token in LIST_ID.findall(m.group(1)):
+            if token in known_ids and not has_letter_and_digit(token):
+                found.add(token)
+    found.discard(self_id)
+    return found
+
+
+def own_section(lines, sections, task_id):
+    starts = [s for s in sections if s.id == task_id]
     if not starts:
         fail(3, f"no heading for task {task_id!r}")
     if len(starts) > 1:
         fail(3, f"task {task_id!r} has {len(starts)} headings; refusing to guess")
-    section = lines[starts[0].start:starts[0].end]
+    own = starts[0]
+    section = lines[own.start:own.end]
     while section and not section[-1].strip():
         section.pop()
     if not any(line.strip() for line in section[1:]):
         fail(3, f"task {task_id!r} section is empty")
-    return "\n".join(section) + "\n"
+    return own, section
+
+
+def build(text, task_id, also):
+    lines = text.splitlines()
+    mask = _plan.unfenced_mask(lines)
+    sections = _plan.task_sections(lines, mask)
+    own, section = own_section(lines, sections, task_id)
+
+    # A referenced id with two headings uses the first.
+    first = {}
+    for s in sections:
+        first.setdefault(s.id, s)
+
+    referenced = set()
+    own_mask = mask[own.start:own.end]
+    span = bullet_span(section, own_mask, "Consumes")
+    if span:
+        # Only text outside fenced code inside the bullet names tasks.
+        named = [section[i] for i in range(*span) if own_mask[i]]
+        referenced = consumed_ids("\n".join(named), set(first), task_id)
+    missing = []
+    for extra in also:
+        if extra == task_id:
+            continue
+        if extra in first:
+            referenced.add(extra)
+        elif extra not in missing:
+            missing.append(extra)
+
+    parts = ["\n".join(section)]
+    for s in sorted((first[i] for i in referenced), key=lambda s: s.start):
+        heading = f"## Produces of Task {s.id}: {s.title.strip()} (consumed by this task)"
+        block = bullet_block(lines[s.start:s.end], mask[s.start:s.end], "Produces")
+        body = "\n".join(block) if block else f"Task {s.id} has no Produces block in the plan."
+        parts.append(f"{heading}\n\n{body}")
+    parts.extend(f"Task {m} has no heading in the plan." for m in missing)
+    return "\n\n".join(parts) + "\n"
+
+
+def parse_args(argv):
+    if len(argv) < 3 or not all(argv[:3]):
+        fail(2, USAGE)
+    plan, task_id, out = argv[:3]
+    also = []
+    rest = argv[3:]
+    while rest:
+        if rest[0] != "--also" or len(rest) < 2 or not rest[1] or rest[1].startswith("-"):
+            fail(2, USAGE)
+        also.append(rest[1])
+        rest = rest[2:]
+    return plan, task_id, out, also
 
 
 def main(argv):
-    if len(argv) != 3 or not all(argv):
-        fail(2, "usage: task-brief PLAN TASK_ID OUT")
-    plan, task_id, out = argv
+    plan, task_id, out, also = parse_args(argv)
     try:
         with open(plan, encoding="utf-8") as f:
             text = f.read()
     except (OSError, UnicodeDecodeError) as e:
         fail(3, f"cannot read plan {plan!r}: {e}")
-    brief = extract(text, task_id)
+    brief = build(text, task_id, also)
     parent = os.path.dirname(out)
     if parent:
         os.makedirs(parent, exist_ok=True)

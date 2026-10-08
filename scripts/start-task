@@ -3,12 +3,16 @@
 
 usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
                   --brief TASK_ID OUT [--brief TASK_ID OUT ...]
+                  [--also TASK_ID PRODUCER_ID ...]
 
 In order:
   --sync     git -C DIR merge --ff-only BRANCH (a failure exits 3 and writes
              no brief).
   --brief    scripts/task-brief PLAN TASK_ID OUT for each pair, in the given
-             order (a failure exits with its code and message).
+             order (a failure exits with its code and message). Each
+             --also TASK_ID PRODUCER_ID adds '--also PRODUCER_ID' to the
+             task-brief call for that TASK_ID, in the given order; an --also
+             whose TASK_ID has no --brief exits 2 before any work.
   --package  mkdir -p the parent of OUT, then bash SCRIPT PLAN BASE HEAD OUT
              with DIR as the working directory (a failure exits 1).
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
@@ -69,7 +73,15 @@ def parse(argv):
     parser.add_argument(
         "--brief", nargs=2, action="append", required=True, metavar=("TASK_ID", "OUT")
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--also", nargs=2, action="append", default=[], metavar=("TASK_ID", "PRODUCER_ID")
+    )
+    args = parser.parse_args(argv)
+    briefed = {task_id for task_id, _ in args.brief}
+    for task_id, _ in args.also:
+        if task_id not in briefed:
+            parser.error(f"--also names task {task_id!r}, which has no --brief")
+    return args
 
 
 def main(argv):
@@ -87,8 +99,10 @@ def main(argv):
     out = [f"branch: {branch}\n", f"head: {head}\n"]
     plan = os.path.abspath(args.plan)
     for task_id, path in args.brief:
+        extra = [a for t, producer in args.also if t == task_id for a in ("--also", producer)]
         res = subprocess.run(
-            [sys.executable, os.path.join(HERE, "task-brief"), plan, task_id, path], env=ENV
+            [sys.executable, os.path.join(HERE, "task-brief"), plan, task_id, path, *extra],
+            env=ENV,
         )
         if res.returncode != 0:
             sys.exit(res.returncode)
