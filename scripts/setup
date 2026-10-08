@@ -2,7 +2,7 @@
 """Deterministic run setup: the feature branch, run worktrees, setup commands.
 
 usage:
-  python3 setup MANIFEST
+  python3 setup MANIFEST [--owner TOKEN]
 
 MANIFEST is the run manifest (JSON). setup does what the Setup agent of
 run.workflow.js does, without an agent:
@@ -21,13 +21,24 @@ profile full (the default): creates or reuses the lane worktree
 start at repo.branch) for every lane. profile lite: no lane worktree or lane
 branch; the single lane works in the feature checkout.
 
+Launch lock: setup runs only for the holder of the run's launch lock
+(active-run acquire wrote <active dir>/<run_id>.lock; the active dir is
+$PL_ACTIVE_DIR, default ${CLAUDE_CONFIG_DIR:-~/.claude}/parallel-lanes/active).
+It refuses (exit 3, nothing changed) when the lock does not exist or --owner
+TOKEN does not match it: without the lock another session may be running
+this run, and setup would discard its work.
+
 A reused worktree (the run's own: the shadow feature worktree or a lane
-worktree) must be a worktree of this repo on its branch; its uncommitted
-changes are listed in discarded as "<worktree>: <git status --porcelain
-line>" and discarded with reset --hard HEAD and clean -fd (ignored files
-stay). An existing non-empty directory that is not such a worktree is
-refused (exit 3) and left alone. No worktree is removed and no branch is
-deleted.
+worktree) must be a worktree of this repo on its branch. Before its
+uncommitted changes are discarded (reset --hard HEAD and clean -fd; ignored
+files stay), they are saved: every tracked change and untracked, non-ignored
+file goes into a commit on top of the worktree's HEAD, referenced by
+refs/parallel-lanes/<run_id>/abandoned/<worktree name>-<UTC time> and listed in
+preserved as {"worktree", "ref", "commit"}; each discarded change is also
+listed in discarded as "<worktree>: <git status --porcelain line>". Restore
+one with git checkout <commit> -- . in that worktree. An existing non-empty
+directory that is not such a worktree is refused (exit 3) and left alone. No
+worktree is removed and no branch is deleted.
 
 Then commands.setup (or the lane's lane_commands override) runs with bash
 in the feature checkout and in each lane checkout; under lite the lane's
@@ -39,24 +50,29 @@ worktree_root (never another worktree's record). repo.base_ref is resolved
 to a commit (a leading '-' is refused); the feature branch starts there.
 
 On success setup appends {"task":"_run","event":"run_started","phase":
-"setup","head":<feature_head>} to the ledger lane _run in repo.ledger_dir
-and prints the manifest's setup_result:
+"setup","head":<feature_head>,"plan_sha256":<sha256 of the plan file>,
+"spec_sha256":<sha256 of the spec file, or null>} to the ledger lane _run in
+repo.ledger_dir (ledger status --plan/--spec compares them on a resume) and
+prints the manifest's setup_result:
   {"feature_head": <sha of repo.branch>, "worktrees": {<lane id>: <path>},
-   "discarded": [...]}
+   "discarded": [...], "preserved": [...]}
 The worktree paths are exactly the paths the run uses for the lanes.
 
 Exit 0 on success; 1 when a git or setup command fails; 2 on a usage error
 or an unreadable or malformed manifest (run_id or a lane id outside its
 pattern, a relative repo path, a base_ref starting with '-'); 3 on a refused
 condition (dirty main checkout, foreign directory or symlink at a run
-worktree path, missing shadow).
+worktree path, missing shadow, a run locked by another owner).
 """
 
+import datetime
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 # Variables that would point git at another repo than the one named.
@@ -235,19 +251,81 @@ def worktree_state(repo, path, branch):
     return "reuse"
 
 
-def discard_changes(path, discarded):
+def snapshot(path, run_id):
+    """Commit every tracked change and untracked, non-ignored file of the
+    worktree at path on top of its HEAD (through a temporary index, so the
+    worktree and its index are untouched) and point a run ref at it.
+    Returns {"worktree", "ref", "commit"}."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    ref = f"refs/parallel-lanes/{run_id}/abandoned/{os.path.basename(path)}-{stamp}"
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(ENV, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+
+        def git(*args):
+            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, env=env)
+            if res.returncode != 0:
+                raise Failure(1, f"saving the changes in {path} failed: git {args[0]}: {res.stderr.strip()}")
+            return res.stdout.strip()
+
+        git("read-tree", "HEAD")
+        git("add", "-A")
+        tree = git("write-tree")
+        commit = git("-c", "user.name=parallel-lanes", "-c", "user.email=parallel-lanes@localhost",
+                     "commit-tree", tree, "-p", "HEAD", "-m",
+                     f"parallel-lanes {run_id}: uncommitted changes in {path} saved before setup discarded them")
+        git("update-ref", ref, commit)
+    return {"worktree": path, "ref": ref, "commit": commit}
+
+
+def discard_changes(path, run_id, discarded, preserved):
     status = run_git(["-C", path, "status", "--porcelain"]).stdout
     for line in status.splitlines():
         if line:
             discarded.append(f"{path}: {line}")
     if status:
+        preserved.append(snapshot(path, run_id))
         run_git(["-C", path, "reset", "-q", "--hard", "HEAD"])
         run_git(["-C", path, "clean", "-q", "-fd"])
 
 
-def ensure_worktree(repo, path, branch, start, state, discarded):
+def active_dir():
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.environ.get("PL_ACTIVE_DIR") or os.path.join(base, "parallel-lanes", "active")
+
+
+def check_lock(run_id, owner):
+    """Refuse unless the run's launch lock exists and owner matches it."""
+    lock = os.path.join(active_dir(), f"{run_id}.lock")
+    try:
+        with open(lock, encoding="utf-8") as f:
+            token = f.read().strip()
+    except FileNotFoundError:
+        raise Failure(3, f"run {run_id} has no launch lock ({lock}); run active-run acquire first and pass its "
+                         "token as --owner (nothing was changed)")
+    except OSError as e:
+        raise Failure(3, f"cannot read the launch lock {lock}: {e}")
+    if owner is None or owner != token:
+        raise Failure(3, f"run {run_id} is locked by another launch ({lock}); another session may still be "
+                         "running it, so nothing was changed. If it has ended, run active-run acquire with "
+                         "--takeover and pass the new token as --owner")
+
+
+def file_sha256(path):
+    if not is_text(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        # Recorded as null: a resume cannot then tell whether it changed.
+        return None
+    except OSError as e:
+        raise Failure(2, f"cannot read {path}: {e}")
+
+
+def ensure_worktree(repo, path, branch, start, state, run_id, discarded, preserved):
     if state == "reuse":
-        discard_changes(path, discarded)
+        discard_changes(path, run_id, discarded, preserved)
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if repo.has_branch(branch):
@@ -270,7 +348,8 @@ def run_commands(path, cmds):
             raise Failure(1, f"setup command failed in {path} (exit {res.returncode}): {cmd}")
 
 
-def setup(m):
+def setup(m, owner=None):
+    check_lock(m["run_id"], owner)
     repo_cfg = m["repo"]
     lite = m.get("profile", "full") == "lite"
     branch = repo_cfg["branch"]
@@ -291,6 +370,7 @@ def setup(m):
     base = repo.resolve(repo_cfg["base_ref"])
 
     discarded = []
+    preserved = []
     # Drops only the records of the run's own worktrees whose directory is gone.
     repo.prune_run_worktrees(repo_cfg["worktree_root"])
     if not repo.has_branch(branch):
@@ -298,10 +378,10 @@ def setup(m):
     if repo_cfg["mode"] == "git":
         repo.git("switch", "-q", branch)
     else:
-        ensure_worktree(repo, feature, branch, base, feature_state, discarded)
+        ensure_worktree(repo, feature, branch, base, feature_state, m["run_id"], discarded, preserved)
     check_branch(feature, branch)
     for (_, path, lb), state in zip(lanes, lane_states):
-        ensure_worktree(repo, path, lb, branch, state, discarded)
+        ensure_worktree(repo, path, lb, branch, state, m["run_id"], discarded, preserved)
         check_branch(path, lb)
 
     feature_cmds = setup_commands(m, None)
@@ -315,21 +395,27 @@ def setup(m):
         run_commands(path, setup_commands(m, lane["id"]))
 
     head = repo.head_of(branch)
-    entry = {"task": "_run", "event": "run_started", "phase": "setup", "head": head}
+    entry = {"task": "_run", "event": "run_started", "phase": "setup", "head": head,
+             "plan_sha256": file_sha256(m.get("plan")), "spec_sha256": file_sha256(m.get("spec"))}
     res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ledger"), "append",
                           repo_cfg["ledger_dir"], "_run", json.dumps(entry)],
                          capture_output=True, text=True, env=ENV)
     if res.returncode != 0:
         raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
-    return {"feature_head": head, "worktrees": worktrees, "discarded": discarded}
+    return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved}
 
 
 def main(argv):
     try:
-        if len(argv) != 1 or not argv[0]:
-            raise Failure(2, "usage: setup MANIFEST")
-        result = setup(load_manifest(argv[0]))
+        owner = None
+        if len(argv) == 3 and argv[1] == "--owner" and argv[2]:
+            owner = argv[2]
+        elif len(argv) != 1:
+            raise Failure(2, "usage: setup MANIFEST [--owner TOKEN]")
+        if not argv[0]:
+            raise Failure(2, "usage: setup MANIFEST [--owner TOKEN]")
+        result = setup(load_manifest(argv[0]), owner)
     except Failure as e:
         print(f"setup: {e}", file=sys.stderr)
         sys.exit(e.code)

@@ -382,8 +382,10 @@ test('each prompt names the ledger event its agent records', () => {
   assert.ok(p.implement.includes('"event":"blocked"'));
   assert.ok(p.fix.includes("scripts/finish-task' "), 'fix records committed via finish-task');
   assert.ok(p.fix.includes('"event":"blocked"'));
-  assert.ok(p.review.includes('"event":"reviewed","rounds":0'));
-  assert.ok(p.reReview.includes('"event":"reviewed","rounds":1'));
+  // Approvals go through ledger reviewed, which reads the section hash and
+  // the head from the files (review finding 8).
+  assert.ok(p.review.includes("scripts/ledger' reviewed '/work/ledger' 'alpha' 'T2' 0 '/work/my plan.md' '/work/wt/lane-alpha'"), p.review);
+  assert.ok(p.reReview.includes("scripts/ledger' reviewed '/work/ledger' 'alpha' 'T2' 1 '/work/my plan.md' '/work/wt/lane-alpha'"));
   for (const name of ['review', 'reReview']) assert.match(p[name], /read-only/);
 });
 
@@ -517,8 +519,11 @@ test('a user note for a task reaches only that task\'s prompts', () => {
 // ---- Adjudication (autonomous mode, spec C1) ----
 
 const question = (base, q) => ({ status: 'question', head: base, tests: '', notes: '', question: q });
-const ruled = (outcome, text, stopCondition) =>
-  ({ outcome, text, ...(stopCondition ? { stop_condition: stopCondition } : {}) });
+// head: for park and unblock, the head finish-task --settled printed (the
+// adjudicator returns it).
+const ruled = (outcome, text, stopCondition, head = null) =>
+  ({ outcome, text, ...(stopCondition ? { stop_condition: stopCondition } : {}), ...(head ? { head } : {}) });
+const settled = (outcome, text, head) => ruled(outcome, text, undefined, head);
 
 test('autonomous: a blocked implement is adjudicated; an answer reruns implement with it as a note', async () => {
   const m = manifest();
@@ -669,11 +674,12 @@ test('autonomous: the round cap is adjudicated; an answer reruns implement and r
   const adj = s.calls[4];
   assert.match(adj.prompt, /Why you were called: round_cap/);
   assert.ok(adj.prompt.includes('CAP-2'), 'the open findings reach the adjudicator');
-  assert.ok(adj.prompt.includes('{"task":"T2","event":"settled","outcome":"park","base":"b0","head":"h2"}'),
-    'details carry the settled ledger command for park');
-  assert.ok(adj.prompt.includes('{"task":"T2","event":"settled","outcome":"unblock","base":"b0","head":"h2"}'),
-    'details carry the settled ledger command for unblock');
-  assert.ok(adj.prompt.includes("append '/work/ledger' 'alpha'"));
+  assert.ok(adj.prompt.includes('Diff range: b0..h2'));
+  for (const outcome of ['park', 'unblock']) {
+    assert.ok(adj.prompt.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'b0' '/work/ledger' "
+      + `'alpha' --task 'T2' --settled ${outcome}`), `details carry the finish-task --settled command for ${outcome}`);
+  }
+  assert.ok(adj.prompt.includes("append '/work/ledger' 'alpha'"), 'the ruling ledger command');
   const impl2 = s.calls[5];
   assert.ok(impl2.prompt.includes('CAP-2') && impl2.prompt.includes('ANSWER-CAP: drop the cache'));
   assert.ok(s.calls[6].prompt.includes('b0..h3'));
@@ -689,44 +695,85 @@ test('autonomous: park at the round cap completes the task with the findings def
     'T2 review': [changes('OPEN-1')],
     'T2 fix 1': [done('h1', 'h2')],
     'T2 re-review 1': [changes('OPEN-2')],
-    'T2 adjudicate': [ruled('park', 'PARK-1: cosmetic, defer')],
+    'T2 adjudicate': [settled('park', 'PARK-1: cosmetic, defer', 'h2')],
   });
   const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
-  assert.equal(r.status, 'done');
+  assert.equal(r.status, 'deferred', 'a parked task is deferred, never done (review finding 13)');
   assert.equal(r.base, 'b0');
   assert.equal(r.head, 'h2');
   assert.equal(r.rounds, 1);
-  assert.match(r.notes, /deferred \(parked\): src\/a\.js:3 - OPEN-2/);
+  assert.match(r.notes, /deferred, not accepted: parked/);
+  assert.match(r.notes, /deferred finding \[important\]: src\/a\.js:3 - OPEN-2/);
   assert.ok(r.notes.includes('PARK-1: cosmetic, defer'));
   assert.deepEqual(r.rulings, ['PARK-1: cosmetic, defer']);
 });
 
-test('autonomous: park or unblock with no new commits keeps head = base', async () => {
+test('autonomous: park or unblock with no new commits is deferred at the head the settled command printed', async () => {
   for (const outcome of ['park', 'unblock']) {
     const m = manifest();
     const s = stub({
       'T2 implement': [blocked('b0', 'nothing to do')],
-      'T2 adjudicate': [ruled(outcome, `${outcome} it`)],
+      'T2 adjudicate': [settled(outcome, `${outcome} it`, 'b0')],
     });
     const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
-    assert.equal(r.status, 'done', outcome);
+    assert.equal(r.status, 'deferred', outcome);
     assert.equal(r.base, 'b0', outcome);
     assert.equal(r.head, 'b0', outcome);
   }
+});
+
+// Review finding 6: a blocked implementer's partial commits stay with its
+// task: the adjudicator sees them and the deferred range ends at the head git
+// has, not at the base.
+test('autonomous: commits a blocked implementer made stay in the task range when it is parked', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [{ status: 'blocked', head: 'partial', tests: '', notes: 'stuck halfway' }],
+    'T2 adjudicate': [settled('park', 'park the half', 'partial')],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.ok(s.calls[1].prompt.includes('Diff range: b0..partial'), 'the adjudicator sees the partial commits');
+  assert.equal(r.status, 'deferred');
+  assert.deepEqual([r.base, r.head], ['b0', 'partial']);
+});
+
+test('autonomous: a park without the settled head is an invalid ruling and stops the task', async () => {
+  const m = manifest();
+  const s = stub({
+    'T2 implement': [blocked('b0', 'stuck')],
+    'T2 adjudicate': [ruled('park', 'park it')],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'blocked');
+  assert.equal(r.notes, 'adjudicator_stop: plan_broken');
+  assert.deepEqual(r.rulings, []);
+});
+
+test('autonomous: allow_deferral false refuses park and unblock', async () => {
+  const m = manifest({ allow_deferral: false });
+  const s = stub({
+    'T2 implement': [blocked('b0', 'stuck')],
+    'T2 adjudicate': [settled('park', 'park it', 'b0')],
+  });
+  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'blocked');
+  assert.equal(r.notes, 'adjudicator_stop: deferral_not_allowed');
+  assert.match(s.calls[1].prompt, /Deferral is not allowed in this run/);
+  assert.ok(!s.calls[1].prompt.includes('--settled'));
 });
 
 test('autonomous: unblock completes the task and carries its text to the next task as a note', async () => {
   const m = manifest();
   const s = stub({
     'T2 implement': [blocked('b0', 'upstream contract missing')],
-    'T2 adjudicate': [ruled('unblock', 'UNBLOCK-1: stub the contract as {ok: true}')],
+    'T2 adjudicate': [settled('unblock', 'UNBLOCK-1: stub the contract as {ok: true}', 'b0')],
     'T3 implement': [done('b0', 'h3')],
     'T3 review': [approve()],
   });
   const r = await runLane(m, m.lanes[0], 'b0', s.io);
   assert.equal(r.stopped, null);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate', 'T3 implement', 'T3 review']);
-  assert.equal(r.results[0].status, 'done');
+  assert.equal(r.results[0].status, 'deferred');
   assert.equal(r.results[0].head, 'b0');
   assert.ok(r.results[0].notes.includes('UNBLOCK-1'));
   const t3 = s.calls[2].prompt;
@@ -989,7 +1036,7 @@ test('a final-fix result without changed_lines still validates against finalFixS
   const sc = finalFixSchema();
   assert.equal(sc.properties.changed_lines.type, 'integer');
   assert.ok(!sc.required.includes('changed_lines'));
-  const result = { status: 'done', head: 'h9', tests: 'npm test: pass', notes: '', declined: [] };
+  const result = { status: 'done', head: 'h9', tests: 'npm test: pass', notes: '', dispositions: [] };
   assert.deepEqual(schemaErrors(sc, result), []);
   assert.deepEqual(schemaErrors(sc, { ...result, changed_lines: 12 }), []);
 });
@@ -1012,11 +1059,11 @@ test('implement prompt opens with start-task and syncs when the lane needs it', 
   const synced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
   assert.ok(synced.includes(
     "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
-    "'/work/my plan.md' --sync 'pl/run-1' --brief 'T2' '/work/ledger/briefs/T2.md'"), synced);
+    "'/work/my plan.md' --artifacts '/work/ledger' --sync 'pl/run-1' --brief 'T2' '/work/ledger/briefs/T2.md'"), synced);
   const plain = implementPrompt(m, task('T2'), WHERE, 'b0');
   assert.ok(plain.includes(
     "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
-    "'/work/my plan.md' --brief 'T2' '/work/ledger/briefs/T2.md'"), plain);
+    "'/work/my plan.md' --artifacts '/work/ledger' --brief 'T2' '/work/ledger/briefs/T2.md'"), plain);
   assert.ok(!plain.includes('--sync'));
 });
 
@@ -1045,7 +1092,7 @@ test('review prompts without superpowers keep the git log and diff steps', () =>
 test('implement and fix prompts record commits with finish-task from their start commit', () => {
   const p = allPrompts(manifest());
   const finish = (from) => "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/finish-task' " +
-    `'/work/wt/lane-alpha' 'pl-run-1-alpha' '${from}' '/work/ledger' 'alpha' --task 'T2' --commit`;
+    `'/work/wt/lane-alpha' 'pl-run-1-alpha' '${from}' '/work/ledger' 'alpha' --task 'T2'`;
   assert.ok(p.implement.includes(finish('b0')), p.implement);
   assert.ok(p.fix.includes(finish('h1')), p.fix);
   for (const name of ['implement', 'fix']) {
@@ -1071,7 +1118,8 @@ test('batch prompts pass every task to start-task and finish-task', () => {
       `${name}: every brief`);
   }
   for (const name of ['implement', 'fix']) {
-    assert.ok(p[name].includes("--task 'T3' --task 'T4' --commit"), `${name}: every task`);
+    assert.ok(p[name].includes("--task 'T3' --task 'T4'"), `${name}: every task`);
+    assert.ok(!p[name].includes('--commit'), `${name}: the range comes from git, not a typed list`);
   }
   assert.ok(p.review.includes("'/work/ledger/reviews/T3-T4-b0..h1.diff'"), 'one package for the batch range');
 });
@@ -1102,14 +1150,13 @@ test('autonomous: a park or unblock without commits gives the adjudicator settle
   const m = manifest();
   const s = stub({
     'T2 implement': [blocked('b0', 'nothing to do')],
-    'T2 adjudicate': [ruled('park', 'PARK-0')],
+    'T2 adjudicate': [settled('park', 'PARK-0', 'b0')],
   });
   const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
-  assert.equal(r.status, 'done');
+  assert.equal(r.status, 'deferred');
   const adj = s.calls[1].prompt;
   for (const outcome of ['park', 'unblock']) {
-    const entry = JSON.stringify({ task: 'T2', event: 'settled', outcome, base: 'b0', head: 'b0' });
-    assert.ok(adj.includes(entry), `${outcome} command at base`);
+    assert.ok(adj.includes(`'b0' '/work/ledger' 'alpha' --task 'T2' --settled ${outcome}`), `${outcome} command from base`);
   }
 });
 
@@ -1126,22 +1173,106 @@ test('autonomous: a security task with an important finding open cannot be parke
     assert.equal(r.notes, 'adjudicator_stop: security', outcome);
     const adj = s.calls[2].prompt;
     assert.match(adj, /This task is security-flagged/);
-    assert.ok(!adj.includes('"event":"settled"'), 'no settled command for a gated security task');
+    assert.ok(!adj.includes('--settled'), 'no settled command for a security task');
     assert.deepEqual(r.rulings, [`refused (security-gated): ${outcome} it`], outcome);
   }
 });
 
-test('autonomous: a security task may still be parked with only minor findings open', async () => {
+// Review finding 13: deferring a security requirement is never inferred from
+// the absence of findings; a security task blocked before its first review
+// cannot be parked either.
+test('autonomous: a security task is never parked, even blocked before any review or with only minor findings', async () => {
+  const before = stub({
+    'T2 implement': [blocked('b0', 'stuck before any code')],
+    'T2 adjudicate': [settled('park', 'PARK-EARLY', 'b0')],
+  });
+  let r = await runTask(manifest(), task('T2', { security: true }), WHERE, 'b0', before.io);
+  assert.equal(r.status, 'blocked');
+  assert.equal(r.notes, 'adjudicator_stop: security');
+  assert.deepEqual(labels(before.calls), ['T2 implement', 'T2 adjudicate'], 'no reviewer, no settled range');
   const m = manifest({ limits: { review_rounds: 0, max_parallel_lanes: 3 } });
   const minor = { verdict: 'changes', findings: [{ ...finding('NIT-1'), severity: 'minor' }], cannot_verify: [] };
-  const s = stub({
+  const later = stub({
     'T2 implement': [done('b0', 'h1')],
     'T2 review': [minor],
-    'T2 adjudicate': [ruled('park', 'PARK-NIT')],
+    'T2 adjudicate': [settled('park', 'PARK-NIT', 'h1')],
   });
-  const r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', s.io);
+  r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', later.io);
+  assert.equal(r.status, 'blocked');
+  assert.equal(r.notes, 'adjudicator_stop: security');
+});
+
+// Review finding 3: the gate decides from the findings, not the label.
+test('an approval that carries a critical finding is acted on as changes, with its severity kept', async () => {
+  const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }],
+    'T2 fix 1': [done('h1', 'h2')],
+    'T2 re-review 1': [{ verdict: 'approve', findings: [{ ...crit, severity: 'minor', issue: 'naming' }], cannot_verify: [] }],
+  });
+  const r = await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
+  assert.ok(s.calls[2].prompt.includes('authz bypass'), 'the fixer gets the critical finding');
+  assert.ok(s.logs.some((l) => l.includes('approved with a critical or important finding')));
   assert.equal(r.status, 'done');
-  assert.ok(s.calls[2].prompt.includes('"event":"settled"'));
+  assert.match(r.notes, /minor finding: src\/auth\.js:10 - naming/);
+});
+
+test('the fix after a contradicted approval reopens any approval the reviewer recorded', async () => {
+  const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }],
+    'T2 fix 1': [done('h1', 'h2')],
+    'T2 re-review 1': [approve()],
+  });
+  await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  const fix = s.calls.find((c) => c.label === 'T2 fix 1').prompt;
+  assert.ok(fix.includes('"event":"reopened"'), fix);
+  assert.ok(s.calls.find((c) => c.label === 'T2 review').prompt.includes("'/work/wt/lane-alpha' 'h1' <blocking>"),
+    'the approval command names the reviewed head and asks for the blocking count');
+});
+
+test('a contradicted approval on a sonnet task is reopened by the escalated implement', async () => {
+  const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }, approve()],
+  });
+  await runTask(manifest(), task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  const impls = s.calls.filter((c) => c.label === 'T2 implement');
+  assert.equal(impls.length, 2, 'the changes verdict escalates the sonnet task to a standard rerun');
+  assert.ok(!impls[0].prompt.includes('"event":"reopened"'));
+  assert.ok(impls[1].prompt.includes('"event":"reopened"'), 'the rerun reopens the contradicted approval');
+});
+
+test('a changes verdict with no findings is not a usable review', async () => {
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'changes', findings: [], cannot_verify: [] }],
+  });
+  const r = await runTask(manifest({ autonomy: 'supervised' }), task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'blocked');
+  assert.match(r.notes, /invalid result from T2 review: changes with no findings/);
+});
+
+test('autonomous: an unblock note goes to the task that depends on it, not just the next one', async () => {
+  const m = manifest({ lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [
+    task('T2'), task('T3'), task('T5', { depends_on: [{ id: 'T2', kind: 'contract' }] }),
+  ] }] });
+  const s = stub({
+    'T2 implement': [blocked('b0', 'upstream missing')],
+    'T2 adjudicate': [settled('unblock', 'UNBLOCK-DEP: use the v2 shape', 'b0')],
+    'T3 implement': [done('b0', 'h3')],
+    'T3 review': [approve()],
+    'T5 implement': [done('h3', 'h5')],
+    'T5 review': [approve()],
+  });
+  await runLane(m, m.lanes[0], 'b0', s.io);
+  const prompt = (label) => s.calls.find((c) => c.label === label).prompt;
+  assert.ok(!prompt('T3 implement').includes('UNBLOCK-DEP'));
+  assert.ok(prompt('T5 implement').includes('UNBLOCK-DEP: use the v2 shape'));
 });
 
 test('a non-security task is not told it is security-flagged', async () => {

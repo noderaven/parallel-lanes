@@ -57,23 +57,50 @@ function ledgerCommand(m, laneId, entry, dir) {
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
-// One command group for a ledger lane (null: project commands only);
+// The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
-function commandList(m, laneId, name) {
+function commandGroup(m, laneId, name) {
   const own = (laneId !== null && m.lane_commands && m.lane_commands[laneId]) || {};
-  const list = own[name] || m.commands[name] || [];
-  return list.length > 0 ? list.join(' ; ') : '(none)';
+  return own[name] || m.commands[name] || [];
 }
 
-// Project commands for a ledger lane.
-function commandsText(m, laneId) {
-  return ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`).join('\n');
+// One command group as a shell line: joined with &&, so a failing command
+// fails the line instead of hiding behind the next one's success.
+function commandList(m, laneId, name) {
+  const list = commandGroup(m, laneId, name);
+  return list.length > 0 ? list.join(' && ') : '(none)';
+}
+
+// The scripts/run-checks call that runs every test, lint and build command
+// of a ledger lane in dir, each separately, and exits non-zero when any one
+// fails (the setup group is not a check). out (optional) is the evidence file
+// it writes under the ledger dir. null when there is no check command.
+function checksCommand(m, laneId, dir, out = null) {
+  const parts = [];
+  for (const name of ['test', 'lint', 'build']) {
+    for (const cmd of commandGroup(m, laneId, name)) parts.push('--cmd', shellQuote(name), shellQuote(cmd));
+  }
+  if (parts.length === 0) return null;
+  const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
+  return [`cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
+    ...evidence, ...parts].join(' ');
+}
+
+// Project commands for a ledger lane; with dir, also the run-checks call that
+// runs every check there at once.
+function commandsText(m, laneId, dir = null) {
+  const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
+  const all = dir === null ? null : checksCommand(m, laneId, dir);
+  if (all !== null) {
+    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`);
+  }
+  return lines.join('\n');
 }
 
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
-  return findings.map((f, i) =>
-    `${i + 1}. [${f.severity}] ${f.file}:${f.line} - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
+  return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
+    + ` - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
 }
 
 // The note for a finding with file "start-task" (reviewStartFailure): the
@@ -125,10 +152,10 @@ function taskContext(m, task, where, guidance = null) {
     `Implementer report file: ${files.report}`,
     '',
     'Project commands (run from the worktree):',
-    commandsText(m, where.lane),
+    commandsText(m, where.lane, where.dir),
     '',
     `Commit rules (follow exactly): ${m.commit_rules}`,
-    'All files you write are plain ASCII. Never commit anything under .superpowers/.',
+    'Never commit anything under .superpowers/.',
     'Never push, open pull requests, merge into the base branch, or copy work back to the project.',
     agentRules(),
     '',
@@ -191,7 +218,7 @@ function startCommand(m, task, where, opts = {}) {
   const pkg = opts.pkg || null;
   const parts = [
     `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
-    shellQuote(where.dir), shellQuote(m.plan),
+    shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
   if (pkg && m.sp_dir !== null) {
@@ -199,7 +226,13 @@ function startCommand(m, task, where, opts = {}) {
     const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
     parts.push('--package', shellQuote(script), shellQuote(pkg.base), shellQuote(pkg.head), shellQuote(out));
   }
-  for (const t of unitTasks(task)) parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
+  // Producers pre-flight found undeclared (consumes_extra, phases.js) reach
+  // each task's brief through start-task --also.
+  const extra = m.consumes_extra || {};
+  for (const t of unitTasks(task)) {
+    parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
+    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+  }
   return parts.join(' ');
 }
 
@@ -222,17 +255,29 @@ function startBlock(m, task, where, opts, failure) {
 }
 
 // The finish-task command an implement or fix agent runs after committing:
-// branch check, commit validation against from..HEAD, the committed event for
-// every task of the unit, then head and changed_lines. The <sha> placeholders
-// are the agent's to fill.
-function finishCommand(m, task, where, from) {
+// branch check, then the committed event for every task of the unit with the
+// range from..HEAD read from git (base, head, every commit), then head and
+// changed_lines. settled ('park' or 'unblock') instead records the settled
+// event an adjudicator's outcome needs, with the range as git has it.
+function finishCommand(m, task, where, from, settled = null) {
   return [
     `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
     shellQuote(where.dir), shellQuote(where.branch), shellQuote(from), shellQuote(m.repo.ledger_dir),
     shellQuote(where.lane),
     ...unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`),
-    '--commit <sha> --commit <sha>',
+    ...(settled === null ? [] : ['--settled', settled]),
   ].join(' ');
+}
+
+// The ledger command that records a review approval of one task at head (the
+// head of the range under review): the hash of the task's section of the plan
+// comes from the file, not from the reviewer (scripts/ledger reviewed). The
+// reviewer fills <blocking> with its count of critical and important
+// findings; the command records nothing unless it is 0.
+function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
+  return `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
+    `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
@@ -270,7 +315,7 @@ function taskResultText(dir, from) {
   ].join('\n');
 }
 
-function reviewResultText(m, task, where, rounds) {
+function reviewResultText(m, task, where, rounds, head) {
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
@@ -285,28 +330,43 @@ function reviewResultText(m, task, where, rounds) {
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
-    ...ledgerLines(m, task, where, { event: 'reviewed', rounds }),
+    ...unitTasks(task).map((t) => `  ${reviewedCommand(m, where.lane, t.id, rounds, where.dir, head)}`),
+    'replacing <blocking> with the number of critical and important findings you report. An approve with any',
+    'of them is not an approval: the command refuses it, and your verdict must then be changes.',
   ].join('\n');
 }
 
-// How an implement or fix prompt introduces its finish-task command.
-// shas says which commits it lists.
-function finishText(batch, shas) {
-  return `After committing, run finish-task once, with one --commit per sha (${shas}); it records the\n` +
+// How an implement or fix prompt introduces its finish-task command. range
+// says which commits it records.
+function finishText(batch, range) {
+  return `After committing, run finish-task once; it records ${range} as git has it in the\n` +
     (batch ? 'committed event for every task of the batch' : 'committed event') + ' and prints head and changed_lines:';
 }
 
 function finishFailure() {
   return 'A refusal (exit 3) records nothing; only a failed ledger write can leave part of a batch recorded, and a\n' +
-    'rerun just repeats those events. On a non-zero exit fix the cause (a wrong sha, the wrong branch) and rerun it,\n' +
+    'rerun just repeats those events. On a non-zero exit fix the cause (no commit yet, the wrong branch) and rerun it,\n' +
     'or report blocked.';
+}
+
+// The lines that open an implement or fix prompt after a review approved
+// while reporting a critical or important finding (not an approval): record
+// that any approval it wrote no longer holds. Empty unless reopen.
+function reopenLines(m, task, where, reopen) {
+  if (!reopen) return [];
+  return [
+    'Run this first: the review approved while reporting a critical or important finding, which is not an',
+    'approval, so record that any approval it wrote no longer holds:',
+    ...ledgerLines(m, task, where, { event: 'reopened', reason: 'approved with a blocking finding' }),
+    '',
+  ];
 }
 
 // Prompt for an implementer. base is the task base the script owns (the
 // previous task's head, or the feature tip); retry (optional) is {reason,
 // findings} when a previous attempt in this run blocked or failed review;
 // guidance (optional) is taskContext's.
-function implementPrompt(m, task, where, base, retry = null, guidance = null) {
+function implementPrompt(m, task, where, base, retry = null, guidance = null, reopen = false) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const noun = unitNoun(task);
@@ -315,6 +375,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     `You are implementing ${unitName(task)}`,
     ...batchLines(task),
     '',
+    ...reopenLines(m, task, where, reopen),
     sdd === null ? fallbackImplementer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
@@ -340,7 +401,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     ].join('\n'));
   }
   parts.push('', [
-    finishText(batch, `every sha you made for this ${noun}, oldest first`),
+    finishText(batch, `every commit since the ${noun} base`),
     `  ${finishCommand(m, task, where, base)}`,
     finishFailure(),
     batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
@@ -377,13 +438,15 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     '',
     taskContext(m, task, where, guidance),
     '',
-    reviewResultText(m, task, where, rounds),
+    reviewResultText(m, task, where, rounds, head),
   ].join('\n');
 }
 
 // Prompt for a fix agent. report is the latest implement or fix result;
-// head is the branch head the fix builds on.
-function fixPrompt(m, task, where, findings, report, head, guidance = null) {
+// head is the branch head the fix builds on. reopen: the review approved
+// while reporting a blocking finding, and may have recorded that approval;
+// the fix first records that it no longer holds.
+function fixPrompt(m, task, where, findings, report, head, guidance = null, reopen = false) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const batch = isBatch(task);
@@ -397,6 +460,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
+    ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
@@ -410,7 +474,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
     '',
     startBlock(m, task, where, {}, 'stop and report blocked with its message.'),
     '',
-    finishText(batch, 'every fix sha, oldest first'),
+    finishText(batch, 'every commit since the branch head named above'),
     `  ${finishCommand(m, task, where, head)}`,
     finishFailure(),
     batch ? 'If you are blocked, record it for every task of the batch with:' : 'If you are blocked, record it with:',
@@ -444,7 +508,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     taskContext(m, task, where, guidance),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
-    reviewResultText(m, task, where, round),
+    reviewResultText(m, task, where, round, head),
   ].join('\n');
 }
 

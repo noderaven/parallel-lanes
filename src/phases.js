@@ -4,15 +4,21 @@
 // prompts; the script itself never touches files or runs commands.
 
 // Final review: three lenses in parallel (profile lite: one combined
-// reviewer labelled `final review`), one fix agent, one scoped re-review of
-// tip..fix head. tip is the real feature head: the first head a reviewer
-// reported, else base (the feature tip the script tracked); on a resume
-// after an earlier final fix the two differ. Returns {findings, fixed,
-// declined, cannot_verify}; declined entries carry a reason (declined by the
-// fix agent, not fixed, or still open after the re-review). carried holds
-// findings from before the final review (the post-integrate re-reviews, C2):
-// they join the lenses' findings, so the one fix wave and the final
-// re-review cover them too.
+// reviewer labelled `final review`), one fix agent, one re-review of every
+// finding. tip is the real feature head: the first head a reviewer reported,
+// else base (the feature tip the script tracked); on a resume after an
+// earlier final fix the two differ. carried holds findings from before the
+// final review (the post-integrate re-reviews, C2): they join the lenses'
+// findings, so the one fix wave and the re-review cover them too.
+// Findings get stable ids (F1...) before the fix; the fixer returns a
+// disposition per id and the re-review a result per id, so a finding whose
+// line or wording changes is still the same finding, and a declined finding
+// is judged by the re-reviewer, not just by the fixer. The re-review runs
+// whenever there are findings and a fix result, even without fix commits
+// (declines still need judging). Returns {findings, fixed, declined, open,
+// cannot_verify, missing_lenses, head}: head is the delivered feature head
+// (the fix head when the fix committed), open lists every finding not fixed
+// and not rightly declined, each with a reason.
 async function runFinalReview(m, e2e, base, io, carried = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
@@ -25,24 +31,24 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
+  const missing = [];
   lenses.forEach(([, name], i) => {
     const r = results[i];
-    if (!r) cannotVerify.push(`the ${name} review returned no result`);
+    if (!r || !Array.isArray(r.findings)) missing.push(name);
     else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
   });
-  const findings = dedupeFindings([
+  const findings = withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
-  ]);
-  const final = { findings, fixed: [], declined: [], cannot_verify: cannotVerify };
-  if (findings.length === 0) return final;
+  ]));
   const lensHead = results.find((r) => r && present(r.head));
   const tip = lensHead ? lensHead.head : base;
-
-  const declineAll = (reason) => {
-    final.declined = findings.map((f) => ({ ...f, reason }));
-    return final;
+  const final = {
+    findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
   };
+  if (findings.length === 0) return final;
+  const settle = (dispositions, rr, why) => Object.assign(final, settleFinalFindings(findings, dispositions, rr, why));
+
   // Final fix tier (spec decision 5): Sonnet when every finding is minor or
   // every finding is in documentation; otherwise Opus. A Sonnet fix that does
   // not finish reruns once on Opus (same label); still one fix wave.
@@ -53,32 +59,19 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  if (!fix) return declineAll('no result from final fix');
-  if (fix.status !== 'done') return declineAll(`final fix blocked: ${fix.notes}`);
-  const declinedKeys = new Set((fix.declined || []).map(findingKey));
-  final.declined = (fix.declined || []).map((d) => {
-    const f = findings.find((x) => findingKey(x) === findingKey(d));
-    return { ...(f || d), reason: d.reason };
-  });
-  const attempted = findings.filter((f) => !declinedKeys.has(findingKey(f)));
-  if (attempted.length === 0) return final;
-  if (!present(fix.head) || fix.head === tip) {
-    for (const f of attempted) final.declined.push({ ...f, reason: 'final fix made no commits' });
-    return final;
+  // Whatever the fix agent did, commits it reports are delivered code.
+  if (fix && present(fix.head)) final.head = fix.head;
+  if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
+  if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
+  const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
+  const verifying = findings.map((f) => ({ ...f, disposition: dispositions.find((d) => d && d.id === f.id) || null }));
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
+  // A refused re-review returns the budget sentinel, which has no results.
+  if (!rr || !Array.isArray(rr.results)) {
+    return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
+      : 'no result from final re-review');
   }
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, fix.head, attempted),
-    finalReReviewSchema());
-  // A refused re-review returns the budget sentinel, which has no findings.
-  if (!rr || !Array.isArray(rr.findings)) {
-    const reason = rr && rr.__budget ? 'final re-review not run: budget exhausted'
-      : 'no result from final re-review';
-    for (const f of attempted) final.declined.push({ ...f, reason });
-    return final;
-  }
-  const openKeys = new Set(rr.findings.map(findingKey));
-  final.fixed = attempted.filter((f) => !openKeys.has(findingKey(f)));
-  for (const f of rr.findings) final.declined.push({ ...f, reason: 'still open after the final re-review' });
-  return final;
+  return settle(dispositions, rr);
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -146,23 +139,86 @@ function preflightResolved(m, text) {
   return { ...m, notes };
 }
 
+// A copy of the manifest whose notes carry the unblock note of each result
+// (next_note) to the tasks of later whose depends_on names its task: later
+// is the lanes and the join after the prelude, the join after the lanes (a
+// list's own dependents get the note from runTaskList; lanes run at once, so
+// a lane-to-lane note is not carried).
+function withCarriedNotes(m, results, later) {
+  const unblocked = results.filter((r) => present(r.next_note));
+  if (unblocked.length === 0) return m;
+  const notes = { ...(m.notes || {}) };
+  for (const t of later) {
+    for (const r of unblocked) {
+      if (!(t.depends_on || []).some((d) => d.id === r.task)) continue;
+      const line = `from ${r.task}, unblocked by the adjudicator: ${r.next_note}`;
+      if (notes[t.id] && notes[t.id].includes(line)) continue;
+      notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
+    }
+  }
+  return { ...m, notes };
+}
+
+// The undeclared dependencies pre-flight reported, split into the entries
+// the run keeps and the ones it drops with a reason: an entry must be an
+// object with string task, producer and what, name two different task ids of
+// the manifest, and name a task that is not done and reviewed (a done task
+// still to review keeps its entry: its reviewer and fix agents use it).
+function preflightUndeclared(m, entries) {
+  const ids = new Set([...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join].map((t) => t.id));
+  const kept = [];
+  const dropped = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const drop = (reason) => dropped.push({ entry, reason });
+    const shaped = entry !== null && typeof entry === 'object' && !Array.isArray(entry) &&
+      ['task', 'producer', 'what'].every((k) => typeof entry[k] === 'string');
+    if (!shaped) drop('not an object with string task, producer and what');
+    else if (!ids.has(entry.task)) drop(`task ${entry.task} is not in the run`);
+    else if (!ids.has(entry.producer)) drop(`producer ${entry.producer} is not in the run`);
+    else if (entry.task === entry.producer) drop('task and producer are the same');
+    else if (taskState(m, entry.task) === 'skip') drop(`task ${entry.task} is already done and reviewed`);
+    else kept.push({ task: entry.task, producer: entry.producer, what: entry.what });
+  }
+  return { kept, dropped };
+}
+
+// A copy of the manifest with consumes_extra: {<task>: [<producer>, ...]}
+// from the kept undeclared entries, producers in entry order without
+// duplicates. startCommand and the adjudicator's task-brief command pass
+// them as --also, so each producer's Produces block reaches the task's
+// briefs for this run (the manifest file is not changed).
+function withConsumesExtra(m, kept) {
+  const extra = {};
+  for (const e of kept) {
+    const list = extra[e.task] || (extra[e.task] = []);
+    if (!list.includes(e.producer)) list.push(e.producer);
+  }
+  return { ...m, consumes_extra: extra };
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
-//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings},
-//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items}|null,
-//  final:{findings, fixed, declined, cannot_verify}, agents_spawned,
+//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
+//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
+//  verify (the run-checks result at the delivered revision)|null,
+//  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
+//  (complete runs only: status complete says the run executed to the end,
+//  acceptance says whether the delivered revision meets the gates;
+//  acceptanceOf), agents_spawned,
 //  rulings_spent (adjudications that ran; a relaunch subtracts it from
 //  limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
-// (C2); they also reach the final fix wave. Task status is done, blocked,
-// skipped (done and reviewed earlier), or not_run. Under profile lite no
-// pre-flight agent runs (preflight has no conflicts or rulings) and
-// integrate stays null (validateManifest rejects lite with a post_integrate
-// hook, so no configured hook is skipped).
+// (C2); they also reach the final fix wave. Task status is done, deferred
+// (parked or unblocked by the adjudicator: never accepted), blocked, skipped
+// (done and reviewed earlier), or not_run. Under profile lite no
+// pre-flight agent runs (preflight has no conflicts, rulings or undeclared
+// entries) and integrate stays null (validateManifest rejects lite with a
+// post_integrate hook, so no configured hook is skipped).
 async function runAll(m, io) {
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
@@ -170,7 +226,8 @@ async function runAll(m, io) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
-      integrate: null, e2e: null, final: null, agents_spawned: 0, rulings_spent: 0,
+      integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
+      agents_spawned: 0, rulings_spent: 0,
     };
   }
 
@@ -186,10 +243,11 @@ async function runAll(m, io) {
   const autonomous = effectiveAutonomy(m) === 'autonomous';
 
   const tasks = {};
+  const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
     const range = taskState(m, t.id) === 'skip' ? (m.backfill || {})[t.id] : null;
     tasks[t.id] = {
-      status: taskState(m, t.id) === 'skip' ? 'skipped' : 'not_run',
+      status: taskState(m, t.id) === 'skip' ? (deferredBefore.has(t.id) ? 'deferred' : 'skipped') : 'not_run',
       rounds: null,
       tier_used: null,
       commits: range ? [range.base, range.head] : null,
@@ -199,7 +257,8 @@ async function runAll(m, io) {
   const record = (results) => {
     for (const r of results) {
       tasks[r.task] = {
-        status: r.status,
+        // A task the ledger lists as deferred stays deferred when skipped.
+        status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
         commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
@@ -216,8 +275,14 @@ async function runAll(m, io) {
   let integrate = null;
   let e2e = null;
   let final = null;
+  let verify = null;
+  let post = null;
+  let delivered = null;
+  let acceptance = null;
   // Set when a post-integrate fix's re-review returned no result (C2).
   let fixUnreviewed = false;
+  // The post-integrate check's result and the revision it covered.
+  let postCheck = null;
   const report = (status, reason = null) => ({
     status,
     run_id: m.run_id,
@@ -227,6 +292,9 @@ async function runAll(m, io) {
     integrate,
     e2e,
     final,
+    verify,
+    delivered_sha: delivered,
+    acceptance,
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
     ...(reason === null ? {} : { reason }),
@@ -261,18 +329,13 @@ async function runAll(m, io) {
     io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
   }
 
-  // Setup: the session ran scripts/setup and passed its output; without it
-  // (a hand-written manifest) the Setup agent does the same work.
-  let setup = m.setup_result;
-  if (!setup) {
-    io.phase('Setup');
-    setup = await call('setup', 'Setup', setupPrompt(m), setupSchema());
-    if (state.refused.length > 0) return budgetReport();
-    if (!setup || setup.ok !== true) {
-      return report('stopped', `setup failed: ${setup ? setup.notes : 'no result from setup'}`);
-    }
-  }
+  // Setup: the session ran scripts/setup and passed its output (the only
+  // setup; validateManifest requires it for a launch).
+  const setup = m.setup_result;
   for (const item of setup.discarded || []) io.log(`parallel-lanes: discarded uncommitted change ${item}`);
+  for (const p of setup.preserved || []) {
+    io.log(`parallel-lanes: saved the discarded changes of ${p.worktree} as ${p.ref} (${p.commit})`);
+  }
   if (!present(setup.feature_head)) return report('stopped', 'setup failed: no feature head reported');
   // The feature tip: the base of the next task on the feature branch.
   let tip = setup.feature_head;
@@ -288,13 +351,21 @@ async function runAll(m, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [] };
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
     if (state.refused.length > 0) return budgetReport();
     if (!pre) return report('stopped', 'no result from pre-flight');
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings] };
+    // Undeclared dependencies only add context: they reach the briefs of
+    // their task and never stop the run or call the adjudicator.
+    const { kept, dropped } = preflightUndeclared(m, pre.undeclared);
+    for (const d of dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped undeclared entry ${JSON.stringify(d.entry)} (${d.reason})`);
+    }
+    for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
+    m = withConsumesExtra(m, kept);
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -318,6 +389,7 @@ async function runAll(m, io) {
   const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
     counted, 'Prelude', true);
   record(prelude.results);
+  m = withCarriedNotes(m, prelude.results, [...m.lanes.flatMap((l) => l.tasks), ...m.join]);
   if (prelude.stopped !== null) stopAt('prelude', prelude);
   if (state.refused.length > 0) return budgetReport();
   if (prelude.stopped !== null) return report('stopped', 'prelude stopped');
@@ -338,6 +410,7 @@ async function runAll(m, io) {
     const list = await runTaskList(m, lane.tasks, featureWhere(m, lane.id),
       fromPhase ? starts.prelude || tip : tip, counted, lane.name, fromPhase);
     record(list.results);
+    m = withCarriedNotes(m, list.results, m.join);
     if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
     if (list.stopped !== null) return report('stopped', 'lanes stopped');
@@ -349,6 +422,7 @@ async function runAll(m, io) {
     const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
     for (const lr of laneResults) {
       record(lr.results);
+      m = withCarriedNotes(m, lr.results, m.join);
       if (lr.stopped !== null) stopAt(lr.lane, lr);
     }
     if (state.refused.length > 0) return budgetReport();
@@ -376,7 +450,7 @@ async function runAll(m, io) {
       if (state.refused.length > 0) return BUDGET;
       if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
-          postIntegrateReReviewPrompt(m, base, fix.head), finalReReviewSchema(), standard);
+          postIntegrateReReviewPrompt(m, base, fix.head), postIntegrateReReviewSchema(), standard);
         if (state.refused.length > 0) return BUDGET;
         if (rr && Array.isArray(rr.findings)) fixReview.push(...rr.findings);
         else fixUnreviewed = true;
@@ -457,6 +531,8 @@ async function runAll(m, io) {
       integrate.post_integrate = pr;
       if (pr.status !== 'done') return report('stopped', `post-integrate failed: ${pr.notes}`);
       tip = post.head;
+      // The revision the check covered: a later commit makes it stale.
+      postCheck = { status: pr.status, notes: pr.notes, checked_sha: post.head };
     }
     joinBase = starts.join || tip;
   }
@@ -470,17 +546,23 @@ async function runAll(m, io) {
   if (join.stopped !== null) return report('stopped', 'join stopped');
   tip = listTip(join);
 
+  // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
+  // Opus (same label) and the Opus result is used. It records the revision
+  // its checks covered.
+  const runE2e = async (label, phaseName) => {
+    let r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), sonnetHigh);
+    if (state.refused.length > 0) return null;
+    if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
+      r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), standard);
+      if (state.refused.length > 0) return null;
+    }
+    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
+      : { items: [], checked_sha: null, notes: `no result from ${label}` };
+  };
   if (m.hooks.e2e) {
     io.phase('E2E');
-    // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
-    // Opus (same label) and the Opus result is used.
-    let r = await callM('e2e', 'E2E', e2ePrompt(m), e2eSchema(), sonnetHigh);
+    e2e = await runE2e('e2e', 'E2E');
     if (state.refused.length > 0) return budgetReport();
-    if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
-      r = await callM('e2e', 'E2E', e2ePrompt(m), e2eSchema(), standard);
-      if (state.refused.length > 0) return budgetReport();
-    }
-    e2e = r ? { items: r.items } : { items: [], notes: 'no result from e2e' };
   }
 
   io.phase('Final review');
@@ -488,5 +570,42 @@ async function runAll(m, io) {
   if (state.refused.length > 0) return budgetReport();
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
+  delivered = final.head;
+
+  // Verify: the evidence acceptance rests on, at the delivered revision.
+  // The project checks always run there (scripts/run-checks); the e2e and
+  // post-integrate checks rerun only when a later commit made their evidence
+  // stale (the post-integrate one check-only).
+  io.phase('Verify');
+  if (checksCommand(m, null, featureDir(m)) !== null) {
+    verify = await callM('verify', 'Verify', verifyPrompt(m, delivered), verifySchema(), sonnetHigh);
+    if (state.refused.length > 0) return budgetReport();
+  }
+  if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
+    e2e = await runE2e('e2e recheck', 'Verify');
+    if (state.refused.length > 0) return budgetReport();
+  }
+  if (m.hooks.post_integrate && !lite && (!postCheck || postCheck.checked_sha !== delivered)) {
+    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true), statusSchema());
+    if (state.refused.length > 0) return budgetReport();
+    const pr = phaseCheck(r, 'post-integrate recheck');
+    postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };
+    if (postCheck.checked_sha !== null && postCheck.checked_sha !== delivered) {
+      postCheck = { status: 'failed', notes: `the recheck left HEAD at ${postCheck.checked_sha}`, checked_sha: delivered };
+    }
+  }
+  post = postCheck;
+  acceptance = acceptanceOf({
+    m, tasks, final, e2e, verify, post, delivered_sha: delivered, fix_unreviewed: fixUnreviewed,
+  });
+  io.log(`parallel-lanes: acceptance ${acceptance.status} at ${delivered}`
+    + (acceptance.reasons.length > 0 ? `: ${acceptance.reasons.map((r) => r.kind).join(', ')}` : ''));
   return report('complete');
+}
+
+// A phase agent's status result as {status, notes}: done only with a head.
+function phaseCheck(r, label) {
+  if (!r) return { status: 'failed', notes: `no result from ${label}` };
+  if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+  return { status: r.status, notes: r.notes };
 }

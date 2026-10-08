@@ -23,8 +23,11 @@ claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 dest="$claude_dir/skills/parallel-lanes"
 settings="$claude_dir/settings.json"
 agent_file="$claude_dir/agents/parallel-lanes-worker.md"
-start_cmd="bash $dest/hooks/session-start.sh"
-notice_cmd="bash $dest/hooks/notice.sh"
+# The hook commands run through a shell, so the paths are single-quoted
+# (a config dir may contain spaces or quotes).
+shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+start_cmd="bash $(shquote "$dest/hooks/session-start.sh")"
+notice_cmd="bash $(shquote "$dest/hooks/notice.sh")"
 
 die() { echo "install: $*" >&2; exit 1; }
 

@@ -141,6 +141,50 @@ test('start-task regenerates and prints each brief', () => {
   assert.ok(res.stdout.indexOf('brief T1') < res.stdout.indexOf('brief T2'));
 });
 
+test("start-task passes --also to the named task's brief only", () => {
+  const c = newCase();
+  write(c.plan, [
+    PLAN,
+    '### Task P: Producer',
+    '',
+    'Body of task P.',
+    '',
+    '- Produces: `made()` returns 7.',
+    '',
+  ].join('\n'));
+  const out1 = join(c.root, 'briefs', 'T1.md');
+  const out2 = join(c.root, 'briefs', 'T2.md');
+  const res = startTask(
+    c.lane, c.plan, '--brief', 'T1', out1, '--brief', 'T2', out2, '--also', 'T2', 'P',
+  );
+  assert.equal(res.code, 0, res.stderr);
+  const appended = [
+    '## Produces of Task P: Producer (consumed by this task)',
+    '',
+    '- Produces: `made()` returns 7.',
+    '',
+  ].join('\n');
+  const text2 = readFileSync(out2, 'utf8');
+  assert.ok(text2.endsWith(`\n\n${appended}`), text2);
+  assert.ok(!readFileSync(out1, 'utf8').includes('## Produces of Task P'));
+  assert.ok(res.stdout.includes(`===== brief T2: ${out2} =====\n${text2}`), res.stdout);
+});
+
+test('start-task exits 2 for --also naming a task without --brief', () => {
+  const c = newCase();
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  git(c.project, 'checkout', '-q', 'feature');
+  commit(c.project, 'b.txt', 'prelude\n', 'prelude');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(
+    c.lane, c.plan, '--sync', 'feature', '--brief', 'T1', out, '--also', 'T2', 'T1',
+  );
+  assert.equal(res.code, 2);
+  assert.match(res.stderr, /T2/);
+  assert.equal(existsSync(out), false);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), head);
+});
+
 test('start-task --sync fast-forwards the worktree first', () => {
   const c = newCase();
   git(c.project, 'checkout', '-q', 'feature');
@@ -259,6 +303,7 @@ test('finish-task records every task\'s commits and prints head and changed_line
   const lines = res.stdout.trim().split('\n');
   assert.equal(lines.length, 1, res.stdout);
   assert.deepEqual(JSON.parse(lines[0]), {
+    base: from,
     head: second,
     changed_lines: 4,
     commits: [first, second],
@@ -267,8 +312,8 @@ test('finish-task records every task\'s commits and prints head and changed_line
   assert.deepEqual(done(c), ['T1', 'T2']);
   const entries = readFileSync(join(c.ledgerDir, 'a.jsonl'), 'utf8').trim().split('\n');
   assert.deepEqual(entries.map((l) => JSON.parse(l)), [
-    { task: 'T1', event: 'committed', commits: [first, second] },
-    { task: 'T2', event: 'committed', commits: [first, second] },
+    { task: 'T1', event: 'committed', base: from, head: second, commits: [first, second] },
+    { task: 'T2', event: 'committed', base: from, head: second, commits: [first, second] },
   ]);
 });
 
@@ -335,12 +380,63 @@ test('finish-task refuses an unsafe lane or a ledger path that is not a director
   assert.equal(readFileSync(file, 'utf8'), '');
 });
 
-test('finish-task without --commit exits 2', () => {
+// Review finding 5: an interrupted implementer leaves commit A unrecorded; the
+// retry makes B and lists only B. The ledger must still hold the task's real
+// base and every commit since it, read from git.
+test('finish-task records the whole FROM..HEAD range even when only the last commit is listed', () => {
+  const c = newCase();
+  const from = git(c.lane, 'rev-parse', 'HEAD');
+  const a = commit(c.lane, 'b.txt', 'x\n', 'commit A (unrecorded attempt)');
+  const b = commit(c.lane, 'c.txt', 'y\n', 'commit B (the retry)');
+  const res = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1', '--commit', b);
+  assert.equal(res.code, 0, res.stderr);
+  const [entry] = readFileSync(join(c.ledgerDir, 'a.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(entry, { task: 'T1', event: 'committed', base: from, head: b, commits: [a, b] });
+});
+
+test('finish-task without --commit records the range git lists', () => {
+  const c = newCase();
+  const from = git(c.lane, 'rev-parse', 'HEAD');
+  const a = commit(c.lane, 'b.txt', 'x\n', 'add b');
+  const res = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout).commits, [a]);
+  assert.deepEqual(done(c), ['T1']);
+});
+
+test('finish-task with no commit since FROM exits 3 and records nothing', () => {
   const c = newCase();
   const from = git(c.lane, 'rev-parse', 'HEAD');
   const res = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1');
-  assert.equal(res.code, 2);
+  assert.equal(res.code, 3);
+  assert.match(res.stderr, /no commits/);
   assert.deepEqual(done(c), []);
+});
+
+test('finish-task refuses a FROM that is not an ancestor of HEAD', () => {
+  const c = newCase();
+  git(c.project, 'switch', '-q', 'main');
+  const elsewhere = commit(c.project, 'z.txt', 'z\n', 'on main only');
+  commit(c.lane, 'b.txt', 'x\n', 'add b');
+  const res = finishTask(c.lane, 'lane-a', elsewhere, c.ledgerDir, 'a', '--task', 'T1');
+  assert.equal(res.code, 3);
+  assert.match(res.stderr, /not an ancestor/);
+  assert.deepEqual(done(c), []);
+});
+
+test('finish-task --settled records the range from git, even an empty one', () => {
+  const c = newCase();
+  const from = git(c.lane, 'rev-parse', 'HEAD');
+  const empty = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T1', '--settled', 'park');
+  assert.equal(empty.code, 0, empty.stderr);
+  const partial = commit(c.lane, 'b.txt', 'x\n', 'partial work before a block');
+  const res = finishTask(c.lane, 'lane-a', from, c.ledgerDir, 'a', '--task', 'T2', '--settled', 'unblock');
+  assert.equal(res.code, 0, res.stderr);
+  const entries = readFileSync(join(c.ledgerDir, 'a.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(entries, [
+    { task: 'T1', event: 'settled', outcome: 'park', base: from, head: from, commits: [] },
+    { task: 'T2', event: 'settled', outcome: 'unblock', base: from, head: partial, commits: [partial] },
+  ]);
 });
 
 test('finish-task ignores GIT_DIR and friends pointing at another repo', () => {
@@ -353,6 +449,7 @@ test('finish-task ignores GIT_DIR and friends pointing at another repo', () => {
   );
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(JSON.parse(res.stdout), {
+    base: from,
     head: sha,
     changed_lines: 2,
     commits: [sha],

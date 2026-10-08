@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Run a checkout's project commands one by one and keep every exit status.
+
+usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd ...]
+
+Each COMMAND runs with bash -c in DIR, in the given order, and every one runs
+even after a failure: one group's failure never hides another's. Command
+output goes to stderr. stdout is one JSON line, also written to FILE with
+--out (FILE must resolve inside ROOT with --root, the run's ledger directory):
+  {"checkout": DIR, "branch": <abbrev-ref>, "head": <full sha checked>,
+   "results": [{"group": GROUP, "command": COMMAND, "exit": <code>}],
+   "ok": <true when every exit is 0>, "clean": <true when git status
+   --porcelain printed nothing after the commands>}
+
+head is read before the commands run and again after; if a command moved
+HEAD the result says so in "head_after" and ok is false (a check must not
+change the code it checks).
+
+GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
+GIT_COMMON_DIR are removed from the environment.
+
+Exit 0 when ok; 1 when a command failed or moved HEAD; 2 on usage error; 3
+when DIR is not a git checkout or FILE is outside ROOT.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+USAGE = "usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]"
+
+
+def fail(code, message):
+    print(f"run-checks: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def git(directory, *args):
+    return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, env=ENV)
+
+
+def contained(path, root):
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    return os.path.commonpath([resolved, root]) == root
+
+
+def parse(argv):
+    if not argv or not argv[0] or argv[0].startswith("-"):
+        fail(2, USAGE)
+    directory, rest = argv[0], argv[1:]
+    out = root = None
+    cmds = []
+    while rest:
+        if rest[0] == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
+            cmds.append((rest[1], rest[2]))
+            rest = rest[3:]
+        elif rest[0] in ("--out", "--root") and len(rest) >= 2 and rest[1]:
+            if rest[0] == "--out":
+                out = rest[1]
+            else:
+                root = rest[1]
+            rest = rest[2:]
+        else:
+            fail(2, USAGE)
+    return directory, out, root, cmds
+
+
+def head_of(directory):
+    res = git(directory, "rev-parse", "--verify", "HEAD^{commit}")
+    if res.returncode != 0:
+        fail(3, f"{directory!r} is not a git checkout with a commit: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def main(argv):
+    directory, out, root, cmds = parse(argv)
+    if out is not None and root is not None and (os.path.islink(out) or not contained(out, root)):
+        fail(3, f"output path {out!r} is outside {root!r}")
+    head = head_of(directory)
+    branch = git(directory, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    results = []
+    for group, command in cmds:
+        res = subprocess.run(["bash", "-c", command], cwd=directory, env=ENV,
+                             stdout=sys.stderr, stderr=sys.stderr)
+        results.append({"group": group, "command": command, "exit": res.returncode})
+    after = head_of(directory)
+    clean = git(directory, "status", "--porcelain").stdout == ""
+    report = {"checkout": directory, "branch": branch, "head": head, "results": results,
+              "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": clean}
+    if after != head:
+        report["head_after"] = after
+    line = json.dumps(report)
+    if out is not None:
+        parent = os.path.dirname(out)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+    print(line)
+    sys.exit(0 if report["ok"] else 1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

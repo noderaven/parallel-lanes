@@ -71,9 +71,10 @@ function stub(script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 const ledgerEntry = (id, event, extra) => JSON.stringify({ task: id, event, ...extra });
-const finishTasks = "--task 'T2' --task 'T3' --commit";
+const finishTasks = "--task 'T2' --task 'T3'";
 const blockedEntry = (id) => ledgerEntry(id, 'blocked', { reason: '<reason>' });
-const reviewedEntry = (id, rounds) => ledgerEntry(id, 'reviewed', { rounds });
+// The approval command a reviewer runs per task (scripts/ledger reviewed).
+const reviewedEntry = (id, rounds) => `scripts/ledger' reviewed '/work/ledger' 'alpha' '${id}' ${rounds} `;
 
 test('two batched tasks run as one implementer and one review, with a result for each', async () => {
   const m = manifest([task('T2', { batch: 'x' }), task('T3', { batch: 'x' })]);
@@ -249,17 +250,14 @@ test('autonomous: a batch parked at the round cap gives the adjudicator every se
   const s = stub({
     'T2-T3 implement': [done('h1')],
     'T2-T3 review': [changes('OPEN-1')],
-    'T2 adjudicate': [ruled('park', 'PARK-B')],
+    'T2 adjudicate': [{ ...ruled('park', 'PARK-B'), head: 'h1' }],
   });
   const r = await runLane(m, m.lanes[0], 'b0', s.io);
   assert.deepEqual(labels(s.calls), ['T2-T3 implement', 'T2-T3 review', 'T2 adjudicate']);
-  for (const id of ['T2', 'T3']) {
-    for (const outcome of ['park', 'unblock']) {
-      const entry = ledgerEntry(id, 'settled', { outcome, base: 'b0', head: 'h1' });
-      assert.ok(s.calls[2].prompt.includes(entry), `${id} ${outcome}`);
-    }
+  for (const outcome of ['park', 'unblock']) {
+    assert.ok(s.calls[2].prompt.includes(`'b0' '/work/ledger' 'alpha' ${finishTasks} --settled ${outcome}`), outcome);
   }
-  assert.deepEqual(r.results.map((x) => [x.task, x.status, x.head]), [['T2', 'done', 'h1'], ['T3', 'done', 'h1']]);
+  assert.deepEqual(r.results.map((x) => [x.task, x.status, x.head]), [['T2', 'deferred', 'h1'], ['T3', 'deferred', 'h1']]);
 });
 
 test('autonomous: an adjudicator stop on a batch stops the lane at its first task', async () => {
@@ -279,14 +277,14 @@ test('autonomous: an unblocked batch carries its note to the next task', async (
   const m = manifest([task('T2', { batch: 'x' }), task('T3', { batch: 'x' }), task('T4')]);
   const s = stub({
     'T2-T3 implement': [blocked('b0', 'a'), blocked('b0', 'b')],
-    'T2 adjudicate': [ruled('unblock', 'UNBLOCK-B: stub it')],
+    'T2 adjudicate': [{ ...ruled('unblock', 'UNBLOCK-B: stub it'), head: 'b0' }],
     'T4 implement': [done('h4')],
     'T4 review': [approve()],
   });
   const r = await runLane(m, m.lanes[0], 'b0', s.io);
   assert.ok(s.calls[3].prompt.includes('UNBLOCK-B: stub it'));
   assert.deepEqual(r.results.map((x) => [x.task, x.status, x.head]),
-    [['T2', 'done', 'b0'], ['T3', 'done', 'b0'], ['T4', 'done', 'h4']]);
+    [['T2', 'deferred', 'b0'], ['T3', 'deferred', 'b0'], ['T4', 'done', 'h4']]);
 });
 
 test('supervised: a blocked batch stops the lane at its first task without adjudication', async () => {

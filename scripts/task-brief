@@ -1,18 +1,51 @@
 #!/usr/bin/env python3
-"""Extract one task's section from a plan into a brief file.
+"""Extract one task's section from a plan into a brief file, followed by the
+Produces blocks of the tasks it consumes.
 
-usage: task-brief PLAN TASK_ID OUT
+usage: task-brief PLAN TASK_ID OUT [--root DIR] [--also ID ...]
+
+TASK_ID must be a safe id (^[A-Za-z0-9_][A-Za-z0-9._-]*$: no '/', no leading
+'.' or '-'), so the id can name a file. With --root DIR, OUT must resolve
+(symlinks included) to a path inside DIR, and OUT itself must not be a
+symlink: the run's artifacts stay inside its ledger directory.
 
 The section starts at the heading '#+ Task <TASK_ID>: ...' (the id compared
 literally and whole, so 'Task 1' does not match 'Task 10', 'Task 1a', or
 'Task 1.5'; qualifiers such as '(join)' may precede the colon). It ends before
 the next '#+ Task ' heading of the same or higher level, or before any heading
 of a strictly higher level. Headings inside fenced code blocks are ignored.
-Heading and section rules live in _plan.py, shared with derive-lanes.
+Heading and section rules live in _plan.py; brief rules in _brief.py.
 
-Exit 0 on success; 2 on usage error; 3 if the plan is unreadable, the heading
-is missing or duplicated, or the section has no content. Nothing is written
-unless the exit is 0.
+Referenced tasks come from the section's Consumes bullet (the first
+'- Consumes:' line outside fenced code, plus its deeper-indented continuation
+lines) and from the --also ids. In the bullet, an id with both a letter and a
+digit (G1) matches as a whole word ('G1.5' does not name G1); any other id
+(4, 1.5) matches only after 'Task' or 'Tasks', including lists such as
+'Tasks 3, 6 and 9' or 'Tasks 2 and 3 outputs'. An id after a list separator
+counts unless a unit follows it ('Task 4 and 3 mi' names Task 4 only). Only
+ids with a heading in the plan count from the bullet; the task itself never
+counts.
+
+After the section, for each referenced task in plan order:
+
+    ## Produces of Task <ID>: <title> (consumed by this task)
+
+    <the Produces block, verbatim>
+
+The Produces block is the first '- Produces:' line outside fenced code in that
+task's section and every following line up to the first non-blank line indented
+no deeper than the bullet, except that a fenced code block opened inside the
+block (at any indent, or right after the bullet line) runs to its closing
+fence. A task without one gets its heading followed by
+'Task <ID> has no Produces block in the plan.' Then one line per --also id with
+no heading: 'Task <ID> has no heading in the plan.' One blank line separates
+each appended part. With no Consumes bullet and no --also ids the brief is the
+section alone.
+
+Exit 0 on success; 2 on usage error (an unsafe TASK_ID or --also id, an
+option without its value, any other option); 3 if the plan is unreadable, the
+heading is missing or duplicated, the section has no content, or OUT is
+outside --root. Nothing is written unless the exit is 0.
 """
 
 import os
@@ -20,7 +53,9 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import _plan  # noqa: E402
+import _brief  # noqa: E402
+
+USAGE = "usage: task-brief PLAN TASK_ID OUT [--root DIR] [--also ID ...]"
 
 
 def fail(code, message):
@@ -28,31 +63,59 @@ def fail(code, message):
     sys.exit(code)
 
 
-def extract(text, task_id):
-    lines = text.splitlines()
-    starts = [s for s in _plan.task_sections(lines) if s.id == task_id]
-    if not starts:
-        fail(3, f"no heading for task {task_id!r}")
-    if len(starts) > 1:
-        fail(3, f"task {task_id!r} has {len(starts)} headings; refusing to guess")
-    section = lines[starts[0].start:starts[0].end]
-    while section and not section[-1].strip():
-        section.pop()
-    if not any(line.strip() for line in section[1:]):
-        fail(3, f"task {task_id!r} section is empty")
-    return "\n".join(section) + "\n"
+def contained(path, root):
+    """Whether path, with every existing ancestor's symlinks resolved, lies
+    inside root (also resolved). The missing tail is taken as written."""
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    return os.path.commonpath([resolved, root]) == root
+
+
+def parse_args(argv):
+    if len(argv) < 3 or not all(argv[:3]):
+        fail(2, USAGE)
+    plan, task_id, out = argv[:3]
+    if not _brief.is_safe_id(task_id):
+        fail(2, f"unsafe task id {task_id!r} (it must match {_brief.TASK_ID.pattern})")
+    root = None
+    also = []
+    rest = argv[3:]
+    while rest:
+        if len(rest) < 2 or not rest[1] or rest[1].startswith("-"):
+            fail(2, USAGE)
+        if rest[0] == "--also":
+            if not _brief.is_safe_id(rest[1]):
+                fail(2, f"unsafe --also id {rest[1]!r}")
+            also.append(rest[1])
+        elif rest[0] == "--root" and root is None:
+            root = rest[1]
+        else:
+            fail(2, USAGE)
+        rest = rest[2:]
+    return plan, task_id, out, root, also
 
 
 def main(argv):
-    if len(argv) != 3 or not all(argv):
-        fail(2, "usage: task-brief PLAN TASK_ID OUT")
-    plan, task_id, out = argv
+    plan, task_id, out, root, also = parse_args(argv)
+    if root is not None:
+        if os.path.islink(out):
+            fail(3, f"brief path {out!r} is a symlink; nothing written")
+        if not contained(out, root):
+            fail(3, f"brief path {out!r} is outside {root!r}; nothing written")
     try:
         with open(plan, encoding="utf-8") as f:
             text = f.read()
     except (OSError, UnicodeDecodeError) as e:
         fail(3, f"cannot read plan {plan!r}: {e}")
-    brief = extract(text, task_id)
+    try:
+        brief = _brief.build(text, task_id, also)
+    except _brief.BriefError as e:
+        fail(e.code, str(e))
     parent = os.path.dirname(out)
     if parent:
         os.makedirs(parent, exist_ok=True)

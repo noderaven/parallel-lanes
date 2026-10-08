@@ -143,6 +143,23 @@ test('session-start: each active-run marker adds a resume line', () => {
   );
 });
 
+// Review finding 7: a marker whose launch lock is held may belong to a run
+// another session is still running; it must not be offered for resume.
+test('session-start: a locked run is reported as possibly running, not offered for resume', () => {
+  const dir = freshActiveDir();
+  const env = { ...process.env, PL_ACTIVE_DIR: dir };
+  const a = spawnSync(BASH, [ACTIVE_RUN, 'acquire', 'live', '/plans/live.json'], { encoding: 'utf8', env });
+  assert.equal(a.status, 0, a.stderr);
+  const w = spawnSync(BASH, [ACTIVE_RUN, 'write', 'old', '/plans/old.json', 'stopped'], { encoding: 'utf8', env });
+  assert.equal(w.status, 0, w.stderr);
+  const res = runHook(SESSION_START, '{}', env);
+  assert.equal(res.code, 0, res.stderr);
+  const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+  assert.ok(ctx.includes('parallel-lanes run live (manifest /plans/live.json) may still be running in another session'), ctx);
+  assert.ok(!ctx.includes('Interrupted parallel-lanes run live'), ctx);
+  assert.ok(ctx.includes('Interrupted parallel-lanes run old (manifest /plans/old.json): offer the user a one-word resume.'), ctx);
+});
+
 test('session-start: control characters in a manifest path stay on one line', () => {
   const dir = freshActiveDir();
   const env = { ...process.env, PL_ACTIVE_DIR: dir };

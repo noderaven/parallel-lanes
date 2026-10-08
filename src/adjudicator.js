@@ -23,6 +23,7 @@ function adjudicatorSchema() {
       outcome: { type: 'string', enum: adjudicatorOutcomes() },
       text: { type: 'string' },
       stop_condition: { type: 'string', enum: adjudicatorStopConditions() },
+      head: { type: 'string' },
     },
     required: ['outcome', 'text'],
   };
@@ -54,9 +55,8 @@ function adjudicatorPrompt(m, ctx) {
     '',
     `Why you were called: ${adjudicatorKindText(ctx.kind)}`,
     ...(task && task.security === true ? [
-      'This task is security-flagged. Parking or unblocking it while a critical or important finding is open is',
-      'a security-sensitive decision: choose stop with stop_condition security for that (answer or clarify_plan',
-      'remain open to you); a park or unblock in that case is treated as that stop.',
+      'This task is security-flagged: deferring its requirements is the user\'s decision. Park and unblock are not',
+      'open to you (either one is treated as stop with stop_condition security); answer or clarify_plan are.',
     ] : []),
     '',
     `Plan: ${m.plan}`,
@@ -67,7 +67,8 @@ function adjudicatorPrompt(m, ctx) {
   if (task) {
     const files = taskFiles(m, task);
     const brief = `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
-      `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)}`;
+      `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)} --root ${shellQuote(m.repo.ledger_dir)}` +
+      ((m.consumes_extra || {})[task.id] || []).map((p) => ` --also ${shellQuote(p)}`).join('');
     parts.push(
       `Task brief: ${files.brief}. Generate it from the current plan before reading it with:`,
       `  ${brief}`,
@@ -92,9 +93,10 @@ function adjudicatorPrompt(m, ctx) {
     '- answer: your text answers the question or settles the blocker; it is given to the task as its note and',
     '  the task retries.',
     "- clarify_plan: your text is a ruling that amends the task's brief for this run only; the task retries.",
-    '- park: the open findings are recorded as deferred and the task completes as it is.',
-    '- unblock: your text is the smallest change that unblocks the dependent tasks; the task completes and the',
-    '  text is carried to the next task.',
+    '- park: the task is deferred as it is, with its open findings: the run goes on, but its work is not',
+    '  accepted until the user takes the deferral up.',
+    '- unblock: your text is the smallest change that unblocks the dependent tasks; the task is deferred as for',
+    '  park and the text is carried to the tasks that depend on it.',
     '- stop: the lane stops and the user decides. Allowed only for these four stop conditions, named in',
     '  stop_condition:',
     '  - destructive: irreversible/destructive operation',
@@ -106,12 +108,13 @@ function adjudicatorPrompt(m, ctx) {
     'Record your ruling, in the format `Ruling: decision - why - cost if wrong`, as a ledger ruling event with:',
     `  ${ruling}`,
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
-    'If the details above name a ledger command for your outcome, run it too.',
+    'For park or unblock, run the command the details above give for that outcome; it prints JSON with a head.',
     '',
     'Return a structured result: outcome (answer, clarify_plan, park, unblock, or stop); text = your ruling',
     'text for the task (the answer, the brief amendment, what is parked, the unblocking change, or why you',
     'stop); stop_condition (destructive, security, outside_side_effect, or plan_broken) only when outcome is',
-    'stop. That result replaces any other output format.',
+    'stop; head = the head that command printed, for park or unblock. That result replaces any other output',
+    'format.',
   );
   return parts.join('\n');
 }
@@ -123,6 +126,9 @@ function adjudicatorResult(r) {
   if (!adjudicatorOutcomes().includes(r.outcome) || typeof r.text !== 'string') return null;
   const hasCondition = r.stop_condition !== undefined;
   if (hasCondition && !adjudicatorStopConditions().includes(r.stop_condition)) return null;
+  if (r.outcome === 'park' || r.outcome === 'unblock') {
+    return { outcome: r.outcome, text: r.text, ...(present(r.head) ? { head: r.head } : {}) };
+  }
   if (r.outcome !== 'stop') return { outcome: r.outcome, text: r.text };
   if (!hasCondition) return null;
   return { outcome: 'stop', text: r.text, stop_condition: r.stop_condition };

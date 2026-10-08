@@ -11,7 +11,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -41,13 +41,22 @@ const ledger = (...args) => run('python3', 'ledger', args);
 
 // --- find-superpowers -------------------------------------------------------
 
-function fakeInstall(dir, { pkgVersion, pluginVersion, prompt = true }) {
-  mkdirSync(join(dir, 'skills', 'subagent-driven-development'), { recursive: true });
-  if (prompt) {
-    writeFileSync(
-      join(dir, 'skills', 'subagent-driven-development', 'implementer-prompt.md'),
-      'prompt\n',
-    );
+// Every file of a superpowers install that a run uses (find-superpowers
+// requires them all). prompt: false leaves out the implementer prompt;
+// skip names one more file to leave out.
+const SP_FILES = [
+  'subagent-driven-development/implementer-prompt.md',
+  'subagent-driven-development/task-reviewer-prompt.md',
+  'subagent-driven-development/re-review-prompt.md',
+  'subagent-driven-development/scripts/review-package',
+  'requesting-code-review/code-reviewer.md',
+];
+
+function fakeInstall(dir, { pkgVersion, pluginVersion, prompt = true, skip = null }) {
+  for (const rel of SP_FILES) {
+    if ((!prompt && rel.endsWith('implementer-prompt.md')) || rel === skip) continue;
+    mkdirSync(dirname(join(dir, 'skills', rel)), { recursive: true });
+    writeFileSync(join(dir, 'skills', rel), 'file\n');
   }
   if (pkgVersion) {
     writeFileSync(
@@ -97,6 +106,25 @@ test('find-superpowers exits 3 when the search roots have no candidates at all',
   assert.equal(res.code, 3);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, '');
+});
+
+test('find-superpowers skips an install that lacks a file a run needs', () => {
+  const root = workDir();
+  fakeInstall(join(root, 'complete'), { pkgVersion: '6.4.2' });
+  fakeInstall(join(root, 'newer but partial'), { pkgVersion: '9.0.0', skip: 'subagent-driven-development/re-review-prompt.md' });
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: root });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout.trim(), join(root, 'complete', 'skills'));
+});
+
+test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', () => {
+  const config = join(workDir(), 'config dir');
+  fakeInstall(join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2'), { pkgVersion: '6.4.2' });
+  const env = { CLAUDE_CONFIG_DIR: config, HOME: join(workDir(), 'empty home') };
+  delete process.env.PL_SEARCH_ROOTS;
+  const res = findSuperpowers(env);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout.trim(), join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
 });
 
 test('find-superpowers rejects arguments with exit 2', () => {
@@ -249,6 +277,251 @@ test('task-brief exits 2 on a usage error', () => {
   assert.equal(res.code, 2);
 });
 
+// Writes planText to a fresh plan file and runs task-brief for id with any
+// extra args. Returns the result and the brief text (null when not written).
+function briefFor(planText, id, ...extra) {
+  const dir = workDir();
+  const plan = join(dir, 'plan file.md');
+  writeFileSync(plan, planText);
+  const out = join(dir, 'briefs', `${id} brief.md`);
+  const res = taskBrief(plan, id, out, ...extra);
+  return { res, brief: existsSync(out) ? readFileSync(out, 'utf8') : null };
+}
+
+const appendedHeadings = (brief) =>
+  brief.split('\n').filter((l) => l.startsWith('## Produces of Task '));
+
+const CONSUMER = [
+  '### Task C1: Consumer',
+  '',
+  '**Interfaces:**',
+  '- Consumes: G1, G2; `DAYS` (core).',
+  '- Produces: `check(plan)`.',
+  '',
+  'Body of C1.',
+];
+const PRODUCERS = [
+  '### Task G1: Generator',
+  '',
+  '**Interfaces:**',
+  '- Consumes: nothing.',
+  '- Produces:',
+  '  - `gen(n)` returns a list of weeks.',
+  '    Each week has a stage divider.',
+  '',
+  '  - Dividers sit at the top, one per week.',
+  '',
+  'Body of G1.',
+  '',
+  '### Task G2: Second generator',
+  '',
+  '- Produces: `days()` returns DAYS.',
+  '  Continued on a deeper line.',
+  '- Another bullet.',
+  '',
+];
+
+test('task-brief appends the Produces of tasks named in Consumes', () => {
+  const plan = ['# Plan', '', ...CONSUMER, '', ...PRODUCERS].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  const own = [...CONSUMER, ''].join('\n');
+  const g1 = [
+    '## Produces of Task G1: Generator (consumed by this task)',
+    '',
+    '- Produces:',
+    '  - `gen(n)` returns a list of weeks.',
+    '    Each week has a stage divider.',
+    '',
+    '  - Dividers sit at the top, one per week.',
+  ].join('\n');
+  const g2 = [
+    '## Produces of Task G2: Second generator (consumed by this task)',
+    '',
+    '- Produces: `days()` returns DAYS.',
+    '  Continued on a deeper line.',
+  ].join('\n');
+  assert.equal(brief, `${own}\n${g1}\n\n${g2}\n`);
+});
+
+test('task-brief reads numeric ids only after Task or Tasks', () => {
+  const lines = ['# Plan', ''];
+  for (const id of ['2', '3', '4', '5', '6', '9', '10', '13']) {
+    lines.push(`### Task ${id}: Number ${id}`, '', `- Produces: out${id}.`, '');
+  }
+  lines.push(
+    '### Task 8: Consumer',
+    '',
+    "- Consumes: the API contract (Task 4); Task 3's output; Tasks 10 and 13; Tasks 5, 6 and 9; 3 mi a week 2",
+    '',
+  );
+  const { res, brief } = briefFor(lines.join('\n'), '8');
+  assert.equal(res.code, 0, res.stderr);
+  const ids = appendedHeadings(brief).map((h) => h.match(/^## Produces of Task (\S+):/)[1]);
+  assert.deepEqual(ids, ['3', '4', '5', '6', '9', '10', '13']);
+});
+
+test('task-brief stops a Produces block at the next bullet at its indent', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '**Interfaces:**',
+    '- Produces: `api()`.',
+    '  - returns 404 no_profile when the profile is absent or invalid.',
+    '',
+    '- [ ] **Step 1: Write the failing test**',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(!brief.includes('Step 1'), brief);
+  assert.ok(
+    brief.endsWith(
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+        '- Produces: `api()`.\n' +
+        '  - returns 404 no_profile when the profile is absent or invalid.\n',
+    ),
+    JSON.stringify(brief),
+  );
+});
+
+test('task-brief copies a single-line Produces block', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo(x)` returns a string.',
+    'Prose after the bullet.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\n- Consumes: A1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      '- Produces: `foo(x)` returns a string.\n',
+  );
+});
+
+test('task-brief notes a missing Produces block and exits 0', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    'No interfaces here.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    '- Consumes: A1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\n- Consumes: A1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      'Task A1 has no Produces block in the plan.\n',
+  );
+});
+
+test('task-brief notes an --also id with no heading and exits 0', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo()`.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    'Body of B1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1', '--also', 'Z9', '--also', 'A1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(
+    brief,
+    '### Task B1: Consumer\n\nBody of B1.\n\n' +
+      '## Produces of Task A1: Producer (consumed by this task)\n\n' +
+      '- Produces: `foo()`.\n\n' +
+      'Task Z9 has no heading in the plan.\n',
+  );
+});
+
+test('task-brief leaves a brief without a Consumes bullet unchanged', () => {
+  const { res, brief } = briefFor(PLAN, 'T13a');
+  assert.equal(res.code, 0, res.stderr);
+  const lines = PLAN.split('\n');
+  const start = lines.indexOf('### Task T13a: Lettered');
+  const end = lines.indexOf('### Task T13b: Next');
+  assert.equal(brief, `${lines.slice(start, end - 1).join('\n')}\n`);
+  assert.equal(appendedHeadings(brief).length, 0);
+});
+
+test('task-brief reads a Consumes bullet without an Interfaces heading', () => {
+  const plan = [
+    '### Task A1: Producer',
+    '',
+    '- Produces: `foo()`.',
+    '',
+    '### Task B1: Consumer',
+    '',
+    'Some prose first.',
+    '',
+    '- Consumes: the foo helper',
+    '  from A1, used twice.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'B1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief), [
+    '## Produces of Task A1: Producer (consumed by this task)',
+  ]);
+});
+
+test('task-brief skips self-references, duplicates, and ids inside code fences', () => {
+  const plan = [
+    '### Task G1: Producer',
+    '',
+    '- Produces: `g1()`.',
+    '',
+    '### Task G9: Fenced only',
+    '',
+    '- Produces: `g9()`.',
+    '',
+    '### Task C1: Consumer',
+    '',
+    '```markdown',
+    '- Consumes: G9',
+    '```',
+    '',
+    '- Consumes: C1 itself, G1 and again G1.',
+    '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1', '--also', 'G1', '--also', 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief), [
+    '## Produces of Task G1: Producer (consumed by this task)',
+  ]);
+  assert.ok(!brief.includes('g9()'), brief);
+  assert.ok(!brief.includes('has no'), brief);
+});
+
+test('task-brief exits 2 for --also without an id', () => {
+  const plan = '### Task A1: One\n\nBody.\n';
+  for (const extra of [['--also'], ['--also', ''], ['--other', 'A1']]) {
+    const { res, brief } = briefFor(plan, 'A1', ...extra);
+    assert.equal(res.code, 2, `${extra.join(' ')}: ${res.stderr}`);
+    assert.equal(brief, null);
+  }
+});
+
 // --- ledger --------------------------------------------------------------------
 
 function appendOk(dir, lane, entry) {
@@ -261,6 +534,9 @@ function status(dir) {
   assert.equal(res.code, 0, res.stderr);
   return JSON.parse(res.stdout);
 }
+
+// The keys ledger status has always printed, with their original meaning.
+const core = ({ done, reviewed, blocked, start_points, carry }) => ({ done, reviewed, blocked, start_points, carry });
 
 test('ledger round-trips events across two lanes', () => {
   const dir = join(workDir(), 'ledger dir');
@@ -280,7 +556,7 @@ test('ledger round-trips events across two lanes', () => {
   });
   assert.ok(existsSync(join(dir, 'beta.jsonl')));
 
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['T1', 'T2'],
     reviewed: ['T1'],
     blocked: ['T3'],
@@ -295,7 +571,7 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 1 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
   appendOk(dir, 'alpha', { task: 'T13a', event: 'committed', commits: ['222'] });
-  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T13a'], reviewed: [], blocked: [], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 3 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
 });
@@ -303,9 +579,9 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
 test('ledger: a commit after a block clears the block', () => {
   const dir = workDir();
   appendOk(dir, 'alpha', { task: 'T7', event: 'blocked', reason: 'flaky' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: ['T7'], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T7', event: 'committed', commits: ['333'] });
-  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T7'], reviewed: [], blocked: [], start_points: {}, carry: {} });
 });
 
 test('ledger: a settled task is done and reviewed, even after a block and with no commits', () => {
@@ -315,7 +591,7 @@ test('ledger: a settled task is done and reviewed, even after a block and with n
   appendOk(dir, 'alpha', { task: 'T2', event: 'settled', outcome: 'park', base: 'b0', head: 'b0' });
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c1'] });
   appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'c1' });
-  assert.deepEqual(status(dir), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {}, carry: {} });
   // A later commit makes the task unreviewed again, as after a review.
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c2'] });
   assert.deepEqual(status(dir).reviewed, ['T2']);
@@ -325,7 +601,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'aaa111' });
   appendOk(dir, 'prelude', { task: 'P1', event: 'committed', commits: ['bbb222'] });
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['P1'],
     reviewed: [],
     blocked: [],
@@ -335,7 +611,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'ccc333' });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'ddd444' });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'eee555' });
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['P1'],
     reviewed: [],
     blocked: [],
@@ -354,7 +630,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
 test('ledger: a join start point alone omits the prelude key', () => {
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'fff666' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' }, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' }, carry: {} });
 });
 
 // Node's spawn() starts children too far apart to hit a first-append race, so
@@ -402,7 +678,7 @@ test('ledger append refuses a DIR that is a file with exit 3', () => {
 
 test('ledger status of a missing directory is empty', () => {
   const dir = join(workDir(), 'never created');
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: [], start_points: {}, carry: {} });
   assert.equal(existsSync(dir), false);
 });
 
@@ -469,4 +745,59 @@ test('ledger: carry holds the last adjudicator ruling after the last commit of a
   // A later commit means the task ran again; its unblock note no longer carries.
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c9'] });
   assert.deepEqual(status(dir).carry, {});
+});
+
+test('task-brief does not read G1.5 as a reference to G1', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task G1: First', '', '- Produces: `one()`.', '',
+    '### Task G1.5: Between', '', '- Produces: `onefive()`.', '',
+    '### Task C1: Consumer', '', "- Consumes: G1.5's output.", '',
+    '### Task C2: Other consumer', '', '- Consumes: G1. Also G1.5.', '',
+  ].join('\n');
+  const a = briefFor(plan, 'C1');
+  assert.equal(a.res.code, 0, a.res.stderr);
+  assert.deepEqual(appendedHeadings(a.brief).map((h) => h.split(':')[0]), ['## Produces of Task G1.5']);
+  const b = briefFor(plan, 'C2');
+  assert.deepEqual(appendedHeadings(b.brief).map((h) => h.split(':')[0]), [
+    '## Produces of Task G1', '## Produces of Task G1.5',
+  ]);
+});
+
+test('task-brief ends a Task list at an item that is followed by a word', () => {
+  const lines = ['# Plan', ''];
+  for (const id of ['3', '4', '10']) lines.push(`### Task ${id}: Number ${id}`, '', `- Produces: out${id}.`, '');
+  lines.push('### Task 8: Consumer', '', '- Consumes: Task 10 and 3 mi a week; Task 4 and 3 mi.', '');
+  const { res, brief } = briefFor(lines.join('\n'), '8');
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(appendedHeadings(brief).map((h) => h.split(':')[0]), [
+    '## Produces of Task 4', '## Produces of Task 10',
+  ]);
+});
+
+test('task-brief copies a fenced contract that starts right after the Produces bullet', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task A1: Producer', '',
+    '- Produces:', '```js', '- not a bullet', 'export const a = 1;', '```', '',
+    '- Next bullet.', '',
+    '### Task C1: Consumer', '', '- Consumes: A1', '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(brief.endsWith(
+    '(consumed by this task)\n\n- Produces:\n```js\n- not a bullet\nexport const a = 1;\n```\n'), brief);
+});
+
+test('task-brief runs a fence opened inside a Produces block to its close', () => {
+  const plan = [
+    '# Plan', '',
+    '### Task A1: Producer', '',
+    '- Produces: the api.', '  ```js', 'less indented body', '- also not a bullet', '  ```', '',
+    '- Next bullet.', '',
+    '### Task C1: Consumer', '', '- Consumes: A1', '',
+  ].join('\n');
+  const { res, brief } = briefFor(plan, 'C1');
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(brief.endsWith('- Produces: the api.\n  ```js\nless indented body\n- also not a bullet\n  ```\n'), brief);
 });

@@ -5,9 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript } from './harness.mjs';
 
-const { combinedFinalReviewPrompt, setupPrompt } = await loadHelpers([
-  'combinedFinalReviewPrompt', 'setupPrompt',
-]);
+const { combinedFinalReviewPrompt } = await loadHelpers(['combinedFinalReviewPrompt']);
 
 function task(id, extra = {}) {
   return { id, title: `Task ${id}`, files: [`src/${id}.js`], tier: 'standard', security: false, ...extra };
@@ -89,6 +87,8 @@ async function run(m, script) {
 }
 
 const labels = (calls) => calls.map((c) => c.label);
+// The run-checks JSON the verify agent returns for these manifests' commands.
+const verified = (sha) => ({ head: sha, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true });
 const LITE = ['T1', 'T2', 'T3', 'T4'];
 
 test('lite: no setup, pre-flight, integrate or post-integrate agent; one combined final reviewer', async () => {
@@ -96,8 +96,9 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   const script = {
     ...taskScript(LITE),
     'final review': [{ findings: [finding('combined issue')], cannot_verify: ['e2e: none'], head: 'T4-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', declined: [] }],
-    'final re-review': [{ findings: [] }],
+    'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }],
+    'final re-review': [{ results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
+    verify: [verified('f1')],
   };
   const { result, calls, phases } = await run(m, script);
   assert.equal(result.status, 'complete', JSON.stringify(result));
@@ -112,11 +113,12 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   assert.equal(reviewers[0].phase, 'Final review');
   assert.ok(reviewers[0].schema.required.includes('head'));
   // The single fix wave and its re-review follow, from the reviewer's head.
-  assert.deepEqual(names.slice(-2), ['final fix', 'final re-review']);
+  assert.deepEqual(names.slice(-3), ['final fix', 'final re-review', 'verify']);
+  assert.equal(result.acceptance.status, 'accepted');
   assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes('(now at T4-h)'));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['combined issue']);
   assert.deepEqual(result.final.cannot_verify, ['combined: e2e: none']);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: [] });
+  assert.deepEqual(result.preflight, { conflicts: [], rulings: [], undeclared: [] });
   assert.equal(result.integrate, null);
   assert.equal(result.agents_spawned, calls.length);
 });
@@ -126,6 +128,7 @@ test('lite: the lane works in the feature checkout on the feature branch with le
   const script = {
     ...taskScript(LITE),
     'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
+    verify: [verified('T4-h')],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
@@ -151,6 +154,7 @@ test('lite: an empty prelude starts the lane at the saved setup start point', as
   const script = {
     ...taskScript(['T2', 'T3', 'T4']),
     'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
+    verify: [verified('T4-h')],
   };
   const { result } = await run(m, script);
   assert.equal(result.status, 'complete');
@@ -171,6 +175,7 @@ test('lite: a backfilled first lane task after an empty prelude reviews its own 
     ...taskScript(['T3', 'T4']),
     'T2 review': [approve()],
     'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
+    verify: [verified('T4-h')],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
@@ -192,30 +197,11 @@ test('lite: a stopped lane stops the run before the join', async () => {
   assert.ok(!labels(calls).some((l) => l.startsWith('T4') || l.startsWith('final')));
 });
 
-test('lite without setup_result: the setup agent runs and its prompt lists no lane worktree', async () => {
-  const m = manifest();
-  const script = {
-    setup: [{ ok: true, discarded: [], worktrees: ['/work/repo'], feature_head: 'F0', notes: '' }],
-    ...taskScript(LITE),
-    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
-  };
-  const { result, calls } = await run(m, script);
-  assert.equal(result.status, 'complete');
-  assert.deepEqual(labels(calls).filter((l) => !/^T\d/.test(l)), ['setup', 'final review']);
-  const prompt = calls[0].prompt;
-  assert.ok(!prompt.includes('lane-alpha') && !prompt.includes('pl-run-1-alpha'), prompt);
-  assert.ok(!prompt.includes('worktree add -b'), prompt);
-  assert.ok(prompt.includes('lane alpha works in the feature checkout /work/repo'), prompt);
-  assert.deepEqual(result.tasks.T1.commits, ['F0', 'T1-h']);
-});
-
-test('setup prompt lite runs a lane setup override in the feature checkout', () => {
-  const m = manifest({ lane_commands: { alpha: { setup: ['make deps'] } } });
-  const prompt = setupPrompt(m);
-  assert.ok(prompt.includes('- /work/repo: npm ci'), prompt);
-  assert.ok(prompt.includes('- /work/repo (lane alpha): make deps'), prompt);
-  const plain = setupPrompt(manifest());
-  assert.ok(!plain.includes('(lane alpha)'), plain);
+test('lite without setup_result is invalid for a launch: there is no setup agent', async () => {
+  const { result, calls } = await run(manifest(), {});
+  assert.equal(result.status, 'invalid');
+  assert.ok(result.errors.some((e) => e.startsWith('setup_result: missing')));
+  assert.deepEqual(calls, []);
 });
 
 test('combined final review prompt names all three lenses and asks for head', () => {
@@ -229,30 +215,30 @@ test('combined final review prompt names all three lenses and asks for head', ()
   assert.ok(prompt.includes('"item":"login"'), prompt);
   assert.match(prompt, /head = the full sha printed by\s+git -C '\/work\/repo' rev-parse HEAD/);
   assert.ok(prompt.includes('main..pl/run-1'), prompt);
-  assert.match(prompt, /AI tool or assistant names/);
+  assert.match(prompt, /anything the commit rules forbid/);
   const fallback = combinedFinalReviewPrompt({ ...m, sp_dir: null }, { e2e: null });
   assert.ok(fallback.includes('superpowers not found'), fallback);
   assert.ok(fallback.includes('(no e2e hook)'), fallback);
 });
 
-test('full profile unchanged: setup, pre-flight, integrate and the three lenses run', async () => {
+test('full profile unchanged: pre-flight, integrate, the three lenses and verify run', async () => {
   const m = manifest({ profile: 'full', hooks: { post_integrate: 'POST' } });
+  m.setup_result = { feature_head: 'F0', worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
   const script = {
-    setup: [{ ok: true, discarded: [], worktrees: ['/work/wt/lane-alpha'], feature_head: 'F0', notes: '' }],
-    'pre-flight': [{ conflicts: [], rulings: [] }],
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
     integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
     'post-integrate': [{ status: 'done', head: 'P1', notes: '' }],
     ...taskScript(LITE),
     'final review sp': [{ findings: [], cannot_verify: [], head: 'P1' }],
     'final review security': [{ findings: [], cannot_verify: [], head: 'P1' }],
     'final review correctness': [{ findings: [], cannot_verify: [], head: 'P1' }],
+    verify: [verified('P1')],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
   assert.deepEqual(labels(calls).filter((l) => !/^T\d/.test(l)),
-    ['setup', 'pre-flight', 'integrate', 'post-integrate', 'final review sp', 'final review security', 'final review correctness']);
+    ['pre-flight', 'integrate', 'post-integrate', 'final review sp', 'final review security', 'final review correctness', 'verify']);
   const t2 = calls.find((c) => c.label === 'T2 implement').prompt;
   assert.ok(t2.includes('Worktree: /work/wt/lane-alpha (branch pl-run-1-alpha)'), t2);
   assert.deepEqual(result.tasks.T4.commits, ['P1', 'T4-h']);
-  assert.ok(setupPrompt(m).includes('lane alpha: worktree'));
 });

@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Check that a run manifest accounts for every task of its plan, both ways.
+
+usage: coverage PLAN MANIFEST
+
+Every '#+ Task <ID>:' heading of PLAN (_plan.task_sections) must appear
+exactly once in the manifest: in prelude, a lane, or join (run), or in
+excluded [{id, reason}] (not run: after-merge, operator, manual, or handled by
+a hook). Every manifest task id must have a heading in PLAN.
+
+Prints one JSON line:
+  {"plan": [ids in plan order], "run": [...], "excluded": [...],
+   "missing": [plan ids the manifest does not mention],
+   "unknown": [manifest ids with no heading in PLAN],
+   "duplicates": [ids the manifest lists more than once],
+   "ok": <true when missing, unknown and duplicates are empty>}
+
+Exit 0 when ok; 2 on usage error; 3 when the plan or manifest is unreadable
+or when ok is false.
+"""
+
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _plan  # noqa: E402
+
+
+def fail(code, message):
+    print(f"coverage: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main(argv):
+    if len(argv) != 2 or not all(argv):
+        fail(2, "usage: coverage PLAN MANIFEST")
+    try:
+        with open(argv[0], encoding="utf-8") as f:
+            plan_ids = [s.id for s in _plan.task_sections(f.read().splitlines())]
+        with open(argv[1], encoding="utf-8") as f:
+            m = json.load(f)
+        run = [t["id"] for t in m.get("prelude", [])]
+        for lane in m.get("lanes", []):
+            run += [t["id"] for t in lane.get("tasks", [])]
+        run += [t["id"] for t in m.get("join", [])]
+        excluded = [e["id"] for e in m.get("excluded", [])]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
+        fail(3, f"cannot read the plan or manifest: {e}")
+    listed = run + excluded
+    seen, duplicates = set(), []
+    for task_id in listed:
+        if task_id in seen and task_id not in duplicates:
+            duplicates.append(task_id)
+        seen.add(task_id)
+    missing = [t for t in plan_ids if t not in seen]
+    unknown = [t for t in listed if t not in plan_ids]
+    ok = not (missing or unknown or duplicates)
+    print(json.dumps({"plan": plan_ids, "run": run, "excluded": excluded, "missing": missing,
+                      "unknown": unknown, "duplicates": duplicates, "ok": ok}))
+    sys.exit(0 if ok else 3)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

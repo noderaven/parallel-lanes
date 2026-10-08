@@ -17,12 +17,16 @@ function tierSettings(tier) {
 // task's tier. Reviews are listed at high effort: the diff size that allows
 // medium (reviewSettings) is not known before the run. Fix rounds are not
 // predictable, so each task review counts as one; a task can add up to 2x
-// review_rounds more (fix plus re-review). No setup agent when setup_result
-// is present (scripts/setup ran). Profile lite has no pre-flight, integrate
-// or post-integrate agent and one combined final reviewer. Integrate and e2e
-// start on Sonnet. final_fix (Opus; Sonnet when every finding is minor or
-// docs-only) and final_re_review are listed as the upper bound; they run
-// only when the final reviews report findings. Retries, adjudications,
+// review_rounds more (fix plus re-review). There is no setup agent:
+// scripts/setup runs before the launch. Profile lite has no pre-flight,
+// integrate or post-integrate agent and one combined final reviewer.
+// Integrate and e2e start on Sonnet. final_fix (Opus; Sonnet when every
+// finding is minor or docs-only) and final_re_review are listed as the upper
+// bound; they run only when the final reviews report findings. Verify: the
+// verify agent (Sonnet) runs the project checks at the delivered revision
+// whenever a test, lint or build command exists; e2e_recheck and
+// post_integrate_recheck are listed as the upper bound: they run only when a
+// later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
 // predictable either; the max_agents budget covers them. Expects a valid
 // manifest.
@@ -45,7 +49,6 @@ function planAgents(m) {
     }
   };
 
-  if (!m.setup_result) add('Setup', null, null, 'setup', standard);
   if (!lite) add('Pre-flight', null, null, 'preflight', standard);
   addTasks('Prelude', null, m.prelude);
   for (const lane of m.lanes) addTasks(lane.name, lane.id, lane.tasks);
@@ -61,6 +64,9 @@ function planAgents(m) {
   for (const role of [...lenses, 'final_fix', 'final_re_review']) {
     add('Final review', null, null, role, standard);
   }
+  if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
+  if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
 }
 

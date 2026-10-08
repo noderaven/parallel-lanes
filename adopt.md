@@ -14,9 +14,12 @@ For a resume without a manifest or ledger, or with lane branches named different
    messages and titles the plan gives (`git log --oneline <feature branch>..<lane branch>`
    per lane). Show the mapping; the user confirms it.
 3. Seed the ledger with `committed` events only (never `reviewed` for work no reviewer
-   approved):
-   `python3 <skill_dir>/scripts/ledger append <ledger_dir> <lane> '{"task":"T1","event":"committed","commits":["ddd07f9"]}'`
-   where `<lane>` is `prelude`, the lane id, or `join`.
+   approved), each with the task's range: `base` = the commit the task started from (the
+   previous task's last commit, or the branch point), `head` = its last commit, and `commits`
+   = `git -C <root> rev-list --reverse <base>..<head>` exactly:
+   `python3 <skill_dir>/scripts/ledger append <ledger_dir> <lane> '{"task":"T1","event":"committed","base":"<base>","head":"<head>","commits":[<those shas>]}'`
+   where `<lane>` is `prelude`, the lane id, or `join`. `ledger backfill` (Resume step 3)
+   checks every range against git and refuses one that does not match.
 4. For each lane with earlier commits: `git -C <root> branch pl-<run_id>-<lane> <old branch>`.
    Lanes without earlier commits get their branch from setup.
 5. Use a fresh `worktree_root`: the old worktrees hold the old branches. Leave the old
@@ -124,10 +127,12 @@ Manifest excerpt:
 ```
 
 (The excerpt omits most tasks and the `b`, `c`, `e` entries of `lane_commands`, which match
-`a`.) The full manifest's dry run returns no errors, 64 agents, 5 lanes, `lanes_effective`
-4: setup 1, pre-flight 1, backfill reviews 4 (T0, T1, T13a, T14a), implement + review 2
-each for the other 23 lane tasks (46) and the 2 join tasks (4), integrate 1, post-integrate
-1, e2e 1, final reviews 5 (three lenses, fix, re-review; the last two are an upper bound). Confirmation table rows, abridged:
+`a`.) The full manifest's dry run returns no errors, 66 agents, 5 lanes, `lanes_effective`
+4: pre-flight 1, backfill reviews 4 (T0, T1, T13a, T14a), implement + review 2 each for the
+other 23 lane tasks (46) and the 2 join tasks (4), integrate 1, post-integrate 1, e2e 1,
+final reviews 5 (three lenses, fix, re-review; the last two are an upper bound), verify 3
+(the checks at the delivered revision, and the e2e and post-integrate rechecks, an upper
+bound). Confirmation table rows, abridged:
 
 | Lane | Task | Tier | Security | Agents |
 |---|---|---|---|---|
@@ -138,8 +143,8 @@ each for the other 23 lane tasks (46) and the 2 join tasks (4), integrate 1, pos
 | e | T22 | light | no | 2 |
 | join | T16 | standard | yes | 2 |
 | join | T23 | light | no | 2 |
-| run | setup, pre-flight, integrate, post-integrate, e2e, final x5 | standard | - | 10 |
-| | | | Total | 64 |
+| run | pre-flight, integrate, post-integrate, e2e, final x5, verify x3 | standard | - | 12 |
+| | | | Total | 66 |
 
 each task can add up to 2x review_rounds more agents (fix and re-review rounds)
 

@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-modules=(rules validate plan prompts-task prompts-phase adjudicator budget engine phases)
+modules=(rules validate plan prompts-task prompts-phase adjudicator budget engine acceptance phases)
 
 for name in main "${modules[@]}"; do
   if [ ! -f "$src/$name.js" ]; then

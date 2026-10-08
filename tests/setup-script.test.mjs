@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdtempSync,
   mkdirSync,
@@ -28,6 +29,8 @@ const GIT_ENV = {
   GIT_AUTHOR_EMAIL: 'author@example.invalid',
   GIT_COMMITTER_NAME: 'Test Author',
   GIT_COMMITTER_EMAIL: 'author@example.invalid',
+  // Launch locks of these tests never meet the user's real ones.
+  PL_ACTIVE_DIR: join(TMP, 'active markers'),
 };
 
 function sh(cmd, args, opts = {}) {
@@ -100,18 +103,26 @@ function manifest(c, overrides = {}) {
   };
 }
 
-function setup(c, m) {
+// Runs setup as the holder of the run's launch lock: unless the caller passes
+// its own PL_ACTIVE_DIR, the case gets its own marker dir, the lock is taken
+// once per run id, and its token is passed as --owner.
+function setup(c, m, extra = [], env = {}) {
   counter += 1;
   const path = join(c.root, `manifest ${counter}.json`);
   writeFileSync(path, JSON.stringify(m));
-  return sh('python3', [join(SCRIPTS, 'setup'), path]);
+  if (!('PL_ACTIVE_DIR' in env) && typeof m.run_id === 'string' && /^[a-z0-9-]+$/.test(m.run_id)) {
+    env = { ...env, PL_ACTIVE_DIR: join(c.root, 'own active dir') };
+    c.tokens = c.tokens || {};
+    if (!c.tokens[m.run_id]) {
+      const got = sh('bash', [join(SCRIPTS, 'active-run'), 'acquire', m.run_id, path], { env });
+      assert.equal(got.code, 0, got.stderr);
+      c.tokens[m.run_id] = got.stdout.trim();
+    }
+    if (!extra.includes('--owner')) extra = [...extra, '--owner', c.tokens[m.run_id]];
+  }
+  return sh('python3', [join(SCRIPTS, 'setup'), path, ...extra], { env });
 }
 
-function setupOk(c, m) {
-  const res = setup(c, m);
-  assert.equal(res.code, 0, res.stderr);
-  return JSON.parse(res.stdout);
-}
 
 function logLines(c) {
   return existsSync(c.log) ? readFileSync(c.log, 'utf8').trim().split('\n') : [];
@@ -134,6 +145,7 @@ test('setup: a fresh git run creates the branch and lane worktrees and prints se
     feature_head: base,
     worktrees: { a: laneDir(c, 'a'), b: laneDir(c, 'b') },
     discarded: [],
+    preserved: [],
   });
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -240,13 +252,16 @@ test('setup: ledger records run_started and status reports the earliest start po
     event: 'run_started',
     phase: 'setup',
     head: first.feature_head,
+    plan_sha256: null,
+    spec_sha256: null,
   });
   write(c.project, 'more.txt', 'more\n');
   git(c.project, 'add', 'more.txt');
   git(c.project, 'commit', '-q', '-m', 'more');
   const second = setupOk(c, m);
   assert.notEqual(second.feature_head, first.feature_head);
-  assert.deepEqual(ledgerStatus(c.ledgerDir), {
+  const { done, reviewed, blocked, start_points, carry } = ledgerStatus(c.ledgerDir);
+  assert.deepEqual({ done, reviewed, blocked, start_points, carry }, {
     done: [],
     reviewed: [],
     blocked: [],
@@ -305,6 +320,7 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
     feature_head: baseline,
     worktrees: { a: laneDir(c, 'a'), b: laneDir(c, 'b') },
     discarded: [],
+    preserved: [],
   });
   assert.equal(git(feature, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -422,4 +438,90 @@ test('setup: prunes only missing worktree records under worktree_root', () => {
   const list = git(c.project, 'worktree', 'list', '--porcelain');
   assert.ok(list.includes(`worktree ${own}`), "the user's missing worktree keeps its record");
   assert.ok(existsSync(join(laneDir(c, 'a'), 'README.md')), 'the lane worktree is recreated');
+});
+
+// --- review finding 7: overlapping launches and abandoned work ----------------
+
+const activeRun = (env, ...args) => sh('bash', [join(SCRIPTS, 'active-run'), ...args], { env });
+
+test('setup: a run locked by another launch is refused, and its in-progress work survives', () => {
+  const c = newCase();
+  const env = { PL_ACTIVE_DIR: join(c.root, 'active') };
+  const m = manifest(c);
+  const token = activeRun(env, 'acquire', 'r1', '/m.json').stdout.trim();
+  assert.match(token, /^[0-9a-f]{32}$/);
+  setupOk(c, m, ['--owner', token], env);
+  write(laneDir(c, 'a'), 'wip.txt', 'in progress\n');
+  for (const extra of [[], ['--owner', 'not-the-token']]) {
+    const res = setup(c, m, extra, env);
+    assert.equal(res.code, 3, res.stderr);
+    assert.match(res.stderr, /locked by another launch/);
+    assert.equal(readFileSync(join(laneDir(c, 'a'), 'wip.txt'), 'utf8'), 'in progress\n');
+  }
+});
+
+function setupOk(c, m, extra = [], env = {}) {
+  const res = setup(c, m, extra, env);
+  assert.equal(res.code, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test('setup: changes it discards are saved first in a commit under a run ref', () => {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  write(laneDir(c, 'a'), 'README.md', 'edited\n');
+  write(laneDir(c, 'a'), 'new file.txt', 'untracked\n');
+  write(laneDir(c, 'a'), 'scratch/keep.txt', 'ignored\n');
+  const laneHead = git(laneDir(c, 'a'), 'rev-parse', 'HEAD');
+  const result = setupOk(c, m);
+  assert.equal(result.preserved.length, 1);
+  const [saved] = result.preserved;
+  assert.equal(saved.worktree, laneDir(c, 'a'));
+  assert.match(saved.ref, /^refs\/parallel-lanes\/r1\/abandoned\/lane-a-\d{8}T\d+Z$/);
+  assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
+  assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), laneHead);
+  assert.equal(git(c.project, 'show', `${saved.commit}:README.md`), 'edited');
+  assert.equal(git(c.project, 'show', `${saved.commit}:new file.txt`), 'untracked');
+  assert.equal(sh('git', ['-C', c.project, 'cat-file', '-e', `${saved.commit}:scratch/keep.txt`]).code === 0, false);
+  // The worktree itself was discarded, ignored scratch kept.
+  assert.equal(git(laneDir(c, 'a'), 'status', '--porcelain'), '');
+  assert.equal(readFileSync(join(laneDir(c, 'a'), 'scratch', 'keep.txt'), 'utf8'), 'ignored\n');
+});
+
+test('setup: run_started records the plan and spec hashes', () => {
+  const c = newCase();
+  write(c.root, 'plan.md', '# Plan\n');
+  write(c.root, 'spec.md', '# Spec\n');
+  setupOk(c, manifest(c, { plan: join(c.root, 'plan.md'), spec: join(c.root, 'spec.md') }));
+  const [entry] = readFileSync(join(c.ledgerDir, '_run.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(entry.plan_sha256, createHash('sha256').update('# Plan\n').digest('hex'));
+  assert.equal(entry.spec_sha256, createHash('sha256').update('# Spec\n').digest('hex'));
+});
+
+test('setup: a run with no launch lock is refused, even with a token from a released lock', () => {
+  const c = newCase();
+  const env = { PL_ACTIVE_DIR: join(c.root, 'active') };
+  const m = manifest(c);
+  let res = setup(c, m, [], env);
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /no launch lock/);
+  const token = activeRun(env, 'acquire', 'r1', '/m.json').stdout.trim();
+  setupOk(c, m, ['--owner', token], env);
+  assert.equal(activeRun(env, 'release', 'r1', 'stopped').code, 0);
+  write(laneDir(c, 'a'), 'wip.txt', 'work of a session still running\n');
+  res = setup(c, m, ['--owner', token], env);
+  assert.equal(res.code, 3, res.stderr);
+  assert.equal(readFileSync(join(laneDir(c, 'a'), 'wip.txt'), 'utf8'), 'work of a session still running\n');
+});
+
+test('active-run: remove refuses a locked run unless --takeover', () => {
+  const c = newCase();
+  const env = { PL_ACTIVE_DIR: join(c.root, 'active') };
+  activeRun(env, 'acquire', 'r1', '/m.json');
+  const res = activeRun(env, 'remove', 'r1');
+  assert.equal(res.code, 4);
+  assert.match(res.stderr, /--takeover/);
+  assert.equal(activeRun(env, 'remove', 'r1', '--takeover').code, 0);
+  assert.equal(JSON.parse(activeRun(env, 'list').stdout).length, 0);
 });

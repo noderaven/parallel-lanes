@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Print the absolute skills directory of the newest superpowers install.
 #
-# An install qualifies when it has
-# skills/subagent-driven-development/implementer-prompt.md. Its version comes
-# from package.json, else .claude-plugin/plugin.json (0 when neither has one).
+# An install qualifies only when it has every file a run uses, under skills/:
+# subagent-driven-development/implementer-prompt.md, task-reviewer-prompt.md,
+# re-review-prompt.md, scripts/review-package, and
+# requesting-code-review/code-reviewer.md. Its version comes from
+# package.json, else .claude-plugin/plugin.json (0 when neither has one).
 # Versions compare numerically (6.10.0 > 6.4.2).
 #
-# Default search: ~/.claude/remote/plugins/*/*/ and
-# ~/.claude/plugins/cache/*/superpowers/*/.
+# Default search, under the config dir ${CLAUDE_CONFIG_DIR:-~/.claude}:
+# <config>/remote/plugins/*/*/ and <config>/plugins/cache/*/superpowers/*/.
 # PL_SEARCH_ROOTS (colon-separated directories) replaces the default; each
 # immediate subdirectory of a root is a candidate install.
 #
@@ -29,8 +31,9 @@ if [ -n "${PL_SEARCH_ROOTS:-}" ]; then
     candidates+=("$root"/*/)
   done
 else
-  candidates+=("$HOME"/.claude/remote/plugins/*/*/)
-  candidates+=("$HOME"/.claude/plugins/cache/*/superpowers/*/)
+  config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  candidates+=("$config"/remote/plugins/*/*/)
+  candidates+=("$config"/plugins/cache/*/superpowers/*/)
 fi
 
 # First "version": "x.y.z" value in a JSON file, or nothing.
@@ -43,7 +46,15 @@ read_version() {
 entries=""
 for dir in ${candidates[@]+"${candidates[@]}"}; do
   dir="${dir%/}"
-  [ -f "$dir/skills/subagent-driven-development/implementer-prompt.md" ] || continue
+  complete=1
+  for need in subagent-driven-development/implementer-prompt.md \
+    subagent-driven-development/task-reviewer-prompt.md \
+    subagent-driven-development/re-review-prompt.md \
+    subagent-driven-development/scripts/review-package \
+    requesting-code-review/code-reviewer.md; do
+    [ -f "$dir/skills/$need" ] || complete=0
+  done
+  [ "$complete" = 1 ] || continue
   version="$(read_version "$dir/package.json")"
   if [ -z "$version" ]; then
     version="$(read_version "$dir/.claude-plugin/plugin.json")"

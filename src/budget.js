@@ -76,10 +76,11 @@ function makeIo(m, baseIo, state) {
 }
 
 // The custom agent type for a spawn: m.agent_type, except for the hook agents
-// (e2e and post-integrate) and the post-integrate fix, which must keep the
-// post-integrate hook passing: hook instructions may need any tool.
+// (e2e and post-integrate, and their rechecks) and the post-integrate fix,
+// which must keep the post-integrate hook passing: hook instructions may need
+// any tool.
 function agentTypeFor(m, label) {
   if (typeof m.agent_type !== 'string' || m.agent_type.length === 0) return null;
-  if (/^(e2e|post-integrate|post-integrate fix)( retry)?$/.test(label)) return null;
+  if (/^(e2e|e2e recheck|post-integrate|post-integrate recheck|post-integrate fix)( retry)?$/.test(label)) return null;
   return m.agent_type;
 }

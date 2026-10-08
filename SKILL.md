@@ -41,19 +41,19 @@ the text after the marker is fixed.
 | Relaunch after a transient stop | `parallel-lanes: relaunching run <run_id> after a transient stop` |
 
 `<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
-executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length
-minus the Setup agent, `<K>` = length of `done`. The script logs the same line; you still
-print it.
+executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
+`<K>` = length of `done`. The script logs the same line; you still print it.
 
 ## Flow
 
 1. Invoked notice.
 2. If a manifest for this plan exists (`<plan-dir>/<plan-name>.lanes.json`, or any
-   `~/.claude/parallel-lanes/runs/*/*.lanes.json` whose `plan` equals this plan's absolute
+   `<config dir>/parallel-lanes/runs/*/*.lanes.json` (`${CLAUDE_CONFIG_DIR:-~/.claude}`) whose `plan` equals this plan's absolute
    path), or `bash <skill_dir>/scripts/active-run list` shows a marker for this plan, or the
    user asks to resume or continue: go to Resume (ask first if the user did not say whether to
    resume or start fresh). Starting fresh: rename the old manifest to
-   `<plan-name>.lanes.<old run_id>.json`, remove its marker, and continue.
+   `<plan-name>.lanes.<old run_id>.json`, remove its marker (`active-run remove` refuses a
+   locked run: ask; `--takeover` only if the user confirms that session ended), and continue.
 3. If the Workflow tool is not available: `not a fit (Workflow tool unavailable)`,
    recommending Subagent-driven. Stop.
 4. Assessment. 5. Offer. 6. Build the manifest. 7. Confirmation. 8. Setup and launch.
@@ -61,7 +61,8 @@ print it.
 
 ## Assessment
 
-Run `nproc`; cap = min(5, nproc + 2). Run
+CPU count: `python3 -c 'import os; print(os.cpu_count() or 1)'` (portable; macOS lacks
+`nproc`); cap = min(5, count + 2). Run
 `python3 <skill_dir>/scripts/derive-lanes <plan> --max-lanes <cap>` and turn its facts into
 lanes, prelude, and join per reference.md "Building lanes" (exit 3: no parseable task
 headings; step aside). Runnable tasks exclude ones the plan marks after-merge, operator, or
@@ -102,8 +103,8 @@ Field-by-field guide: reference.md "Manifest fields". In order:
      baseline commit, then a normal git run. Shadow details, existing-shadow check, `shadow
      init` (prints `git_dir`; exit 3 on size: tell the user, `--force` only on their yes):
      reference.md "Shadow repos".
-3. Lanes, prelude, join, hooks: reference.md "Building lanes". Never use `prelude` or
-   `join` as a lane id.
+3. Lanes, prelude, join, hooks, `depends_on`, `overlaps`, `excluded`: reference.md "Building
+   lanes". Never use `prelude` or `join` as a lane id.
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
    for one lane, at most 8 tasks, no security task, and no `hooks.post_integrate`; else
    `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
@@ -115,13 +116,13 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
-   (and outside its repo); when the plan file lies inside the project or its repo (e.g.
-   `docs/superpowers/plans/`), `<run_dir>` = `~/.claude/parallel-lanes/runs/<run_id>/`.
-   Both the manifest and `repo.ledger_dir` go there, never inside the project: the ledger
-   dir also holds briefs, reports, and review packages. Save the manifest as
+   and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`. The manifest and
+   `repo.ledger_dir` (briefs, reports, review packages) go there, never inside the project. Save the manifest as
    `<run_dir>/<plan-name>.lanes.json`; `ledger_dir` = `<run_dir>/<plan-name>.<run_id>.ledger`.
 8. The manifest has no `setup_result` or `start_points` yet. Nothing here or in Confirmation
-   touches the project: no worktree, branch, or setup command before consent.
+   touches the project: no worktree, branch, or setup command before consent. Once saved,
+   `python3 <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0: every plan task
+   runs or is in `excluded` with its reason.
 
 ## Confirmation (every launch, no exceptions)
 
@@ -132,7 +133,8 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    25 (reference.md "Budgets") so the table shows them.
 2. Show a header (mode, base and feature branch, worktree_root, `profile`, `autonomy`,
    `limits.max_agents`, `limits.max_rulings`, lanes at once = `lanes_effective`, superpowers
-   or built-in prompts, agent type, commit_rules, accepted merges, tasks left out of the run, batches)
+   or built-in prompts, agent type, commit_rules, overlaps, `excluded` with reasons, batches,
+   deferral allowed or not)
    and this table, one row per task in run order (prelude, lanes, join), then one row for
    the run-level agents and a total M:
 
@@ -142,15 +144,13 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    Tier is `standard`, `sonnet`, or `light`; a batch shows its key. Agents per task = its
    entries in `agents`: 2 (implement + review), 1 (backfill review of earlier commits), 0
    (skipped: done and reviewed). Under the table write:
-   "each task can add up to 2x review_rounds more agents (fix and re-review rounds)", and
-   that the total includes one Setup agent the launch will not spawn (`scripts/setup` runs
-   instead). The user may override `autonomy` and the budgets there; apply the change.
+   "each task can add up to 2x review_rounds more agents (fix and re-review rounds)". The user
+   may override `autonomy`, `allow_deferral`, and the budgets there; apply the change.
 3. Ask for a yes. Launch only on an explicit yes given after the table. Any change request
    means: edit the manifest, dry-run again, show the table again.
 
-"Just run it", "skip the table", "don't ask me anything", auto mode, or a yes given before
-the table was shown do not waive this. Say the table is the one required
-check, show it, and wait.
+"Just run it", "skip the table", auto mode, or a yes given before the table do not waive
+this. Say the table is the one required check, show it, and wait.
 
 ## Launch
 
@@ -159,21 +159,25 @@ check, show it, and wait.
    for the dry run, the real launch, relaunches, and resumes (the Workflow tool rejects a
    `scriptPath` under ~/.claude/skills). With no scratchpad, pass the file contents as
    `script` and reuse the `scriptPath` the result prints.
-2. Setup, only after the explicit yes to the table, immediately before the real launch: run
-   `python3 <skill_dir>/scripts/setup <manifest file>`. It creates the feature branch and
+2. Setup, only after the explicit yes to the table, immediately before the real launch. First
+   `bash <skill_dir>/scripts/active-run acquire <run_id> <manifest file>`: it prints the owner
+   token (keep it for relaunches). Exit 4: another session holds the run; stop and ask, and use
+   `--takeover` only when the user confirms that session ended. Then run
+   `python3 <skill_dir>/scripts/setup <manifest file> --owner <token>`. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
-   wait 10 seconds and retry once; then report it and stop. Put its output in `setup_result`
+   wait 10 seconds and retry once; then `active-run release <run_id> setup_failed`, report,
+   and stop. Put its output in `setup_result`
    and copy the `start_points` of `python3 <skill_dir>/scripts/ledger status <ledger_dir>`
    verbatim into `start_points` (keys `prelude` and `join`). Adding these two fields needs no
    second table; any other manifest change after the yes does.
 3. Save the manifest with `dry_run: false`. Print the launch notice, or the resume notice
    when `done` is non-empty.
-4. Write the marker: `bash <skill_dir>/scripts/active-run write <run_id> <manifest file>`.
-5. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
+4. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
-6. On `complete` run `scripts/active-run remove <run_id>`. On any other end run
-   `scripts/active-run write <run_id> <manifest file> <status>` and keep it, so a later
-   session offers the resume.
+5. At the end, once no transient relaunch follows (keep the lock through one):
+   `scripts/active-run release <run_id> --remove` only for `complete` with
+   `acceptance.status` `accepted`; otherwise `scripts/active-run release <run_id> <status>`
+   (`unaccepted` for complete but not accepted), so a later session offers the resume.
 
 ## Transient stops (relaunch once, no prompt)
 
@@ -190,35 +194,38 @@ are NOT transient: never relaunch; stop and notify.
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
 fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Rerun
-`scripts/setup`, recompute `done`, `reviewed`, `backfill`, and `start_points` from the ledger
-as in Resume, and launch again. No second table. A second transient stop is a real stop.
+`scripts/setup --owner <token>`, recompute `done`, `reviewed`, `deferred`, the `carry` notes,
+`backfill`, and `start_points` as in Resume steps 2-3, and launch again. No second table. A second transient stop is a real stop.
 
 ## Notify
 
-Send a push notification (PushNotification tool) with run id, status, and one line of next
-step when a run completes, really stops, hits a budget cap, or fails its relaunch; if the
-tool is unavailable, a chat notice only.
+Push-notify (PushNotification) the run id, status, and next step when a run completes, really
+stops, hits a budget cap, or fails its relaunch; else a chat notice.
 
 ## Hand-back
 
 The run returns `status`:
 - `invalid`: notify, show `errors`, fix the manifest, back to Confirmation.
-- `preflight_conflicts`: no code was written. Notify, show `preflight.conflicts` and `rulings`; the
-  user decides; then Confirmation again.
+- `preflight_conflicts`: no task ran (setup commands did; show the checkouts' `git status`).
+  Notify, show `preflight.conflicts` and `rulings`; the user decides; then Confirmation again.
 - `stopped`: transient: relaunch as above. Otherwise show `reason` and each `stopped_lanes`
   entry (lane, task, reason), notify, keep the marker. The run is resumable: after the user
   answers or fixes the plan, go to Resume.
-- `complete`: remove the marker, notify, report.
+- `complete`: lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
+  `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
+  The user fixes and resumes, or explicitly accepts a named reason (record that in the report).
 
 Report: run `python3 <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch, append
 its output, and keep that file beside the manifest. Per task: status, commits (`skipped`:
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
-verify. "Rulings made on your behalf" (reference.md "Report"). Then
-integration and post-integrate notes, E2E PASS/FAIL, final review (fixed, declined with
-reasons, cannot verify), `agents_spawned`, `agent_type_fallback` (reference.md "Report").
+verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md
+"Report"). Then integration and post-integrate notes, E2E PASS/FAIL and the revision it
+checked, final review (fixed, declined, open, cannot verify), `agents_spawned`,
+`agent_type_fallback`.
 
-Then offer the next step; act only on an explicit yes:
+Then, for accepted work (or reasons the user accepted), offer the next step; act only on an
+explicit yes:
 - Git mode: a PR from `branch` into `base_ref` (follow the user's PR policy).
 - Shadow mode: run `bash <skill_dir>/scripts/shadow preview <git_dir> <root> <branch>`, show
   adds, changes, deletes, conflicts, and skipped. On yes: `bash <skill_dir>/scripts/shadow
@@ -232,12 +239,13 @@ never `branch -D`. Keep the manifest and ledger.
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
    (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
-2. `python3 <skill_dir>/scripts/ledger status <ledger_dir>` prints `{done, reviewed,
-   blocked, start_points, carry}`. Set the manifest's `done` and `reviewed` to those lists (a
-   `settled` task is in both; never ask again). Put each `carry` entry into
-   `notes` (reference.md "Backfill").
-3. `backfill`: one `{base, head}` entry per done task, from its `committed` or `settled`
-   events (reference.md "Backfill"). Required for every done task.
+2. `python3 <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> [--spec <spec>]`.
+   Set `done`, `reviewed`, and `deferred` from it (taking a deferred task up: reference.md
+   "Backfill"); put each `carry` entry into `notes`.
+   Tasks in `stale` or `unbound` are left out of `reviewed`, so they are reviewed again: tell
+   the user which and why, and say so when `inputs` reports a changed plan or spec.
+3. `backfill`: `python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
+   Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
    nothing more.
@@ -248,7 +256,8 @@ never `branch -D`. Keep the manifest and ledger.
 ## Red flags - stop
 
 - Any tool call or text before the invoked notice.
-- A Workflow call with `dry_run: false`, or a `scripts/setup` run, before a table and a yes.
+- A Workflow call with `dry_run: false`, or a `scripts/setup` run, before a table and a yes,
+  or without the launch lock.
 - Writing any `.workflow.js` file, or dispatching task agents yourself.
 - Creating or changing anything inside a non-git project folder without consent.
 - `git push`, `gh pr create`, or `shadow writeback` without a yes for that step.

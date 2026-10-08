@@ -3,7 +3,8 @@
 Details for SKILL.md. `<skill_dir>` is the absolute directory holding SKILL.md. The
 validator in `run.workflow.js` (`validateManifest`) is authoritative;
 `manifest.schema.json` documents it. A dry run reports every validation error. Adopting earlier work from a hand-run
-attempt, with a worked example, is in adopt.md.
+attempt, with a worked example, is in adopt.md. `<config dir>` below is
+`${CLAUDE_CONFIG_DIR:-~/.claude}`; every helper uses the same one.
 
 ## Manifest fields
 
@@ -18,31 +19,39 @@ attempt, with a worked example, is in adopt.md.
 | `repo.git_dir` | Git: `null`. Shadow: the path `shadow init` printed. |
 | `repo.base_ref` | Git: the branch the work will merge into (usually the default branch). Shadow: `pl-base`. |
 | `repo.branch` | Feature branch, never the same as `base_ref`. Git: the plan's or user's branch name if given (it may already exist), else `pl-<run_id>`. Shadow: `pl-<run_id>`. In git mode setup checks it out in the main checkout. |
-| `repo.worktree_root` | A directory outside the project that does not exist yet (or this run's, when resuming). Git: `<parent of root>/<repo name>-wt-<run_id>`. Shadow: `~/.claude/parallel-lanes/worktrees/<run_id>`. Lane worktrees go to `<worktree_root>/lane-<lane id>` on branches `pl-<run_id>-<lane id>`; shadow mode also uses `<worktree_root>/feature`. |
-| `repo.ledger_dir` | `<run_dir>/<plan-name>.<run_id>.ledger`, where `<run_dir>` is the plan's directory when the plan is outside the project and its repo, else `~/.claude/parallel-lanes/runs/<run_id>/` (plan inside the project, e.g. `docs/superpowers/plans/`). It holds briefs, reports, and review packages too, so it must never be inside the project; the manifest goes in the same `<run_dir>`. |
+| `repo.worktree_root` | A directory outside the project that does not exist yet (or this run's, when resuming). Git: `<parent of root>/<repo name>-wt-<run_id>`. Shadow: `<config dir>/parallel-lanes/worktrees/<run_id>`. Lane worktrees go to `<worktree_root>/lane-<lane id>` on branches `pl-<run_id>-<lane id>`; shadow mode also uses `<worktree_root>/feature`. |
+| `repo.ledger_dir` | `<run_dir>/<plan-name>.<run_id>.ledger`, where `<run_dir>` is the plan's directory when the plan is outside the project and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`, by default `~/.claude/parallel-lanes/runs/<run_id>/` (plan inside the project, e.g. `docs/superpowers/plans/`). It holds briefs, reports, and review packages too, so it must never be inside the project; the manifest goes in the same `<run_dir>`. |
 | `commands` | `setup`, `test`, `lint`, `build`: lists of shell commands run from a checkout. Take them from the plan's conventions, then the project (package.json scripts, pyproject, Makefile). Use `[]` for a group the project lacks. |
 | `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
-| `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes. |
+| `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
 | `join` | Tasks run in order on the merged branch after integration. |
-| task | `{id, title, files, tier, security, batch?}`. `id` exactly as in the plan heading (`T13a`, `7`); `title` and `files` from derive-lanes; `tier` `standard`, `sonnet`, or `light` (see Tiers); a sonnet or light task cannot have `security: true`; `batch` only on light tasks (see Batching). |
+| task | `{id, title, files, tier, security, batch?, depends_on?}`. `id` exactly as in the plan heading (`T13a`, `7`) and a safe file name (`^[A-Za-z0-9_][A-Za-z0-9._-]*$`: it names brief, report, and review files); `title` and `files` from derive-lanes (project-relative: no absolute path, nothing that leaves the project); `tier` `standard`, `sonnet`, or `light` (see Tiers); a sonnet or light task cannot have `security: true`; `batch` only on light tasks (see Batching); `depends_on` `[{id, kind: "code" or "contract"}]` (see Building lanes). |
+| `overlaps` | Optional `[{file, tasks, reason, merge_owner}]`: a file tasks in different lanes both change on purpose. Every listed task lists the file; `merge_owner` is one of them (its version wins where both changes cannot stand). The integration agent is told about each. |
+| `excluded` | Optional `[{id, reason}]`: plan tasks the run leaves out (after-merge, operator, manual, or done by a hook), shown in the confirmation header. `scripts/coverage` checks that every plan task runs or is here. |
+| `allow_deferral` | Optional boolean, default `true`: whether the adjudicator may park or unblock a task (security tasks never). `false` makes every park or unblock a stop. Show it in the table header. |
+| `deferred` | Resume: the `deferred` list of `ledger status`. Those tasks are done for scheduling but keep the run from being accepted. |
 | `hooks` | Optional `post_integrate` (instructions for an agent after integration, e.g. a contract check) and `e2e` (instructions for an end-to-end check, e.g. "Follow plan Task T24"). |
-| `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, nproc + 2)`, `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
+| `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, CPU count + 2)` (the count from `os.cpu_count()`), `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
 | `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
 | `profile` | `full` (default) or `lite` (see Profiles). |
-| `setup_result` | The output of `scripts/setup <manifest>`: `{feature_head, worktrees, discarded}`. Added after the yes to the table; when present no Setup agent runs. Absent only in hand-written manifests (the Setup agent is then the fallback). |
+| `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved}`. Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
 | `start_points` | `{prelude, join}` feature heads, copied verbatim from `ledger status` after setup. |
 | `dry_run` | `true` only in the confirmation call. |
-| `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status`. Never by hand. |
-| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks (see Backfill below). Required for every done task; each `head` is the next task's review base. |
+| `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status --plan`. Never by hand. |
+| `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks, from `ledger backfill` (see Backfill below). Required for every done task; each `head` is the next task's review base. |
 | `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents. |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e`, `post-integrate`, and `post-integrate fix` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it (throws or returns no result) is retried once on the default type, and both attempts count toward `max_agents`. After the first such throw, or the second typed agent that returns no result while its retry succeeds, every later agent of the run uses the default type: the run log says so and the run result carries `agent_type_fallback: true`. |
 | `skill_dir` | `<skill_dir>`. |
 
-Plan task ids must have `#+ Task <ID>:` headings; agents extract briefs with
-`scripts/task-brief`, which fails on a missing heading. Tasks the plan marks after-merge,
-operator, or manual are left out of the manifest and listed in the confirmation header.
+Plan task ids must have `#+ Task <ID>:` headings and be safe file names (derive-lanes and
+task-brief refuse others); agents extract briefs with `scripts/task-brief`, which fails on a
+missing heading and, through `start-task --artifacts`, writes only inside the ledger dir. A brief ends with the Produces block
+of each task its Consumes names and of each producer pre-flight added (`preflight.undeclared`:
+the run passes them to `start-task` and `task-brief` as `--also`). Tasks the plan marks
+after-merge, operator, or manual are left out of the manifest and listed in the confirmation
+header.
 
 ## Building lanes
 
@@ -71,21 +80,27 @@ Otherwise:
      docs describing finished behavior): move the dependent to `join`.
    - Otherwise merge the two groups into one lane, keeping plan order.
    Plans often state deps only in prose ("per contract", "if T20 has not"); read each task
-   when `deps` is empty.
+   when `deps` is empty. Record every dependency you keep in the dependent's `depends_on`:
+   `code` when it needs the producer's real code (the producer must be in the prelude,
+   earlier in the same lane, or the dependent in join; the validator checks it), `contract`
+   when it builds against the plan's contract. Unblock notes follow these edges.
 4. Bridge files. A bridge only matters when you want its parts in different lanes:
    - A shared registry or list that every part extends (a module list, a route table): make
      a prelude task do the shared edit if the plan has one, or
    - accept a small merge: when each part adds its own separate line, keep the parts in
-     separate lanes, list the file under one lane's task only (the validator rejects a file
-     in two lanes), and name it under "accepted merges" in the confirmation header. The
-     integration agent merges it. If commits already exist, check with
-     `git merge-tree --write-tree <head1> <head2>` (exit 0 = clean).
+     separate lanes, keep the file in both tasks' files, and record it in `overlaps` (the
+     tasks, why, and the merge owner); the validator allows a file in two lanes only with
+     that record, the table header lists it, and the integration agent merges it. If commits
+     already exist, check with `git merge-tree --write-tree <head1> <head2>` (exit 0 = clean).
    - Anything else (both parts change the same logic): keep them in one lane.
 5. Small groups with nothing between them can share a lane (a lane is a sequence). Balance
    lanes so the longest lane, which sets the wall time, stays short.
 6. More lanes than the cap is fine: extra lanes queue. A single lane is fine; a plan of 1-2
    runnable tasks is not a fit.
-7. A task that commits nothing (end-to-end verification) becomes `hooks.e2e`, not a task.
+7. A task that commits nothing (end-to-end verification) becomes `hooks.e2e`, not a task, and
+   goes in `excluded` with the reason `done by hooks.e2e`.
+8. Every plan task the run does not run goes in `excluded` with its reason; `scripts/coverage
+   <plan> <manifest>` must exit 0 (no plan task missing, no unknown or repeated id).
 
 ## Profiles
 
@@ -138,14 +153,17 @@ and the diff range, and returns one outcome:
 |---|---|
 | `answer` | The text becomes the task's note; the task retries. |
 | `clarify_plan` | A ruling that amends the task's brief for this run only; the task retries. |
-| `park` | The findings are recorded as deferred; the task completes. |
-| `unblock` | The smallest change that unblocks dependents, carried to the next task. |
+| `park` | The task is deferred as it is, with its open findings: the run goes on, but the run is not accepted. |
+| `unblock` | Deferred as for park; the text (the smallest change that unblocks dependents) goes to the tasks whose `depends_on` names it, else to the next task. |
 | `stop` | Allowed only for `destructive` (irreversible operation), `security` (a security-sensitive decision), `outside_side_effect` (outside the run's worktrees), or `plan_broken` (every path is a guess). The run stops, resumable. |
 
-A park or unblock appends a `settled` ledger event (`outcome`, `base`, `head`), so a resume
-treats the task as done and reviewed even when it made no commits. A security-flagged task
-with a critical or important finding open cannot be parked or unblocked: that stops with
-`adjudicator_stop: security`. A task adjudicated twice and still blocked ends with
+A park or unblock runs `finish-task --settled`, which appends a `settled` ledger event with
+the range git has (`outcome`, `base`, `head`, `commits`: commits a blocked agent made stay
+with the task) and prints the head the adjudicator returns. The task result is `deferred`,
+never `done`; a resume schedules it as done (`ledger status` lists it in `deferred`) and the
+run is still not accepted. A security-flagged task is never parked or unblocked, whatever its
+findings (`adjudicator_stop: security`), and `allow_deferral: false` refuses it for every task
+(`adjudicator_stop: deferral_not_allowed`). A task adjudicated twice and still blocked ends with
 `adjudication_cap`. Every ruling is a
 ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
 `preflight.rulings`. Both appear in the hand-back under "Rulings made on your behalf". Under
@@ -154,9 +172,10 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
 
 ## Budgets
 
-- `limits.max_agents`: set to 2 x the dry-run estimate (which includes one Setup agent the
-  launch will not spawn). A refused agent ends its task or phase without work; the run stops
-  with reason `budget`, resumable.
+- `limits.max_agents`: set to 2 x the dry-run estimate (which lists the Verify agents as an
+  upper bound: `verify` runs whenever a check command exists, the rechecks only when later
+  commits made earlier evidence stale). A refused agent ends its task or phase without work;
+  the run stops with reason `budget`, resumable, never accepted.
 - `limits.max_rulings`: 25 adjudicator rulings per run.
 - The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
   notifies. Raise the limit in the manifest, then resume; that goes through Confirmation again
@@ -169,11 +188,17 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
 
 ## Active-run markers and stops
 
-`scripts/active-run write <run_id> <manifest> [status]` writes
-`~/.claude/parallel-lanes/active/<run_id>.json` (`{run_id, manifest, started, status}`) at
-launch; `remove` deletes it at `complete`; `list` prints every marker as JSON. A run that
-ends any other way keeps the marker with its status, and the next session's bootstrap lists
-it so the user can resume with one word.
+Markers live in `<config dir>/parallel-lanes/active/` (`$PL_ACTIVE_DIR` overrides).
+`scripts/active-run acquire <run_id> <manifest>` creates `<run_id>.lock` atomically (it fails
+with exit 4 when it exists: another session may still be running the run), writes the marker
+`{run_id, manifest, started, status: running}`, and prints the owner token; `scripts/setup`
+refuses unless the lock exists and `--owner <token>` matches it, so a second launch or
+resume cannot reset work in progress. Keep the lock through a transient relaunch; `remove`
+refuses a locked run unless `--takeover`. `--takeover` replaces a stale lock: use it only when the user confirms
+the session that held it has ended. `release <run_id> <status>` drops the lock and records
+the status; `release <run_id> --remove` drops both (only for an accepted run). `list` prints
+every marker with `locked`; the next session's bootstrap offers an unlocked one for a
+one-word resume and reports a locked one as possibly still running.
 
 Transient vs real stops (SKILL.md "Transient stops"): only agent errors, missing results
 (`no result from ...`, `error: ...`), and setup-command retry exhaustion (`setup failed`) are
@@ -197,34 +222,81 @@ the mid-stream output count of a message (`stop_reason` null); such an agent's
 tiers sum only complete agents, so when `output_incomplete` > 0 report `output_tokens_min`
 as the output figure (a minimum). Report both,
 and call out any agent whose `resolved_models` names a model other than the one requested
-(a fallback). The hand-back appends the report, saves it beside the manifest, and lists
+(a fallback).
+
+Acceptance: `status: complete` only says the run executed to the end. `acceptance`
+(`{status, delivered_sha, reasons, warnings}`) says whether the delivered revision
+(`delivered_sha`: the feature head after the final fix) meets the gates, decided in code
+from the evidence: `accepted` (no reason), `rejected` (a check failed at `delivered_sha`, a
+blocking finding is open, or a task is deferred or not done), or `unverified` (nothing failed,
+but evidence is missing or covers another revision). Reasons are `{kind, class, detail}`:
+`checks_failed`, `checks_missing`, `checks_stale`, `checks_incomplete` (from `verify`, the
+`scripts/run-checks` result at `delivered_sha`), `e2e_failed`, `e2e_missing`, `e2e_stale`
+(`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
+`post_integrate_stale`, `blocking_findings` (open critical or important final findings),
+`review_missing` (a final lens with no result), `fix_unreviewed`, `deferred_task`,
+`task_not_done`. Warnings (open minor findings, cannot-verify items) never block. The checks evidence is the
+`scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
+JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
+it is not caught by the run. Show the
+status and every reason first; only `accepted` is delivered work. A reason the user explicitly
+accepts is recorded in the report as accepted by the user, never folded into `accepted`.
+`final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
+`fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
+
+The hand-back appends the report, saves it beside the manifest, and lists
 "Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
-a task result's `rulings` has an entry starting `refused (security-gated):`, the security gate
-refused the adjudicator's park or unblock: list that ruling with the prefix, never as one that
-took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
-such entry) is listed as a stop ruling, as written. When the run result has
+a task result's `rulings` has an entry starting `refused (security-gated):` or
+`refused (deferral_not_allowed):`, the policy refused the adjudicator's park or unblock: list
+that ruling with the prefix, never as one that took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
+such entry) is listed as a stop ruling, as written. `preflight.undeclared` lists the
+dependencies pre-flight found that a task relies on without naming the producer in its
+Consumes (`{task, producer, what}`, after dropping entries with an unknown or done-and-reviewed task, an
+unknown producer, or a task equal to its producer; a task done and reviewed is dropped, one done but still to review is kept); the hand-back lists them under
+"Dependencies pre-flight added" so the user can name them in the plan. When the run result has
 `agent_type_fallback: true`, say in the report that the run switched to the default agent type
 partway through (see `agent_type` under Manifest fields).
 
 ## Backfill
 
-Resume builds `backfill` for every done task from its `committed` events in
-`<ledger_dir>/<lane>.jsonl`:
+`python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>` prints
+`{backfill, derived, errors}`. Every `committed` event `finish-task` writes records the task's
+`base` and `head` and every commit git lists between them, and a `settled` event the range git
+had, so a task's range runs from the base of its first event to the head of its last. Each
+range is checked against git (the base is an ancestor of the head, recorded commits equal
+`git rev-list`), and events whose bases do not chain are refused: exit 3 with `errors` means a
+resume must not guess; show them and stop. Older ledgers recorded no base: those tasks are
+listed in `derived` and get the head of the previous done task in their list as base (the
+first of the prelude and of each lane: the last prelude head or the setup start point; of the
+join: the join start point), which is the widest range they can have; say so in the table
+header.
 
-- `head` = the last sha of the task's last committed event.
-- `base` = the parent of the first sha of its first committed event, via
-  `git -C <root> rev-parse <sha>^`, or `git --git-dir=<git_dir> rev-parse <sha>^` in shadow
-  mode.
-- A task with a `settled` event (parked or unblocked by the adjudicator) after its last
-  committed event, or with no committed event at all, uses the last settled event's `base`
-  and `head` instead (equal when it made no commits). `ledger status` lists it as done and
-  reviewed, so it is skipped, never asked about again.
+`ledger status --plan <plan> [--spec <spec>]` also checks approvals: a review recorded with
+`ledger reviewed` holds the hash of the task's section and the head of the range it approved
+(it refuses an approval that reports a critical or important finding; a fix agent records
+`reopened` when the engine acted on such an approval as changes); a changed
+section or head puts the task in `stale`, a review without a hash (older ledgers) in
+`unbound`, and both are left out of `reviewed` so the resume reviews them again. `inputs`
+says whether the plan or spec changed since the last launch recorded their hashes. A stale
+task that is not the last done task of its list is reviewed against the current plan, but a
+fix for it lands after the later tasks' commits; tell the user, who may prefer rerunning it
+and the tasks after it. List tasks whose
+`depends_on` names a stale task for the user too.
 
-`ledger status` also prints `carry`: `{<task>: <text>}` for each task the adjudicator last
-unblocked, with its unblock ruling. A skipped task passes no note at run time, so for each
-entry add `from <task>, unblocked by the adjudicator: <text>` to `notes` for the next task in
-the same list (prelude, the lane, or join; after a batch, the task after the batch),
-appended to any existing note for it.
+To take a deferred task up again (the user wants it done after all) when it is the last
+done task of its list, leave it out of `done`, `reviewed`, and `deferred` on the resume: it
+runs again from the previous task's head, its earlier commits stay on the branch, and its
+implementer starts from them. When later tasks of its list are done, or its lane is already
+merged, its range would take in their commits: leave those later tasks out too, so they all
+run again in order, or plan the follow-up as a new task.
+
+`carry`: `{<task>: <text>}` for each task the adjudicator last unblocked, with its unblock
+ruling. A skipped task passes no note at run time, so for each entry add
+`from <task>, unblocked by the adjudicator: <text>` to `notes` for the tasks whose
+`depends_on` names it (else the next task in the same list; after a batch, the task after
+the batch), appended to any existing note for it. During a run the engine does the same:
+within a list, and from the prelude to the lanes and join and from the lanes to the join
+(lanes run at once, so not from one lane to another).
 
 It is required because each `head` is the next task's review base, and done-but-unreviewed
 tasks get a review first. A wrong base silently changes the review range of every done task.
@@ -232,11 +304,12 @@ tasks get a review first. A wrong base silently changes the review range of ever
 ## Shadow repos
 
 The shadow for a project is
-`~/.claude/parallel-lanes/shadow/<first 16 hex of sha256(physical project path)>`:
+`<config dir>/parallel-lanes/shadow/<first 16 hex of sha256(physical project path)>`:
 
 ```bash
 p="$(cd "<project>" && pwd -P)"
-d="$HOME/.claude/parallel-lanes/shadow/$(printf '%s' "$p" | sha256sum | cut -c1-16)"
+h="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$p")"
+d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/shadow/$h"
 test -f "$d/pl-baseline" && echo "existing shadow: $d"
 ```
 
@@ -266,7 +339,10 @@ git --git-dir="<git_dir>" worktree remove "<wt>"
 run; "cannot be written" = permissions (in both nothing was written; show them and ask);
 "writeback failed at" = a write failed midway; show the paths it lists as already written.
 
-A worktree with uncommitted files stays; list it for the user. In shadow mode remove the lane
+A worktree with uncommitted files stays; list it for the user. Changes setup discarded are
+saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`): restore one
+with `git -C <wt> checkout <commit> -- .`, and once the user no longer needs it, delete it
+with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" worktree remove`, then run `shadow remove` (it deletes the shadow
 repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir`).

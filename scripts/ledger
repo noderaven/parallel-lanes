@@ -3,47 +3,92 @@
 
 usage:
   ledger append DIR LANE JSON
-  ledger status DIR
+  ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING
+  ledger status DIR [--plan PLAN] [--spec SPEC]
+  ledger backfill DIR MANIFEST
 
 append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
-0700. JSON must be an object with a non-empty string 'task' and an 'event' of:
-  committed  with 'commits': non-empty list of strings
-  reviewed   with 'rounds': integer >= 0
+0700. JSON must be an object with a safe non-empty string 'task' (or "_run")
+and an 'event' of:
+  committed    with 'commits': non-empty list of strings; finish-task also
+               writes 'base' and 'head' (non-empty strings, both or neither)
+  reviewed     with 'rounds': integer >= 0; 'ledger reviewed' also writes
+               'brief_sha256' (64 hex digits) and 'head'
   ruling       with 'text': string
   blocked      with 'reason': string
-  run_started  with 'phase': "setup" or "join", and 'head': non-empty string
+  run_started  with 'phase': "setup" or "join", and 'head': non-empty string;
+               setup also writes 'plan_sha256' and 'spec_sha256' (hex or null)
   settled      with 'outcome': "park" or "unblock", and 'base' and 'head':
-               non-empty strings (the task range when the adjudicator settled it)
+               non-empty strings; optional 'commits': list of strings
+  reopened     with 'reason': string (an approval that no longer holds: the
+               task counts as not reviewed again)
+
+reviewed appends a reviewed event for TASK with ROUNDS, the sha256 of TASK's
+own section in PLAN (what the review approved against; _brief.section_sha256)
+and the full sha HEAD resolves to (the code it approved, the head of the range
+under review). It refuses (exit 3, nothing recorded) when BLOCKING, the
+number of critical and important findings the reviewer reports, is not 0 (an
+approval with blocking findings is not an approval), when PLAN has no section
+for TASK, or when HEAD is not a commit that CHECKOUT's HEAD contains.
 
 status reads every DIR/*.jsonl and prints
-  {"done": [...], "reviewed": [...], "blocked": [...], "start_points": {...},
-   "carry": {...}}
+  {"done": [...], "reviewed": [...], "blocked": [...], "deferred": [...],
+   "start_points": {...}, "carry": {...}, "ranges": {...}, "legacy": [...],
+   "inconsistent": [...], "stale": [...], "unbound": [...], "inputs": {...}}
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
 'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
-with a 'blocked' event and no 'committed' or 'settled' after it. A settled
-task (parked or unblocked by the adjudicator) is done and reviewed even when
-it made no commits; its backfill range is the settled event's base and head. start_points: "prelude" is the head of the earliest
+with a 'blocked' event and no 'committed' or 'settled' after it. deferred:
+tasks whose last 'committed' or 'settled' event is a 'settled' (parked or
+unblocked by the adjudicator: done and reviewed for scheduling, never
+accepted). ranges: {task: {base, head}} from the base of the task's first
+'committed' or 'settled' event and the head of its last, for tasks whose
+events record a base. legacy: done tasks with a 'committed' event that records
+no base (written before finish-task recorded ranges; ledger backfill derives
+their base). inconsistent: [{task, reason}] when one event's base is not the
+previous event's head. start_points: "prelude" is the head of the earliest
 run_started event with phase "setup", "join" the head of the earliest with
-phase "join" (earliest: first in ledger order, files by name then lines in
-order; the run appends them all to lane _run); a key is omitted when there
-is no such event. run_started
-events do not affect the lists. carry: for each task whose last 'committed'
-or 'settled' event is a 'settled' with outcome "unblock", the text of that
-task's last 'ruling' event with "by": "adjudicator" after its last
-'committed' (the adjudicator's unblock ruling, which a resume hands to the
-next task in the same list); a task with no such ruling is omitted. Other
-rulings (implementers', or from before a later commit) are never carried. A missing DIR has empty lists, no start points, and no carry.
+phase "join". carry: for each task whose last 'committed' or 'settled' event
+is a 'settled' with outcome "unblock", the text of that task's last 'ruling'
+event with "by": "adjudicator" after its last 'committed'.
+With --plan PLAN, every reviewed task (not settled) is checked against PLAN:
+stale lists [{task, reason}] when the review's brief_sha256 differs from the
+task's current section, the task has no section, or the review's head is not
+the task's recorded head; unbound lists reviewed tasks whose review recorded
+no brief_sha256. Both are left out of reviewed, so a resume reviews them
+again. inputs: {"plan_changed", "spec_changed"}: true or false against the
+hashes the latest setup run_started recorded (the last launch; with --plan /
+--spec), null when nothing was recorded or no file was given.
+A missing DIR has empty lists, no start points, and no carry.
+
+backfill reads the manifest's task lists (prelude, lanes in order, join), its
+repo, and start_points, and prints {"backfill": {task: {base, head}},
+"derived": [...], "errors": [...]} for every done task. A task with a
+recorded range uses it. A legacy task gets base = the head of the previous
+done task in its list, or for the first task of a list its start point
+(prelude and lanes: the last prelude head, else start_points.prelude; join:
+start_points.join), and head = the last commit of its last event; it is listed
+in derived. Every range is checked against git: base must be an ancestor of
+head, and a committed event's commits must be exactly git rev-list base..head
+of that event. Any failure is listed in errors and the exit is 3: a resume
+must not narrow or guess a review range.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
-name or an unreadable ledger.
+or task name, an unreadable ledger, plan or manifest, or a backfill error.
 """
 
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _brief  # noqa: E402
+
 LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REQUIRED = {
     "committed": "commits",
     "reviewed": "rounds",
@@ -51,9 +96,13 @@ REQUIRED = {
     "blocked": "reason",
     "run_started": "head",
     "settled": "outcome",
+    "reopened": "reason",
 }
 SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 
 
 def fail(code, message):
@@ -61,49 +110,65 @@ def fail(code, message):
     sys.exit(code)
 
 
+def is_text(v):
+    return isinstance(v, str) and v != ""
+
+
 def entry_error(entry):
     """Return why entry is not a valid ledger event, or None."""
     if not isinstance(entry, dict):
         return "entry must be a JSON object"
     task = entry.get("task")
-    if not isinstance(task, str) or not task:
+    if not is_text(task):
         return "'task' must be a non-empty string"
+    if not LANE.fullmatch(task):
+        return f"'task' {task!r} is not a safe task id"
     event = entry.get("event")
     if event not in REQUIRED:
         return f"'event' must be one of {', '.join(REQUIRED)}"
     key = REQUIRED[event]
     value = entry.get(key)
     if event == "committed":
-        ok = isinstance(value, list) and value and all(isinstance(c, str) and c for c in value)
+        ok = isinstance(value, list) and value and all(is_text(c) for c in value)
         if not ok:
             return "'commits' must be a non-empty list of strings"
+        has = [f in entry for f in ("base", "head")]
+        if any(has) and not all(is_text(entry.get(f)) for f in ("base", "head")):
+            return "'base' and 'head' must both be non-empty strings when either is present"
     elif event == "reviewed":
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return "'rounds' must be an integer >= 0"
+        if "brief_sha256" in entry and not (isinstance(entry["brief_sha256"], str)
+                                            and SHA256.fullmatch(entry["brief_sha256"])):
+            return "'brief_sha256' must be 64 lowercase hex digits"
+        if "head" in entry and not is_text(entry["head"]):
+            return "'head' must be a non-empty string"
     elif event == "run_started":
         if entry.get("phase") not in START_POINTS:
             return "'phase' must be one of setup, join"
-        if not isinstance(value, str) or not value:
+        if not is_text(value):
             return "'head' must be a non-empty string"
+        for field in ("plan_sha256", "spec_sha256"):
+            v = entry.get(field)
+            if field in entry and v is not None and not (isinstance(v, str) and SHA256.fullmatch(v)):
+                return f"'{field}' must be 64 lowercase hex digits or null"
     elif event == "settled":
         if value not in SETTLED_OUTCOMES:
             return "'outcome' must be one of park, unblock"
         for field in ("base", "head"):
-            v = entry.get(field)
-            if not isinstance(v, str) or not v:
+            if not is_text(entry.get(field)):
                 return f"'{field}' must be a non-empty string"
+        if "commits" in entry and not (isinstance(entry["commits"], list)
+                                       and all(is_text(c) for c in entry["commits"])):
+            return "'commits' must be a list of strings"
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
     return None
 
 
-def append(directory, lane, raw):
+def write_entry(directory, lane, entry):
     if not LANE.fullmatch(lane):
         fail(3, f"unsafe lane name {lane!r}")
-    try:
-        entry = json.loads(raw)
-    except json.JSONDecodeError as e:
-        fail(2, f"invalid JSON: {e}")
     error = entry_error(entry)
     if error:
         fail(2, error)
@@ -126,66 +191,279 @@ def append(directory, lane, raw):
         os.close(fd)
 
 
-def status(directory):
-    done, reviewed, blocked, start_points = {}, {}, {}, {}
-    last_ruling, unblocked = {}, {}
-    if os.path.isdir(directory):
-        names = sorted(n for n in os.listdir(directory) if n.endswith(".jsonl"))
-        for name in names:
-            path = os.path.join(directory, name)
+def append(directory, lane, raw):
+    try:
+        entry = json.loads(raw)
+    except json.JSONDecodeError as e:
+        fail(2, f"invalid JSON: {e}")
+    write_entry(directory, lane, entry)
+
+
+def read_text(path, what):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        fail(3, f"cannot read {what} {path!r}: {e}")
+
+
+def file_sha256(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError as e:
+        fail(3, f"cannot read {path!r}: {e}")
+
+
+def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
+    if not re.fullmatch(r"[0-9]+", rounds):
+        fail(2, "ROUNDS must be an integer >= 0")
+    if not re.fullmatch(r"[0-9]+", blocking):
+        fail(2, "BLOCKING must be the number of critical and important findings")
+    if int(blocking) != 0:
+        fail(3, f"an approval with {blocking} critical or important finding(s) is not an approval; "
+                "nothing recorded (return verdict changes)")
+    try:
+        digest = _brief.section_sha256(read_text(plan, "plan"), task)
+    except _brief.BriefError as e:
+        fail(3, str(e))
+
+    def git(*args):
+        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, env=ENV)
+
+    res = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{head}^{{commit}}")
+    if res.returncode != 0 or not res.stdout.strip():
+        fail(3, f"{head!r} is not a commit in {checkout!r}; nothing recorded")
+    sha = res.stdout.strip()
+    if git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
+        fail(3, f"{head!r} is not in the history of {checkout!r}'s HEAD; nothing recorded")
+    write_entry(directory, lane, {"task": task, "event": "reviewed", "rounds": int(rounds),
+                                  "brief_sha256": digest, "head": sha})
+
+
+def read_events(directory):
+    """Every valid event in ledger order (files by name, then lines)."""
+    events = []
+    if not os.path.isdir(directory):
+        return events
+    names = sorted(n for n in os.listdir(directory) if n.endswith(".jsonl"))
+    for name in names:
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="ascii") as f:
+                lines = f.read().splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            fail(3, f"cannot read {path}: {e}")
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
             try:
-                with open(path, encoding="ascii") as f:
-                    lines = f.read().splitlines()
-            except (OSError, UnicodeDecodeError) as e:
-                fail(3, f"cannot read {path}: {e}")
-            for number, line in enumerate(lines, 1):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    entry = None
-                error = "invalid JSON" if entry is None else entry_error(entry)
-                if error:
-                    fail(3, f"{path}:{number}: {error}")
-                task, event = entry["task"], entry["event"]
-                if event == "committed":
-                    unblocked[task] = False
-                    last_ruling.pop(task, None)
-                    done[task] = True
-                    reviewed[task] = False
-                    blocked[task] = False
-                elif event == "reviewed":
-                    reviewed[task] = task in done
-                elif event == "settled":
-                    unblocked[task] = entry["outcome"] == "unblock"
-                    done[task] = True
-                    reviewed[task] = True
-                    blocked[task] = False
-                elif event == "blocked":
-                    blocked[task] = True
-                elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
-                    last_ruling[task] = entry["text"]
-                elif event == "run_started":
-                    key = START_POINTS[entry["phase"]]
-                    start_points.setdefault(key, entry["head"])
-    result = {
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                entry = None
+            error = "invalid JSON" if entry is None else entry_error(entry)
+            if error:
+                fail(3, f"{path}:{number}: {error}")
+            events.append(entry)
+    return events
+
+
+def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=None):
+    done, reviewed_by, blocked, start_points = {}, {}, {}, {}
+    last_ruling, unblocked, deferred = {}, {}, {}
+    review_event = {}
+    history = {}  # task -> committed/settled events in order
+    setup_hashes = None
+    for entry in events:
+        task, event = entry["task"], entry["event"]
+        if event == "committed":
+            unblocked[task] = False
+            deferred[task] = False
+            last_ruling.pop(task, None)
+            done[task] = True
+            reviewed_by[task] = None
+            blocked[task] = False
+            history.setdefault(task, []).append(entry)
+        elif event == "reviewed":
+            if task in done:
+                reviewed_by[task] = "review"
+                review_event[task] = entry
+        elif event == "settled":
+            unblocked[task] = entry["outcome"] == "unblock"
+            deferred[task] = True
+            done[task] = True
+            reviewed_by[task] = "settled"
+            blocked[task] = False
+            history.setdefault(task, []).append(entry)
+        elif event == "reopened":
+            if reviewed_by.get(task) == "review":
+                reviewed_by[task] = None
+        elif event == "blocked":
+            blocked[task] = True
+        elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
+            last_ruling[task] = entry["text"]
+        elif event == "run_started":
+            key = START_POINTS[entry["phase"]]
+            start_points.setdefault(key, entry["head"])
+            # The latest launch's hashes: inputs report changes since then.
+            if entry["phase"] == "setup" and "plan_sha256" in entry:
+                setup_hashes = (entry.get("plan_sha256"), entry.get("spec_sha256"))
+
+    ranges, legacy, inconsistent = {}, [], []
+    for task, evs in history.items():
+        if any(e["event"] == "committed" and "base" not in e for e in evs):
+            legacy.append(task)
+            continue
+        # An implement (or a rerun after an adjudication) and a settled event
+        # cover the whole task from its base; a fix starts at the previous head.
+        for prev, cur in zip(evs, evs[1:]):
+            if cur["base"] not in (evs[0]["base"], prev["head"]):
+                inconsistent.append({"task": task, "reason":
+                                     f"an event starts at {cur['base']}, neither the task base "
+                                     f"{evs[0]['base']} nor the previous head {prev['head']}"})
+                break
+        ranges[task] = {"base": evs[0]["base"], "head": evs[-1]["head"]}
+
+    stale, unbound = [], []
+    if plan_given:
+        for task, by in reviewed_by.items():
+            if by != "review":
+                continue
+            rev = review_event[task]
+            if "brief_sha256" not in rev:
+                unbound.append(task)
+                continue
+            try:
+                current = _brief.section_sha256(plan_text, task)
+            except _brief.BriefError:
+                stale.append({"task": task, "reason": "the plan has no section for this task now"})
+                continue
+            if current != rev["brief_sha256"]:
+                stale.append({"task": task, "reason": "the task's section of the plan changed since its review"})
+            elif "head" in rev and task in ranges and rev["head"] != ranges[task]["head"]:
+                stale.append({"task": task, "reason":
+                              f"the review approved {rev['head']}, not the recorded head {ranges[task]['head']}"})
+    excluded = {s["task"] for s in stale} | set(unbound)
+
+    inputs = {"plan_changed": None, "spec_changed": None}
+    if setup_hashes is not None:
+        if plan_sha is not None:
+            inputs["plan_changed"] = setup_hashes[0] != plan_sha
+        if spec_sha is not None:
+            inputs["spec_changed"] = setup_hashes[1] != spec_sha
+    return {
         "done": list(done),
-        "reviewed": [t for t, v in reviewed.items() if v],
+        "reviewed": [t for t, v in reviewed_by.items() if v and t not in excluded],
         "blocked": [t for t, v in blocked.items() if v],
+        "deferred": [t for t, v in deferred.items() if v],
         "start_points": start_points,
         "carry": {t: last_ruling[t] for t, v in unblocked.items() if v and t in last_ruling},
-    }
+        "ranges": ranges,
+        "legacy": legacy,
+        "inconsistent": inconsistent,
+        "stale": stale,
+        "unbound": unbound,
+        "inputs": inputs,
+    }, history
+
+
+def status(directory, plan=None, spec=None):
+    plan_text = read_text(plan, "plan") if plan is not None else None
+    result, _ = summarize(read_events(directory), plan_text, plan is not None,
+                          file_sha256(spec) if spec is not None else None,
+                          file_sha256(plan) if plan is not None else None)
     print(json.dumps(result))
+
+
+def backfill(directory, manifest_path):
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            m = json.load(f)
+        repo = m["repo"]
+        lists = [("prelude", m["prelude"])] + [(lane["id"], lane["tasks"]) for lane in m["lanes"]] \
+            + [("join", m["join"])]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as e:
+        fail(3, f"cannot read manifest {manifest_path!r}: {e}")
+    prefix = [f"--git-dir={repo['git_dir']}"] if repo.get("mode") == "shadow" else ["-C", repo["root"]]
+
+    def git(*args):
+        return subprocess.run(["git", *prefix, *args], capture_output=True, text=True, env=ENV)
+
+    summary, history = summarize(read_events(directory))
+    done = set(summary["done"])
+    starts = m.get("start_points") or summary["start_points"]
+    out, derived, errors = {}, [], []
+    for item in summary["inconsistent"]:
+        errors.append(f"task {item['task']}: {item['reason']}")
+    prelude_head = None
+    for name, tasks in lists:
+        # Where a legacy first task of the list starts: the feature tip setup
+        # recorded (prelude), the prelude's last head (a lane), or the join
+        # start point integration recorded (join).
+        if name == "prelude":
+            prev = starts.get("prelude")
+        elif name == "join":
+            prev = starts.get("join")
+        else:
+            prev = prelude_head or starts.get("prelude")
+        for t in tasks:
+            tid = t["id"]
+            if tid not in done:
+                break
+            evs = history.get(tid, [])
+            if tid in summary["ranges"]:
+                rng = summary["ranges"][tid]
+            elif evs:
+                last = evs[-1]
+                head = last.get("head") or last["commits"][-1]
+                if prev is None:
+                    errors.append(f"task {tid}: no recorded base and no start point to derive one from")
+                    break
+                rng = {"base": prev, "head": head}
+                derived.append(tid)
+            else:
+                errors.append(f"task {tid}: done but has no committed or settled event")
+                break
+            check = git("merge-base", "--is-ancestor", rng["base"], rng["head"])
+            if check.returncode != 0:
+                errors.append(f"task {tid}: {rng['base']} is not an ancestor of {rng['head']} in the repo")
+            for e in evs:
+                if e["event"] == "committed" and "base" in e:
+                    listed = git("rev-list", "--reverse", f"{e['base']}..{e['head']}")
+                    if listed.returncode != 0 or listed.stdout.split() != e["commits"]:
+                        errors.append(f"task {tid}: recorded commits differ from git rev-list "
+                                      f"{e['base']}..{e['head']}")
+                        break
+            out[tid] = rng
+            prev = rng["head"]
+        if name == "prelude":
+            prelude_head = prev
+    print(json.dumps({"backfill": out, "derived": derived, "errors": errors}))
+    if errors:
+        sys.exit(3)
 
 
 def main(argv):
     if len(argv) == 4 and argv[0] == "append" and argv[1]:
         append(argv[1], argv[2], argv[3])
-    elif len(argv) == 2 and argv[0] == "status" and argv[1]:
-        status(argv[1])
+    elif len(argv) == 9 and argv[0] == "reviewed" and all(argv[1:]):
+        if not LANE.fullmatch(argv[3]):
+            fail(3, f"unsafe task id {argv[3]!r}")
+        reviewed(*argv[1:])
+    elif len(argv) >= 2 and argv[0] == "status" and argv[1]:
+        opts = {"--plan": None, "--spec": None}
+        rest = argv[2:]
+        while rest:
+            if len(rest) < 2 or rest[0] not in opts or opts[rest[0]] is not None or not rest[1]:
+                fail(2, "usage: ledger status DIR [--plan PLAN] [--spec SPEC]")
+            opts[rest[0]] = rest[1]
+            rest = rest[2:]
+        status(argv[1], opts["--plan"], opts["--spec"])
+    elif len(argv) == 3 and argv[0] == "backfill" and argv[1] and argv[2]:
+        backfill(argv[1], argv[2])
     else:
-        fail(2, "usage: ledger append DIR LANE JSON | ledger status DIR")
+        fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING"
+                " | ledger status DIR [--plan PLAN] [--spec SPEC] | ledger backfill DIR MANIFEST")
 
 
 if __name__ == "__main__":

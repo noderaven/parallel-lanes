@@ -1,29 +1,48 @@
 #!/usr/bin/env bash
-# Active-run markers: one JSON file per launched parallel-lanes run, so a later
-# session can see which runs were interrupted and offer to resume them.
+# Active-run markers and launch locks: one JSON marker per launched
+# parallel-lanes run, so a later session can see which runs stopped and offer
+# to resume them, and one lock per run while a session is running it, so a
+# second launch or resume cannot reset a run that is still working.
 #
 # usage:
+#   active-run acquire RUN_ID MANIFEST [--takeover]
+#   active-run release RUN_ID STATUS|--remove
 #   active-run write RUN_ID MANIFEST [STATUS]
-#   active-run remove RUN_ID
+#   active-run remove RUN_ID [--takeover]
 #   active-run list
 #
-# Markers live in ${PL_ACTIVE_DIR:-~/.claude/parallel-lanes/active}/<RUN_ID>.json
-# as {run_id, manifest, started, status}; the directory is created with mode
-# 0700. write creates or replaces a marker: STATUS defaults to running, and
+# Markers live in $PL_ACTIVE_DIR (default
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/parallel-lanes/active) as <RUN_ID>.json
+# {run_id, manifest, started, status}; the lock is <RUN_ID>.lock holding the
+# owner token. The directory is created with mode 0700.
+#
+# acquire creates the lock atomically (it fails if the file exists), writes
+# the marker with status running, and prints the owner token, which setup
+# requires (setup --owner TOKEN). A run that is already locked is refused
+# (exit 4): another session may still be running it. --takeover replaces an
+# existing lock; use it only when the user confirms the session that held it
+# has ended.
+# release removes the lock and either writes the marker with STATUS or, with
+# --remove, deletes the marker.
+# write creates or replaces a marker: STATUS defaults to running, and
 # rewriting an existing marker keeps its started time and updates its status.
-# remove deletes a marker (a missing one is fine). list prints a JSON array of
-# the markers sorted by run id, skipping files that are not valid markers (a
-# marker's run_id must be a safe run id equal to its file name); a missing
-# directory lists as [].
+# remove deletes a marker (a missing one is fine); a locked run is refused
+# (exit 4) unless --takeover, which deletes the lock too. list prints a
+# JSON array of the markers sorted by run id, each with "locked": true when its
+# lock exists, skipping files that are not valid markers (a marker's run_id
+# must be a safe run id equal to its file name); a missing directory lists
+# as [].
 #
 # Exit 0 on success; 2 on usage error; 3 on an unsafe run id or a marker
-# directory that cannot be created or written.
+# directory that cannot be created or written; 4 when acquire finds the run
+# locked.
 set -euo pipefail
 
-dir="${PL_ACTIVE_DIR:-$HOME/.claude/parallel-lanes/active}"
+dir="${PL_ACTIVE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/active}"
 
 usage() {
-  echo "usage: active-run write RUN_ID MANIFEST [STATUS] | remove RUN_ID | list" >&2
+  echo "usage: active-run acquire RUN_ID MANIFEST [--takeover] | release RUN_ID STATUS|--remove" \
+    "| write RUN_ID MANIFEST [STATUS] | remove RUN_ID [--takeover] | list" >&2
   exit 2
 }
 
@@ -34,6 +53,12 @@ fail() {
 
 check_id() {
   [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || fail 3 "unsafe run id '$1'"
+}
+
+ensure_dir() {
+  (umask 077 && mkdir -p "$dir") 2>/dev/null || fail 3 "cannot create $dir"
+  [ -d "$dir" ] || fail 3 "$dir is not a directory"
+  chmod 700 "$dir" 2>/dev/null || fail 3 "cannot set mode 700 on $dir"
 }
 
 # A file's contents as a compact marker object, or nothing if it is not one:
@@ -47,43 +72,92 @@ read_marker() {
     and (.status | type) == "string")' "$1" 2>/dev/null || true
 }
 
+write_marker() {
+  local run_id="$1" manifest="$2" status="$3" target started tmp
+  target="$dir/$run_id.json"
+  started=""
+  if [ -f "$target" ]; then
+    started="$(read_marker "$target" | jq -r '.started' 2>/dev/null || true)"
+  fi
+  [ -n "$started" ] || started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  tmp="$(umask 077 && mktemp "$dir/.$run_id.XXXXXX")" || fail 3 "cannot write in $dir"
+  if ! jq -n --arg run_id "$run_id" --arg manifest "$manifest" \
+    --arg started "$started" --arg status "$status" \
+    '{run_id: $run_id, manifest: $manifest, started: $started, status: $status}' >"$tmp" ||
+    ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"
+    fail 3 "cannot write $target"
+  fi
+}
+
 [ "$#" -ge 1 ] || usage
 command -v jq >/dev/null 2>&1 || fail 3 "jq is required"
 
 case "$1" in
+  acquire)
+    [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
+    run_id="$2" manifest="$3" takeover="${4-}"
+    [ -n "$manifest" ] || usage
+    [ -z "$takeover" ] || [ "$takeover" = "--takeover" ] || usage
+    check_id "$run_id"
+    ensure_dir
+    lock="$dir/$run_id.lock"
+    token="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    [ -n "$token" ] || fail 3 "cannot generate an owner token"
+    if [ -n "$takeover" ]; then
+      tmp="$(umask 077 && mktemp "$dir/.$run_id.lock.XXXXXX")" || fail 3 "cannot write in $dir"
+      printf '%s\n' "$token" >"$tmp" && mv -f "$tmp" "$lock" || fail 3 "cannot write $lock"
+    elif ! (umask 077 && set -o noclobber && printf '%s\n' "$token" >"$lock") 2>/dev/null; then
+      [ -e "$lock" ] || fail 3 "cannot write $lock"
+      status="$( (read_marker "$dir/$run_id.json" | jq -r '.status') 2>/dev/null || true)"
+      fail 4 "run $run_id is locked by another launch (marker status: ${status:-unknown}); if that session has ended, acquire again with --takeover"
+    fi
+    write_marker "$run_id" "$manifest" running
+    printf '%s\n' "$token"
+    ;;
+  release)
+    [ "$#" -eq 3 ] || usage
+    run_id="$2" what="$3"
+    [ -n "$what" ] || usage
+    check_id "$run_id"
+    if [ "$what" = "--remove" ]; then
+      rm -f "$dir/$run_id.json" || fail 3 "cannot remove $dir/$run_id.json"
+    else
+      ensure_dir
+      manifest="$( (read_marker "$dir/$run_id.json" | jq -r '.manifest') 2>/dev/null || true)"
+      [ -n "$manifest" ] || fail 3 "no marker for run $run_id to release"
+      write_marker "$run_id" "$manifest" "$what"
+    fi
+    rm -f "$dir/$run_id.lock" || fail 3 "cannot remove $dir/$run_id.lock"
+    ;;
   write)
     [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
     run_id="$2" manifest="$3" status="${4-running}"
     [ -n "$manifest" ] && [ -n "$status" ] || usage
     check_id "$run_id"
-    (umask 077 && mkdir -p "$dir") 2>/dev/null || fail 3 "cannot create $dir"
-    [ -d "$dir" ] || fail 3 "$dir is not a directory"
-    chmod 700 "$dir" 2>/dev/null || fail 3 "cannot set mode 700 on $dir"
-    target="$dir/$run_id.json"
-    started=""
-    if [ -f "$target" ]; then
-      started="$(read_marker "$target" | jq -r '.started' 2>/dev/null || true)"
-    fi
-    [ -n "$started" ] || started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    tmp="$(umask 077 && mktemp "$dir/.$run_id.XXXXXX")" || fail 3 "cannot write in $dir"
-    if ! jq -n --arg run_id "$run_id" --arg manifest "$manifest" \
-      --arg started "$started" --arg status "$status" \
-      '{run_id: $run_id, manifest: $manifest, started: $started, status: $status}' >"$tmp" ||
-      ! mv -f "$tmp" "$target"; then
-      rm -f "$tmp"
-      fail 3 "cannot write $target"
-    fi
+    ensure_dir
+    write_marker "$run_id" "$manifest" "$status"
     ;;
   remove)
-    [ "$#" -eq 2 ] || usage
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+    [ "$#" -eq 2 ] || [ "$3" = "--takeover" ] || usage
     check_id "$2"
-    rm -f "$dir/$2.json" || fail 3 "cannot remove $dir/$2.json"
+    if [ -e "$dir/$2.lock" ] && [ "$#" -eq 2 ]; then
+      fail 4 "run $2 is locked by a launch that may still be running; if that session has ended, remove it with --takeover"
+    fi
+    rm -f "$dir/$2.json" "$dir/$2.lock" || fail 3 "cannot remove $dir/$2.json"
     ;;
   list)
     [ "$#" -eq 1 ] || usage
     shopt -s nullglob
     for f in "$dir"/*.json; do
-      read_marker "$f"
+      m="$(read_marker "$f")"
+      [ -n "$m" ] || continue
+      if [ -e "${f%.json}.lock" ]; then
+        printf '%s\n' "$m" | jq -c '. + {locked: true}'
+      else
+        printf '%s\n' "$m" | jq -c '. + {locked: false}'
+      fi
     done | jq -s -c 'sort_by(.run_id)'
     ;;
   *)
