@@ -5,169 +5,547 @@
   "description": "Documentation of the manifest passed as args to run.workflow.js. validateManifest in run.workflow.js is authoritative and also enforces: task ids unique across prelude, lanes and join; no file claimed by two lanes; sonnet and light tasks cannot set security; batch only on light tasks; profile lite needs exactly one lane, at most 8 tasks across prelude, lanes and join, no security task, and no hooks.post_integrate; setup_result.worktrees names exactly the lanes; repo.git_dir required in shadow mode; repo.branch must differ from repo.base_ref; lane_commands, notes, and backfill keys and done/reviewed entries must be known ids; lane ids prelude and join are reserved (ledger lanes); every task in done needs a backfill entry.",
   "type": "object",
   "required": [
-    "version", "run_id", "plan", "spec", "commit_rules", "repo", "commands",
-    "prelude", "lanes", "join", "hooks", "limits", "dry_run", "done",
-    "reviewed", "sp_dir", "skill_dir"
+    "version",
+    "run_id",
+    "plan",
+    "spec",
+    "commit_rules",
+    "repo",
+    "commands",
+    "prelude",
+    "lanes",
+    "join",
+    "hooks",
+    "limits",
+    "dry_run",
+    "done",
+    "reviewed",
+    "sp_dir",
+    "skill_dir"
   ],
   "properties": {
-    "version": { "const": 1 },
-    "run_id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-    "plan": { "$ref": "#/$defs/text" },
-    "spec": { "$ref": "#/$defs/textOrNull" },
-    "commit_rules": { "$ref": "#/$defs/text" },
+    "version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "plan": {
+      "$ref": "#/$defs/text"
+    },
+    "spec": {
+      "$ref": "#/$defs/textOrNull"
+    },
+    "commit_rules": {
+      "$ref": "#/$defs/text"
+    },
     "repo": {
       "type": "object",
-      "required": ["mode", "root", "git_dir", "base_ref", "branch", "worktree_root", "ledger_dir"],
+      "required": [
+        "mode",
+        "root",
+        "git_dir",
+        "base_ref",
+        "branch",
+        "worktree_root",
+        "ledger_dir"
+      ],
       "properties": {
-        "mode": { "enum": ["git", "shadow"] },
-        "root": { "$ref": "#/$defs/text" },
-        "git_dir": { "$ref": "#/$defs/textOrNull" },
-        "base_ref": { "$ref": "#/$defs/text" },
-        "branch": { "$ref": "#/$defs/text" },
-        "worktree_root": { "$ref": "#/$defs/text" },
-        "ledger_dir": { "$ref": "#/$defs/text" }
+        "mode": {
+          "enum": [
+            "git",
+            "shadow"
+          ]
+        },
+        "root": {
+          "$ref": "#/$defs/text"
+        },
+        "git_dir": {
+          "$ref": "#/$defs/textOrNull"
+        },
+        "base_ref": {
+          "$ref": "#/$defs/text"
+        },
+        "branch": {
+          "$ref": "#/$defs/text"
+        },
+        "worktree_root": {
+          "$ref": "#/$defs/text"
+        },
+        "ledger_dir": {
+          "$ref": "#/$defs/text"
+        }
       },
-      "if": { "properties": { "mode": { "const": "shadow" } } },
-      "then": { "properties": { "git_dir": { "$ref": "#/$defs/text" } } }
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "shadow"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "git_dir": {
+            "$ref": "#/$defs/text"
+          }
+        }
+      }
     },
     "commands": {
       "allOf": [
-        { "$ref": "#/$defs/commandSet" },
-        { "required": ["setup", "test", "lint", "build"] }
+        {
+          "$ref": "#/$defs/commandSet"
+        },
+        {
+          "required": [
+            "setup",
+            "test",
+            "lint",
+            "build"
+          ]
+        }
       ]
     },
     "lane_commands": {
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/commandSet" }
+      "additionalProperties": {
+        "$ref": "#/$defs/commandSet"
+      }
     },
-    "prelude": { "$ref": "#/$defs/taskList" },
+    "prelude": {
+      "$ref": "#/$defs/taskList"
+    },
     "lanes": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "tasks"],
+        "required": [
+          "id",
+          "name",
+          "tasks"
+        ],
         "properties": {
           "id": {
             "allOf": [
-              { "type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$" },
-              { "not": { "enum": ["prelude", "join"] } }
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$"
+              },
+              {
+                "not": {
+                  "enum": [
+                    "prelude",
+                    "join"
+                  ]
+                }
+              }
             ]
           },
-          "name": { "$ref": "#/$defs/text" },
-          "setup_note": { "$ref": "#/$defs/text" },
-          "tasks": { "$ref": "#/$defs/taskList" }
+          "name": {
+            "$ref": "#/$defs/text"
+          },
+          "setup_note": {
+            "$ref": "#/$defs/text"
+          },
+          "tasks": {
+            "$ref": "#/$defs/taskList"
+          }
         }
       }
     },
-    "join": { "$ref": "#/$defs/taskList" },
+    "join": {
+      "$ref": "#/$defs/taskList"
+    },
     "hooks": {
       "type": "object",
       "properties": {
-        "post_integrate": { "$ref": "#/$defs/text" },
-        "e2e": { "$ref": "#/$defs/text" }
+        "post_integrate": {
+          "$ref": "#/$defs/text"
+        },
+        "e2e": {
+          "$ref": "#/$defs/text"
+        }
       },
       "additionalProperties": false
     },
     "limits": {
       "type": "object",
-      "required": ["review_rounds", "max_parallel_lanes"],
+      "required": [
+        "review_rounds",
+        "max_parallel_lanes"
+      ],
       "properties": {
-        "review_rounds": { "type": "integer", "minimum": 1 },
-        "max_parallel_lanes": { "type": "integer", "minimum": 1 },
-        "max_agents": { "type": "integer", "minimum": 1 },
-        "max_rulings": { "type": "integer", "minimum": 0 }
+        "review_rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_parallel_lanes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_rulings": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
-    "dry_run": { "type": "boolean" },
+    "dry_run": {
+      "type": "boolean"
+    },
     "autonomy": {
       "description": "Default autonomous: blocked tasks, questions, review caps and pre-flight conflicts go to the adjudicator; supervised stops and waits as Plan 1 did.",
-      "enum": ["autonomous", "supervised"]
+      "enum": [
+        "autonomous",
+        "supervised"
+      ]
     },
     "profile": {
       "description": "Default full. lite: one lane worked on the feature branch, no integrate agent, one combined final reviewer; not allowed with hooks.post_integrate.",
-      "enum": ["lite", "full"]
+      "enum": [
+        "lite",
+        "full"
+      ]
     },
     "setup_result": {
-      "description": "Output of scripts/setup; when present no Setup agent runs. worktrees maps every lane id to the absolute path of its checkout.",
+      "description": "scripts/setup output; required when dry_run is false (there is no setup agent).",
       "type": "object",
-      "required": ["feature_head", "worktrees", "discarded"],
+      "required": [
+        "feature_head",
+        "worktrees",
+        "discarded"
+      ],
       "properties": {
-        "feature_head": { "$ref": "#/$defs/text" },
+        "feature_head": {
+          "$ref": "#/$defs/text"
+        },
         "worktrees": {
           "type": "object",
-          "additionalProperties": { "type": "string", "pattern": "^/" }
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^/"
+          }
         },
-        "discarded": { "$ref": "#/$defs/textList" }
+        "discarded": {
+          "$ref": "#/$defs/textList"
+        },
+        "preserved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "worktree",
+              "ref",
+              "commit"
+            ],
+            "properties": {
+              "worktree": {
+                "$ref": "#/$defs/text"
+              },
+              "ref": {
+                "$ref": "#/$defs/text"
+              },
+              "commit": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          },
+          "description": "Commits under refs/parallel-lanes/<run_id>/abandoned/ holding changes setup discarded."
+        }
       }
     },
     "start_points": {
       "description": "Feature heads from the ledger run_started events (ledger status start_points).",
       "type": "object",
       "properties": {
-        "prelude": { "$ref": "#/$defs/text" },
-        "join": { "$ref": "#/$defs/text" }
+        "prelude": {
+          "$ref": "#/$defs/text"
+        },
+        "join": {
+          "$ref": "#/$defs/text"
+        }
       },
       "additionalProperties": false
     },
-    "done": { "$ref": "#/$defs/textList" },
-    "reviewed": { "$ref": "#/$defs/textList" },
+    "done": {
+      "$ref": "#/$defs/textList"
+    },
+    "reviewed": {
+      "$ref": "#/$defs/textList"
+    },
     "notes": {
       "description": "Resume only: the user's answer to a blocked task's question, per task id; passed to that task's agents.",
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/text" }
+      "additionalProperties": {
+        "$ref": "#/$defs/text"
+      }
     },
     "backfill": {
       "description": "Commits of every task in done (from ledger committed events). A done but unreviewed task is reviewed before its lane continues; each head is the next task's review base.",
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["base", "head"],
+        "required": [
+          "base",
+          "head"
+        ],
         "properties": {
-          "base": { "$ref": "#/$defs/text" },
-          "head": { "$ref": "#/$defs/text" }
+          "base": {
+            "$ref": "#/$defs/text"
+          },
+          "head": {
+            "$ref": "#/$defs/text"
+          }
         }
       }
     },
-    "sp_dir": { "$ref": "#/$defs/textOrNull" },
-    "agent_type": { "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[a-z0-9-]+$" }] },
-    "skill_dir": { "$ref": "#/$defs/text" }
+    "overlaps": {
+      "type": "array",
+      "description": "Files tasks in different lanes both change on purpose; the only way a file may appear in two lanes.",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "tasks",
+          "reason",
+          "merge_owner"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "$ref": "#/$defs/text"
+          },
+          "tasks": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "$ref": "#/$defs/text"
+            }
+          },
+          "reason": {
+            "$ref": "#/$defs/text"
+          },
+          "merge_owner": {
+            "$ref": "#/$defs/text"
+          }
+        }
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "description": "Plan tasks the run leaves out, each with why (scripts/coverage checks the plan against the manifest).",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/text"
+          },
+          "reason": {
+            "$ref": "#/$defs/text"
+          }
+        }
+      }
+    },
+    "allow_deferral": {
+      "type": "boolean",
+      "description": "Default true: the adjudicator may park or unblock a non-security task (the run is then not accepted). false: every park or unblock is a stop."
+    },
+    "deferred": {
+      "$ref": "#/$defs/textList",
+      "description": "Resume: ledger status deferred (parked or unblocked tasks); each must be in done."
+    },
+    "sp_dir": {
+      "$ref": "#/$defs/textOrNull"
+    },
+    "agent_type": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        }
+      ]
+    },
+    "skill_dir": {
+      "$ref": "#/$defs/text"
+    }
   },
   "$defs": {
-    "text": { "type": "string", "minLength": 1 },
-    "textOrNull": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/text" }] },
-    "textList": { "type": "array", "items": { "$ref": "#/$defs/text" } },
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "textOrNull": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/text"
+        }
+      ]
+    },
+    "textList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    },
     "commandSet": {
       "type": "object",
       "properties": {
-        "setup": { "$ref": "#/$defs/textList" },
-        "test": { "$ref": "#/$defs/textList" },
-        "lint": { "$ref": "#/$defs/textList" },
-        "build": { "$ref": "#/$defs/textList" }
+        "setup": {
+          "$ref": "#/$defs/textList"
+        },
+        "test": {
+          "$ref": "#/$defs/textList"
+        },
+        "lint": {
+          "$ref": "#/$defs/textList"
+        },
+        "build": {
+          "$ref": "#/$defs/textList"
+        }
       },
       "additionalProperties": false
     },
     "task": {
       "type": "object",
-      "required": ["id", "title", "files", "tier", "security"],
+      "required": [
+        "id",
+        "title",
+        "files",
+        "tier",
+        "security"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/text" },
-        "title": { "$ref": "#/$defs/text" },
-        "files": { "$ref": "#/$defs/textList" },
-        "tier": { "enum": ["standard", "sonnet", "light"] },
-        "security": { "type": "boolean" },
-        "batch": { "$ref": "#/$defs/text" }
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$",
+          "description": "Exactly as in the plan heading; a safe file name (it names brief, report and review files)."
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "pattern": "^/"
+            }
+          },
+          "description": "Project-relative paths; none may leave the project. Compared normalized and case-insensitively across lanes."
+        },
+        "tier": {
+          "enum": [
+            "standard",
+            "sonnet",
+            "light"
+          ]
+        },
+        "security": {
+          "type": "boolean"
+        },
+        "batch": {
+          "$ref": "#/$defs/text"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "kind": {
+                "enum": [
+                  "code",
+                  "contract"
+                ]
+              }
+            }
+          },
+          "description": "code: needs the producer's real code (prelude, earlier in the same lane, or the dependent in join); contract: builds against the plan's contract. No cycles."
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "tier": { "enum": ["sonnet", "light"] } } },
-          "then": { "properties": { "security": { "const": false } } }
+          "if": {
+            "properties": {
+              "tier": {
+                "enum": [
+                  "sonnet",
+                  "light"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "security": {
+                "const": false
+              }
+            }
+          }
         },
         {
-          "if": { "required": ["batch"] },
-          "then": { "properties": { "tier": { "const": "light" } } }
+          "if": {
+            "required": [
+              "batch"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tier": {
+                "const": "light"
+              }
+            }
+          }
         }
       ]
     },
-    "taskList": { "type": "array", "items": { "$ref": "#/$defs/task" } }
-  }
+    "taskList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": false
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "required": [
+          "setup_result"
+        ]
+      }
+    }
+  ]
 }

@@ -188,21 +188,30 @@ session lists it, and you can resume with one word. Finished tasks are skipped.
    project commands, commit rules taken from your CLAUDE.md, and budgets.
 3. **Dry run and consent.** The workflow validates the manifest without spawning anything,
    and Claude shows the table. "Just run it" and auto mode do not skip it.
-4. **Execute.** `scripts/setup` creates the feature branch and lane worktrees, then the
-   phases run: pre-flight conflict check, prelude, lanes in parallel, integration, join,
-   E2E, and a final review with three lenses and one fix round.
-5. **Hand-back.** The report covers each task's commits, review rounds, model and token
-   usage, rulings made on your behalf, and the E2E result.
+4. **Execute.** The run takes a launch lock (a second session cannot reset it), then
+   `scripts/setup` creates the feature branch and lane worktrees, saving any changes it has
+   to discard under a git ref first. The phases run: pre-flight conflict check, prelude,
+   lanes in parallel, integration, join, E2E, a final review with three lenses and one fix
+   round, and a verify step that reruns the project checks (and any stale E2E or
+   post-integration check) on the exact revision delivered.
+5. **Hand-back.** The report leads with acceptance: `accepted` only when every check passed
+   on the delivered revision, no blocking finding is open, and nothing was deferred;
+   otherwise `rejected` or `unverified`, with every reason, and the run stays resumable. It
+   also covers each task's commits, review rounds, model and token usage, rulings made on
+   your behalf, and the E2E result.
 
 Other things to know:
 
 - **Autonomy.** In `autonomous` mode (the default), an adjudicator agent settles blocked
   tasks and review deadlocks, capped at 25 rulings per run. In `supervised` mode, those
-  stop the run for you instead. You can switch modes when the table is shown.
+  stop the run for you instead. You can switch modes when the table is shown. A task the
+  adjudicator parks is deferred, never counted as delivered; security tasks are never
+  parked, and `allow_deferral: false` forbids parking altogether.
 - **Transient failures** (agent errors, missing results) relaunch once automatically.
   Anything substantive stops the run and asks you.
 - **Where files go.** Manifests and ledgers are stored beside the plan, or under
-  `~/.claude/parallel-lanes/runs/` when the plan is inside the repo. Worktrees go in a
+  `~/.claude/parallel-lanes/runs/` (under `CLAUDE_CONFIG_DIR` when set) when the plan is
+  inside the repo. Worktrees go in a
   sibling directory such as `<repo>-wt-<run_id>`. In git mode the run adds branches to
   your repo, but no run files are written inside the project folder.
 

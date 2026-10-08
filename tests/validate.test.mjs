@@ -442,6 +442,17 @@ test('schema documents every addendum field', () => {
   assert.deepEqual(p.agent_type, { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[a-z0-9-]+$' }] });
 });
 
+test('schema documents the explicit records and the task id pattern the validator enforces', () => {
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  const p = schema.properties;
+  assert.equal(schema.$defs.task.properties.id.pattern, laneIdPattern());
+  assert.deepEqual(schema.$defs.task.properties.depends_on.items.properties.kind.enum, ['code', 'contract']);
+  for (const key of ['overlaps', 'excluded', 'allow_deferral', 'deferred']) assert.ok(key in p, key);
+  assert.deepEqual([...p.overlaps.items.required].sort(), ['file', 'merge_owner', 'reason', 'tasks']);
+  assert.ok('preserved' in p.setup_result.properties);
+  assert.ok(schema.allOf.some((r) => r.then && r.then.required && r.then.required.includes('setup_result')));
+});
+
 test('agent_type is optional, null, or a lowercase name', () => {
   assert.equal(agentTypePattern(), '^[a-z0-9-]+$');
   const message = 'agent_type: must be null or a name matching ^[a-z0-9-]+$';
