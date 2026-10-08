@@ -137,7 +137,7 @@ test('ledger reviewed binds an approval to the section hash and head; a changed 
   const c = newCase();
   const h = commit(c, 'a.txt');
   finish(c, c.start, '--task', 'T1');
-  ok(py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo));
+  ok(py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo, h, '0'));
   let status = ok(py('ledger', 'status', c.ledger, '--plan', c.plan));
   assert.deepEqual(status.reviewed, ['T1']);
   assert.deepEqual(status.stale, []);
@@ -196,4 +196,41 @@ test('a settled task is listed as deferred; a later commit clears it', () => {
   finish(c, c.start, '--task', 'T1');
   status = ok(py('ledger', 'status', c.ledger));
   assert.deepEqual(status.deferred, []);
+});
+
+// The reviewer review: an approval records the head of the range it reviewed,
+// not the checkout's later HEAD, and never carries a blocking finding.
+test('ledger reviewed records the reviewed head, not a later checkout HEAD', () => {
+  const c = newCase();
+  const h1 = commit(c, 'a.txt');
+  finish(c, c.start, '--task', 'T1');
+  commit(c, 'b.txt');
+  finish(c, h1, '--task', 'T2');
+  ok(py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo, h1, '0'));
+  const status = ok(py('ledger', 'status', c.ledger, '--plan', c.plan));
+  assert.deepEqual(status.stale, []);
+  assert.deepEqual(status.reviewed, ['T1']);
+});
+
+test('ledger reviewed refuses an approval with blocking findings or a head outside the checkout', () => {
+  const c = newCase();
+  const h = commit(c, 'a.txt');
+  finish(c, c.start, '--task', 'T1');
+  let res = py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo, h, '1');
+  assert.equal(res.code, 3);
+  assert.match(res.stderr, /not an approval/);
+  res = py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo, '0'.repeat(40), '0');
+  assert.equal(res.code, 3);
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).reviewed, []);
+});
+
+test('a reopened event voids an earlier approval', () => {
+  const c = newCase();
+  const h = commit(c, 'a.txt');
+  finish(c, c.start, '--task', 'T1');
+  ok(py('ledger', 'reviewed', c.ledger, 'prelude', 'T1', '0', c.plan, c.repo, h, '0'));
+  append(c, { task: 'T1', event: 'reopened', reason: 'approved with a blocking finding' });
+  const status = ok(py('ledger', 'status', c.ledger, '--plan', c.plan));
+  assert.deepEqual(status.reviewed, []);
+  assert.deepEqual(status.done, ['T1']);
 });

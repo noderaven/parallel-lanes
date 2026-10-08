@@ -269,13 +269,15 @@ function finishCommand(m, task, where, from, settled = null) {
   ].join(' ');
 }
 
-// The ledger command that records a review approval of one task: the hash of
-// the task's section of the plan and the head of the checkout come from the
-// files, not from the reviewer (scripts/ledger reviewed).
-function reviewedCommand(m, laneId, taskId, rounds, dir) {
+// The ledger command that records a review approval of one task at head (the
+// head of the range under review): the hash of the task's section of the plan
+// comes from the file, not from the reviewer (scripts/ledger reviewed). The
+// reviewer fills <blocking> with its count of critical and important
+// findings; the command records nothing unless it is 0.
+function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
   return `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
-    `${shellQuote(m.plan)} ${shellQuote(dir)}`;
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
@@ -313,7 +315,7 @@ function taskResultText(dir, from) {
   ].join('\n');
 }
 
-function reviewResultText(m, task, where, rounds) {
+function reviewResultText(m, task, where, rounds, head) {
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
@@ -328,7 +330,9 @@ function reviewResultText(m, task, where, rounds) {
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
-    ...unitTasks(task).map((t) => `  ${reviewedCommand(m, where.lane, t.id, rounds, where.dir)}`),
+    ...unitTasks(task).map((t) => `  ${reviewedCommand(m, where.lane, t.id, rounds, where.dir, head)}`),
+    'replacing <blocking> with the number of critical and important findings you report. An approve with any',
+    'of them is not an approval: the command refuses it, and your verdict must then be changes.',
   ].join('\n');
 }
 
@@ -420,13 +424,15 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     '',
     taskContext(m, task, where, guidance),
     '',
-    reviewResultText(m, task, where, rounds),
+    reviewResultText(m, task, where, rounds, head),
   ].join('\n');
 }
 
 // Prompt for a fix agent. report is the latest implement or fix result;
-// head is the branch head the fix builds on.
-function fixPrompt(m, task, where, findings, report, head, guidance = null) {
+// head is the branch head the fix builds on. reopen: the review approved
+// while reporting a blocking finding, and may have recorded that approval;
+// the fix first records that it no longer holds.
+function fixPrompt(m, task, where, findings, report, head, guidance = null, reopen = false) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const batch = isBatch(task);
@@ -440,6 +446,12 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
+    ...(reopen ? [
+      'Run this first: the review approved while reporting a critical or important finding, which is not an',
+      'approval, so record that any approval it wrote no longer holds:',
+      ...ledgerLines(m, task, where, { event: 'reopened', reason: 'approved with a blocking finding' }),
+      '',
+    ] : []),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
@@ -487,7 +499,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     taskContext(m, task, where, guidance),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
-    reviewResultText(m, task, where, round),
+    reviewResultText(m, task, where, round, head),
   ].join('\n');
 }
 

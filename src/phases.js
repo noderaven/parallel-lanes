@@ -139,6 +139,26 @@ function preflightResolved(m, text) {
   return { ...m, notes };
 }
 
+// A copy of the manifest whose notes carry the unblock note of each result
+// (next_note) to the tasks of later whose depends_on names its task: later
+// is the lanes and the join after the prelude, the join after the lanes (a
+// list's own dependents get the note from runTaskList; lanes run at once, so
+// a lane-to-lane note is not carried).
+function withCarriedNotes(m, results, later) {
+  const unblocked = results.filter((r) => present(r.next_note));
+  if (unblocked.length === 0) return m;
+  const notes = { ...(m.notes || {}) };
+  for (const t of later) {
+    for (const r of unblocked) {
+      if (!(t.depends_on || []).some((d) => d.id === r.task)) continue;
+      const line = `from ${r.task}, unblocked by the adjudicator: ${r.next_note}`;
+      if (notes[t.id] && notes[t.id].includes(line)) continue;
+      notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
+    }
+  }
+  return { ...m, notes };
+}
+
 // The undeclared dependencies pre-flight reported, split into the entries
 // the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
@@ -237,7 +257,8 @@ async function runAll(m, io) {
   const record = (results) => {
     for (const r of results) {
       tasks[r.task] = {
-        status: r.status,
+        // A task the ledger lists as deferred stays deferred when skipped.
+        status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
         commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
@@ -368,6 +389,7 @@ async function runAll(m, io) {
   const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
     counted, 'Prelude', true);
   record(prelude.results);
+  m = withCarriedNotes(m, prelude.results, [...m.lanes.flatMap((l) => l.tasks), ...m.join]);
   if (prelude.stopped !== null) stopAt('prelude', prelude);
   if (state.refused.length > 0) return budgetReport();
   if (prelude.stopped !== null) return report('stopped', 'prelude stopped');
@@ -388,6 +410,7 @@ async function runAll(m, io) {
     const list = await runTaskList(m, lane.tasks, featureWhere(m, lane.id),
       fromPhase ? starts.prelude || tip : tip, counted, lane.name, fromPhase);
     record(list.results);
+    m = withCarriedNotes(m, list.results, m.join);
     if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
     if (list.stopped !== null) return report('stopped', 'lanes stopped');
@@ -399,6 +422,7 @@ async function runAll(m, io) {
     const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
     for (const lr of laneResults) {
       record(lr.results);
+      m = withCarriedNotes(m, lr.results, m.join);
       if (lr.stopped !== null) stopAt(lr.lane, lr);
     }
     if (state.refused.length > 0) return budgetReport();

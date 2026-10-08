@@ -192,8 +192,9 @@ Markers live in `<config dir>/parallel-lanes/active/` (`$PL_ACTIVE_DIR` override
 `scripts/active-run acquire <run_id> <manifest>` creates `<run_id>.lock` atomically (it fails
 with exit 4 when it exists: another session may still be running the run), writes the marker
 `{run_id, manifest, started, status: running}`, and prints the owner token; `scripts/setup`
-refuses a locked run unless `--owner <token>` matches, so a second launch or resume cannot
-reset work in progress. `--takeover` replaces a stale lock: use it only when the user confirms
+refuses unless the lock exists and `--owner <token>` matches it, so a second launch or
+resume cannot reset work in progress. Keep the lock through a transient relaunch; `remove`
+refuses a locked run unless `--takeover`. `--takeover` replaces a stale lock: use it only when the user confirms
 the session that held it has ended. `release <run_id> <status>` drops the lock and records
 the status; `release <run_id> --remove` drops both (only for an accepted run). `list` prints
 every marker with `locked`; the next session's bootstrap offers an unlocked one for a
@@ -234,7 +235,10 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 (`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `fix_unreviewed`, `deferred_task`,
-`task_not_done`. Warnings (open minor findings, cannot-verify items) never block. Show the
+`task_not_done`. Warnings (open minor findings, cannot-verify items) never block. The checks evidence is the
+`scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
+JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
+it is not caught by the run. Show the
 status and every reason first; only `accepted` is delivered work. A reason the user explicitly
 accepts is recorded in the report as accepted by the user, never folded into `accepted`.
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
@@ -268,22 +272,31 @@ join: the join start point), which is the widest range they can have; say so in 
 header.
 
 `ledger status --plan <plan> [--spec <spec>]` also checks approvals: a review recorded with
-`ledger reviewed` holds the hash of the task's section and the head it approved; a changed
+`ledger reviewed` holds the hash of the task's section and the head of the range it approved
+(it refuses an approval that reports a critical or important finding; a fix agent records
+`reopened` when the engine acted on such an approval as changes); a changed
 section or head puts the task in `stale`, a review without a hash (older ledgers) in
 `unbound`, and both are left out of `reviewed` so the resume reviews them again. `inputs`
-says whether the plan or spec changed since setup recorded their hashes. List tasks whose
+says whether the plan or spec changed since the last launch recorded their hashes. A stale
+task that is not the last done task of its list is reviewed against the current plan, but a
+fix for it lands after the later tasks' commits; tell the user, who may prefer rerunning it
+and the tasks after it. List tasks whose
 `depends_on` names a stale task for the user too.
 
-To take a deferred task up again (the user wants it done after all), leave it out of `done`,
-`reviewed`, and `deferred` on the resume: it runs again from the previous task's head, its
-earlier commits stay on the branch, and its implementer starts from them. Tasks whose
-`depends_on` names it run again only if the user asks for that too.
+To take a deferred task up again (the user wants it done after all) when it is the last
+done task of its list, leave it out of `done`, `reviewed`, and `deferred` on the resume: it
+runs again from the previous task's head, its earlier commits stay on the branch, and its
+implementer starts from them. When later tasks of its list are done, or its lane is already
+merged, its range would take in their commits: leave those later tasks out too, so they all
+run again in order, or plan the follow-up as a new task.
 
 `carry`: `{<task>: <text>}` for each task the adjudicator last unblocked, with its unblock
 ruling. A skipped task passes no note at run time, so for each entry add
 `from <task>, unblocked by the adjudicator: <text>` to `notes` for the tasks whose
 `depends_on` names it (else the next task in the same list; after a batch, the task after
-the batch), appended to any existing note for it.
+the batch), appended to any existing note for it. During a run the engine does the same:
+within a list, and from the prelude to the lanes and join and from the lanes to the join
+(lanes run at once, so not from one lane to another).
 
 It is required because each `head` is the next task's review base, and done-but-unreviewed
 tasks get a review first. A wrong base silently changes the review range of every done task.

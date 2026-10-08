@@ -219,3 +219,18 @@ test('task-brief keeps a fence indented under a nested Produces bullet whole', (
   const block = text.split('## Produces of Task P1: producer (consumed by this task)\n\n')[1];
   assert.equal(block, '  - Produces:\n    ```js\nexport function f() {}\n    ```\n');
 });
+
+test('derive-lanes does not read backticked identifiers as files', () => {
+  const dir = workDir();
+  write(join(dir, 'plan.md'), [
+    '# P', '',
+    '### Task 1: a', '', '**Files:**', '- Modify: `src/app.py` to call `init_db`', '- Test: `tests/test_app.py`', '',
+    '### Task 2: b', '', '**Files:**', '- Modify: `src/db.py`: rename `init_db` to `setup`', '- Create: `Makefile`', '',
+    '### Task 3: c', '', '**Files:**', '- Modify: `src/x.py` add `ENV_VAR` handling, and `Dockerfile`', '',
+  ].join('\n'));
+  const out = JSON.parse(py('derive-lanes', [join(dir, 'plan.md')]).stdout);
+  assert.deepEqual(out.tasks.map((t) => t.files),
+    [['src/app.py', 'tests/test_app.py'], ['src/db.py', 'Makefile'], ['src/x.py', 'Dockerfile']]);
+  assert.deepEqual(out.groups, [['1'], ['2'], ['3']]);
+  assert.deepEqual(out.bridge_files, []);
+});

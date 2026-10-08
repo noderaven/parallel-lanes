@@ -148,17 +148,20 @@ test('every helper script SKILL.md, reference.md, and adopt.md name exists', () 
   }
 });
 
-test('run files of a plan inside the project go under ~/.claude/parallel-lanes/runs/<run_id>/', () => {
+test('run files of a plan inside the project go under <config dir>/parallel-lanes/runs/<run_id>/', () => {
   const skill = read(SKILL_MD).toString('utf8');
   const reference = read(REFERENCE_MD).toString('utf8');
+  // The config dir is ${CLAUDE_CONFIG_DIR:-~/.claude}; reference.md also names the default.
+  assert.ok(reference.includes('~/.claude/parallel-lanes/runs/<run_id>/'), 'reference.md lacks the default runs/ location');
   for (const [name, text] of [['SKILL.md', skill], ['reference.md', reference]]) {
-    assert.ok(text.includes('~/.claude/parallel-lanes/runs/<run_id>/'), `${name} lacks the runs/ location`);
+    assert.ok(text.includes('<config dir>/parallel-lanes/runs/<run_id>/'), `${name} lacks the runs/ location`);
     assert.ok(text.includes('<run_dir>/<plan-name>.<run_id>.ledger'), `${name} lacks the run_dir ledger path`);
     assert.ok(!text.includes('<plan-dir>/<plan-name>.<run_id>.ledger'), `${name} still pins the ledger beside the plan`);
   }
   assert.ok(skill.includes('<run_dir>/<plan-name>.lanes.json'), 'SKILL.md lacks the run_dir manifest path');
   // Resume must find a manifest saved under runs/.
-  assert.ok(skill.includes('~/.claude/parallel-lanes/runs/*/*.lanes.json'), 'SKILL.md resume lookup misses runs/');
+  assert.ok(skill.includes('<config dir>/parallel-lanes/runs/*/*.lanes.json'), 'SKILL.md resume lookup misses runs/');
+  assert.ok(skill.includes('${CLAUDE_CONFIG_DIR:-~/.claude}'), 'SKILL.md defines the config dir');
 });
 
 test('adopt.md holds the adoption steps and the worked example', () => {

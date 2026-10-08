@@ -1744,3 +1744,21 @@ test('acceptance: minor findings and cannot-verify items are warnings, not reaso
   assert.ok(result.acceptance.warnings.some((w) => w.includes('open minor finding F1')));
   assert.ok(result.acceptance.warnings.some((w) => w.includes('load under 1k users')));
 });
+
+test('an unblock note reaches a join task that depends on the unblocked lane task', async () => {
+  const m = manifest();
+  m.join[0].depends_on = [{ id: 'T2', kind: 'contract' }];
+  const blocked = { status: 'blocked', head: 'T1-h', tests: '', notes: 'upstream missing' };
+  const { calls } = await run(m, {
+    ...phaseScript(), ...taskScript(ALL),
+    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'unblock', text: 'UNBLOCK-X: stub the v2 shape', head: 'T1-h' }],
+  });
+  assert.ok(calls.find((c) => c.label === 'T5 implement').prompt.includes('UNBLOCK-X: stub the v2 shape'));
+});
+
+test('a deferred task stays deferred in the report when its lane resumes with other work', async () => {
+  const m = manifest({ done: ['T2'], reviewed: ['T2'], deferred: ['T2'], backfill: { T2: { base: 'T1-h', head: 'T1-h' } } });
+  const { result } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.tasks.T2.status, 'deferred');
+  assert.equal(result.acceptance.status, 'rejected');
+});

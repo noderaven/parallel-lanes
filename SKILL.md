@@ -48,11 +48,12 @@ executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = i
 
 1. Invoked notice.
 2. If a manifest for this plan exists (`<plan-dir>/<plan-name>.lanes.json`, or any
-   `~/.claude/parallel-lanes/runs/*/*.lanes.json` whose `plan` equals this plan's absolute
+   `<config dir>/parallel-lanes/runs/*/*.lanes.json` (`${CLAUDE_CONFIG_DIR:-~/.claude}`) whose `plan` equals this plan's absolute
    path), or `bash <skill_dir>/scripts/active-run list` shows a marker for this plan, or the
    user asks to resume or continue: go to Resume (ask first if the user did not say whether to
    resume or start fresh). Starting fresh: rename the old manifest to
-   `<plan-name>.lanes.<old run_id>.json`, remove its marker, and continue.
+   `<plan-name>.lanes.<old run_id>.json`, remove its marker (`active-run remove` refuses a
+   locked run: ask; `--takeover` only if the user confirms that session ended), and continue.
 3. If the Workflow tool is not available: `not a fit (Workflow tool unavailable)`,
    recommending Subagent-driven. Stop.
 4. Assessment. 5. Offer. 6. Build the manifest. 7. Confirmation. 8. Setup and launch.
@@ -115,10 +116,8 @@ Field-by-field guide: reference.md "Manifest fields". In order:
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
-   (and outside its repo); when the plan file lies inside the project or its repo (e.g.
-   `docs/superpowers/plans/`), `<run_dir>` = `~/.claude/parallel-lanes/runs/<run_id>/`.
-   Both the manifest and `repo.ledger_dir` go there, never inside the project: the ledger
-   dir also holds briefs, reports, and review packages. Save the manifest as
+   and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`. The manifest and
+   `repo.ledger_dir` (briefs, reports, review packages) go there, never inside the project. Save the manifest as
    `<run_dir>/<plan-name>.lanes.json`; `ledger_dir` = `<run_dir>/<plan-name>.<run_id>.ledger`.
 8. The manifest has no `setup_result` or `start_points` yet. Nothing here or in Confirmation
    touches the project: no worktree, branch, or setup command before consent. Once saved,
@@ -150,9 +149,8 @@ Field-by-field guide: reference.md "Manifest fields". In order:
 3. Ask for a yes. Launch only on an explicit yes given after the table. Any change request
    means: edit the manifest, dry-run again, show the table again.
 
-"Just run it", "skip the table", "don't ask me anything", auto mode, or a yes given before
-the table was shown do not waive this. Say the table is the one required
-check, show it, and wait.
+"Just run it", "skip the table", auto mode, or a yes given before the table do not waive
+this. Say the table is the one required check, show it, and wait.
 
 ## Launch
 
@@ -167,7 +165,8 @@ check, show it, and wait.
    `--takeover` only when the user confirms that session ended. Then run
    `python3 <skill_dir>/scripts/setup <manifest file> --owner <token>`. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
-   wait 10 seconds and retry once; then report it and stop. Put its output in `setup_result`
+   wait 10 seconds and retry once; then `active-run release <run_id> setup_failed`, report,
+   and stop. Put its output in `setup_result`
    and copy the `start_points` of `python3 <skill_dir>/scripts/ledger status <ledger_dir>`
    verbatim into `start_points` (keys `prelude` and `join`). Adding these two fields needs no
    second table; any other manifest change after the yes does.
@@ -175,7 +174,8 @@ check, show it, and wait.
    when `done` is non-empty.
 4. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
-5. At the end: `scripts/active-run release <run_id> --remove` only for `complete` with
+5. At the end, once no transient relaunch follows (keep the lock through one):
+   `scripts/active-run release <run_id> --remove` only for `complete` with
    `acceptance.status` `accepted`; otherwise `scripts/active-run release <run_id> <status>`
    (`unaccepted` for complete but not accepted), so a later session offers the resume.
 
@@ -194,14 +194,13 @@ are NOT transient: never relaunch; stop and notify.
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
 fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Rerun
-`scripts/setup --owner <token>`, recompute `done`, `reviewed`, `backfill`, and `start_points` from the ledger
-as in Resume, and launch again. No second table. A second transient stop is a real stop.
+`scripts/setup --owner <token>`, recompute `done`, `reviewed`, `deferred`, the `carry` notes,
+`backfill`, and `start_points` as in Resume steps 2-3, and launch again. No second table. A second transient stop is a real stop.
 
 ## Notify
 
-Send a push notification (PushNotification tool) with run id, status, and one line of next
-step when a run completes, really stops, hits a budget cap, or fails its relaunch; if the
-tool is unavailable, a chat notice only.
+Push-notify (PushNotification) the run id, status, and next step when a run completes, really
+stops, hits a budget cap, or fails its relaunch; else a chat notice.
 
 ## Hand-back
 

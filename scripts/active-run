@@ -8,7 +8,7 @@
 #   active-run acquire RUN_ID MANIFEST [--takeover]
 #   active-run release RUN_ID STATUS|--remove
 #   active-run write RUN_ID MANIFEST [STATUS]
-#   active-run remove RUN_ID
+#   active-run remove RUN_ID [--takeover]
 #   active-run list
 #
 # Markers live in $PL_ACTIVE_DIR (default
@@ -26,7 +26,8 @@
 # --remove, deletes the marker.
 # write creates or replaces a marker: STATUS defaults to running, and
 # rewriting an existing marker keeps its started time and updates its status.
-# remove deletes a marker and its lock (a missing one is fine). list prints a
+# remove deletes a marker (a missing one is fine); a locked run is refused
+# (exit 4) unless --takeover, which deletes the lock too. list prints a
 # JSON array of the markers sorted by run id, each with "locked": true when its
 # lock exists, skipping files that are not valid markers (a marker's run_id
 # must be a safe run id equal to its file name); a missing directory lists
@@ -41,7 +42,7 @@ dir="${PL_ACTIVE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/active}
 
 usage() {
   echo "usage: active-run acquire RUN_ID MANIFEST [--takeover] | release RUN_ID STATUS|--remove" \
-    "| write RUN_ID MANIFEST [STATUS] | remove RUN_ID | list" >&2
+    "| write RUN_ID MANIFEST [STATUS] | remove RUN_ID [--takeover] | list" >&2
   exit 2
 }
 
@@ -138,8 +139,12 @@ case "$1" in
     write_marker "$run_id" "$manifest" "$status"
     ;;
   remove)
-    [ "$#" -eq 2 ] || usage
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+    [ "$#" -eq 2 ] || [ "$3" = "--takeover" ] || usage
     check_id "$2"
+    if [ -e "$dir/$2.lock" ] && [ "$#" -eq 2 ]; then
+      fail 4 "run $2 is locked by a launch that may still be running; if that session has ended, remove it with --takeover"
+    fi
     rm -f "$dir/$2.json" "$dir/$2.lock" || fail 3 "cannot remove $dir/$2.json"
     ;;
   list)

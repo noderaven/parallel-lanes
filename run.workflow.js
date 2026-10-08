@@ -982,13 +982,15 @@ function finishCommand(m, task, where, from, settled = null) {
   ].join(' ');
 }
 
-// The ledger command that records a review approval of one task: the hash of
-// the task's section of the plan and the head of the checkout come from the
-// files, not from the reviewer (scripts/ledger reviewed).
-function reviewedCommand(m, laneId, taskId, rounds, dir) {
+// The ledger command that records a review approval of one task at head (the
+// head of the range under review): the hash of the task's section of the plan
+// comes from the file, not from the reviewer (scripts/ledger reviewed). The
+// reviewer fills <blocking> with its count of critical and important
+// findings; the command records nothing unless it is 0.
+function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
   return `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
-    `${shellQuote(m.plan)} ${shellQuote(dir)}`;
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
@@ -1026,7 +1028,7 @@ function taskResultText(dir, from) {
   ].join('\n');
 }
 
-function reviewResultText(m, task, where, rounds) {
+function reviewResultText(m, task, where, rounds, head) {
   return [
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
@@ -1041,7 +1043,9 @@ function reviewResultText(m, task, where, rounds) {
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
-    ...unitTasks(task).map((t) => `  ${reviewedCommand(m, where.lane, t.id, rounds, where.dir)}`),
+    ...unitTasks(task).map((t) => `  ${reviewedCommand(m, where.lane, t.id, rounds, where.dir, head)}`),
+    'replacing <blocking> with the number of critical and important findings you report. An approve with any',
+    'of them is not an approval: the command refuses it, and your verdict must then be changes.',
   ].join('\n');
 }
 
@@ -1133,13 +1137,15 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     '',
     taskContext(m, task, where, guidance),
     '',
-    reviewResultText(m, task, where, rounds),
+    reviewResultText(m, task, where, rounds, head),
   ].join('\n');
 }
 
 // Prompt for a fix agent. report is the latest implement or fix result;
-// head is the branch head the fix builds on.
-function fixPrompt(m, task, where, findings, report, head, guidance = null) {
+// head is the branch head the fix builds on. reopen: the review approved
+// while reporting a blocking finding, and may have recorded that approval;
+// the fix first records that it no longer holds.
+function fixPrompt(m, task, where, findings, report, head, guidance = null, reopen = false) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const batch = isBatch(task);
@@ -1153,6 +1159,12 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null) {
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
+    ...(reopen ? [
+      'Run this first: the review approved while reporting a critical or important finding, which is not an',
+      'approval, so record that any approval it wrote no longer holds:',
+      ...ledgerLines(m, task, where, { event: 'reopened', reason: 'approved with a blocking finding' }),
+      '',
+    ] : []),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
@@ -1200,7 +1212,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     taskContext(m, task, where, guidance),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
-    reviewResultText(m, task, where, round),
+    reviewResultText(m, task, where, round, head),
   ].join('\n');
 }
 
@@ -2168,11 +2180,12 @@ function makeIo(m, baseIo, state) {
 }
 
 // The custom agent type for a spawn: m.agent_type, except for the hook agents
-// (e2e and post-integrate) and the post-integrate fix, which must keep the
-// post-integrate hook passing: hook instructions may need any tool.
+// (e2e and post-integrate, and their rechecks) and the post-integrate fix,
+// which must keep the post-integrate hook passing: hook instructions may need
+// any tool.
 function agentTypeFor(m, label) {
   if (typeof m.agent_type !== 'string' || m.agent_type.length === 0) return null;
-  if (/^(e2e|post-integrate|post-integrate fix)( retry)?$/.test(label)) return null;
+  if (/^(e2e|e2e recheck|post-integrate|post-integrate recheck|post-integrate fix)( retry)?$/.test(label)) return null;
   return m.agent_type;
 }
 
@@ -2257,6 +2270,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let latest = null;
   let verdict = null;
   let adjudications = 0;
+  // The latest review approved with a blocking finding (checkedReview): the
+  // next fix reopens any approval it recorded.
+  let reopen = false;
   const extra = [];
   const rulings = [];
   const guidance = { notes: note ? [note] : [], amendments: [] };
@@ -2396,8 +2412,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
     if (deferring && refused === null && !present(out.head)) {
-      out = { outcome: 'stop', text: 'adjudicator chose park or unblock without the settled head',
-        stop_condition: 'plan_broken', invalid: true };
+      out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
+        text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
+          + 'the ledger holds the task as deferred: check ledger status before resuming)' };
     }
     // A park or unblock the policy refuses never took effect, so it is listed
     // as refused, not as a ruling made on the user's behalf.
@@ -2469,6 +2486,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (verdict.contradicted) {
       io.log(`${task.id}: ${reviewLabel} approved with a critical or important finding; acting on it as changes`);
+      reopen = true;
     }
     if (verdict.verdict === 'approve') break;
     changesSeen += 1;
@@ -2488,8 +2506,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     rounds += 1;
     const fixLabel = `fix ${rounds}`;
-    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance),
+    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance, reopen),
       tierSettings(tierUsed), implementSchema());
+    reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
     if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
@@ -2926,6 +2945,26 @@ function preflightResolved(m, text) {
   return { ...m, notes };
 }
 
+// A copy of the manifest whose notes carry the unblock note of each result
+// (next_note) to the tasks of later whose depends_on names its task: later
+// is the lanes and the join after the prelude, the join after the lanes (a
+// list's own dependents get the note from runTaskList; lanes run at once, so
+// a lane-to-lane note is not carried).
+function withCarriedNotes(m, results, later) {
+  const unblocked = results.filter((r) => present(r.next_note));
+  if (unblocked.length === 0) return m;
+  const notes = { ...(m.notes || {}) };
+  for (const t of later) {
+    for (const r of unblocked) {
+      if (!(t.depends_on || []).some((d) => d.id === r.task)) continue;
+      const line = `from ${r.task}, unblocked by the adjudicator: ${r.next_note}`;
+      if (notes[t.id] && notes[t.id].includes(line)) continue;
+      notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
+    }
+  }
+  return { ...m, notes };
+}
+
 // The undeclared dependencies pre-flight reported, split into the entries
 // the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
@@ -3024,7 +3063,8 @@ async function runAll(m, io) {
   const record = (results) => {
     for (const r of results) {
       tasks[r.task] = {
-        status: r.status,
+        // A task the ledger lists as deferred stays deferred when skipped.
+        status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
         commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
@@ -3155,6 +3195,7 @@ async function runAll(m, io) {
   const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
     counted, 'Prelude', true);
   record(prelude.results);
+  m = withCarriedNotes(m, prelude.results, [...m.lanes.flatMap((l) => l.tasks), ...m.join]);
   if (prelude.stopped !== null) stopAt('prelude', prelude);
   if (state.refused.length > 0) return budgetReport();
   if (prelude.stopped !== null) return report('stopped', 'prelude stopped');
@@ -3175,6 +3216,7 @@ async function runAll(m, io) {
     const list = await runTaskList(m, lane.tasks, featureWhere(m, lane.id),
       fromPhase ? starts.prelude || tip : tip, counted, lane.name, fromPhase);
     record(list.results);
+    m = withCarriedNotes(m, list.results, m.join);
     if (list.stopped !== null) stopAt(lane.id, list);
     if (state.refused.length > 0) return budgetReport();
     if (list.stopped !== null) return report('stopped', 'lanes stopped');
@@ -3186,6 +3228,7 @@ async function runAll(m, io) {
     const laneResults = await runLanes(m, m.lanes.filter((l) => hasWork(m, l.tasks)), tip, counted);
     for (const lr of laneResults) {
       record(lr.results);
+      m = withCarriedNotes(m, lr.results, m.join);
       if (lr.stopped !== null) stopAt(lr.lane, lr);
     }
     if (state.refused.length > 0) return budgetReport();

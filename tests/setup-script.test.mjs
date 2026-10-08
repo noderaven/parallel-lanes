@@ -103,10 +103,23 @@ function manifest(c, overrides = {}) {
   };
 }
 
+// Runs setup as the holder of the run's launch lock: unless the caller passes
+// its own PL_ACTIVE_DIR, the case gets its own marker dir, the lock is taken
+// once per run id, and its token is passed as --owner.
 function setup(c, m, extra = [], env = {}) {
   counter += 1;
   const path = join(c.root, `manifest ${counter}.json`);
   writeFileSync(path, JSON.stringify(m));
+  if (!('PL_ACTIVE_DIR' in env) && typeof m.run_id === 'string' && /^[a-z0-9-]+$/.test(m.run_id)) {
+    env = { ...env, PL_ACTIVE_DIR: join(c.root, 'own active dir') };
+    c.tokens = c.tokens || {};
+    if (!c.tokens[m.run_id]) {
+      const got = sh('bash', [join(SCRIPTS, 'active-run'), 'acquire', m.run_id, path], { env });
+      assert.equal(got.code, 0, got.stderr);
+      c.tokens[m.run_id] = got.stdout.trim();
+    }
+    if (!extra.includes('--owner')) extra = [...extra, '--owner', c.tokens[m.run_id]];
+  }
   return sh('python3', [join(SCRIPTS, 'setup'), path, ...extra], { env });
 }
 
@@ -484,4 +497,31 @@ test('setup: run_started records the plan and spec hashes', () => {
   const [entry] = readFileSync(join(c.ledgerDir, '_run.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(entry.plan_sha256, createHash('sha256').update('# Plan\n').digest('hex'));
   assert.equal(entry.spec_sha256, createHash('sha256').update('# Spec\n').digest('hex'));
+});
+
+test('setup: a run with no launch lock is refused, even with a token from a released lock', () => {
+  const c = newCase();
+  const env = { PL_ACTIVE_DIR: join(c.root, 'active') };
+  const m = manifest(c);
+  let res = setup(c, m, [], env);
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /no launch lock/);
+  const token = activeRun(env, 'acquire', 'r1', '/m.json').stdout.trim();
+  setupOk(c, m, ['--owner', token], env);
+  assert.equal(activeRun(env, 'release', 'r1', 'stopped').code, 0);
+  write(laneDir(c, 'a'), 'wip.txt', 'work of a session still running\n');
+  res = setup(c, m, ['--owner', token], env);
+  assert.equal(res.code, 3, res.stderr);
+  assert.equal(readFileSync(join(laneDir(c, 'a'), 'wip.txt'), 'utf8'), 'work of a session still running\n');
+});
+
+test('active-run: remove refuses a locked run unless --takeover', () => {
+  const c = newCase();
+  const env = { PL_ACTIVE_DIR: join(c.root, 'active') };
+  activeRun(env, 'acquire', 'r1', '/m.json');
+  const res = activeRun(env, 'remove', 'r1');
+  assert.equal(res.code, 4);
+  assert.match(res.stderr, /--takeover/);
+  assert.equal(activeRun(env, 'remove', 'r1', '--takeover').code, 0);
+  assert.equal(JSON.parse(activeRun(env, 'list').stdout).length, 0);
 });

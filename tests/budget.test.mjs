@@ -186,6 +186,14 @@ test('labelTasks maps an agent label to its tasks: one id, a batch range, or non
 const typed = (extra = {}) => manifest({ agent_type: 'parallel-lanes-worker', ...extra });
 const agentTypes = (calls) => calls.map((c) => ('agentType' in c ? c.agentType : null));
 
+test('agentTypeFor leaves the e2e and post-integrate rechecks on the default agent type', () => {
+  const m = typed();
+  for (const label of ['e2e recheck', 'e2e recheck retry', 'post-integrate recheck', 'post-integrate recheck retry']) {
+    assert.equal(agentTypeFor(m, label), null, label);
+  }
+  assert.equal(agentTypeFor(m, 'verify'), 'parallel-lanes-worker');
+});
+
 test('agentTypeFor names the agent type for every label but the hook agents', () => {
   const m = typed();
   assert.equal(agentTypeFor(m, 'T2 implement'), 'parallel-lanes-worker');

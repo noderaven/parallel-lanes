@@ -1219,6 +1219,21 @@ test('an approval that carries a critical finding is acted on as changes, with i
   assert.match(r.notes, /minor finding: src\/auth\.js:10 - naming/);
 });
 
+test('the fix after a contradicted approval reopens any approval the reviewer recorded', async () => {
+  const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }],
+    'T2 fix 1': [done('h1', 'h2')],
+    'T2 re-review 1': [approve()],
+  });
+  await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  const fix = s.calls.find((c) => c.label === 'T2 fix 1').prompt;
+  assert.ok(fix.includes('"event":"reopened"'), fix);
+  assert.ok(s.calls.find((c) => c.label === 'T2 review').prompt.includes("'/work/wt/lane-alpha' 'h1' <blocking>"),
+    'the approval command names the reviewed head and asks for the blocking count');
+});
+
 test('a changes verdict with no findings is not a usable review', async () => {
   const s = stub({
     'T2 implement': [done('b0', 'h1')],

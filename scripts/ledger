@@ -3,7 +3,7 @@
 
 usage:
   ledger append DIR LANE JSON
-  ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT
+  ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING
   ledger status DIR [--plan PLAN] [--spec SPEC]
   ledger backfill DIR MANIFEST
 
@@ -20,11 +20,16 @@ and an 'event' of:
                setup also writes 'plan_sha256' and 'spec_sha256' (hex or null)
   settled      with 'outcome': "park" or "unblock", and 'base' and 'head':
                non-empty strings; optional 'commits': list of strings
+  reopened     with 'reason': string (an approval that no longer holds: the
+               task counts as not reviewed again)
 
 reviewed appends a reviewed event for TASK with ROUNDS, the sha256 of TASK's
 own section in PLAN (what the review approved against; _brief.section_sha256)
-and the full sha of CHECKOUT's HEAD (the code it approved). Exit 3 if PLAN has
-no section for TASK or CHECKOUT's HEAD cannot be read.
+and the full sha HEAD resolves to (the code it approved, the head of the range
+under review). It refuses (exit 3, nothing recorded) when BLOCKING, the
+number of critical and important findings the reviewer reports, is not 0 (an
+approval with blocking findings is not an approval), when PLAN has no section
+for TASK, or when HEAD is not a commit that CHECKOUT's HEAD contains.
 
 status reads every DIR/*.jsonl and prints
   {"done": [...], "reviewed": [...], "blocked": [...], "deferred": [...],
@@ -51,8 +56,8 @@ task's current section, the task has no section, or the review's head is not
 the task's recorded head; unbound lists reviewed tasks whose review recorded
 no brief_sha256. Both are left out of reviewed, so a resume reviews them
 again. inputs: {"plan_changed", "spec_changed"}: true or false against the
-hashes the earliest setup run_started recorded (with --plan / --spec), null
-when nothing was recorded or no file was given.
+hashes the latest setup run_started recorded (the last launch; with --plan /
+--spec), null when nothing was recorded or no file was given.
 A missing DIR has empty lists, no start points, and no carry.
 
 backfill reads the manifest's task lists (prelude, lanes in order, join), its
@@ -91,6 +96,7 @@ REQUIRED = {
     "blocked": "reason",
     "run_started": "head",
     "settled": "outcome",
+    "reopened": "reason",
 }
 SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
@@ -209,19 +215,30 @@ def file_sha256(path):
         fail(3, f"cannot read {path!r}: {e}")
 
 
-def reviewed(directory, lane, task, rounds, plan, checkout):
+def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
     if not re.fullmatch(r"[0-9]+", rounds):
         fail(2, "ROUNDS must be an integer >= 0")
+    if not re.fullmatch(r"[0-9]+", blocking):
+        fail(2, "BLOCKING must be the number of critical and important findings")
+    if int(blocking) != 0:
+        fail(3, f"an approval with {blocking} critical or important finding(s) is not an approval; "
+                "nothing recorded (return verdict changes)")
     try:
         digest = _brief.section_sha256(read_text(plan, "plan"), task)
     except _brief.BriefError as e:
         fail(3, str(e))
-    res = subprocess.run(["git", "-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"],
-                         capture_output=True, text=True, env=ENV)
+
+    def git(*args):
+        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, env=ENV)
+
+    res = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{head}^{{commit}}")
     if res.returncode != 0 or not res.stdout.strip():
-        fail(3, f"cannot read HEAD of {checkout!r}: {res.stderr.strip()}")
+        fail(3, f"{head!r} is not a commit in {checkout!r}; nothing recorded")
+    sha = res.stdout.strip()
+    if git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
+        fail(3, f"{head!r} is not in the history of {checkout!r}'s HEAD; nothing recorded")
     write_entry(directory, lane, {"task": task, "event": "reviewed", "rounds": int(rounds),
-                                  "brief_sha256": digest, "head": res.stdout.strip()})
+                                  "brief_sha256": digest, "head": sha})
 
 
 def read_events(directory):
@@ -278,6 +295,9 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             reviewed_by[task] = "settled"
             blocked[task] = False
             history.setdefault(task, []).append(entry)
+        elif event == "reopened":
+            if reviewed_by.get(task) == "review":
+                reviewed_by[task] = None
         elif event == "blocked":
             blocked[task] = True
         elif event == "ruling" and entry["text"] and entry.get("by") == "adjudicator":
@@ -285,7 +305,8 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         elif event == "run_started":
             key = START_POINTS[entry["phase"]]
             start_points.setdefault(key, entry["head"])
-            if entry["phase"] == "setup" and setup_hashes is None and "plan_sha256" in entry:
+            # The latest launch's hashes: inputs report changes since then.
+            if entry["phase"] == "setup" and "plan_sha256" in entry:
                 setup_hashes = (entry.get("plan_sha256"), entry.get("spec_sha256"))
 
     ranges, legacy, inconsistent = {}, [], []
@@ -425,7 +446,7 @@ def backfill(directory, manifest_path):
 def main(argv):
     if len(argv) == 4 and argv[0] == "append" and argv[1]:
         append(argv[1], argv[2], argv[3])
-    elif len(argv) == 7 and argv[0] == "reviewed" and all(argv[1:]):
+    elif len(argv) == 9 and argv[0] == "reviewed" and all(argv[1:]):
         if not LANE.fullmatch(argv[3]):
             fail(3, f"unsafe task id {argv[3]!r}")
         reviewed(*argv[1:])
@@ -441,7 +462,7 @@ def main(argv):
     elif len(argv) == 3 and argv[0] == "backfill" and argv[1] and argv[2]:
         backfill(argv[1], argv[2])
     else:
-        fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT"
+        fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING"
                 " | ledger status DIR [--plan PLAN] [--spec SPEC] | ledger backfill DIR MANIFEST")
 
 

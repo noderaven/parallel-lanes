@@ -12,11 +12,15 @@ Per task:
   files  backticked paths in the task's '**Files:**' block, from clauses that
          start with Create, Modify, or Test. The block is the Files line plus
          the lines after it up to a blank line; clauses are bullets or
-         ';'-separated parts. Every backticked token there is a path (root
-         files such as Makefile included) unless it sits inside a
+         ';'-separated parts. A backticked token there is a path unless it
+         sits inside a
          parenthesized aside ('Modify: `a.py` (add `fn`)' names a.py only),
          looks like code ('(', ')', '<', '>', '{', '}', '=', ',' or '$'), or has
-         spaces (it may be a command; a warning says so). A ':12-30' line
+         spaces (it may be a command; a warning says so). A token with no '/'
+         and no '.' (an extensionless root file such as Makefile, or an
+         identifier) counts only as the clause's first token
+         ('Create: `Makefile`') or when it is a well-known file name
+         (Makefile, Dockerfile, LICENSE, ...): 'rename `init_db`' names no file. A ':12-30' line
          suffix is dropped and the path is normalized ('./a', 'a//b' and
          'a/../b' become 'a', 'a/b' and 'b'). A path that is absolute or
          leaves the project ('../x'), and a glob ('*', '?', '['), is left out
@@ -64,6 +68,12 @@ BRACKETS = re.compile(r"\[([^\]]*)\]")
 TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
 LINE_SUFFIX = re.compile(r":\d+(-\d+)?$")
 ASIDE = re.compile(r"\([^()]*\)")
+# Extensionless files a clause may name after its first path.
+KNOWN_FILES = {
+    "Makefile", "GNUmakefile", "Dockerfile", "Containerfile", "Procfile", "Gemfile", "Rakefile",
+    "Justfile", "justfile", "Jenkinsfile", "Vagrantfile", "Brewfile", "Pipfile", "Caddyfile",
+    "Taskfile", "LICENSE", "COPYING", "NOTICE", "AUTHORS", "CODEOWNERS", "README", "CHANGELOG",
+}
 CODE_LIKE = re.compile(r"[()<>{}=,$]")
 GLOB = re.compile(r"[*?\[]")
 
@@ -175,7 +185,10 @@ def parse_files(body, task_id):
         for clause in clauses:
             if not FILE_VERB.match(clause):
                 continue
-            for token in outside_asides(clause):
+            for n, token in enumerate(outside_asides(clause)):
+                bare = "/" not in token and "." not in token
+                if bare and n > 0 and token not in KNOWN_FILES:
+                    continue
                 path = path_of(token, task_id)
                 if path and path not in files:
                     files.append(path)

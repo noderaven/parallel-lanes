@@ -21,11 +21,12 @@ profile full (the default): creates or reuses the lane worktree
 start at repo.branch) for every lane. profile lite: no lane worktree or lane
 branch; the single lane works in the feature checkout.
 
-Launch lock: when the run's lock exists (active-run acquire wrote
-<active dir>/<run_id>.lock; the active dir is $PL_ACTIVE_DIR, default
-${CLAUDE_CONFIG_DIR:-~/.claude}/parallel-lanes/active), setup refuses (exit 3,
-nothing changed) unless --owner TOKEN matches it: another session may still
-be running this run, and setup would discard its work.
+Launch lock: setup runs only for the holder of the run's launch lock
+(active-run acquire wrote <active dir>/<run_id>.lock; the active dir is
+$PL_ACTIVE_DIR, default ${CLAUDE_CONFIG_DIR:-~/.claude}/parallel-lanes/active).
+It refuses (exit 3, nothing changed) when the lock does not exist or --owner
+TOKEN does not match it: without the lock another session may be running
+this run, and setup would discard its work.
 
 A reused worktree (the run's own: the shadow feature worktree or a lane
 worktree) must be a worktree of this repo on its branch. Before its
@@ -293,13 +294,14 @@ def active_dir():
 
 
 def check_lock(run_id, owner):
-    """Refuse when the run's launch lock exists and owner does not match it."""
+    """Refuse unless the run's launch lock exists and owner matches it."""
     lock = os.path.join(active_dir(), f"{run_id}.lock")
     try:
         with open(lock, encoding="utf-8") as f:
             token = f.read().strip()
     except FileNotFoundError:
-        return
+        raise Failure(3, f"run {run_id} has no launch lock ({lock}); run active-run acquire first and pass its "
+                         "token as --owner (nothing was changed)")
     except OSError as e:
         raise Failure(3, f"cannot read the launch lock {lock}: {e}")
     if owner is None or owner != token:

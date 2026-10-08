@@ -79,6 +79,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let latest = null;
   let verdict = null;
   let adjudications = 0;
+  // The latest review approved with a blocking finding (checkedReview): the
+  // next fix reopens any approval it recorded.
+  let reopen = false;
   const extra = [];
   const rulings = [];
   const guidance = { notes: note ? [note] : [], amendments: [] };
@@ -218,8 +221,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
     if (deferring && refused === null && !present(out.head)) {
-      out = { outcome: 'stop', text: 'adjudicator chose park or unblock without the settled head',
-        stop_condition: 'plan_broken', invalid: true };
+      out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
+        text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
+          + 'the ledger holds the task as deferred: check ledger status before resuming)' };
     }
     // A park or unblock the policy refuses never took effect, so it is listed
     // as refused, not as a ruling made on the user's behalf.
@@ -291,6 +295,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (verdict.contradicted) {
       io.log(`${task.id}: ${reviewLabel} approved with a critical or important finding; acting on it as changes`);
+      reopen = true;
     }
     if (verdict.verdict === 'approve') break;
     changesSeen += 1;
@@ -310,8 +315,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     rounds += 1;
     const fixLabel = `fix ${rounds}`;
-    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance),
+    const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance, reopen),
       tierSettings(tierUsed), implementSchema());
+    reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
     if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
