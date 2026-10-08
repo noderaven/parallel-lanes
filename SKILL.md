@@ -241,7 +241,8 @@ never `branch -D`. Keep the manifest and ledger.
 1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
    (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
 2. `python3 <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> [--spec <spec>]`.
-   Set `done`, `reviewed`, and `deferred` from it; put each `carry` entry into `notes`.
+   Set `done`, `reviewed`, and `deferred` from it (taking a deferred task up: reference.md
+   "Backfill"); put each `carry` entry into `notes`.
    Tasks in `stale` or `unbound` are left out of `reviewed`, so they are reviewed again: tell
    the user which and why, and say so when `inputs` reports a changed plan or spec.
 3. `backfill`: `python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.

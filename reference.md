@@ -274,6 +274,11 @@ section or head puts the task in `stale`, a review without a hash (older ledgers
 says whether the plan or spec changed since setup recorded their hashes. List tasks whose
 `depends_on` names a stale task for the user too.
 
+To take a deferred task up again (the user wants it done after all), leave it out of `done`,
+`reviewed`, and `deferred` on the resume: it runs again from the previous task's head, its
+earlier commits stay on the branch, and its implementer starts from them. Tasks whose
+`depends_on` names it run again only if the user asks for that too.
+
 `carry`: `{<task>: <text>}` for each task the adjudicator last unblocked, with its unblock
 ruling. A skipped task passes no note at run time, so for each entry add
 `from <task>, unblocked by the adjudicator: <text>` to `notes` for the tasks whose
