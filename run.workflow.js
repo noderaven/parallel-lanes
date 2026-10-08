@@ -2968,8 +2968,10 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
+  // fix's head stands unless its Opus rerun reports a head of its own.
+  if (fix && present(fix.head)) final.head = fix.head;
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  // Whatever the fix agent did, commits it reports are delivered code.
   if (fix && present(fix.head)) final.head = fix.head;
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);

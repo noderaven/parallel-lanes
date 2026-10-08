@@ -1655,6 +1655,29 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   assert.equal(nul.result.status, 'complete');
 });
 
+// Reviewer of 1.2.1: commits a Sonnet final fix made stay delivered when its
+// Opus rerun reports no head, so they are never left unreviewed silently.
+test('a Sonnet final fix that committed and stopped keeps its head when the Opus rerun reports none', async () => {
+  const minor = { ...finding('naming'), severity: 'minor' };
+  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const { result, calls } = await run(manifest(), {
+    ...phaseScript({
+      'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+      'final review security': none(), 'final review correctness': none(),
+      'final fix': [
+        { status: 'blocked', head: 'S1', tests: '', notes: 'ran out of room', dispositions: [] },
+        { status: 'blocked', tests: '', notes: 'could not finish either', dispositions: [] },
+      ],
+      verify: [verified('S1')],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(result.delivered_sha, 'S1');
+  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes('rev-parse HEAD must print S1'));
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'), JSON.stringify(result.acceptance));
+});
+
 test('supervised integrate conflict escalates to one opus rerun with no resolver', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const script = {

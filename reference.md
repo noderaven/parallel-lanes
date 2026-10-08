@@ -189,8 +189,10 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   returned nothing is retried.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
   `agents_spawned` and `max_rulings` by its `rulings_spent`, the adjudications that ran
-  (floor 0). Never count ledger `ruling` events for this: implementers record their own
-  smaller rulings there too. Fewer than 1 agent left is treated as a budget cap.
+  (floor 0). Use `rulings_spent` here, not a count of ledger `ruling` events (implementers
+  record their own smaller rulings there too; only `spent` below counts the adjudicator's
+  own, as a floor after a session that died). Fewer than 1 agent left is treated as a budget
+  cap.
 - Spend across launches: after every launch returns (a relaunch included, never a dry run),
   record what it spent:
   `python3 <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
