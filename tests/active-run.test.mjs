@@ -48,11 +48,13 @@ test('active-run: write, list, and remove round trip', () => {
     ],
   );
   for (const m of markers) {
-    assert.deepEqual(Object.keys(m).sort(), ['manifest', 'run_id', 'started', 'status']);
+    assert.deepEqual(Object.keys(m).sort(), ['locked', 'manifest', 'run_id', 'started', 'status']);
+    assert.equal(m.locked, false);
     assert.match(m.started, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
   }
   const file = JSON.parse(readFileSync(join(dir, 'run-a.json'), 'utf8'));
-  assert.deepEqual(file, markers[0]);
+  const { locked, ...stored } = markers[0];
+  assert.deepEqual(file, stored);
 
   const rm = activeRun(dir, 'remove', 'run-a');
   assert.equal(rm.code, 0, rm.stderr);
@@ -68,7 +70,55 @@ test('active-run: a rewrite updates status and keeps started', () => {
   writeFileSync(join(dir, 'r1.json'), JSON.stringify(old));
   const res = activeRun(dir, 'write', 'r1', '/m.json', 'stopped');
   assert.equal(res.code, 0, res.stderr);
-  assert.deepEqual(list(dir), [{ ...old, status: 'stopped' }]);
+  assert.deepEqual(list(dir), [{ ...old, status: 'stopped', locked: false }]);
+});
+
+// --- launch locks -----------------------------------------------------------
+
+test('active-run: acquire takes the lock, writes a running marker, and prints the owner token', () => {
+  const dir = markerDir();
+  const res = activeRun(dir, 'acquire', 'r1', '/m.json');
+  assert.equal(res.code, 0, res.stderr);
+  const token = res.stdout.trim();
+  assert.match(token, /^[0-9a-f]{32}$/);
+  assert.equal(readFileSync(join(dir, 'r1.lock'), 'utf8').trim(), token);
+  assert.equal(statSync(join(dir, 'r1.lock')).mode & 0o777, 0o600);
+  const [m] = list(dir);
+  assert.equal(m.status, 'running');
+  assert.equal(m.locked, true);
+});
+
+test('active-run: a second acquire of a locked run is refused with exit 4 and keeps the first lock', () => {
+  const dir = markerDir();
+  const first = activeRun(dir, 'acquire', 'r1', '/m.json');
+  assert.equal(first.code, 0, first.stderr);
+  const second = activeRun(dir, 'acquire', 'r1', '/m.json');
+  assert.equal(second.code, 4);
+  assert.match(second.stderr, /locked by another launch/);
+  assert.match(second.stderr, /--takeover/);
+  assert.equal(second.stdout, '');
+  assert.equal(readFileSync(join(dir, 'r1.lock'), 'utf8').trim(), first.stdout.trim());
+});
+
+test('active-run: acquire --takeover replaces a stale lock with a new token', () => {
+  const dir = markerDir();
+  const first = activeRun(dir, 'acquire', 'r1', '/m.json').stdout.trim();
+  const taken = activeRun(dir, 'acquire', 'r1', '/m.json', '--takeover');
+  assert.equal(taken.code, 0, taken.stderr);
+  const token = taken.stdout.trim();
+  assert.notEqual(token, first);
+  assert.equal(readFileSync(join(dir, 'r1.lock'), 'utf8').trim(), token);
+});
+
+test('active-run: release drops the lock and records the status, or removes the marker', () => {
+  const dir = markerDir();
+  activeRun(dir, 'acquire', 'r1', '/m.json');
+  const rel = activeRun(dir, 'release', 'r1', 'unaccepted');
+  assert.equal(rel.code, 0, rel.stderr);
+  assert.deepEqual(list(dir).map(({ status, locked }) => ({ status, locked })), [{ status: 'unaccepted', locked: false }]);
+  assert.equal(activeRun(dir, 'acquire', 'r1', '/m.json').code, 0, 'a released run can be acquired again');
+  assert.equal(activeRun(dir, 'release', 'r1', '--remove').code, 0);
+  assert.deepEqual(list(dir), []);
 });
 
 test('active-run: list with no directory prints []', () => {

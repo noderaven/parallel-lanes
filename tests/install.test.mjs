@@ -65,10 +65,38 @@ test('install.sh installs the skill, the worker agent, and both hooks, keeping o
   const notice = commands(s.hooks.PostToolUse);
   assert.equal(start.length, 1);
   assert.equal(notice.length, 1);
-  assert.ok(start[0].endsWith('hooks/session-start.sh'), start[0]);
-  assert.ok(notice[0].endsWith('hooks/notice.sh'), notice[0]);
-  assert.ok(start[0].includes(dir), start[0]);
-  assert.ok(notice[0].includes(dir), notice[0]);
+  assert.equal(start[0], `bash '${join(skillDir(dir), 'hooks', 'session-start.sh')}'`);
+  assert.equal(notice[0], `bash '${join(skillDir(dir), 'hooks', 'notice.sh')}'`);
+});
+
+// Review finding 10: the stored commands must work when the host runs them
+// through a shell, from a config dir with a space and a single quote.
+test('install.sh registers hook commands that run from a config dir with a space and a quote', { skip: SKIP }, () => {
+  counter += 1;
+  const dir = join(TMP, `it's config ${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'settings.json'), '{}\n');
+  install(dir);
+  const s = settings(dir);
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: dir, PL_ACTIVE_DIR: join(dir, 'no markers') };
+  const start = spawnSync('sh', ['-c', commands(s.hooks.SessionStart)[0]], { input: '{}', encoding: 'utf8', env });
+  assert.equal(start.status, 0, start.stderr);
+  assert.equal(JSON.parse(start.stdout).hookSpecificOutput.hookEventName, 'SessionStart');
+  const event = JSON.stringify({ tool_name: 'Skill', tool_input: { skill: 'parallel-lanes' } });
+  const notice = spawnSync('sh', ['-c', commands(s.hooks.PostToolUse)[0]], { input: event, encoding: 'utf8', env });
+  assert.equal(notice.status, 0, notice.stderr);
+  assert.match(JSON.parse(notice.stdout).systemMessage, /^parallel-lanes (v[0-9.]+ )?invoked$/);
+});
+
+test('install.sh replaces hooks an older install registered without quotes', { skip: SKIP }, () => {
+  const dir = freshConfig();
+  const old = `bash ${join(skillDir(dir), 'hooks', 'session-start.sh')}`;
+  writeFileSync(join(dir, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [
+    { matcher: 'startup|clear|compact', hooks: [{ type: 'command', command: old }] },
+  ] } }));
+  install(dir);
+  assert.deepEqual(commands(settings(dir).hooks.SessionStart),
+    [`bash '${join(skillDir(dir), 'hooks', 'session-start.sh')}'`]);
 });
 
 test('install.sh run twice registers each hook once and keeps one agent file', { skip: SKIP }, () => {

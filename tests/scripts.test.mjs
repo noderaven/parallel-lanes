@@ -11,7 +11,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -41,13 +41,22 @@ const ledger = (...args) => run('python3', 'ledger', args);
 
 // --- find-superpowers -------------------------------------------------------
 
-function fakeInstall(dir, { pkgVersion, pluginVersion, prompt = true }) {
-  mkdirSync(join(dir, 'skills', 'subagent-driven-development'), { recursive: true });
-  if (prompt) {
-    writeFileSync(
-      join(dir, 'skills', 'subagent-driven-development', 'implementer-prompt.md'),
-      'prompt\n',
-    );
+// Every file of a superpowers install that a run uses (find-superpowers
+// requires them all). prompt: false leaves out the implementer prompt;
+// skip names one more file to leave out.
+const SP_FILES = [
+  'subagent-driven-development/implementer-prompt.md',
+  'subagent-driven-development/task-reviewer-prompt.md',
+  'subagent-driven-development/re-review-prompt.md',
+  'subagent-driven-development/scripts/review-package',
+  'requesting-code-review/code-reviewer.md',
+];
+
+function fakeInstall(dir, { pkgVersion, pluginVersion, prompt = true, skip = null }) {
+  for (const rel of SP_FILES) {
+    if ((!prompt && rel.endsWith('implementer-prompt.md')) || rel === skip) continue;
+    mkdirSync(dirname(join(dir, 'skills', rel)), { recursive: true });
+    writeFileSync(join(dir, 'skills', rel), 'file\n');
   }
   if (pkgVersion) {
     writeFileSync(
@@ -97,6 +106,25 @@ test('find-superpowers exits 3 when the search roots have no candidates at all',
   assert.equal(res.code, 3);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, '');
+});
+
+test('find-superpowers skips an install that lacks a file a run needs', () => {
+  const root = workDir();
+  fakeInstall(join(root, 'complete'), { pkgVersion: '6.4.2' });
+  fakeInstall(join(root, 'newer but partial'), { pkgVersion: '9.0.0', skip: 'subagent-driven-development/re-review-prompt.md' });
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: root });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout.trim(), join(root, 'complete', 'skills'));
+});
+
+test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', () => {
+  const config = join(workDir(), 'config dir');
+  fakeInstall(join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2'), { pkgVersion: '6.4.2' });
+  const env = { CLAUDE_CONFIG_DIR: config, HOME: join(workDir(), 'empty home') };
+  delete process.env.PL_SEARCH_ROOTS;
+  const res = findSuperpowers(env);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout.trim(), join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
 });
 
 test('find-superpowers rejects arguments with exit 2', () => {
@@ -507,6 +535,9 @@ function status(dir) {
   return JSON.parse(res.stdout);
 }
 
+// The keys ledger status has always printed, with their original meaning.
+const core = ({ done, reviewed, blocked, start_points, carry }) => ({ done, reviewed, blocked, start_points, carry });
+
 test('ledger round-trips events across two lanes', () => {
   const dir = join(workDir(), 'ledger dir');
   appendOk(dir, 'alpha', { task: 'T1', event: 'committed', commits: ['abc1234'] });
@@ -525,7 +556,7 @@ test('ledger round-trips events across two lanes', () => {
   });
   assert.ok(existsSync(join(dir, 'beta.jsonl')));
 
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['T1', 'T2'],
     reviewed: ['T1'],
     blocked: ['T3'],
@@ -540,7 +571,7 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 1 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
   appendOk(dir, 'alpha', { task: 'T13a', event: 'committed', commits: ['222'] });
-  assert.deepEqual(status(dir), { done: ['T13a'], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T13a'], reviewed: [], blocked: [], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T13a', event: 'reviewed', rounds: 3 });
   assert.deepEqual(status(dir).reviewed, ['T13a']);
 });
@@ -548,9 +579,9 @@ test('ledger: a commit after a review makes the task unreviewed again', () => {
 test('ledger: a commit after a block clears the block', () => {
   const dir = workDir();
   appendOk(dir, 'alpha', { task: 'T7', event: 'blocked', reason: 'flaky' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: ['T7'], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: ['T7'], start_points: {}, carry: {} });
   appendOk(dir, 'alpha', { task: 'T7', event: 'committed', commits: ['333'] });
-  assert.deepEqual(status(dir), { done: ['T7'], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T7'], reviewed: [], blocked: [], start_points: {}, carry: {} });
 });
 
 test('ledger: a settled task is done and reviewed, even after a block and with no commits', () => {
@@ -560,7 +591,7 @@ test('ledger: a settled task is done and reviewed, even after a block and with n
   appendOk(dir, 'alpha', { task: 'T2', event: 'settled', outcome: 'park', base: 'b0', head: 'b0' });
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c1'] });
   appendOk(dir, 'alpha', { task: 'T3', event: 'settled', outcome: 'unblock', base: 'b0', head: 'c1' });
-  assert.deepEqual(status(dir), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: ['T2', 'T3'], reviewed: ['T2', 'T3'], blocked: [], start_points: {}, carry: {} });
   // A later commit makes the task unreviewed again, as after a review.
   appendOk(dir, 'alpha', { task: 'T3', event: 'committed', commits: ['c2'] });
   assert.deepEqual(status(dir).reviewed, ['T2']);
@@ -570,7 +601,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'aaa111' });
   appendOk(dir, 'prelude', { task: 'P1', event: 'committed', commits: ['bbb222'] });
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['P1'],
     reviewed: [],
     blocked: [],
@@ -580,7 +611,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'ccc333' });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'ddd444' });
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'eee555' });
-  assert.deepEqual(status(dir), {
+  assert.deepEqual(core(status(dir)), {
     done: ['P1'],
     reviewed: [],
     blocked: [],
@@ -599,7 +630,7 @@ test('ledger: run_started events give the earliest start points per phase', () =
 test('ledger: a join start point alone omits the prelude key', () => {
   const dir = workDir();
   appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'join', head: 'fff666' });
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' }, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: [], start_points: { join: 'fff666' }, carry: {} });
 });
 
 // Node's spawn() starts children too far apart to hit a first-append race, so
@@ -647,7 +678,7 @@ test('ledger append refuses a DIR that is a file with exit 3', () => {
 
 test('ledger status of a missing directory is empty', () => {
   const dir = join(workDir(), 'never created');
-  assert.deepEqual(status(dir), { done: [], reviewed: [], blocked: [], start_points: {}, carry: {} });
+  assert.deepEqual(core(status(dir)), { done: [], reviewed: [], blocked: [], start_points: {}, carry: {} });
   assert.equal(existsSync(dir), false);
 });
 

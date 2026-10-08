@@ -2,6 +2,7 @@
 """Opening bookkeeping for an implementer or reviewer in one call.
 
 usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
+                  [--artifacts ROOT]
                   --brief TASK_ID OUT [--brief TASK_ID OUT ...]
                   [--also TASK_ID PRODUCER_ID ...]
 
@@ -15,6 +16,9 @@ In order:
              whose TASK_ID has no --brief exits 2 before any work.
   --package  mkdir -p the parent of OUT, then bash SCRIPT PLAN BASE HEAD OUT
              with DIR as the working directory (a failure exits 1).
+  --artifacts  every brief OUT (task-brief --root ROOT) and the package OUT
+             must resolve, symlinks included, to a path inside ROOT (the run's
+             ledger directory); otherwise exit 3 before anything is written.
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
 GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
 GIT_COMMON_DIR are removed from the environment of git, task-brief and the
@@ -28,8 +32,8 @@ stdout, only on success:
 
 Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
 brief cannot be read, or the package script fails; 2 on usage error; 3 if DIR
-is not a git worktree or the fast-forward fails; task-brief's code if a brief
-fails.
+is not a git worktree, the fast-forward fails, or an OUT is outside --artifacts;
+task-brief's code if a brief fails.
 """
 
 import argparse
@@ -38,6 +42,9 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.dont_write_bytecode = True
+sys.path.insert(0, HERE)
+import _brief  # noqa: E402
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
@@ -76,7 +83,11 @@ def parse(argv):
     parser.add_argument(
         "--also", nargs=2, action="append", default=[], metavar=("TASK_ID", "PRODUCER_ID")
     )
+    parser.add_argument("--artifacts", metavar="ROOT")
     args = parser.parse_args(argv)
+    for task_id, _ in args.brief:
+        if not _brief.is_safe_id(task_id):
+            parser.error(f"unsafe task id {task_id!r}")
     briefed = {task_id for task_id, _ in args.brief}
     for task_id, _ in args.also:
         if task_id not in briefed:
@@ -84,9 +95,26 @@ def parse(argv):
     return args
 
 
+def contained(path, root):
+    """As task-brief: path, existing ancestors' symlinks resolved, is inside root."""
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    return os.path.commonpath([resolved, root]) == root
+
+
 def main(argv):
     args = parse(argv)
     directory = args.dir
+    if args.artifacts is not None:
+        outs = [path for _, path in args.brief] + ([args.package[3]] if args.package else [])
+        for path in outs:
+            if os.path.islink(path) or not contained(path, args.artifacts):
+                fail(3, f"artifact path {path!r} is outside {args.artifacts!r}; nothing written")
     branch = rev_parse(3, directory, "--abbrev-ref", "HEAD")
 
     if args.sync is not None:
@@ -100,6 +128,8 @@ def main(argv):
     plan = os.path.abspath(args.plan)
     for task_id, path in args.brief:
         extra = [a for t, producer in args.also if t == task_id for a in ("--also", producer)]
+        if args.artifacts is not None:
+            extra += ["--root", args.artifacts]
         res = subprocess.run(
             [sys.executable, os.path.join(HERE, "task-brief"), plan, task_id, path, *extra],
             env=ENV,

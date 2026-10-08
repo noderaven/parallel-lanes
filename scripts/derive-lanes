@@ -12,9 +12,15 @@ Per task:
   files  backticked paths in the task's '**Files:**' block, from clauses that
          start with Create, Modify, or Test. The block is the Files line plus
          the lines after it up to a blank line; clauses are bullets or
-         ';'-separated parts. A token counts as a path if it has no spaces
-         and contains '/' or '.'; a ':12-30' line suffix and a leading './'
-         are dropped.
+         ';'-separated parts. Every backticked token there is a path (root
+         files such as Makefile included) unless it sits inside a
+         parenthesized aside ('Modify: `a.py` (add `fn`)' names a.py only),
+         looks like code ('(', ')', '<', '>', '{', '}', '=', ',' or '$'), or has
+         spaces (it may be a command; a warning says so). A ':12-30' line
+         suffix is dropped and the path is normalized ('./a', 'a//b' and
+         'a/../b' become 'a', 'a/b' and 'b'). A path that is absolute or
+         leaves the project ('../x'), and a glob ('*', '?', '['), is left out
+         with a warning, as is a Files block that names no path.
   deps   ids of other plan tasks named in bracketed lists on the heading line
          (e.g. '[T1, T5]') or on '- Consumes:' lines, matched as whole tokens
          ('Task 3' and 'T3' both work; ranges like 'Tasks 1-2' are not
@@ -34,17 +40,20 @@ Prints JSON on stdout:
 The script reports facts; the session decides joins, preludes, and order.
 
 Exit 0 on success; 2 on usage error; 3 if the plan is unreadable, has no task
-headings, or repeats a task id.
+headings, repeats a task id, or has a task id that is not a safe file name
+(^[A-Za-z0-9_][A-Za-z0-9._-]*$: no '/', no leading '.' or '-').
 """
 
 import json
 import os
+import posixpath
 import re
 import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _plan  # noqa: E402
+import _brief  # noqa: E402
 
 FILES_LINE = re.compile(r"^\s*\*\*Files:?\*\*:?(.*)$")
 BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
@@ -54,6 +63,9 @@ BACKTICK = re.compile(r"`([^`]+)`")
 BRACKETS = re.compile(r"\[([^\]]*)\]")
 TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
 LINE_SUFFIX = re.compile(r":\d+(-\d+)?$")
+ASIDE = re.compile(r"\([^()]*\)")
+CODE_LIKE = re.compile(r"[()<>{}=,$]")
+GLOB = re.compile(r"[*?\[]")
 
 
 def fail(code, message):
@@ -102,16 +114,24 @@ def title_of(title, known):
     return " ".join(title.split())
 
 
-def path_of(token):
+def path_of(token, task_id):
+    """The normalized project-relative path a backticked token names, or None."""
     token = token.strip()
-    if not token or any(c.isspace() for c in token):
+    if not token or CODE_LIKE.search(token):
         return None
-    if "/" not in token and "." not in token:
+    if any(c.isspace() for c in token):
+        warn(f"task {task_id}: {token!r} has spaces, so it is not read as a path (it may be a command);"
+             " if it is a file, add it to the task's files in the manifest by hand")
         return None
     token = LINE_SUFFIX.sub("", token)
-    while token.startswith("./"):
-        token = token[2:]
-    return token or None
+    if GLOB.search(token):
+        warn(f"task {task_id}: glob {token!r} in a Files block is not a path; list the files")
+        return None
+    norm = posixpath.normpath(token)
+    if norm.startswith("/") or norm == ".." or norm.startswith("../"):
+        warn(f"task {task_id}: path {token!r} leaves the project; left out")
+        return None
+    return None if norm == "." else norm
 
 
 def files_blocks(body):
@@ -134,7 +154,19 @@ def files_blocks(body):
         yield [part.strip() for item in items for part in item.split(";")]
 
 
-def parse_files(body):
+def outside_asides(clause):
+    """The backticked tokens of clause that are not inside a parenthesized
+    aside ('(add `fn`)'). Backtick spans are set aside first, so parentheses
+    inside them never count as an aside."""
+    tokens = BACKTICK.findall(clause)
+    marks = iter(range(len(tokens)))
+    text = BACKTICK.sub(lambda m: f"\x00{next(marks)}\x00", clause)
+    while ASIDE.search(text):
+        text = ASIDE.sub(" ", text)
+    return [tokens[int(i)] for i in re.findall(r"\x00(\d+)\x00", text)]
+
+
+def parse_files(body, task_id):
     """Return (has_files_block, files)."""
     has_block = False
     files = []
@@ -143,10 +175,12 @@ def parse_files(body):
         for clause in clauses:
             if not FILE_VERB.match(clause):
                 continue
-            for token in BACKTICK.findall(clause):
-                path = path_of(token)
+            for token in outside_asides(clause):
+                path = path_of(token, task_id)
                 if path and path not in files:
                     files.append(path)
+    if has_block and not files:
+        warn(f"task {task_id}: its Files block names no path")
     return has_block, files
 
 
@@ -211,6 +245,8 @@ def derive(text):
     order = [s.id for s in sections]
     seen = set()
     for task_id in order:
+        if not _brief.is_safe_id(task_id):
+            fail(3, f"task id {task_id!r} is not a safe file name (it must match {_brief.TASK_ID.pattern})")
         if task_id in seen:
             fail(3, f"duplicate task id {task_id!r}; refusing to guess")
         seen.add(task_id)
@@ -222,7 +258,7 @@ def derive(text):
     for section in sections:
         task_id, heading = section.id, lines[section.start]
         body = [lines[i] for i in range(section.start + 1, section.end) if mask[i]]
-        has_block, files = parse_files(body)
+        has_block, files = parse_files(body, task_id)
         if not has_block:
             without_files.append(task_id)
         for path in files:
