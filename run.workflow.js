@@ -1062,11 +1062,24 @@ function finishFailure() {
     'or report blocked.';
 }
 
+// The lines that open an implement or fix prompt after a review approved
+// while reporting a critical or important finding (not an approval): record
+// that any approval it wrote no longer holds. Empty unless reopen.
+function reopenLines(m, task, where, reopen) {
+  if (!reopen) return [];
+  return [
+    'Run this first: the review approved while reporting a critical or important finding, which is not an',
+    'approval, so record that any approval it wrote no longer holds:',
+    ...ledgerLines(m, task, where, { event: 'reopened', reason: 'approved with a blocking finding' }),
+    '',
+  ];
+}
+
 // Prompt for an implementer. base is the task base the script owns (the
 // previous task's head, or the feature tip); retry (optional) is {reason,
 // findings} when a previous attempt in this run blocked or failed review;
 // guidance (optional) is taskContext's.
-function implementPrompt(m, task, where, base, retry = null, guidance = null) {
+function implementPrompt(m, task, where, base, retry = null, guidance = null, reopen = false) {
   const files = taskFiles(m, task);
   const sdd = m.sp_dir === null ? null : `${m.sp_dir}/subagent-driven-development`;
   const noun = unitNoun(task);
@@ -1075,6 +1088,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null) {
     `You are implementing ${unitName(task)}`,
     ...batchLines(task),
     '',
+    ...reopenLines(m, task, where, reopen),
     sdd === null ? fallbackImplementer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
@@ -1159,12 +1173,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
-    ...(reopen ? [
-      'Run this first: the review approved while reporting a critical or important finding, which is not an',
-      'approval, so record that any approval it wrote no longer holds:',
-      ...ledgerLines(m, task, where, { event: 'reopened', reason: 'approved with a blocking finding' }),
-      '',
-    ] : []),
+    ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
     'Findings:',
@@ -2271,8 +2280,10 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let verdict = null;
   let adjudications = 0;
   // The latest review approved with a blocking finding (checkedReview): the
-  // next fix reopens any approval it recorded.
+  // next implement or fix that runs reopens any approval it recorded.
   let reopen = false;
+  // An agent that received the reopen command ran (not a budget refusal).
+  const ran = (r) => r !== null && r !== undefined && !r.__budget;
   const extra = [];
   const rulings = [];
   const guidance = { notes: note ? [note] : [], amendments: [] };
@@ -2313,8 +2324,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   const implement = async (retry, from = null) => {
     for (;;) {
       const past = from !== null ? from : (head === null ? base : head);
-      const r = await call('implement', implementPrompt(m, task, where, base, retry, guidance),
+      const r = await call('implement', implementPrompt(m, task, where, base, retry, guidance, reopen),
         tierSettings(tierUsed), implementSchema());
+      if (ran(r)) reopen = false;
       const fail = failure(r, `${task.id} implement`, past);
       if (fail === null) {
         head = r.head;
@@ -2508,7 +2520,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     const fixLabel = `fix ${rounds}`;
     const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance, reopen),
       tierSettings(tierUsed), implementSchema());
-    reopen = false;
+    if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
     if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);

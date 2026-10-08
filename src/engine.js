@@ -80,8 +80,10 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   let verdict = null;
   let adjudications = 0;
   // The latest review approved with a blocking finding (checkedReview): the
-  // next fix reopens any approval it recorded.
+  // next implement or fix that runs reopens any approval it recorded.
   let reopen = false;
+  // An agent that received the reopen command ran (not a budget refusal).
+  const ran = (r) => r !== null && r !== undefined && !r.__budget;
   const extra = [];
   const rulings = [];
   const guidance = { notes: note ? [note] : [], amendments: [] };
@@ -122,8 +124,9 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   const implement = async (retry, from = null) => {
     for (;;) {
       const past = from !== null ? from : (head === null ? base : head);
-      const r = await call('implement', implementPrompt(m, task, where, base, retry, guidance),
+      const r = await call('implement', implementPrompt(m, task, where, base, retry, guidance, reopen),
         tierSettings(tierUsed), implementSchema());
+      if (ran(r)) reopen = false;
       const fail = failure(r, `${task.id} implement`, past);
       if (fail === null) {
         head = r.head;
@@ -317,7 +320,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     const fixLabel = `fix ${rounds}`;
     const fix = await call(fixLabel, fixPrompt(m, task, where, findings, latest, head, guidance, reopen),
       tierSettings(tierUsed), implementSchema());
-    reopen = false;
+    if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
     if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);

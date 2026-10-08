@@ -18,9 +18,10 @@ Per task:
          looks like code ('(', ')', '<', '>', '{', '}', '=', ',' or '$'), or has
          spaces (it may be a command; a warning says so). A token with no '/'
          and no '.' (an extensionless root file such as Makefile, or an
-         identifier) counts only as the clause's first token
-         ('Create: `Makefile`') or when it is a well-known file name
-         (Makefile, Dockerfile, LICENSE, ...): 'rename `init_db`' names no file. A ':12-30' line
+         identifier) counts only as the clause's only token ('Create:
+         `Makefile`') or when it is a well-known file name (Makefile,
+         Dockerfile, LICENSE, ...): 'Modify: `parse_args` in `src/cli.py`' names
+         src/cli.py only. A ':12-30' line
          suffix is dropped and the path is normalized ('./a', 'a//b' and
          'a/../b' become 'a', 'a/b' and 'b'). A path that is absolute or
          leaves the project ('../x'), and a glob ('*', '?', '['), is left out
@@ -185,9 +186,14 @@ def parse_files(body, task_id):
         for clause in clauses:
             if not FILE_VERB.match(clause):
                 continue
-            for n, token in enumerate(outside_asides(clause)):
+            tokens = outside_asides(clause)
+            # A bare token (no '/' or '.') is a file when it is well known,
+            # or when it is the clause's only token: 'Modify: `parse_args` in
+            # `src/cli.py`' names src/cli.py, 'Create: `Makefile`' Makefile.
+            alone = len(tokens) == 1
+            for token in tokens:
                 bare = "/" not in token and "." not in token
-                if bare and n > 0 and token not in KNOWN_FILES:
+                if bare and not alone and token not in KNOWN_FILES:
                     continue
                 path = path_of(token, task_id)
                 if path and path not in files:

@@ -234,3 +234,15 @@ test('derive-lanes does not read backticked identifiers as files', () => {
   assert.deepEqual(out.groups, [['1'], ['2'], ['3']]);
   assert.deepEqual(out.bridge_files, []);
 });
+
+test('derive-lanes does not read a leading identifier as a file when the clause names a path', () => {
+  const dir = workDir();
+  write(join(dir, 'plan.md'), [
+    '# P', '',
+    '### Task 1: a', '', '**Files:**', '- Modify: `parse_args` in `src/cli.py`', '',
+    '### Task 2: b', '', '**Files:**', '- Modify: `parse_args` handling in `src/other.py`', '- Create: `Makefile`', '',
+  ].join('\n'));
+  const out = JSON.parse(py('derive-lanes', [join(dir, 'plan.md')]).stdout);
+  assert.deepEqual(out.tasks.map((t) => t.files), [['src/cli.py'], ['src/other.py', 'Makefile']]);
+  assert.deepEqual(out.bridge_files, []);
+});

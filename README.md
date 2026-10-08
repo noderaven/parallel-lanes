@@ -238,6 +238,7 @@ Other things to know:
 | `superpowers not found; agents use built-in prompts` | Install Superpowers (section 3) and restart Claude Code. |
 | The skill never fires at plan execution | Restart Claude Code so the SessionStart hook loads, and check section 4, step 2. Invoking it by name also works. |
 | `setup: the main checkout ... has uncommitted changes` | Commit or stash your changes, then ask Claude to run or resume the plan again. |
+| `setup: run <id> has no launch lock` or `is locked by another launch` | Another session may be running that run. If it has ended, tell Claude so; it takes the lock over (`active-run acquire --takeover`) and resumes. |
 | You want to undo the settings change | Restore the newest `~/.claude/settings.json.bak.*` file. |
 
 ---

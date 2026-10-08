@@ -1234,6 +1234,19 @@ test('the fix after a contradicted approval reopens any approval the reviewer re
     'the approval command names the reviewed head and asks for the blocking count');
 });
 
+test('a contradicted approval on a sonnet task is reopened by the escalated implement', async () => {
+  const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }, approve()],
+  });
+  await runTask(manifest(), task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  const impls = s.calls.filter((c) => c.label === 'T2 implement');
+  assert.equal(impls.length, 2, 'the changes verdict escalates the sonnet task to a standard rerun');
+  assert.ok(!impls[0].prompt.includes('"event":"reopened"'));
+  assert.ok(impls[1].prompt.includes('"event":"reopened"'), 'the rerun reopens the contradicted approval');
+});
+
 test('a changes verdict with no findings is not a usable review', async () => {
   const s = stub({
     'T2 implement': [done('b0', 'h1')],
