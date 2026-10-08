@@ -26,8 +26,8 @@ attempt, with a worked example, is in adopt.md. `<config dir>` below is
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
 | `join` | Tasks run in order on the merged branch after integration. |
-| task | `{id, title, files, tier, security, batch?, depends_on?}`. `id` exactly as in the plan heading (`T13a`, `7`) and a safe file name (`^[A-Za-z0-9_][A-Za-z0-9._-]*$`: it names brief, report, and review files); `title` and `files` from derive-lanes (project-relative: no absolute path, nothing that leaves the project); `tier` `standard`, `sonnet`, or `light` (see Tiers); a sonnet or light task cannot have `security: true`; `batch` only on light tasks (see Batching); `depends_on` `[{id, kind: "code" or "contract"}]` (see Building lanes). |
-| `overlaps` | Optional `[{file, tasks, reason, merge_owner}]`: a file tasks in different lanes both change on purpose. Every listed task lists the file; `merge_owner` is one of them (its version wins where both changes cannot stand). The integration agent is told about each. |
+| task | `{id, title, files, tier, security, batch?, depends_on?}`. `id` exactly as in the plan heading (`T13a`, `7`) and a safe file name (`^[A-Za-z0-9_][A-Za-z0-9._-]*$`: it names brief, report, and review files); `title` and `files` from derive-lanes (project-relative: no absolute path, nothing that leaves the project; each review is shown the files its range changes outside `files`, from git, and judges each); `tier` `standard`, `sonnet`, or `light` (see Tiers); a sonnet or light task cannot have `security: true`; `batch` only on light tasks (see Batching); `depends_on` `[{id, kind: "code" or "contract"}]` (see Building lanes). |
+| `overlaps` | Optional `[{file, tasks, reason, merge_owner, validation?}]`: a file tasks in different lanes both change on purpose. Every listed task lists the file; `merge_owner` is one of them (its version wins where both changes cannot stand); `validation` says how the merged file is checked (a command, or what to look at). The integration agent is told about each and runs the validation after the merge. |
 | `excluded` | Optional `[{id, reason}]`: plan tasks the run leaves out (after-merge, operator, manual, or done by a hook), shown in the confirmation header. `scripts/coverage` checks that every plan task runs or is here. |
 | `allow_deferral` | Optional boolean, default `true`: whether the adjudicator may park or unblock a task (security tasks never). `false` makes every park or unblock a stop. Show it in the table header. |
 | `deferred` | Resume: the `deferred` list of `ledger status`. Those tasks are done for scheduling but keep the run from being accepted. |
@@ -181,10 +181,27 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   notifies. Raise the limit in the manifest, then resume; that goes through Confirmation again
   (dry run, table, explicit yes). The only edits that
   need no second table are `setup_result`, `start_points`, and the relaunch budget carry-over.
+- The `verify` agent (the project checks through `scripts/run-checks`) runs even past
+  `max_agents`: the checks are cheap and deterministic, so the evidence after the last change
+  exists even when the budget is spent. When the budget stops the run after the join (in E2E or
+  the final review), the stopped report carries `verify` at the feature head it reached; it
+  counts in `agents_spawned`, which can then exceed the cap by one.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
   `agents_spawned` and `max_rulings` by its `rulings_spent`, the adjudications that ran
   (floor 0). Never count ledger `ruling` events for this: implementers record their own
   smaller rulings there too. Fewer than 1 agent left is treated as a budget cap.
+- Spend across launches: after every launch returns (a relaunch included, never a dry run),
+  record what it spent:
+  `python3 <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
+  (`status`: the run status, or `unaccepted` for complete but not accepted). `ledger status`
+  sums them as `spent`. On a resume, set `limits.max_rulings` to 25 minus `spent.rulings`
+  (floor 0; the user may raise it at the table), keep `max_agents` at 2 x the new dry-run
+  estimate (the work left), and show `spent.agents` and `spent.rulings` in the table header.
+- Every launch is a new Workflow call (never `resumeFromRunId`), so no agent result is
+  replayed from a cache: `agents_spawned` counts spawns that ran (a retry is a spawn of its
+  own). Agent count is the only budget the run enforces; tokens and time per agent are reported
+  afterwards by `scripts/run-report`, not capped. This has not been checked in a live Workflow
+  session.
 
 ## Active-run markers and stops
 
@@ -235,14 +252,23 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 (`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `fix_unreviewed`, `deferred_task`,
-`task_not_done`. Warnings (open minor findings, cannot-verify items) never block. The checks evidence is the
+`task_not_done`. Warnings (open minor findings, cannot-verify items, checks that left the
+checkout dirty) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
 it is not caught by the run. Show the
-status and every reason first; only `accepted` is delivered work. A reason the user explicitly
-accepts is recorded in the report as accepted by the user, never folded into `accepted`.
+status and every reason first; only `accepted` is delivered work. A reason or warning the
+user explicitly accepts is recorded with `ledger accept <ledger_dir> <repo root>
+<delivered_sha> "<what>"` (an `accepted` event; `ledger status` lists them under `accepted`)
+and shown as accepted by the user, never folded into `accepted`.
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
+The fixer gives each id a disposition with its evidence; the re-review names the revision it
+judged (`head`). A re-review of another revision than the fix head settles nothing, and two
+different dispositions or results for one id leave it open.
+`ledger status <ledger_dir> --manifest <manifest file>` lists under `undeclared` the files each
+task's recorded range changed outside its `files` (from git; a batch's files count for each of
+its tasks): list them in the report so the user can see work that went beyond the plan.
 
 The hand-back appends the report, saves it beside the manifest, and lists
 "Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
@@ -280,8 +306,14 @@ section or head puts the task in `stale`, a review without a hash (older ledgers
 says whether the plan or spec changed since the last launch recorded their hashes. A stale
 task that is not the last done task of its list is reviewed against the current plan, but a
 fix for it lands after the later tasks' commits; tell the user, who may prefer rerunning it
-and the tasks after it. List tasks whose
-`depends_on` names a stale task for the user too.
+and the tasks after it. With `--manifest`, a reviewed task whose `depends_on` names a stale
+task is stale too, transitively (it was built on, or against, the approval that no longer
+holds), so it is reviewed again as well.
+
+The implementer's start-task call records the task base as a `started` event before any
+write (`--record-start`). A task's first recorded range must start at the base of its latest
+`started` event; otherwise the task is listed in `inconsistent` and backfill refuses, so a
+range never silently starts somewhere the task did not.
 
 To take a deferred task up again (the user wants it done after all) when it is the last
 done task of its list, leave it out of `done`, `reviewed`, and `deferred` on the resume: it

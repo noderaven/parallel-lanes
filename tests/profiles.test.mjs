@@ -97,7 +97,7 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
     ...taskScript(LITE),
     'final review': [{ findings: [finding('combined issue')], cannot_verify: ['e2e: none'], head: 'T4-h' }],
     'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] }],
-    'final re-review': [{ results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
+    'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
     verify: [verified('f1')],
   };
   const { result, calls, phases } = await run(m, script);

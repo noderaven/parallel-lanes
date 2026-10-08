@@ -21,16 +21,28 @@ function withFindingIds(findings, prefix = 'F') {
 // fixed (the fixer fixed it and the re-review found it resolved), declined
 // (the fixer declined it and the re-review agreed), or open (anything else:
 // no disposition, a re-review that says open or leaves the id out, or no
-// re-review at all). rr is the re-review result {results, new_findings}, or
-// null when none ran (whyNot says why). New findings are open with ids N1...
-function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-reviewed') {
-  const said = new Map();
-  for (const d of Array.isArray(dispositions) ? dispositions : []) {
-    if (d && typeof d.id === 'string' && (d.status === 'fixed' || d.status === 'declined')) said.set(d.id, d);
-  }
-  const verdict = new Map();
-  if (rr && Array.isArray(rr.results)) {
-    for (const r of rr.results) if (r && typeof r.id === 'string') verdict.set(r.id, r);
+// re-review at all). rr is the re-review result {head, results, new_findings},
+// or null when none ran (whyNot says why). New findings are open with ids N1...
+// Answers are checked across fields, not just for shape: a re-review of
+// another revision than delivered (the fix head) settles nothing, and two
+// different answers for one id (dispositions or results) leave it open.
+function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-reviewed', delivered = null) {
+  // id -> the one answer given, or null when the answers disagree.
+  const byId = (list, ok) => {
+    const out = new Map();
+    for (const x of Array.isArray(list) ? list : []) {
+      if (!x || typeof x.id !== 'string' || !ok(x)) continue;
+      const prev = out.get(x.id);
+      out.set(x.id, prev === undefined || (prev !== null && prev.status === x.status) ? (prev || x) : null);
+    }
+    return out;
+  };
+  const said = byId(dispositions, (d) => d.status === 'fixed' || d.status === 'declined');
+  const verdict = rr && Array.isArray(rr.results) ? byId(rr.results, () => true) : new Map();
+  let none = rr === null ? whyNot : null;
+  if (none === null && delivered !== null && rr.head !== delivered) {
+    none = present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
+      : 'the final re-review did not say which revision it judged';
   }
   const fixed = [];
   const declined = [];
@@ -39,13 +51,15 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     const d = said.get(f.id) || null;
     const v = verdict.get(f.id) || null;
     const withNotes = { ...f, disposition: d, review: v };
-    if (rr === null) open.push({ ...withNotes, reason: whyNot });
+    if (none !== null) open.push({ ...withNotes, reason: none });
+    else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
+    else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
     } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
     else fixed.push(withNotes);
   }
-  const fresh = rr && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
+  const fresh = rr && none === null && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
   for (const f of fresh) open.push({ ...f, reason: 'new in the final fix' });
   return { fixed, declined, open };
 }
@@ -94,6 +108,12 @@ function acceptanceOf(input) {
   } else if (verify.ok !== true || verify.results.some((r) => r.exit !== 0)) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
+  }
+  // Checks that leave files behind (build output that is not ignored, a
+  // generated file) do not change what was delivered, but the user should
+  // know the checkout was not clean after them.
+  if (want.length > 0 && verify && verify.head === sha && verify.clean === false) {
+    warnings.push(`the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`);
   }
 
   if (m.hooks.e2e) {

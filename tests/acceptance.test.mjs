@@ -1,0 +1,75 @@
+// acceptanceOf, one failure class at a time (review finding 1: a test for
+// each class). Every other gate holds in each case, so the reason listed is
+// the one under test.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { loadHelpers } from './harness.mjs';
+
+const { acceptanceOf } = await loadHelpers(['acceptanceOf']);
+
+const SHA = 'd1';
+const passing = () => ({
+  m: { commands: { test: ['npm test'], lint: [], build: [] }, hooks: {}, profile: 'full', deferred: [] },
+  tasks: { T1: { status: 'done', notes: '' } },
+  final: { open: [], missing_lenses: [], cannot_verify: [] },
+  e2e: null,
+  verify: { head: SHA, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true },
+  post: null,
+  delivered_sha: SHA,
+  fix_unreviewed: false,
+});
+const kinds = (a) => a.reasons.map((r) => [r.kind, r.class]);
+
+test('the passing input is accepted, with no reason or warning', () => {
+  const a = acceptanceOf(passing());
+  assert.deepEqual([a.status, a.reasons, a.warnings], ['accepted', [], []]);
+});
+
+test('a task that is not done rejects the run', () => {
+  const input = passing();
+  input.tasks.T2 = { status: 'blocked', notes: 'stuck' };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'rejected');
+  assert.deepEqual(kinds(a), [['task_not_done', 'failed']]);
+  assert.match(a.reasons[0].detail, /task T2 is blocked/);
+});
+
+test('a configured e2e check with no items is missing evidence', () => {
+  const input = passing();
+  input.m.hooks.e2e = 'run the checklist';
+  for (const e2e of [null, { items: [], checked_sha: SHA }]) {
+    const a = acceptanceOf({ ...input, e2e });
+    assert.equal(a.status, 'unverified');
+    assert.deepEqual(kinds(a), [['e2e_missing', 'missing']]);
+  }
+});
+
+test('a configured post-integration check that never ran, or ran at another revision, is missing evidence', () => {
+  const input = passing();
+  input.m.hooks.post_integrate = 'smoke test';
+  let a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['post_integrate_missing', 'missing']]);
+  a = acceptanceOf({ ...input, post: { status: 'done', checked_sha: 'older', notes: '' } });
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['post_integrate_stale', 'missing']]);
+  assert.match(a.reasons[0].detail, /covered older, not d1/);
+  // Profile lite has no integration, so the hook has nothing to cover.
+  assert.equal(acceptanceOf({ ...input, m: { ...input.m, profile: 'lite' } }).status, 'accepted');
+});
+
+test('a post-integration fix nobody re-reviewed is missing evidence', () => {
+  const a = acceptanceOf({ ...passing(), fix_unreviewed: true });
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['fix_unreviewed', 'missing']]);
+});
+
+test('checks that leave the checkout dirty are a warning, not a failure', () => {
+  const input = passing();
+  input.verify = { ...input.verify, clean: false };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'accepted');
+  assert.deepEqual(a.warnings, [`the project checks left uncommitted changes in the checkout at ${SHA}`
+    + ' (git status was not clean afterwards)']);
+});

@@ -7,7 +7,10 @@
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
-// finish. The other io members pass through unchanged.
+// finish. The one exception is a call with opts.overBudget (the verify agent:
+// cheap, deterministic project checks after the last change): it runs and is
+// counted even past the cap or after a refusal; the flag is not passed on.
+// The other io members pass through unchanged.
 //
 // Agent type: when agentTypeFor(m, label) names one, the spawn carries
 // agentType. A typed spawn that throws or returns null is retried once as
@@ -30,9 +33,10 @@ function makeIo(m, baseIo, state) {
     return { __budget: true };
   };
   const isRuling = (label) => / adjudicate( retry)?$/.test(label);
-  const spawn = (prompt, opts) => {
+  const spawn = (prompt, given) => {
+    const { overBudget, ...opts } = given;
     const label = opts.label;
-    if (state.refused.length > 0 || state.agents >= limits.max_agents) return refuse(label);
+    if (!overBudget && (state.refused.length > 0 || state.agents >= limits.max_agents)) return refuse(label);
     const ruling = isRuling(label);
     if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
     // Only calls that run count: state.rulings is the adjudications spent.

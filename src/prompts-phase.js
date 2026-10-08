@@ -126,8 +126,9 @@ function finalFixSchema() {
             id: { type: 'string' },
             status: { type: 'string', enum: ['fixed', 'declined'] },
             reason: { type: 'string' },
+            evidence: { type: 'string' },
           },
-          required: ['id', 'status', 'reason'],
+          required: ['id', 'status', 'reason', 'evidence'],
         },
       },
     },
@@ -151,6 +152,7 @@ function finalReReviewSchema() {
   return {
     type: 'object',
     properties: {
+      head: { type: 'string' },
       results: {
         type: 'array',
         items: {
@@ -165,7 +167,7 @@ function finalReReviewSchema() {
       },
       new_findings: reviewSchema().properties.findings,
     },
-    required: ['results', 'new_findings'],
+    required: ['head', 'results', 'new_findings'],
   };
 }
 
@@ -322,7 +324,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
     '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
     ...m.overlaps.map((o) => `   - ${o.file}: tasks ${o.tasks.join(', ')}; on a conflict keep both changes, and where they`
-      + ` cannot both stand keep task ${o.merge_owner}'s. Why: ${o.reason}`),
+      + ` cannot both stand keep task ${o.merge_owner}'s. Why: ${o.reason}`
+      + (present(o.validation) ? `; after the merge, check it: ${o.validation}` : '')),
   ] : [];
   const review = reviewConflicts ? [
     'Resolution review: the merge conflicts in this run were already resolved by a prior agent in merge',
@@ -606,17 +609,20 @@ function finalFixPrompt(m, findings, base) {
     phaseRules(m),
     '',
     implementResultText(featureDir(m), false, base),
-    'Also return dispositions = one {id, status "fixed" or "declined", reason} for every finding id above (reason:',
-    'what you changed, or why you declined it). A finding without a disposition counts as not addressed.',
+    'Also return dispositions = one {id, status "fixed" or "declined", reason, evidence} for every finding id above',
+    '(reason: what you changed, or why you declined it; evidence: the file:line and commit of the change, or what',
+    'shows the decline is right). A finding without a disposition counts as not addressed; two different ones for',
+    'one id leave it open.',
   ].join('\n');
 }
 
-// findings carry their id and the fixer's disposition ({status, reason}, or
-// none when the fixer gave none).
+// findings carry their id and the fixer's dispositions for it
+// ([{status, reason, evidence}]; none when the fixer gave none).
 function finalReReviewPrompt(m, base, head, findings) {
   const dir = shellQuote(featureDir(m));
-  const said = (f) => (f.disposition
-    ? `   fixer: ${f.disposition.status} - ${f.disposition.reason}`
+  const said = (f) => ((f.dispositions || []).length > 0
+    ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
+      + (present(d.evidence) ? ` (evidence: ${d.evidence})` : '')).join('\n')
     : '   fixer: no disposition (treat it as not addressed unless the defect is verifiably gone)');
   return [
     `You are re-reviewing the final fixes for parallel-lanes run ${m.run_id} (fix range ${base}..${head}`
@@ -634,8 +640,10 @@ function finalReReviewPrompt(m, base, head, findings) {
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     phaseRules(m),
     '',
-    'Return results = one {id, status "resolved" or "open", evidence} per id above (an id you leave out counts',
-    'as open), and new_findings = the new problems, each {severity, file, line, issue, fix}.',
+    `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
+    '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
+    'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
+    'fix}.',
   ].join('\n');
 }
 

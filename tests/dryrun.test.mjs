@@ -274,7 +274,7 @@ function parityAgent(label) {
   if (label === 'final fix') {
     return { status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok' }] };
   }
-  if (label === 'final re-review') return { results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
+  if (label === 'final re-review') return { head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
   if (label === 'verify') return { head: 'f1', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };
   if (label === 'e2e recheck') return { head: 'f1', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
   if (label === 'post-integrate recheck') return { status: 'done', head: 'f1', notes: 'ok' };

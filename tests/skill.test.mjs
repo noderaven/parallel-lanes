@@ -198,6 +198,17 @@ test('SKILL.md names the addendum scripts, fields, tools, and flow rules', () =>
   assert.match(text, /use that copy as `scriptPath`/);
 });
 
+// The review: verify the plan inventory when creating and when resuming a
+// run; a resume reads stale dependents and the spend of earlier launches.
+test('SKILL.md resume rechecks coverage, passes the manifest to ledger status, and carries the spend', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const resume = text.slice(text.indexOf('## Resume'), text.indexOf('## Red flags'));
+  assert.ok(resume.includes('scripts/coverage <plan> <manifest file>` must exit 0'), resume);
+  assert.ok(resume.includes('--plan <plan> --manifest <manifest file>'), resume);
+  assert.ok(resume.includes('`spent` lowers `limits.max_rulings`'), resume);
+  assert.ok(text.includes('ledger accept <ledger_dir>'), 'an explicit acceptance is recorded');
+});
+
 test('SKILL.md stays under 2400 words', () => {
   const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
   assert.ok(words < 2400, `SKILL.md has ${words} words`);

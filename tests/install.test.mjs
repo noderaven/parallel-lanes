@@ -71,9 +71,10 @@ test('install.sh installs the skill, the worker agent, and both hooks, keeping o
 
 // Review finding 10: the stored commands must work when the host runs them
 // through a shell, from a config dir with a space and a single quote.
-test('install.sh registers hook commands that run from a config dir with a space and a quote', { skip: SKIP }, () => {
+test('install.sh registers hook commands that run from a config dir with spaces, quotes and shell characters', { skip: SKIP }, () => {
   counter += 1;
-  const dir = join(TMP, `it's config ${counter}`);
+  // Review finding 10: every character a shell would act on, not just a space.
+  const dir = join(TMP, `it's "a" $HOME \`x\` ; & | * config ${counter}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'settings.json'), '{}\n');
   install(dir);

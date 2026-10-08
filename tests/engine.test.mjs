@@ -1291,3 +1291,62 @@ test('autonomous: an invalid or budget-refused adjudication is not listed as a r
     assert.deepEqual(r.rulings, [], JSON.stringify(r0));
   }
 });
+
+// 1.2.1: review gaps.
+test('the implementer records its task base through start-task before it writes; reviews and fixes do not', () => {
+  const p = allPrompts(manifest());
+  assert.ok(p.implement.includes("--record-start '/work/ledger' 'alpha' 'b0'"), p.implement);
+  for (const name of ['review', 'fix', 'reReview']) assert.ok(!p[name].includes('--record-start'), name);
+});
+
+test('reviews get the files their range changes outside the Files list, and judge each', () => {
+  const m = manifest();
+  const batchTasks = [task('T2', { files: ['src/T2.js', 'docs/a.md'] }), task('T3')];
+  const unit = { id: 'T2-T3', title: 'batch', files: [], tier: 'light', security: false, batch: 'k', tasks: batchTasks };
+  for (const [text, base, head] of [
+    [reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'), 'b0', 'h1'],
+    [reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', [finding('x')]), 'h1', 'h2'],
+  ]) {
+    assert.ok(text.includes(`--scope '${base}' '${head}' --declared 'src/T2.js'`), text);
+    assert.ok(text.includes("files changed outside the task's Files list"), text);
+    assert.ok(/a change the task did not need[^.]*is an important finding/.test(text.replace(/\n/g, ' ')), text);
+  }
+  const batch = reviewPrompt(m, unit, WHERE, 'b0', 'h1');
+  assert.ok(batch.includes("--declared 'src/T2.js' --declared 'docs/a.md' --declared 'src/T3.js'"), batch);
+  // Without superpowers the scope list still comes from start-task.
+  assert.ok(reviewPrompt(manifest({ sp_dir: null }), task('T2'), WHERE, 'b0', 'h1').includes("--scope 'b0' 'h1'"));
+  // A task with no Files list has nothing to compare against.
+  const bare = reviewPrompt(m, task('T2', { files: [] }), WHERE, 'b0', 'h1');
+  assert.ok(!bare.includes('--scope') && !bare.includes('outside the task'), bare);
+});
+
+// Review finding 14: the prompts impose no content or commit convention of
+// their own; the project's commit_rules are the only source, so UTF-8 text
+// and trailers the project asks for stay allowed.
+test('prompts carry only the project rules: no ASCII or trailer rule of their own', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt, integratePrompt, e2ePrompt, verifyPrompt,
+    postIntegratePrompt, preflightPrompt } = await loadHelpers(['finalReviewPrompt', 'combinedFinalReviewPrompt',
+    'integratePrompt', 'e2ePrompt', 'verifyPrompt', 'postIntegratePrompt', 'preflightPrompt']);
+  const rules = 'Write UTF-8 freely (docs are in French: café). End every commit with a Signed-off-by: trailer.';
+  const m = manifest({ commit_rules: rules, hooks: { e2e: 'run the app', post_integrate: 'smoke test' } });
+  const fs = [{ ...finding('the bug'), id: 'F1' }];
+  const prompts = {
+    ...allPrompts(m),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+    finalFix: finalFixPrompt(m, fs, 'h1'),
+    integrate: integratePrompt(m, 'p0', {}),
+    e2e: e2ePrompt(m),
+    verify: verifyPrompt(m, 'h1'),
+    postIntegrate: postIntegratePrompt(m),
+    preflight: preflightPrompt(m),
+  };
+  for (const [name, text] of Object.entries(prompts)) {
+    assert.ok(text.includes(rules), `${name}: the project's rules`);
+    const own = text.split(rules).join('');
+    assert.ok(!/ASCII/i.test(own), `${name}: an ASCII rule of its own`);
+    assert.ok(!/trailer|co-authored|AI (name|attribution)|Claude/i.test(own), `${name}: a trailer or AI rule of its own`);
+  }
+});
