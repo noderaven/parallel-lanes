@@ -41,8 +41,11 @@ attempt, with a worked example, is in adopt.md.
 | `skill_dir` | `<skill_dir>`. |
 
 Plan task ids must have `#+ Task <ID>:` headings; agents extract briefs with
-`scripts/task-brief`, which fails on a missing heading. Tasks the plan marks after-merge,
-operator, or manual are left out of the manifest and listed in the confirmation header.
+`scripts/task-brief`, which fails on a missing heading. A brief ends with the Produces block
+of each task its Consumes names and of each producer pre-flight added (`preflight.undeclared`:
+the run passes them to `start-task` and `task-brief` as `--also`). Tasks the plan marks
+after-merge, operator, or manual are left out of the manifest and listed in the confirmation
+header.
 
 ## Building lanes
 
@@ -202,7 +205,11 @@ and call out any agent whose `resolved_models` names a model other than the one 
 a task result's `rulings` has an entry starting `refused (security-gated):`, the security gate
 refused the adjudicator's park or unblock: list that ruling with the prefix, never as one that
 took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
-such entry) is listed as a stop ruling, as written. When the run result has
+such entry) is listed as a stop ruling, as written. `preflight.undeclared` lists the
+dependencies pre-flight found that a task relies on without naming the producer in its
+Consumes (`{task, producer, what}`, after dropping entries with an unknown or done task, an
+unknown producer, or a task equal to its producer); the hand-back lists them under
+"Dependencies pre-flight added" so the user can name them in the plan. When the run result has
 `agent_type_fallback: true`, say in the report that the run switched to the default agent type
 partway through (see `agent_type` under Manifest fields).
 

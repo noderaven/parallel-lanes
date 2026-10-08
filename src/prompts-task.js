@@ -199,7 +199,13 @@ function startCommand(m, task, where, opts = {}) {
     const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
     parts.push('--package', shellQuote(script), shellQuote(pkg.base), shellQuote(pkg.head), shellQuote(out));
   }
-  for (const t of unitTasks(task)) parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
+  // Producers pre-flight found undeclared (consumes_extra, phases.js) reach
+  // each task's brief through start-task --also.
+  const extra = m.consumes_extra || {};
+  for (const t of unitTasks(task)) {
+    parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
+    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+  }
   return parts.join(' ');
 }
 

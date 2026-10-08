@@ -70,8 +70,20 @@ function preflightSchema() {
     properties: {
       conflicts: { type: 'array', items: { type: 'string' } },
       rulings: { type: 'array', items: { type: 'string' } },
+      undeclared: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            producer: { type: 'string' },
+            what: { type: 'string' },
+          },
+          required: ['task', 'producer', 'what'],
+        },
+      },
     },
-    required: ['conflicts', 'rulings'],
+    required: ['conflicts', 'rulings', 'undeclared'],
   };
 }
 
@@ -231,6 +243,10 @@ function preflightPrompt(m) {
     '   or cannot work as written).',
     '3. Cross-lane code dependencies: a lane task that needs code another lane writes (beyond a contract the',
     '   plan defines) must be in join.',
+    '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
+    '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
+    '   without naming that task in its Consumes. Return each in undeclared as',
+    '   {task, producer, what}, what in one sentence.',
     'Report serious problems (implementers would build the wrong thing, or a check above fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
