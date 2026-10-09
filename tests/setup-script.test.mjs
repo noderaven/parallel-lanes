@@ -12,9 +12,10 @@ import {
   realpathSync,
   symlinkSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -278,6 +279,22 @@ test('setup: a foreign directory at a lane path exits 3 and is left alone', () =
   assert.match(res.stderr, /lane-a/);
   assert.equal(readFileSync(join(laneDir(c, 'a'), 'user.txt'), 'utf8'), 'not a worktree\n');
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+});
+
+test('setup runs setup commands with the resolved bash', () => {
+  const c = newCase();
+  const realBash = sh('bash', ['-c', 'command -v bash']).stdout.trim();
+  const calls = join(c.root, 'calls');
+  write(c.root, 'fake bin/bash', `#!${realBash}\nprintf '%s\\n' "$*" >> ${q(calls)}\nexec ${q(realBash)} "$@"\n`);
+  chmodSync(join(c.root, 'fake bin', 'bash'), 0o755);
+  const m = manifest(c, { lanes: [{ id: 'a', name: 'Lane A', tasks: [] }] });
+  const res = setup(c, m, [], { PATH: `${join(c.root, 'fake bin')}${delimiter}${process.env.PATH}` });
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(logLines(c), [c.project, laneDir(c, 'a')]);
+  const logCmd = m.commands.setup[0];
+  // The test's own active-run acquire also goes through the fake bash.
+  const commandCalls = readFileSync(calls, 'utf8').split('\n').filter((l) => l.startsWith('-c '));
+  assert.deepEqual(commandCalls, [`-c ${logCmd}`, `-c ${logCmd}`]);
 });
 
 test('setup: a failing setup command exits 1 and records no start point', () => {
