@@ -59,6 +59,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _plan  # noqa: E402
 import _brief  # noqa: E402
+import _shell  # noqa: E402
 
 FILES_LINE = re.compile(r"^\s*\*\*Files:?\*\*:?(.*)$")
 BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
@@ -317,7 +318,9 @@ def derive(text):
 
 
 def main(argv):
+    _shell.setup_io()
     plan, max_lanes = parse_args(argv)
+    plan = _shell.native_path(plan)
     try:
         with open(plan, encoding="utf-8") as f:
             text = f.read()
