@@ -20,12 +20,43 @@ test('every Python helper calls setup_io and writes files through write_text', (
     assert.match(source, /setup_io\(\)/, `${name} must call setup_io()`);
     assert.match(source, /import _shell/, `${name} must import _shell`);
   }
-  for (const name of [...HELPERS, '_brief.py']) {
-    const source = readFileSync(join(SCRIPTS, name), 'utf8');
-    // open(...) in a write, append or exclusive mode (os.open is a different call).
-    const textWrite = /(^|[^.\w])open\([^)]*,\s*(mode\s*=\s*)?["'][wax+]/m;
-    assert.doesNotMatch(source, textWrite, `${name} must not write text with open()`);
-  }
+  // Parse each file and check every open() call (os.open takes flags, not a
+  // mode): a write, append, exclusive or update mode must be binary, and a
+  // mode that is not a string literal cannot be checked, so it fails too.
+  const code = [
+    'import ast, sys',
+    'bad = []',
+    'for path in sys.argv[1:]:',
+    '    with open(path, encoding="utf-8") as f:',
+    '        tree = ast.parse(f.read(), path)',
+    '    for node in ast.walk(tree):',
+    '        if not isinstance(node, ast.Call):',
+    '            continue',
+    '        fn = node.func',
+    '        if isinstance(fn, ast.Name):',
+    '            if fn.id != "open":',
+    '                continue',
+    '        elif isinstance(fn, ast.Attribute):',
+    '            if fn.attr != "open" or (isinstance(fn.value, ast.Name) and fn.value.id == "os"):',
+    '                continue',
+    '        else:',
+    '            continue',
+    '        mode = node.args[1] if len(node.args) > 1 else None',
+    '        for kw in node.keywords:',
+    '            if kw.arg == "mode":',
+    '                mode = kw.value',
+    '        if mode is None:',
+    '            continue',
+    '        if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):',
+    '            bad.append(f"{path}:{node.lineno}: mode is not a string literal")',
+    '        elif set(mode.value) & set("wax+") and "b" not in mode.value:',
+    '            bad.append(f"{path}:{node.lineno}: text-mode write {mode.value!r}")',
+    'print("\\n".join(bad))',
+  ].join('\n');
+  const files = [...HELPERS, '_brief.py'].map((name) => join(SCRIPTS, name));
+  const res = spawnSync('python3', ['-c', code, ...files], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), '', 'no helper may write text with open()');
   assert.match(readFileSync(join(SCRIPTS, 'task-brief'), 'utf8'), /write_text\(/);
   assert.match(readFileSync(join(SCRIPTS, 'run-report'), 'utf8'), /write_text\(/);
 });
@@ -76,13 +107,49 @@ test('a CRLF plan gives the same brief and section hash as LF', () => {
 });
 
 test('helpers accept a Git Bash path for their files', () => {
-  const dir = join(TMP, 'x');
-  mkdirSync(join(dir, 'ledger'), { recursive: true });
-  const res = spawnSync('python3', [join(SCRIPTS, 'ledger'), 'status', join(dir, 'y', '..', 'ledger')], {
+  const ledger = join(TMP, 'ledger');
+  mkdirSync(ledger, { recursive: true });
+  mkdirSync(join(TMP, 'x'), { recursive: true });
+  writeFileSync(join(ledger, 'alpha.jsonl'), JSON.stringify({ task: 'T7', event: 'blocked', reason: 'r' }) + '\n');
+  const res = spawnSync('python3', [join(SCRIPTS, 'ledger'), 'status', join(TMP, 'x', '..', 'ledger')], {
     encoding: 'utf8',
   });
   assert.equal(res.status, 0, res.stderr);
-  assert.ok(JSON.parse(res.stdout));
+  assert.deepEqual(JSON.parse(res.stdout).blocked, ['T7']);
+});
+
+test('a path that cannot be converted fails with the helper message, not a traceback', () => {
+  // Pretend to be Windows with a Git Bash that has no cygpath.exe beside it,
+  // so converting a '/'-rooted path (not an MSYS drive path such as /c/x)
+  // raises CygpathNotFound.
+  const bash = join(TMP, 'git', 'bin', 'bash.exe');
+  mkdirSync(join(TMP, 'git', 'bin'), { recursive: true });
+  writeFileSync(bash, '');
+  const env = { ...process.env, CLAUDE_CODE_GIT_BASH_PATH: bash };
+  // Standard modules load before the platform changes (some pick their
+  // implementation by platform at import); _shell reads it at call time.
+  const code = [
+    'import argparse, glob, hashlib, json, os, posixpath, re, runpy, shutil, subprocess, sys',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import _shell',
+    'sys.platform = "win32"',
+    'sys.argv = sys.argv[1:]',
+    'runpy.run_path(sys.argv[0], run_name="__main__")',
+  ].join('\n');
+  const cases = [
+    ['ledger', ['status', '/nowhere/ledger'], 3],
+    ['task-brief', ['/nowhere/plan.md', '1', '/nowhere/brief.md'], 3],
+    ['coverage', ['/nowhere/plan.md', '/nowhere/manifest.json'], 3],
+    ['derive-lanes', ['/nowhere/plan.md'], 3],
+    ['finish-task', ['/nowhere/wt', 'b', 'HEAD', '/nowhere/ledger', 'alpha', '--task', '1'], 3],
+    ['run-report', ['/nowhere/transcripts', '/nowhere/manifest.json'], 2],
+  ];
+  for (const [name, args, status] of cases) {
+    const res = spawnSync('python3', ['-c', code, join(SCRIPTS, name), ...args], { encoding: 'utf8', env });
+    assert.equal(res.status, status, `${name}: ${res.stderr}`);
+    assert.ok(res.stderr.startsWith(`${name}: cannot convert /nowhere/`), `${name}: ${res.stderr}`);
+    assert.doesNotMatch(res.stderr, /Traceback/, name);
+  }
 });
 
 test('run-report --out writes LF only', () => {

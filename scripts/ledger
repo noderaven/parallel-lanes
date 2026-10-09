@@ -630,7 +630,10 @@ def native_args(argv):
 
 def main(argv):
     _shell.setup_io()
-    argv = native_args(argv)
+    try:
+        argv = native_args(argv)
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     if len(argv) == 4 and argv[0] == "append" and argv[1]:
         append(argv[1], argv[2], argv[3])
     elif len(argv) == 9 and argv[0] == "reviewed" and all(argv[1:]):

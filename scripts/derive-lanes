@@ -320,7 +320,10 @@ def derive(text):
 def main(argv):
     _shell.setup_io()
     plan, max_lanes = parse_args(argv)
-    plan = _shell.native_path(plan)
+    try:
+        plan = _shell.native_path(plan)
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     try:
         with open(plan, encoding="utf-8") as f:
             text = f.read()

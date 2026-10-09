@@ -104,9 +104,12 @@ def parse_args(argv):
 def main(argv):
     _shell.setup_io()
     plan, task_id, out, root, also = parse_args(argv)
-    plan, out = _shell.native_path(plan), _shell.native_path(out)
-    if root is not None:
-        root = _shell.native_path(root)
+    try:
+        plan, out = _shell.native_path(plan), _shell.native_path(out)
+        if root is not None:
+            root = _shell.native_path(root)
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     if root is not None:
         if os.path.islink(out):
             fail(3, f"brief path {out!r} is a symlink; nothing written")

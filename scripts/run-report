@@ -320,9 +320,13 @@ def main(argv):
     if len(args) != 2:
         print("usage: run-report TRANSCRIPT_DIR MANIFEST [--out FILE]", file=sys.stderr)
         return 2
-    transcript_dir, manifest_path = (_shell.native_path(a) for a in args)
-    if out:
-        out = _shell.native_path(out)
+    try:
+        transcript_dir, manifest_path = (_shell.native_path(a) for a in args)
+        if out:
+            out = _shell.native_path(out)
+    except _shell.BashNotFound as e:
+        print(f"run-report: {e}", file=sys.stderr)
+        return 2
     if not os.path.isdir(transcript_dir):
         print(f"run-report: not a directory: {transcript_dir}", file=sys.stderr)
         return 2

@@ -101,8 +101,11 @@ def parse(argv):
 def main(argv):
     _shell.setup_io()
     args = parse(argv)
-    directory = _shell.native_path(args.dir)
-    args.ledger_dir = _shell.native_path(args.ledger_dir)
+    try:
+        directory = _shell.native_path(args.dir)
+        args.ledger_dir = _shell.native_path(args.ledger_dir)
+    except _shell.BashNotFound as e:
+        fail(3, f"{e}; nothing recorded")
 
     if not SAFE.fullmatch(args.lane):
         fail(3, f"unsafe lane name {args.lane!r}; nothing recorded")

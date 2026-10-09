@@ -38,7 +38,10 @@ def main(argv):
     _shell.setup_io()
     if len(argv) != 2 or not all(argv):
         fail(2, "usage: coverage PLAN MANIFEST")
-    argv = [_shell.native_path(a) for a in argv]
+    try:
+        argv = [_shell.native_path(a) for a in argv]
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     try:
         with open(argv[0], encoding="utf-8") as f:
             plan_ids = [s.id for s in _plan.task_sections(f.read().splitlines())]
