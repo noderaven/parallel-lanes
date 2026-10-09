@@ -6,9 +6,9 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -153,6 +153,43 @@ test('run-checks fails a command that moves HEAD: a check must not change what i
   const report = JSON.parse(res.stdout);
   assert.equal(report.ok, false);
   assert.notEqual(report.head_after, report.head);
+});
+
+const REAL_BASH = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+const REAL_PYTHON = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
+// A directory holding a fake bash that logs its arguments to calls, then runs the real bash.
+function fakeBash(dir, calls) {
+  const bin = join(dir, 'fake bin');
+  write(join(bin, 'bash'), `#!${REAL_BASH}\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${REAL_BASH}' "$@"\n`);
+  chmodSync(join(bin, 'bash'), 0o755);
+  return bin;
+}
+
+test('run-checks starts each check with the bash find_bash resolves', () => {
+  const r = repo();
+  const calls = join(dirname(r), 'calls');
+  const bin = fakeBash(dirname(r), calls);
+  const res = spawnSync('python3', [join(SCRIPTS, 'run-checks'), r, '--cmd', 'test', 'true'], {
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, PATH: `${bin}${delimiter}${process.env.PATH}` },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).ok, true);
+  assert.ok(readFileSync(calls, 'utf8').split('\n').includes('-c true'), readFileSync(calls, 'utf8'));
+});
+
+test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', () => {
+  const r = repo();
+  // PATH holds only python3: no bash (and no git) can be found on it.
+  const bin = join(dirname(r), 'python only');
+  mkdirSync(bin);
+  symlinkSync(REAL_PYTHON, join(bin, 'python3'));
+  const res = spawnSync(join(bin, 'python3'), [join(SCRIPTS, 'run-checks'), r, '--cmd', 'test', 'true'], {
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, PATH: bin },
+  });
+  assert.equal(res.status, 3, res.stderr);
+  assert.equal(res.stdout, '');
+  assert.match(res.stderr, /CLAUDE_CODE_GIT_BASH_PATH/);
+  assert.doesNotMatch(res.stderr, /Traceback/);
 });
 
 // --- plan coverage ----------------------------------------------------------

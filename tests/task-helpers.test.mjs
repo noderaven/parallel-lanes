@@ -9,9 +9,10 @@ import {
   existsSync,
   realpathSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -244,6 +245,26 @@ test('start-task --package runs the package script in DIR and prints its output'
   assert.equal(readFileSync(out, 'utf8'), [c.lane, c.plan, 'BASE', 'HEAD', out, ''].join('\n'));
   assert.ok(res.stdout.endsWith(`===== review package =====\n${out}\n`), res.stdout);
   assert.ok(res.stdout.indexOf('===== brief T1') < res.stdout.indexOf('===== review package'));
+});
+
+test('start-task runs the package script with the resolved bash', () => {
+  const c = newCase();
+  const realBash = sh('bash', ['-c', 'command -v bash']).stdout.trim();
+  const calls = join(c.root, 'calls');
+  const fake = join(c.root, 'fake bin', 'bash');
+  write(fake, `#!${realBash}\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realBash}' "$@"\n`);
+  chmodSync(fake, 0o755);
+  const pkg = join(c.root, 'tools dir', 'package.sh');
+  write(pkg, 'echo packaged\n');
+  const out = join(c.root, 'review dir', 'package.md');
+  const brief = join(c.root, 'briefs', 'T1.md');
+  const res = scriptEnv('start-task')(
+    { PATH: `${dirname(fake)}${delimiter}${process.env.PATH}` },
+    c.lane, c.plan, '--package', pkg, 'BASE', 'HEAD', out, '--brief', 'T1', brief,
+  );
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith('===== review package =====\npackaged\n'), res.stdout);
+  assert.deepEqual(readFileSync(calls, 'utf8').split('\n'), [`${pkg} ${c.plan} BASE HEAD ${out}`, '']);
 });
 
 test('start-task exits 1 when the package script fails', () => {
