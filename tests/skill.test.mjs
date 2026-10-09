@@ -210,9 +210,14 @@ test('SKILL.md resume rechecks coverage, passes the manifest to ledger status, a
   assert.ok(text.includes('ledger accept <ledger_dir>'), 'an explicit acceptance is recorded');
 });
 
-test('SKILL.md stays under 2400 words', () => {
+// The limit guards against bloat; it is not a target to compress toward.
+// SKILL.md holds what every invocation needs (the flow, the hard rules, the
+// notices, the consent gate, the hand-back). Material needed only sometimes
+// moves whole to reference.md, with SKILL.md pointing to it. Never shorten
+// sentences or drop the reasons behind rules to stay under the limit.
+test('SKILL.md stays under 3000 words', () => {
   const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
-  assert.ok(words < 2400, `SKILL.md has ${words} words`);
+  assert.ok(words < 3000, `SKILL.md has ${words} words`);
 });
 
 test('reference.md has sections for profiles, tiers, batching, adjudicator, budgets, and the report', () => {
