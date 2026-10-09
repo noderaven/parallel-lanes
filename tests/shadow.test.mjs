@@ -70,12 +70,13 @@ function shadow(base, args, env = {}) {
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-// git's own output, with CRLF line ends (if any) read as LF.
-function git(args, cwd = TMP) {
+// git's own output, with CRLF line ends (if any) read as LF. env is added
+// to the hermetic GIT_ENV.
+function git(args, cwd = TMP, env = {}) {
   const res = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV },
+    env: { ...process.env, ...GIT_ENV, ...env },
   });
   assert.equal(res.status, 0, `git ${args.join(' ')}: ${res.stderr}`);
   return res.stdout.replace(/\r\n/g, '\n');
@@ -102,15 +103,15 @@ function init(c, extra = []) {
 }
 
 // A lane worktree created from the shadow repo, as the skill does.
-function laneWorktree(c, gitdir, name = 'lane') {
+function laneWorktree(c, gitdir, name = 'lane', env = {}) {
   const wt = join(c.root, `wt ${name}`);
-  git(['--git-dir', gitdir, 'worktree', 'add', '-q', '-b', name, wt, 'pl-base']);
+  git(['--git-dir', gitdir, 'worktree', 'add', '-q', '-b', name, wt, 'pl-base'], TMP, env);
   return wt;
 }
 
-function commitAll(wt, message = 'lane work') {
-  git(['add', '-A'], wt);
-  git(['commit', '-q', '-m', message], wt);
+function commitAll(wt, message = 'lane work', env = {}) {
+  git(['add', '-A'], wt, env);
+  git(['commit', '-q', '-m', message], wt, env);
 }
 
 function trackedFiles(gitdir, ref = 'pl-base') {
@@ -497,6 +498,58 @@ test('core.autocrlf in the user config does not turn CRLF files into conflicts',
   const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane'], env);
   assert.equal(wb.code, 0, wb.stderr);
   assert.equal(readFileSync(join(c.project, 'w.txt'), 'utf8'), 'one\r\ntwo\r\nthree\r\n');
+});
+
+// The shadow repo's own core.autocrlf ('' when unset).
+function shadowAutocrlf(gitdir) {
+  const res = spawnSync('git', ['--git-dir', gitdir, 'config', '--local', 'core.autocrlf'], {
+    encoding: 'utf8',
+    env: { ...process.env, ...GIT_ENV },
+  });
+  return res.stdout.trim();
+}
+
+test('a shadow repo turns autocrlf off in its own config', () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const gitdir = init(c);
+  assert.equal(shadowAutocrlf(gitdir), 'false');
+});
+
+test('an older shadow without the setting is repaired on its next use', () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const gitdir = init(c);
+  for (const args of [['preview', gitdir, c.project, 'pl-base'], ['writeback', gitdir, c.project, 'pl-base'], ['init', c.project]]) {
+    // A 1.3.0 shadow has no core.autocrlf (--unset exits 5 when it is unset).
+    const unset = spawnSync('git', ['--git-dir', gitdir, 'config', '--local', '--unset', 'core.autocrlf'], {
+      env: { ...process.env, ...GIT_ENV },
+    });
+    assert.ok([0, 5].includes(unset.status), String(unset.stderr));
+    assert.equal(shadowAutocrlf(gitdir), '');
+    const res = shadow(c.base, args);
+    assert.equal(res.code, 0, `${args[0]}: ${res.stderr}`);
+    assert.equal(shadowAutocrlf(gitdir), 'false', args[0]);
+  }
+});
+
+test('CRLF files come back from writeback byte for byte under autocrlf=true', () => {
+  const c = newCase({ 'w.txt': 'a\r\nb\r\n', 'lf.txt': 'x\n' });
+  const config = join(c.root, 'gitconfig');
+  writeFileSync(config, '[core]\n\tautocrlf = true\n');
+  const env = { GIT_CONFIG_GLOBAL: config };
+  const res = shadow(c.base, ['init', c.project], env);
+  assert.equal(res.code, 0, res.stderr);
+  const gitdir = res.stdout.trim();
+  const wt = laneWorktree(c, gitdir, 'lane', env);
+  assert.equal(readFileSync(join(wt, 'w.txt'), 'utf8'), 'a\r\nb\r\n', 'the worktree keeps CRLF');
+  assert.equal(readFileSync(join(wt, 'lf.txt'), 'utf8'), 'x\n', 'the worktree keeps LF');
+  write(wt, 'other.txt', 'other\n');
+  commitAll(wt, 'lane work', env);
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane'], env);
+  assert.equal(wb.code, 0, wb.stderr);
+  assert.deepEqual(JSON.parse(wb.stdout).add, ['other.txt']);
+  assert.equal(readFileSync(join(c.project, 'w.txt'), 'utf8'), 'a\r\nb\r\n');
+  assert.equal(readFileSync(join(c.project, 'lf.txt'), 'utf8'), 'x\n');
+  assert.equal(readFileSync(join(c.project, 'other.txt'), 'utf8'), 'other\n');
 });
 
 // --- remove -----------------------------------------------------------------

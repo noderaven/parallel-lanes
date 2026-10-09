@@ -28,8 +28,9 @@ function fakeBin(scripts) {
   return dir;
 }
 
-function run(args, { path, env = {} } = {}) {
+function run(args, { path, env = {}, cwd } = {}) {
   const res = spawnSync(BASH, args, {
+    cwd,
     encoding: 'utf8',
     env: mergeEnv(process.env, path ? { PATH: path } : {}, env),
   });
@@ -72,6 +73,24 @@ test('abs_dir and native give the C:/ form under Git Bash', { skip: IS_WINDOWS &
   });
   assert.equal(r.code, 0);
   assert.equal(r.stdout, `C:/fake${TMP}\nC:/fake/tmp/x\n`);
+});
+
+test('abs_dir ignores CDPATH and a folder name starting with a dash', () => {
+  // Both the cwd and the CDPATH directory hold 'sub'. cd would take the
+  // CDPATH one and print its path too.
+  const cwd = join(TMP, 'cdpath cwd');
+  const elsewhere = join(TMP, 'cdpath elsewhere');
+  for (const dir of [join(cwd, 'sub'), join(cwd, '-x'), join(elsewhere, 'sub')]) mkdirSync(dir, { recursive: true });
+  const r = run(['-c', `. '${PATHS}'; abs_dir sub`], { cwd, env: { CDPATH: elsewhere } });
+  assert.equal(r.code, 0, r.stderr);
+  const lines = lf(r.stdout).trim().split('\n');
+  assert.equal(lines.length, 1, r.stdout);
+  assert.ok(samePath(lines[0], join(cwd, 'sub')), `${lines[0]} is not ${join(cwd, 'sub')}`);
+
+  const dash = run(['-c', `. '${PATHS}'; abs_dir -x`], { cwd });
+  assert.equal(dash.code, 0, dash.stderr);
+  const got = lf(dash.stdout).trim();
+  assert.ok(samePath(got, join(cwd, '-x')), `${got} is not ${join(cwd, '-x')}`);
 });
 
 test('find-python prints the first interpreter that runs Python 3.8 or later', () => {
