@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, IS_WINDOWS } from './platform.mjs';
 
 const ACTIVE_RUN = join(SKILL_DIR, 'scripts', 'active-run');
 const TMP = mkdtempSync(join(tmpdir(), 'pl-active-'));
@@ -18,7 +19,7 @@ function markerDir() {
 }
 
 function activeRun(dir, ...args) {
-  const res = spawnSync('bash', [ACTIVE_RUN, ...args], {
+  const res = spawnSync(BASH, [ACTIVE_RUN, ...args], {
     encoding: 'utf8',
     env: { ...process.env, PL_ACTIVE_DIR: dir },
   });
@@ -38,7 +39,8 @@ test('active-run: write, list, and remove round trip', () => {
   const w2 = activeRun(dir, 'write', 'run-b', '/plans/b.json', 'stopped');
   assert.equal(w2.code, 0, w2.stderr);
 
-  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  // Windows has no POSIX modes: the writes above succeeding is the check there.
+  if (!IS_WINDOWS) assert.equal(statSync(dir).mode & 0o777, 0o700);
   const markers = list(dir);
   assert.deepEqual(
     markers.map(({ run_id, manifest, status }) => ({ run_id, manifest, status })),
@@ -82,7 +84,7 @@ test('active-run: acquire takes the lock, writes a running marker, and prints th
   const token = res.stdout.trim();
   assert.match(token, /^[0-9a-f]{32}$/);
   assert.equal(readFileSync(join(dir, 'r1.lock'), 'utf8').trim(), token);
-  assert.equal(statSync(join(dir, 'r1.lock')).mode & 0o777, 0o600);
+  if (!IS_WINDOWS) assert.equal(statSync(join(dir, 'r1.lock')).mode & 0o777, 0o600);
   const [m] = list(dir);
   assert.equal(m.status, 'running');
   assert.equal(m.locked, true);
@@ -171,5 +173,5 @@ test('active-run: write tightens an existing wider marker directory to 0700', ()
   mkdirSync(dir, { recursive: true, mode: 0o755 });
   const w = activeRun(dir, 'write', 'run-c', '/plans/c.json');
   assert.equal(w.code, 0, w.stderr);
-  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  if (!IS_WINDOWS) assert.equal(statSync(dir).mode & 0o777, 0o700);
 });

@@ -5,9 +5,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, IS_WINDOWS, samePath } from './platform.mjs';
 
 const INSTALL = join(SKILL_DIR, 'install.sh');
-const HAS_JQ = spawnSync('bash', ['-c', 'command -v jq'], { encoding: 'utf8' }).status === 0;
+const HAS_JQ = spawnSync(BASH, ['-c', 'command -v jq'], { encoding: 'utf8' }).status === 0;
 const SKIP = HAS_JQ ? false : 'jq is not on PATH';
 
 const TMP = mkdtempSync(join(tmpdir(), 'pl-install-'));
@@ -24,7 +25,7 @@ function freshConfig() {
 }
 
 function runInstall(configDir, args = [], env = {}) {
-  return spawnSync('bash', [INSTALL, ...args], {
+  return spawnSync(BASH, [INSTALL, ...args], {
     cwd: SKILL_DIR,
     encoding: 'utf8',
     env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, ...env },
@@ -40,7 +41,7 @@ function install(configDir, args = [], env = {}) {
 // The tools install.sh and find-python start, found on the real PATH.
 const TOOLS = ['bash', 'cat', 'chmod', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
   'mktemp', 'mv', 'rm', 'sed', 'tar', 'tr', 'uname'];
-const which = (name) => spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
+const which = (name) => spawnSync(BASH, ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
 
 // A PATH of one fresh directory holding links to the real TOOLS except the
 // omitted ones, plus the named executable scripts (name -> body).
@@ -67,6 +68,13 @@ function commands(entries) {
   return (entries || []).flatMap((entry) => entry.hooks.map((hook) => hook.command));
 }
 
+// Asserts that a hook command is bash '<path>' for the script at path.
+function assertHookCommand(command, path) {
+  const m = /^bash '(.*)'$/.exec(command);
+  assert.ok(m, command);
+  assert.ok(samePath(m[1], path), `${command} does not run ${path}`);
+}
+
 function agentFile(configDir) {
   return join(configDir, 'agents', 'parallel-lanes-worker.md');
 }
@@ -91,8 +99,8 @@ test('install.sh installs the skill, the worker agent, and both hooks, keeping o
   const notice = commands(s.hooks.PostToolUse);
   assert.equal(start.length, 1);
   assert.equal(notice.length, 1);
-  assert.equal(start[0], `bash '${join(skillDir(dir), 'hooks', 'session-start.sh')}'`);
-  assert.equal(notice[0], `bash '${join(skillDir(dir), 'hooks', 'notice.sh')}'`);
+  assertHookCommand(start[0], join(skillDir(dir), 'hooks', 'session-start.sh'));
+  assertHookCommand(notice[0], join(skillDir(dir), 'hooks', 'notice.sh'));
 });
 
 // Review finding 10: the stored commands must work when the host runs them
@@ -100,7 +108,9 @@ test('install.sh installs the skill, the worker agent, and both hooks, keeping o
 test('install.sh registers hook commands that run from a config dir with spaces, quotes and shell characters', { skip: SKIP }, () => {
   counter += 1;
   // Review finding 10: every character a shell would act on, not just a space.
-  const dir = join(TMP, `it's "a" $HOME \`x\` ; & | * config ${counter}`);
+  // Windows file names cannot hold ", | or *.
+  const shellChars = IS_WINDOWS ? "it's $HOME `x` ; &" : 'it\'s "a" $HOME `x` ; & | *';
+  const dir = join(TMP, `${shellChars} config ${counter}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'settings.json'), '{}\n');
   install(dir);
@@ -122,8 +132,9 @@ test('install.sh replaces hooks an older install registered without quotes', { s
     { matcher: 'startup|clear|compact', hooks: [{ type: 'command', command: old }] },
   ] } }));
   install(dir);
-  assert.deepEqual(commands(settings(dir).hooks.SessionStart),
-    [`bash '${join(skillDir(dir), 'hooks', 'session-start.sh')}'`]);
+  const start = commands(settings(dir).hooks.SessionStart);
+  assert.equal(start.length, 1, start.join('\n'));
+  assertHookCommand(start[0], join(skillDir(dir), 'hooks', 'session-start.sh'));
 });
 
 test('install.sh run twice registers each hook once and keeps one agent file', { skip: SKIP }, () => {
@@ -155,7 +166,7 @@ test('install.sh needs a working Python, not a python3 command', { skip: SKIP },
   const python3 = which('python3');
   assert.ok(python3, 'python3 is on PATH');
   const path = toolPath({ scripts: { python: `exec '${python3}' "$@"` } });
-  assert.equal(spawnSync('bash', ['-c', 'command -v python3'], { env: { PATH: path } }).status, 1,
+  assert.equal(spawnSync(BASH, ['-c', 'command -v python3'], { env: { PATH: path } }).status, 1,
     'the test PATH has no python3');
   const dir = freshConfig();
   install(dir, [], { PATH: path });

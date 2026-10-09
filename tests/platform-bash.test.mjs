@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH } from './platform.mjs';
 
 const PATHS = join(SKILL_DIR, 'scripts', '_paths.sh');
 const FIND_PYTHON = join(SKILL_DIR, 'scripts', 'find-python');
@@ -28,7 +29,7 @@ function fakeBin(scripts) {
 }
 
 function run(args, { path, env = {} } = {}) {
-  const res = spawnSync('bash', args, {
+  const res = spawnSync(BASH, args, {
     encoding: 'utf8',
     env: { ...process.env, ...(path ? { PATH: path } : {}), ...env },
   });
@@ -85,7 +86,7 @@ test('find-python fails clearly when none works', () => {
   // Only the tools the script needs, so no real python is on PATH.
   const tools = fakeBin({ python3: 'exit 9009', python: 'exit 1', py: 'exit 1' });
   for (const name of ['bash', 'dirname', 'uname', 'head', 'tr']) {
-    const found = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
+    const found = spawnSync(BASH, ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
     symlinkSync(found, join(tools, name));
   }
   const r = run([FIND_PYTHON], { path: tools });

@@ -10,6 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, SYMLINKS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-boundaries-')));
@@ -37,10 +38,11 @@ function py(script, args, opts = {}) {
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
   assert.equal(res.status, 0, res.stderr);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
 }
 function repo() {
   const dir = join(workDir(), 'repo');
@@ -62,7 +64,7 @@ test('task-brief refuses an unsafe task id before reading the plan or writing an
   assert.equal(readFileSync(join(dir, 'victim.md'), 'utf8'), 'ORIGINAL\n');
 });
 
-test('task-brief --root refuses a brief path outside the root, through .. or a symlink', () => {
+test('task-brief --root refuses a brief path outside the root, through .. or a symlink', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const dir = workDir();
   write(join(dir, 'plan.md'), '# P\n\n### Task T1: one\n\nbody\n');
   write(join(dir, 'outside', 'keep.md'), 'ORIGINAL\n');
@@ -155,7 +157,7 @@ test('run-checks fails a command that moves HEAD: a check must not change what i
   assert.notEqual(report.head_after, report.head);
 });
 
-const REAL_BASH = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+const REAL_BASH = spawnSync(BASH, ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
 const REAL_PYTHON = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
 // A directory holding a fake bash that logs its arguments to calls, then runs the real bash.
 function fakeBash(dir, calls) {
@@ -177,7 +179,7 @@ test('run-checks starts each check with the bash find_bash resolves', () => {
   assert.ok(readFileSync(calls, 'utf8').split('\n').includes('-c true'), readFileSync(calls, 'utf8'));
 });
 
-test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', () => {
+test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const r = repo();
   // PATH holds only python3: no bash (and no git) can be found on it.
   const bin = join(dirname(r), 'python only');

@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, samePath } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-task-helpers-')));
@@ -37,10 +38,23 @@ function sh(cmd, args, extraEnv = {}) {
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = sh('git', ['-C', dir, ...args]);
   assert.equal(res.code, 0, `git ${args.join(' ')}: ${res.stderr}`);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
+}
+
+// Asserts that text is the expected lines, each ending in a newline, where
+// the lines named in paths are compared as paths.
+function assertLines(text, expected, paths) {
+  assert.ok(text.endsWith('\n'), text);
+  const lines = text.slice(0, -1).split('\n');
+  assert.equal(lines.length, expected.length, text);
+  expected.forEach((want, i) => {
+    if (paths.includes(i)) assert.ok(samePath(lines[i], want), `${lines[i]} is not ${want}`);
+    else assert.equal(lines[i], want);
+  });
 }
 
 function write(path, content) {
@@ -242,14 +256,16 @@ test('start-task --package runs the package script in DIR and prints its output'
     c.lane, c.plan, '--package', pkg, 'BASE', 'HEAD', out, '--brief', 'T1', brief,
   );
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(readFileSync(out, 'utf8'), [c.lane, c.plan, 'BASE', 'HEAD', out, ''].join('\n'));
-  assert.ok(res.stdout.endsWith(`===== review package =====\n${out}\n`), res.stdout);
+  assertLines(readFileSync(out, 'utf8'), [c.lane, c.plan, 'BASE', 'HEAD', out], [0, 1, 4]);
+  const marker = '===== review package =====\n';
+  assert.ok(res.stdout.includes(marker), res.stdout);
+  assertLines(res.stdout.slice(res.stdout.lastIndexOf(marker) + marker.length), [out], [0]);
   assert.ok(res.stdout.indexOf('===== brief T1') < res.stdout.indexOf('===== review package'));
 });
 
 test('start-task runs the package script with the resolved bash', () => {
   const c = newCase();
-  const realBash = sh('bash', ['-c', 'command -v bash']).stdout.trim();
+  const realBash = sh(BASH, ['-c', 'command -v bash']).stdout.trim();
   const calls = join(c.root, 'calls');
   const fake = join(c.root, 'fake bin', 'bash');
   write(fake, `#!${realBash}\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realBash}' "$@"\n`);
@@ -298,7 +314,7 @@ test('start-task ignores GIT_DIR and friends pointing at another repo', () => {
   assert.ok(res.stdout.startsWith(`branch: lane-a\nhead: ${tip}\n`), res.stdout);
   assert.equal(git(c.lane, 'rev-parse', 'HEAD'), tip);
   assert.equal(git(other, 'rev-parse', 'HEAD'), otherHead);
-  assert.equal(readFileSync(out, 'utf8'), `${c.lane}\nunset\n`);
+  assertLines(readFileSync(out, 'utf8'), [c.lane, 'unset'], [0]);
 });
 
 test('start-task --record-start records the task base for every briefed task before any work', () => {

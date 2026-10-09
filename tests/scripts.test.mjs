@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, IS_WINDOWS, samePath } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const TMP = mkdtempSync(join(tmpdir(), 'pl-scripts-'));
@@ -36,7 +37,13 @@ function run(interpreter, script, args, env = {}) {
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
-const findSuperpowers = (env) => run('bash', 'find-superpowers', [], env);
+const findSuperpowers = (env) => run(BASH, 'find-superpowers', [], env);
+
+// Asserts that stdout is one line naming path.
+function assertPathLine(stdout, path) {
+  assert.match(stdout, /^[^\n]+\n$/);
+  assert.ok(samePath(stdout.slice(0, -1), path), `${stdout} is not ${path}`);
+}
 const taskBrief = (...args) => run('python3', 'task-brief', args);
 const ledger = (...args) => run('python3', 'ledger', args);
 
@@ -80,7 +87,7 @@ test('find-superpowers picks the newest install', () => {
   fakeInstall(join(root, 'new'), { pkgVersion: '6.4.2' });
   const res = findSuperpowers({ PL_SEARCH_ROOTS: root });
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(res.stdout, `${join(root, 'new', 'skills')}\n`);
+  assertPathLine(res.stdout, join(root, 'new', 'skills'));
 });
 
 test('find-superpowers compares versions numerically across roots', () => {
@@ -91,7 +98,7 @@ test('find-superpowers compares versions numerically across roots', () => {
   fakeInstall(join(rootB, 'c'), { pkgVersion: '9.0.0', prompt: false });
   const res = findSuperpowers({ PL_SEARCH_ROOTS: `${rootA}:${rootB}` });
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(res.stdout, `${join(rootB, 'b', 'skills')}\n`);
+  assertPathLine(res.stdout, join(rootB, 'b', 'skills'));
 });
 
 test('find-superpowers exits 3 with no output when nothing is installed', () => {
@@ -115,7 +122,7 @@ test('find-superpowers skips an install that lacks a file a run needs', () => {
   fakeInstall(join(root, 'newer but partial'), { pkgVersion: '9.0.0', skip: 'subagent-driven-development/re-review-prompt.md' });
   const res = findSuperpowers({ PL_SEARCH_ROOTS: root });
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(res.stdout.trim(), join(root, 'complete', 'skills'));
+  assertPathLine(res.stdout, join(root, 'complete', 'skills'));
 });
 
 test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', () => {
@@ -125,7 +132,7 @@ test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', 
   delete process.env.PL_SEARCH_ROOTS;
   const res = findSuperpowers(env);
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(res.stdout.trim(), join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
+  assertPathLine(res.stdout, join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
 });
 
 test('find-superpowers prints a C:/ path under Git Bash', () => {
@@ -146,7 +153,7 @@ test('find-superpowers prints a C:/ path under Git Bash', () => {
 });
 
 test('find-superpowers rejects arguments with exit 2', () => {
-  const res = run('bash', 'find-superpowers', ['extra'], { PL_SEARCH_ROOTS: workDir() });
+  const res = run(BASH, 'find-superpowers', ['extra'], { PL_SEARCH_ROOTS: workDir() });
   assert.equal(res.code, 2);
 });
 
@@ -564,7 +571,8 @@ test('ledger round-trips events across two lanes', () => {
   appendOk(dir, 'beta', { task: 'T3', event: 'ruling', text: 'keep the old name' });
   appendOk(dir, 'beta', { task: 'T3', event: 'blocked', reason: 'tests hang' });
 
-  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  // Windows has no POSIX modes: the appends succeeding is the check there.
+  if (!IS_WINDOWS) assert.equal(statSync(dir).mode & 0o777, 0o700);
   const alphaLines = readFileSync(join(dir, 'alpha.jsonl'), 'utf8').trim().split('\n');
   assert.equal(alphaLines.length, 2);
   assert.deepEqual(JSON.parse(alphaLines[0]), {
@@ -670,7 +678,7 @@ test('ledger: concurrent first appends to a missing directory all succeed', () =
   const trials = 25;
   const lanes = 8;
   const res = spawnSync(
-    'bash',
+    BASH,
     ['-c', RACE, 'race', join(SCRIPTS, 'ledger'), base, String(trials), String(lanes)],
     { encoding: 'utf8' },
   );
@@ -682,7 +690,7 @@ test('ledger: concurrent first appends to a missing directory all succeed', () =
   const expected = Array.from({ length: lanes }, (_, i) => `T${i + 1}`).sort();
   for (let t = 1; t <= trials; t += 1) {
     const dir = join(base, `trial ${t}`, 'fresh ledger');
-    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    if (!IS_WINDOWS) assert.equal(statSync(dir).mode & 0o777, 0o700);
     assert.deepEqual(status(dir).done.sort(), expected);
   }
 });

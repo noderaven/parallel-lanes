@@ -5,6 +5,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, SYMLINKS } from './platform.mjs';
 
 const NOTICE = join(SKILL_DIR, 'hooks', 'notice.sh');
 const SESSION_START = join(SKILL_DIR, 'hooks', 'session-start.sh');
@@ -31,11 +32,10 @@ function runHook(script, stdin, env = process.env) {
 
 // Absolute paths of tools, so a test can run a hook with a PATH that lacks one.
 function which(name) {
-  const res = spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' });
+  const res = spawnSync(BASH, ['-c', `command -v ${name}`], { encoding: 'utf8' });
   assert.equal(res.status, 0, `${name} not found`);
   return res.stdout.trim();
 }
-const BASH = which('bash');
 
 function skillEvent(skill, toolName = 'Skill') {
   return JSON.stringify({
@@ -226,10 +226,11 @@ test('session-start: a missing bootstrap.md prints nothing and exits 0', () => {
   }
 });
 
-test('session-start: without jq prints nothing and exits 0', () => {
+test('session-start: without jq prints nothing and exits 0', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const bin = mkdtempSync(join(tmpdir(), 'pl-hook-bin-'));
   try {
-    symlinkSync(which('dirname'), join(bin, 'dirname'));
+    // bash itself is found on this PATH too, when BASH is not a full path.
+    for (const name of ['bash', 'dirname']) symlinkSync(which(name), join(bin, name));
     const res = runHook(SESSION_START, '{}', { PATH: bin });
     assert.equal(res.code, 0, res.stderr);
     assert.equal(res.stdout, '');

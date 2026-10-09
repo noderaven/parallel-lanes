@@ -26,10 +26,11 @@ function sh(cmd, args) {
   const res = spawnSync(cmd, args, { encoding: 'utf8', env: ENV });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = sh('git', ['-C', dir, ...args]);
   assert.equal(res.code, 0, res.stderr);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
 }
 const py = (script, ...args) => sh('python3', [join(SCRIPTS, script), ...args]);
 function ok(res) {
