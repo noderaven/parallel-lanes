@@ -8,11 +8,12 @@ description: Use when an approved implementation plan is about to be executed (a
 ## Overview
 
 Runs an approved plan as parallel lanes (a worktree each), every task implemented and
-reviewed, then integration, checks, E2E, and final reviews. Your job: build a
+reviewed, then integration, checks, E2E, and final reviews. Your job is fixed: build a
 manifest, show the dry-run table, set up and launch the bundled `run.workflow.js`, and hand
 back.
 
-`<skill_dir>` below means the absolute directory that holds this SKILL.md. Details are in
+`<skill_dir>` below means the absolute directory that holds this SKILL.md. Details (manifest
+fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers, report) are in
 `<skill_dir>/reference.md`; read it before building a manifest.
 
 **Hard rules.**
@@ -28,7 +29,8 @@ back.
 
 ## Notices
 
-Print these lines exactly (each may follow a visual marker of your choice).
+Print these lines exactly (each may follow a short visual marker of your choice; the text
+after the marker is fixed).
 
 | When | Line |
 |---|---|
@@ -40,7 +42,8 @@ Print these lines exactly (each may follow a visual marker of your choice).
 
 `<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
 executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
-`<K>` = length of `done`. The script logs the same line; you still print it.
+`<K>` = length of `done`. The dry run returns the launch and resume lines filled in
+(`notices`); the script logs the same line; you still print it.
 
 ## Flow
 
@@ -59,8 +62,8 @@ executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = i
 
 ## Assessment
 
-First Building step 0. CPU count: `<python> -c 'import os; print(os.cpu_count() or 1)'` (not
-`nproc`); cap = min(5, count + 2). Run
+First Building step 0. CPU count: `<python> -c 'import os; print(os.cpu_count() or 1)'`
+(portable; macOS lacks `nproc`); cap = min(5, count + 2). Run
 `<python> <skill_dir>/scripts/derive-lanes <plan> --max-lanes <cap>` and turn its facts into
 lanes, prelude, and join per reference.md "Building lanes" (exit 3: no parseable task
 headings; step aside). Runnable tasks exclude ones the plan marks after-merge, operator, or
@@ -104,6 +107,11 @@ Fields: reference.md "Manifest fields". In order:
      baseline commit, then a normal git run. Shadow details, existing-shadow check, `shadow
      init` (prints `git_dir`; exit 3 on size: tell the user, `--force` only on their yes):
      reference.md "Shadow repos".
+   - Git identity: `git -C <project> var GIT_COMMITTER_IDENT` must print one, because every
+     task agent commits and a commit without an identity fails partway through the run. If it
+     fails, ask the user to set one (`git config --global user.name` and `user.email`) or to
+     name one that `commit_rules` passes with `-c` (`git -c user.name=... -c user.email=...
+     commit`). `scripts/setup` does not check this, since a `-c` identity is legitimate.
 3. Lanes, prelude, join, hooks, `depends_on`, `overlaps`, `excluded`: reference.md "Building
    lanes" (`prelude` and `join` are not lane ids).
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
@@ -111,14 +119,14 @@ Fields: reference.md "Manifest fields". In order:
    `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
    keys for consecutive tiny light tasks. The user's model preference wins when it is stricter
    (e.g. "Opus for everything" means all `standard`).
-5. `commit_rules`: one string from the user's and project's rules (reference.md). Every agent
-   prompt carries it.
+5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md, the
+   plan's conventions, CONTRIBUTING; reference.md). Every agent prompt carries it.
 6. `commands`, paths, `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits`
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
    and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`. The manifest and
-   `repo.ledger_dir` go there, never inside the project. Save the manifest as
+   `repo.ledger_dir` (briefs, reports, review packages) go there, never inside the project. Save the manifest as
    `<run_dir>/<plan-name>.lanes.json`; `ledger_dir` = `<run_dir>/<plan-name>.<run_id>.ledger`.
 8. The manifest has no `setup_result` or `start_points` yet. Nothing here or in Confirmation
    touches the project: no worktree, branch, or setup command before consent. Once saved,
@@ -128,8 +136,8 @@ Fields: reference.md "Manifest fields". In order:
 ## Confirmation (every launch, no exceptions)
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
-   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective}` and spawns
-   nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
+   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
+   spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
    with errors. Then set `limits.max_agents` = 2 x `agents.length` and `limits.max_rulings` =
    25 (reference.md "Budgets") so the table shows them.
 2. Show a header (mode, base and feature branch, worktree_root, `profile`, `autonomy`,
@@ -147,8 +155,12 @@ Fields: reference.md "Manifest fields". In order:
    (skipped: done and reviewed). Under the table write:
    "each task can add up to 2x review_rounds more agents (fix and re-review rounds)". The user
    may override `autonomy`, `allow_deferral`, and the budgets there; apply the change.
-3. Ask for a yes. Launch only on an explicit yes given after the table. Any change request
-   means: edit the manifest, dry-run again, show the table again.
+3. Ask for a plain yes, and say why: the Workflow tool relays the message that approves the
+   launch, word for word, to every agent as the user's request, with priority over the plan
+   and its task text. A yes that adds a request ("yes, and also ...") would reach every agent
+   as an instruction that overrides the plan, so other requests wait until after the run, or
+   become a change to the manifest before it. Launch only on an explicit yes given after the
+   table. Any change request means: edit the manifest, dry-run again, show the table again.
 
 "Just run it", "skip the table", auto mode, or a yes given before the table do not waive
 this. Say the table is the one required check, show it, and wait.
@@ -168,17 +180,23 @@ this. Say the table is the one required check, show it, and wait.
    wait 10 seconds and retry once; then `active-run release <run_id> setup_failed`, report,
    and stop. Put its output in `setup_result`
    and copy the `start_points` of `<python> <skill_dir>/scripts/ledger status <ledger_dir>`
-   verbatim into `start_points` (keys `prelude` and `join`). Adding these two fields needs no
-   second table; any other manifest change after the yes does.
-3. Save the manifest with `dry_run: false`. Print the launch notice, or the resume notice
-   when `done` is non-empty.
+   into `start_points` exactly as it prints them: `prelude` after setup, `join` only once an
+   earlier launch got past integration, so a new run has no `join` key. Adding these two
+   fields needs no second table; any other manifest change after the yes does.
+3. Save the manifest with `dry_run: false`. Print the dry run's `notices.launch`, or
+   `notices.resume` when `done` is non-empty, as it returned them.
 4. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
-5. Record each launch's spend (reference.md "Budgets"). At the end, once no transient
-   relaunch follows (keep the lock through one): `scripts/active-run release <run_id>
-   --remove` only for `complete` with `acceptance.status` `accepted`; otherwise
-   `scripts/active-run release <run_id> <status>` (`unaccepted` for complete but not
-   accepted), so a later session offers the resume.
+5. Record each launch's spend (reference.md "Budgets"), a relaunch included, never a dry run:
+   `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned>
+   <rulings_spent>` (`<status>`: the run status, `unaccepted` for complete but not accepted).
+   After a launch that a transient relaunch follows, record only the spend (keep the lock
+   through the relaunch). At the end, record the spend and release the lock in one command
+   line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)
+   keeps the lock until it is fixed: `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status>
+   <agents_spawned> <rulings_spent> && bash <skill_dir>/scripts/active-run release <run_id>
+   <release>`, where `<release>` is `--remove` only for `complete` with `acceptance.status`
+   `accepted`, otherwise `<status>`, so a later session offers the resume.
 
 ## Transient stops (relaunch once, no prompt)
 
@@ -187,9 +205,10 @@ an agent error, a missing result, or setup-command retry exhaustion. The causes 
 `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
 stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
 `error:`, or `setup failed`, or reads `integration failed: no result from ...` or
-`post-integrate failed: no result from ...`. Every other cause (`review_rounds`,
-`adjudication_cap`, `adjudicator_stop`, a real failure) and status `invalid` or
-`preflight_conflicts` are NOT transient: never relaunch; stop and notify.
+`post-integrate failed: no result from ...`. Every other cause (`review_rounds`, a supervised
+blocked or question task, `adjudication_cap`, `adjudicator_stop`, `budget`, a failed
+integration or post-integrate on real failures) and status `invalid` or `preflight_conflicts`
+are NOT transient: never relaunch; stop and notify.
 
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
@@ -223,7 +242,8 @@ its output. Per task: status, commits (`skipped`:
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md
 "Report"). Then integration and post-integrate notes, E2E PASS/FAIL and the revision it
-checked, final review (fixed, declined, open, cannot verify), acceptance warnings,
+checked, final review (fixed, declined, open, cannot verify, and the task minors no final
+lens raised, `final.task_minors_open`), acceptance warnings,
 `agents_spawned`, `agent_type_fallback`, and the `undeclared` files of `ledger status
 <ledger_dir> --manifest <manifest file>` (changed outside their task's Files list).
 
@@ -241,7 +261,7 @@ never `branch -D`. Keep the manifest and ledger.
 ## Resume
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it); set `python` by
-   Building step 0. No manifest (a hand-run attempt): `<skill_dir>/adopt.md` first.
+   Building step 0. No manifest (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
 2. `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
    task up: reference.md "Backfill"); put each `carry` entry into `notes`. Tasks in `stale`
@@ -256,7 +276,8 @@ never `branch -D`. Keep the manifest and ledger.
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
 6. Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
-   then, after the yes, Launch step 2 again, the resume notice, and launch.
+   then, after the yes, Launch step 2 again (setup and `start_points`), the resume notice,
+   and launch.
 
 ## Red flags - stop
 

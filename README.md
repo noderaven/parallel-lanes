@@ -21,13 +21,13 @@ when it's time to execute the plan.
 | **git** 2.31 or later (2.38 or later recommended) | Worktrees, branches, merges | `git --version` |
 | **jq** 1.6 or later | Installer and SessionStart hook | `jq --version` |
 | **Python** 3.8 or later, as `python3`, `python`, or `py -3` | Lane planning, setup, ledger, reports | `bash scripts/find-python` in the clone prints the one it uses |
-| *Optional:* **node** 18 or later | Only for running the test suite | `node --version` |
+| *Optional:* **node** 22 or later | Only for running the test suite | `node --version` |
 | *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
 
-Platforms: macOS and Linux. CI runs the test suite on both, with the stock bash 3.2 on
-macOS, so no newer bash is needed. On Windows 11, Claude Code installed natively works with
-Git for Windows (preliminary support; see [Windows](#windows-preliminary) below), and
-Claude Code inside **WSL** works as on Linux.
+Platforms: macOS, Linux, and Windows 11. CI runs the test suite on all three, with the stock
+bash 3.2 on macOS, so no newer bash is needed. On Windows 11, Claude Code installed natively
+works with Git for Windows (see [Windows](#windows) below), and Claude Code inside **WSL**
+works as on Linux.
 
 Without the Workflow tool, the skill steps aside and recommends a normal Superpowers
 execution mode instead. Without Superpowers, it still runs, but agents use simpler
@@ -53,11 +53,15 @@ Fedora:
 sudo dnf install -y git jq python3 nodejs
 ```
 
-### Windows (preliminary)
+The test suite needs Node 22 or later (`node --version`). If your distribution's `nodejs`
+package is older, install a current release from https://nodejs.org instead; the skill
+itself does not use Node.
 
-Native Windows 11 support is new and **preliminary**: a Windows CI job runs the test suite,
-but complete runs on a real Windows machine are still being verified. If you hit a problem, WSL is the
-proven route: install Claude Code inside WSL and follow the Linux steps.
+### Windows
+
+Native Windows 11 support is verified by complete runs on a real Windows machine, in both git
+mode and shadow mode, and a Windows CI job runs the test suite. Claude Code inside WSL works
+too: install it there and follow the Linux steps.
 
 - **Git for Windows is required.** With it installed, Claude Code runs its Bash tool and
   hooks in Git Bash, and the skill's scripts run there too. Without it Claude Code falls back
@@ -72,7 +76,7 @@ proven route: install Claude Code inside WSL and follow the Linux steps.
   winget install OpenJS.NodeJS.LTS
   ```
 
-  Node is optional (tests only). Any Python 3.8 or later works: the skill looks for
+  Node is optional (tests only; Node 22 or later). Any Python 3.8 or later works: the skill looks for
   `python3`, then `python`, then `py -3`, and skips the Microsoft Store `python3` stub.
 - **Git in another place:** the skill finds Git Bash on PATH (also through the `Git\cmd` folder
   the Git installer puts there) or under `C:\Program Files\Git`.
