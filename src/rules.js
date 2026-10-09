@@ -3,6 +3,12 @@ function shellQuote(s) {
   return "'" + String(s).split("'").join("'\\''") + "'";
 }
 
+// The shell-quoted Python that starts every helper of the skill: the
+// manifest's python (scripts/find-python found it), python3 when unset.
+function pythonCommand(m) {
+  return shellQuote(m.python || 'python3');
+}
+
 // A non-empty string (an agent-reported sha, for instance).
 function present(v) {
   return typeof v === 'string' && v.length > 0;

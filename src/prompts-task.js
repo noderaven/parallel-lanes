@@ -53,7 +53,7 @@ function batchLines(task) {
 function ledgerCommand(m, laneId, entry, dir) {
   if (!present(dir)) throw new Error('ledgerCommand: dir (the agent checkout) is required');
   const ledger = `${m.skill_dir}/scripts/ledger`;
-  return `cd ${shellQuote(dir)} && python3 ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
@@ -82,7 +82,7 @@ function checksCommand(m, laneId, dir, out = null) {
   }
   if (parts.length === 0) return null;
   const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
-  return [`cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
+  return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
 }
 
@@ -228,7 +228,7 @@ function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
   const parts = [
-    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
+    `cd ${shellQuote(where.dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
     shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
@@ -282,7 +282,7 @@ function startBlock(m, task, where, opts, failure) {
 // event an adjudicator's outcome needs, with the range as git has it.
 function finishCommand(m, task, where, from, settled = null) {
   return [
-    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
+    `cd ${shellQuote(where.dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
     shellQuote(where.dir), shellQuote(where.branch), shellQuote(from), shellQuote(m.repo.ledger_dir),
     shellQuote(where.lane),
     ...unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`),
@@ -296,7 +296,7 @@ function finishCommand(m, task, where, from, settled = null) {
 // reviewer fills <blocking> with its count of critical and important
 // findings; the command records nothing unless it is 0.
 function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
-  return `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
     `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
 }

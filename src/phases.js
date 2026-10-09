@@ -233,7 +233,9 @@ function withConsumesExtra(m, kept) {
 // pre-flight agent runs (preflight has no conflicts, rulings or undeclared
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
-async function runAll(m, io) {
+async function runAll(manifest, io) {
+  // Windows paths in forward-slash form before anything reads them.
+  let m = normalizeManifestPaths(manifest);
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
