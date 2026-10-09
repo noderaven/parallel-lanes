@@ -19,7 +19,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SHADOW = join(SKILL_DIR, 'scripts', 'shadow');
@@ -180,6 +180,36 @@ test('init again reuses the shadow and keeps its baseline', () => {
   write(c.project, 'a.txt', 'changed\n');
   assert.equal(init(c), gitdir);
   assert.equal(readFileSync(join(gitdir, 'pl-baseline'), 'utf8'), baseline);
+});
+
+// A directory holding a fake cygpath that prints C:/fake before its last
+// argument, so the Git Bash rules of _paths.sh run on every platform.
+function fakeCygpath(root) {
+  const bin = join(root, 'fake bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'cygpath'), '#!/bin/bash\necho "C:/fake${@: -1}"\n');
+  chmodSync(join(bin, 'cygpath'), 0o755);
+  return { PL_UNAME: 'MINGW64_NT-10.0', PATH: `${bin}${delimiter}${process.env.PATH}` };
+}
+
+test('shadow prints C:/ paths under Git Bash', () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const env = fakeCygpath(c.root);
+  const hash = createHash('sha256').update(c.project).digest('hex').slice(0, 16);
+  const first = shadow(c.base, ['init', c.project], env);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.stdout, `C:/fake${join(c.base, hash)}\n`);
+  // The shadow itself lives at the bash path, and a resumed init prints the same C:/ path.
+  assert.ok(existsSync(join(c.base, hash, 'pl-baseline')));
+  const again = shadow(c.base, ['init', c.project], env);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.stdout, first.stdout);
+  // Paths in refusals take the C:/ form too.
+  const other = newCase();
+  write(join(c.base, hash), 'pl-project', `${other.project}\n`);
+  const refused = shadow(c.base, ['init', c.project], env);
+  assert.equal(refused.code, 3);
+  assert.equal(refused.stderr, `shadow: C:/fake${join(c.base, hash)} belongs to another project\n`);
 });
 
 test('init refuses a project over the file limit unless --force', () => {
