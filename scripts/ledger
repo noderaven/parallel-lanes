@@ -7,6 +7,7 @@ usage:
   ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST]
   ledger backfill DIR MANIFEST
   ledger accept DIR CHECKOUT HEAD TEXT
+  ledger ended DIR STATUS AGENTS RULINGS
 
 append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
 0700. JSON must be an object with a safe non-empty string 'task' (or "_run")
@@ -87,6 +88,12 @@ A missing DIR has empty lists, no start points, and no carry.
 accept appends {"task": "_run", "event": "accepted", "head": <full sha>,
 "text": TEXT} to DIR/_run.jsonl. It refuses (exit 3) when HEAD is not a commit
 in CHECKOUT, and (exit 2) when TEXT is empty.
+
+ended appends {"task": "_run", "event": "run_ended", "status": STATUS,
+"agents": AGENTS, "rulings": RULINGS} to DIR/_run.jsonl: what one launch
+spent, recorded in one command. AGENTS and RULINGS are decimal integers >= 0;
+it refuses (exit 2, nothing recorded) a count that is not one, or an empty
+STATUS.
 
 backfill reads the manifest's task lists (prelude, lanes in order, join), its
 repo, and start_points, and prints {"backfill": {task: {base, head}},
@@ -556,6 +563,17 @@ def accept(directory, checkout, head, text):
     write_entry(directory, "_run", {"task": "_run", "event": "accepted", "head": res.stdout.strip(), "text": text})
 
 
+COUNT = re.compile(r"[0-9]+")
+
+
+def ended(directory, status_text, agents, rulings):
+    for name, value in (("AGENTS", agents), ("RULINGS", rulings)):
+        if not COUNT.fullmatch(value):
+            fail(2, f"{name} must be an integer >= 0, not {value!r}; nothing recorded")
+    write_entry(directory, "_run", {"task": "_run", "event": "run_ended", "status": status_text,
+                                    "agents": int(agents), "rulings": int(rulings)})
+
+
 def backfill(directory, manifest_path):
     m = load_manifest(manifest_path)
     lists = task_lists(m)
@@ -615,7 +633,8 @@ def backfill(directory, manifest_path):
         sys.exit(3)
 
 
-PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6), "status": (1,), "backfill": (1, 2), "accept": (1, 2)}
+PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
+             "ended": (1,)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
 
@@ -655,10 +674,12 @@ def main(argv):
         backfill(argv[1], argv[2])
     elif len(argv) == 5 and argv[0] == "accept" and all(argv[1:4]):
         accept(*argv[1:])
+    elif len(argv) == 5 and argv[0] == "ended" and argv[1]:
+        ended(*argv[1:])
     else:
         fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING"
                 " | ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST] | ledger backfill DIR MANIFEST"
-                " | ledger accept DIR CHECKOUT HEAD TEXT")
+                " | ledger accept DIR CHECKOUT HEAD TEXT | ledger ended DIR STATUS AGENTS RULINGS")
 
 
 if __name__ == "__main__":

@@ -88,17 +88,16 @@ test('a phase label has task null and the full label as role', () => {
   assert.equal(a.role, 'final review sp');
 });
 
-test('a batch range of manifest ids sets task; meta effort wins', () => {
+test('a batch range of manifest ids sets task', () => {
   const a = find((x) => x.label === 'T3-T4 implement');
   assert.equal(a.task, 'T3-T4');
   assert.equal(a.role, 'implement');
-  assert.equal(a.effort, 'xhigh');
 });
 
-test('effort: manifest rule for implement and fix, unavailable for review', () => {
-  assert.equal(find((x) => x.label === 'T1 fix 1').effort, 'high');
-  assert.equal(find((x) => x.label === 'T1 review').effort, 'unavailable');
-  assert.equal(find((x) => x.label === 'final review sp').effort, 'unavailable');
+test('effort is unavailable for every agent without the workflow result, never derived', () => {
+  // The fixture dir has no transcripts.json beside it; a meta effort or the
+  // manifest tier is not what the workflow ran, so neither is used.
+  for (const a of report.agents) assert.equal(a.effort, 'unavailable', a.label);
 });
 
 test('--out writes the report to a file', () => {
@@ -121,7 +120,6 @@ test('real meta shape: description, workflowPhase and absent model come through'
   assert.equal(a.role, 'fix 1');
   assert.equal(a.requested_model, 'unavailable');
   assert.equal(a.tier, 'sonnet');
-  assert.equal(a.effort, 'high');
 });
 
 test('agents are ordered by first timestamp, not filename', () => {
@@ -188,8 +186,10 @@ test('mid-stream usage lines (stop_reason null) make output a lower bound; fallb
   const rev = out.agents.find((x) => x.label === 'T1 review');
   assert.equal(rev.output_tokens, 50);
   assert.equal(out.output_incomplete, 1);
-  assert.equal(out.totals.output_tokens, 50, 'totals sum only known values');
+  assert.equal(out.totals.output_tokens, 'unavailable', 'an incomplete agent makes the sum unknown');
+  assert.equal(out.tiers.opus.output_tokens, 'unavailable');
   assert.equal(out.totals.output_tokens_min, 7 + 96 + 8 + 50);
+  assert.equal(out.totals.input_tokens, 4, 'other counts still sum');
   assert.deepEqual(out.models, { 'opus-new': 2, 'opus-old': 1 });
 });
 
@@ -210,4 +210,65 @@ test('resolved_models counts a message once even with a non-string requestId or 
   const r = run([dir, MANIFEST]);
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout).agents[0].resolved_models, { 'opus-a': 2 });
+});
+
+// One assistant message line for a synthetic transcript.
+function usageLine(id, model, output, stop, timestamp = '2026-10-02T10:00:00.000Z') {
+  return JSON.stringify({
+    type: 'assistant', requestId: `req-${id}`, timestamp,
+    message: { id, model, ...(stop === undefined ? {} : { stop_reason: stop }), usage: {
+      input_tokens: 1, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    } },
+  }) + '\n';
+}
+function writeAgent(dir, name, label, model, lines) {
+  writeFileSync(join(dir, `agent-${name}.meta.json`),
+    JSON.stringify({ description: label, workflowPhase: 'Lane A', model }));
+  writeFileSync(join(dir, `agent-${name}.jsonl`), lines.join(''));
+}
+
+test('totals say unavailable when an agent\'s output count is incomplete', () => {
+  const dir = join(TMP, 'incomplete');
+  mkdirSync(dir, { recursive: true });
+  writeAgent(dir, 'e1', 'T1 implement', 'opus', [usageLine('m1', 'claude-opus-x', 30, null)]);
+  writeAgent(dir, 'e2', 'T1 review', 'sonnet', [usageLine('m2', 'claude-sonnet-x', 12, 'end_turn')]);
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.output_incomplete, 1);
+  assert.equal(out.totals.output_tokens, 'unavailable');
+  assert.equal(out.totals.output_tokens_min, 30 + 12);
+  assert.equal(out.tiers.opus.output_tokens, 'unavailable');
+  assert.equal(out.tiers.opus.output_tokens_min, 30);
+  assert.equal(out.tiers.sonnet.output_tokens, 12, 'a tier with only complete agents keeps its sum');
+  assert.equal(out.tiers.sonnet.output_tokens_min, 12);
+});
+
+test('effort comes from the workflow result when it is there', () => {
+  const dir = join(TMP, 'effort');
+  mkdirSync(dir, { recursive: true });
+  writeAgent(dir, 'f1', 'T1 implement', 'sonnet', [usageLine('m1', 'claude-sonnet-x', 1, 'end_turn', '2026-10-02T10:00:00.000Z')]);
+  writeAgent(dir, 'f2', 'T1 review', 'opus', [usageLine('m2', 'claude-opus-x', 1, 'end_turn', '2026-10-02T10:01:00.000Z')]);
+  writeAgent(dir, 'f3', 'T1 review', 'opus', [usageLine('m3', 'claude-opus-x', 1, 'end_turn', '2026-10-02T10:02:00.000Z')]);
+  writeAgent(dir, 'f4', 'final review sp', 'opus', [usageLine('m4', 'claude-opus-x', 1, 'end_turn', '2026-10-02T10:03:00.000Z')]);
+  const without = run([dir, MANIFEST]);
+  assert.equal(without.code, 0, without.stderr);
+  for (const a of JSON.parse(without.stdout).agents) assert.equal(a.effort, 'unavailable', a.label);
+
+  writeFileSync(`${dir}.json`, JSON.stringify({ result: { agent_settings: [
+    { label: 'T1 implement', model: 'sonnet', effort: 'high' },
+    { label: 'T1 review', model: 'opus', effort: 'medium' },
+    { label: 'T1 review', model: 'opus', effort: 'xhigh' },
+  ] } }));
+  for (const arg of [dir, `${dir}/`]) {
+    const r = run([arg, MANIFEST]);
+    assert.equal(r.code, 0, r.stderr);
+    const efforts = JSON.parse(r.stdout).agents.map((a) => [a.label, a.effort]);
+    assert.deepEqual(efforts, [
+      ['T1 implement', 'high'],
+      ['T1 review', 'medium'],
+      ['T1 review', 'xhigh'],
+      ['final review sp', 'unavailable'],
+    ], 'matched by label, in start order; an agent with no entry is unavailable');
+  }
 });

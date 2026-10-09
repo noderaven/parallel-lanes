@@ -299,6 +299,21 @@ test('run_ended events add up to the budget spent across launches', () => {
   assert.equal(bad.code, 2);
 });
 
+test('ledger ended records a launch\'s spend in one command', () => {
+  const c = newCase();
+  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start });
+  ok(py('ledger', 'ended', c.ledger, 'stopped', '7', '2'));
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger)).spent, { agents: 7, rulings: 2, unrecorded_launches: 0 });
+  const line = readFileSync(join(c.ledger, '_run.jsonl'), 'utf8').trim();
+  assert.deepEqual(JSON.parse(line), { task: '_run', event: 'run_ended', status: 'stopped', agents: 7, rulings: 2 });
+  for (const [agents, rulings] of [['-1', '0'], ['x', '0'], ['1.5', '0'], ['3', ''], ['3', '-2']]) {
+    assert.equal(py('ledger', 'ended', c.ledger, 'x', agents, rulings).code, 2, `${agents} ${rulings}`);
+  }
+  assert.equal(py('ledger', 'ended', c.ledger, '', '1', '0').code, 2, 'an empty status');
+  assert.equal(py('ledger', 'ended', c.ledger, 'x', '1').code, 2, 'a missing count');
+  assert.equal(readFileSync(join(c.ledger, '_run.jsonl'), 'utf8').trim(), line, 'a refusal records nothing');
+});
+
 test('a task range must start at the base its latest started event recorded', () => {
   const c = newCase();
   const a = commit(c, 'a.txt');

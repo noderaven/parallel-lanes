@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { BASH, SYMLINKS, tempDir, IS_WINDOWS } from './platform.mjs';
 
@@ -34,7 +34,8 @@ function write(path, text) {
 }
 function py(script, args, opts = {}) {
   const res = spawnSync('python3', [join(SCRIPTS, script), ...args], {
-    encoding: 'utf8', env: { ...process.env, ...GIT_ENV }, cwd: opts.cwd,
+    // TMPDIR keeps run-checks' temporary log directories inside TMP.
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, TMPDIR: TMP }, cwd: opts.cwd,
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -138,7 +139,7 @@ test('run-checks keeps every exit status: a failure before a success fails the r
   const report = JSON.parse(res.stdout);
   assert.equal(report.ok, false);
   assert.equal(report.head, git(r, 'rev-parse', 'HEAD'));
-  assert.deepEqual(report.results, [
+  assert.deepEqual(report.results.map(({ group, command, exit }) => ({ group, command, exit })), [
     { group: 'test', command: 'false', exit: 1 },
     { group: 'lint', command: 'true', exit: 0 },
   ]);
@@ -146,6 +147,48 @@ test('run-checks keeps every exit status: a failure before a success fails the r
   const pass = py('run-checks', [r, '--cmd', 'test', 'true']);
   assert.equal(pass.code, 0, pass.stderr);
   assert.equal(JSON.parse(pass.stdout).ok, true);
+});
+
+test('run-checks keeps a large output out of its streams', () => {
+  const r = repo();
+  // Over 1 MB of output, on stdout and stderr both: none of it may reach
+  // run-checks' own streams (an agent's shell call captures them whole).
+  const res = py('run-checks', [r, '--cmd', 'test', 'seq 1 200000; echo to-stderr >&2; seq 1 200000 >&2']);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stderr, '');
+  const lines = res.stdout.split('\n');
+  assert.equal(lines.length, 2, 'stdout is one JSON line');
+  assert.equal(lines[1], '');
+  const [result] = JSON.parse(lines[0]).results;
+  assert.equal(result.exit, 0);
+  const tail = result.tail.split('\n');
+  assert.equal(tail.length, 20);
+  assert.equal(tail[0], '199981');
+  assert.equal(tail[19], '200000');
+  assert.ok(isAbsolute(result.log), result.log);
+  const log = readFileSync(result.log, 'utf8').split('\n');
+  assert.equal(log.length, 400002, 'the log holds both streams and the line between them');
+  assert.equal(log[199999], '200000');
+  assert.equal(log[200000], 'to-stderr');
+  assert.equal(log[400000], '200000');
+  assert.equal(realpathSync(dirname(dirname(result.log))), TMP, 'a new temporary directory');
+});
+
+test('run-checks puts each command\'s log beside --out', () => {
+  const r = repo();
+  const dir = join(dirname(r), 'ledger');
+  const out = join(dir, 'v.json');
+  const res = py('run-checks', [r, '--out', out, '--root', dir,
+    '--cmd', 'test', 'echo first', '--cmd', 'lint', 'printf "a\\nb\\n"; echo oops >&2; exit 4']);
+  assert.equal(res.code, 1, res.stderr);
+  assert.equal(res.stderr, '');
+  const [first, second] = JSON.parse(res.stdout).results;
+  assert.equal(realpathSync(first.log), realpathSync(join(dir, 'v.1.log')));
+  assert.equal(realpathSync(second.log), realpathSync(join(dir, 'v.2.log')));
+  assert.equal(readFileSync(join(dir, 'v.1.log'), 'utf8'), 'first\n');
+  assert.equal(readFileSync(join(dir, 'v.2.log'), 'utf8'), 'a\nb\noops\n');
+  assert.equal(first.tail, 'first');
+  assert.deepEqual([second.exit, second.tail], [4, 'a\nb\noops']);
 });
 
 test('run-checks fails a command that moves HEAD: a check must not change what it checks', () => {
@@ -172,7 +215,7 @@ test('run-checks starts each check with the bash find_bash resolves', { skip: IS
   const calls = join(dirname(r), 'calls');
   const bin = fakeBash(dirname(r), calls);
   const res = spawnSync('python3', [join(SCRIPTS, 'run-checks'), r, '--cmd', 'test', 'true'], {
-    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, PATH: `${bin}${delimiter}${process.env.PATH}` },
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, TMPDIR: TMP, PATH: `${bin}${delimiter}${process.env.PATH}` },
   });
   assert.equal(res.status, 0, res.stderr);
   assert.equal(JSON.parse(res.stdout).ok, true);
