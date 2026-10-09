@@ -5,6 +5,27 @@ validator in `run.workflow.js` (`validateManifest`) is authoritative;
 `manifest.schema.json` documents it. A dry run reports every validation error. Adopting earlier work from a hand-run
 attempt, with a worked example, is in adopt.md. `<config dir>` below is
 `${CLAUDE_CONFIG_DIR:-~/.claude}`; every helper uses the same one.
+`<python>` below is the manifest's `python` (see Paths and Python).
+
+## Paths and Python
+
+`python` is the output of `bash <skill_dir>/scripts/find-python`: the absolute path of the
+first of `python3`, `python`, and `py -3` that runs Python 3.8 or later (the Microsoft Store
+`python3` stub fails that check). Exit 3 means none works: tell the user and stop. Every
+helper command the skill and its agents run starts with it, shell-quoted (`<python>
+<skill_dir>/scripts/<name>`); bash scripts (`active-run`, `shadow`, `find-*`) still start with
+`bash`. Set it whenever you build or resume a manifest; a manifest without it (1.2.x) runs
+helpers with `python3`.
+
+On Windows (Git Bash) every path in the manifest (`plan`, `spec`, `skill_dir`, `sp_dir`,
+`python`, and the `repo` paths) takes the `C:/Users/...` form: drive letter, forward slashes,
+what `cygpath -m` prints and what the helpers print. Never write the Git Bash form
+(`/c/Users/...`): Python and Node read it as a path on the current drive. The workflow turns
+`C:\...` backslashes into `/` before it uses a path, and the validator accepts `/...` and
+`C:/...` (or `C:\...`) as absolute. Task `files` stay project-relative with forward slashes:
+an absolute path in either form, a `\\server\share` path, or any backslash is an error.
+Helpers start Git Bash by its path (`CLAUDE_CODE_GIT_BASH_PATH` when set, else from PATH or
+`C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 
 ## Manifest fields
 
@@ -44,6 +65,7 @@ attempt, with a worked example, is in adopt.md. `<config dir>` below is
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e`, `post-integrate`, and `post-integrate fix` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it (throws or returns no result) is retried once on the default type, and both attempts count toward `max_agents`. After the first such throw, or the second typed agent that returns no result while its retry succeeds, every later agent of the run uses the default type: the run log says so and the run result carries `agent_type_fallback: true`. |
 | `skill_dir` | `<skill_dir>`. |
+| `python` | The output of `bash <skill_dir>/scripts/find-python` (see Paths and Python). Optional for the validator (default `python3`); the skill always sets it. |
 
 Plan task ids must have `#+ Task <ID>:` headings and be safe file names (derive-lanes and
 task-brief refuse others); agents extract briefs with `scripts/task-brief`, which fails on a
@@ -195,7 +217,7 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   cap.
 - Spend across launches: after every launch returns (a relaunch included, never a dry run),
   record what it spent:
-  `python3 <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
+  `<python> <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
   (`status`: the run status, or `unaccepted` for complete but not accepted). `ledger status`
   sums them as `spent`; `spent.rulings` is at least the adjudicator's own `ruling` events (they
   survive a session that died), and `spent.unrecorded_launches` counts launches that recorded
@@ -233,7 +255,7 @@ stop, a budget cap, and a failed relaunch.
 
 ## Report
 
-`python3 <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
+`<python> <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
 workflow transcript directory printed at launch (`agent-*.meta.json` and `agent-*.jsonl`).
 Output: `agents` (per agent: label, phase, task, role, requested and resolved model,
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
@@ -293,7 +315,7 @@ partway through (see `agent_type` under Manifest fields).
 
 ## Backfill
 
-`python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>` prints
+`<python> <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>` prints
 `{backfill, derived, errors}`. Every `committed` event `finish-task` writes records the task's
 `base` and `head` and every commit git lists between them, and a `settled` event the range git
 had, so a task's range runs from the base of its first event to the head of its last. Each
@@ -348,7 +370,7 @@ The shadow for a project is
 
 ```bash
 p="$(cd "<project>" && pwd -P)"
-h="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$p")"
+h="$(printf '%s' "$p" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)"
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/shadow/$h"
 test -f "$d/pl-baseline" && echo "existing shadow: $d"
 ```

@@ -12,8 +12,7 @@ reviewed, then integration, checks, E2E, and final reviews. Your job: build a
 manifest, show the dry-run table, set up and launch the bundled `run.workflow.js`, and hand
 back.
 
-`<skill_dir>` below means the absolute directory that holds this SKILL.md. Details (manifest
-fields, building lanes, profiles, tiers, batching, adjudicator, budgets, markers, report) are in
+`<skill_dir>` below means the absolute directory that holds this SKILL.md. Details are in
 `<skill_dir>/reference.md`; read it before building a manifest.
 
 **Hard rules.**
@@ -60,9 +59,9 @@ executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = i
 
 ## Assessment
 
-CPU count: `python3 -c 'import os; print(os.cpu_count() or 1)'` (not `nproc`); cap =
-min(5, count + 2). Run
-`python3 <skill_dir>/scripts/derive-lanes <plan> --max-lanes <cap>` and turn its facts into
+First Building step 0. CPU count: `<python> -c 'import os; print(os.cpu_count() or 1)'` (not
+`nproc`); cap = min(5, count + 2). Run
+`<python> <skill_dir>/scripts/derive-lanes <plan> --max-lanes <cap>` and turn its facts into
 lanes, prelude, and join per reference.md "Building lanes" (exit 3: no parseable task
 headings; step aside). Runnable tasks exclude ones the plan marks after-merge, operator, or
 manual.
@@ -91,6 +90,8 @@ X is about 2 x runnable tasks + 10; the table gives the exact number. "Go ahead"
 
 Fields: reference.md "Manifest fields". In order:
 
+0. Python: `bash <skill_dir>/scripts/find-python` (exit 3: tell the user and stop); `python` =
+   its output, `<python>` below. On Windows every manifest path takes the `C:/...` form.
 1. Superpowers: `bash <skill_dir>/scripts/find-superpowers`. Exit 0: `sp_dir` = the printed
    path. Exit 3: print `parallel-lanes: superpowers not found; agents use built-in prompts`
    and set `sp_dir: null`.
@@ -103,24 +104,24 @@ Fields: reference.md "Manifest fields". In order:
      init` (prints `git_dir`; exit 3 on size: tell the user, `--force` only on their yes):
      reference.md "Shadow repos".
 3. Lanes, prelude, join, hooks, `depends_on`, `overlaps`, `excluded`: reference.md "Building
-   lanes". Never use `prelude` or `join` as a lane id.
+   lanes" (`prelude` and `join` are not lane ids).
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
    for one lane, at most 8 tasks, no security task, and no `hooks.post_integrate`; else
    `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
    keys for consecutive tiny light tasks. The user's model preference wins when it is stricter
    (e.g. "Opus for everything" means all `standard`).
-5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md,
-   the plan's conventions, CONTRIBUTING). Every agent prompt carries it.
+5. `commit_rules`: one string from the user's and project's rules (reference.md). Every agent
+   prompt carries it.
 6. `commands`, paths, `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits`
    (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
    run: `done: []`, `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
    and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`. The manifest and
-   `repo.ledger_dir` (briefs, reports, review packages) go there, never inside the project. Save the manifest as
+   `repo.ledger_dir` go there, never inside the project. Save the manifest as
    `<run_dir>/<plan-name>.lanes.json`; `ledger_dir` = `<run_dir>/<plan-name>.<run_id>.ledger`.
 8. The manifest has no `setup_result` or `start_points` yet. Nothing here or in Confirmation
    touches the project: no worktree, branch, or setup command before consent. Once saved,
-   `python3 <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0: every plan task
+   `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0: every plan task
    runs or is in `excluded` with its reason.
 
 ## Confirmation (every launch, no exceptions)
@@ -155,18 +156,17 @@ this. Say the table is the one required check, show it, and wait.
 
 1. Script path: before the first Workflow call, copy `<skill_dir>/run.workflow.js` into the
    session scratchpad directory (never into the project) and use that copy as `scriptPath`
-   for every Workflow call (the Workflow tool rejects a
-   `scriptPath` under ~/.claude/skills). With no scratchpad, pass the file contents as
-   `script` and reuse the `scriptPath` the result prints.
+   for every Workflow call (the Workflow tool rejects one under ~/.claude/skills). With no
+   scratchpad, pass the file contents as `script` and reuse the `scriptPath` the result prints.
 2. Setup, only after the explicit yes to the table, immediately before the real launch. First
    `bash <skill_dir>/scripts/active-run acquire <run_id> <manifest file>`: it prints the owner
    token (keep it for relaunches). Exit 4: another session holds the run; stop and ask, and use
    `--takeover` only when the user confirms that session ended. Then run
-   `python3 <skill_dir>/scripts/setup <manifest file> --owner <token>`. It creates the feature branch and
+   `<python> <skill_dir>/scripts/setup <manifest file> --owner <token>`. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
    wait 10 seconds and retry once; then `active-run release <run_id> setup_failed`, report,
    and stop. Put its output in `setup_result`
-   and copy the `start_points` of `python3 <skill_dir>/scripts/ledger status <ledger_dir>`
+   and copy the `start_points` of `<python> <skill_dir>/scripts/ledger status <ledger_dir>`
    verbatim into `start_points` (keys `prelude` and `join`). Adding these two fields needs no
    second table; any other manifest change after the yes does.
 3. Save the manifest with `dry_run: false`. Print the launch notice, or the resume notice
@@ -213,12 +213,12 @@ The run returns `status`:
 - `complete`: lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
-  with `python3 <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
+  with `<python> <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
   "<what>"`.
 
-Report: run `python3 <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
-<run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch, append
-its output, and keep that file beside the manifest. Per task: status, commits (`skipped`:
+Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
+<run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch and append
+its output. Per task: status, commits (`skipped`:
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md
 "Report"). Then integration and post-integrate notes, E2E PASS/FAIL and the revision it
@@ -239,21 +239,21 @@ never `branch -D`. Keep the manifest and ledger.
 
 ## Resume
 
-1. Invoked notice. Read the manifest (an `active-run list` marker names it). No manifest
-   (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
-2. `python3 <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
+1. Invoked notice. Read the manifest (an `active-run list` marker names it); set `python` by
+   Building step 0. No manifest (a hand-run attempt): `<skill_dir>/adopt.md` first.
+2. `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
    task up: reference.md "Backfill"); put each `carry` entry into `notes`. Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
-   spec. `python3 <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
+   spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
    (else fix the manifest's tasks or `excluded`).
-3. `backfill`: `python3 <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
+3. `backfill`: `<python> <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
    Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
    nothing more.
-5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees; shadow mode reuses the existing shadow.
+5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
 6. Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
    then, after the yes, Launch step 2 again, the resume notice, and launch.
 

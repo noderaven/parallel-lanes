@@ -17,7 +17,7 @@ For a resume without a manifest or ledger, or with lane branches named different
    approved), each with the task's range: `base` = the commit the task started from (the
    previous task's last commit, or the branch point), `head` = its last commit, and `commits`
    = `git -C <root> rev-list --reverse <base>..<head>` exactly:
-   `python3 <skill_dir>/scripts/ledger append <ledger_dir> <lane> '{"task":"T1","event":"committed","base":"<base>","head":"<head>","commits":[<those shas>]}'`
+   `<python> <skill_dir>/scripts/ledger append <ledger_dir> <lane> '{"task":"T1","event":"committed","base":"<base>","head":"<head>","commits":[<those shas>]}'`
    where `<lane>` is `prelude`, the lane id, or `join`. `ledger backfill` (Resume step 3)
    checks every range against git and refuses one that does not match.
 4. For each lane with earlier commits: `git -C <root> branch pl-<run_id>-<lane> <old branch>`.

@@ -17,16 +17,17 @@ when it's time to execute the plan.
 | Requirement | Why | Check |
 |---|---|---|
 | **Claude Code** with the **Workflow** tool (multi-agent workflows) | Runs the orchestrator `run.workflow.js` | In a Claude Code session, ask: "Do you have the Workflow tool?" |
-| **bash** | Installer, hooks, helper scripts | `bash --version` |
+| **bash** (Git Bash on Windows) | Installer, hooks, helper scripts | `bash --version` |
 | **git** 2.31 or later (2.38 or later recommended) | Worktrees, branches, merges | `git --version` |
 | **jq** 1.6 or later | Installer and SessionStart hook | `jq --version` |
-| **python3** 3.8 or later | Lane planning, setup, ledger, reports | `python3 --version` |
+| **Python** 3.8 or later, as `python3`, `python`, or `py -3` | Lane planning, setup, ledger, reports | `bash scripts/find-python` in the clone prints the one it uses |
 | *Optional:* **node** 18 or later | Only for running the test suite | `node --version` |
 | *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
 
 Platforms: macOS and Linux. CI runs the test suite on both, with the stock bash 3.2 on
-macOS, so no newer bash is needed. On Windows, install and run
-Claude Code inside **WSL**, because the hooks and scripts need bash.
+macOS, so no newer bash is needed. On Windows 11, Claude Code installed natively works with
+Git for Windows (preliminary support; see [Windows](#windows-preliminary) below), and
+Claude Code inside **WSL** works as on Linux.
 
 Without the Workflow tool, the skill steps aside and recommends a normal Superpowers
 execution mode instead. Without Superpowers, it still runs, but agents use simpler
@@ -52,6 +53,48 @@ Fedora:
 sudo dnf install -y git jq python3 nodejs
 ```
 
+### Windows (preliminary)
+
+Native Windows 11 support is new and **preliminary**: a Windows CI job runs the test suite,
+but complete runs on a real Windows machine are still being verified. If you hit a problem, WSL is the
+proven route: install Claude Code inside WSL and follow the Linux steps.
+
+- **Git for Windows is required.** With it installed, Claude Code runs its Bash tool and
+  hooks in Git Bash, and the skill's scripts run there too. Without it Claude Code falls back
+  to PowerShell, and PowerShell-only setups are not supported.
+- **Install the tools** from PowerShell or a Command Prompt, then open a new Git Bash
+  window so PATH picks them up:
+
+  ```
+  winget install Git.Git
+  winget install jqlang.jq
+  winget install Python.Python.3.12
+  winget install OpenJS.NodeJS.LTS
+  ```
+
+  Node is optional (tests only). Any Python 3.8 or later works: the skill looks for
+  `python3`, then `python`, then `py -3`, and skips the Microsoft Store `python3` stub.
+- **Git in another place:** the skill finds Git Bash on PATH or under `C:\Program Files\Git`.
+  If Git is installed somewhere else, set the Windows environment variable
+  `CLAUDE_CODE_GIT_BASH_PATH` to its `bash.exe` (for example `D:\Tools\Git\bin\bash.exe`);
+  Claude Code reads the same variable. The skill never uses the WSL `bash.exe` in
+  `C:\Windows\System32`.
+- **Long paths:** worktree paths can pass Windows' 260-character limit. Turn on Git's long
+  path support once:
+
+  ```bash
+  git config --global core.longpaths true
+  ```
+
+  The skill does not change your git config for you.
+- **Run the installer from Git Bash** (`bash install.sh`, section 2). `~/.claude` is
+  `%USERPROFILE%\.claude`. The repo's `.gitattributes` keeps every file's line endings LF
+  whatever your `core.autocrlf` setting, so a fresh clone works as is.
+- **Shadow mode and symlinks:** without Windows Developer Mode, Git cannot create symbolic
+  links, so for a non-git folder that holds symlinks prefer a git repo over shadow mode.
+- Run files under `~/.claude/parallel-lanes/` are private to your user through your profile
+  folder's permissions; the POSIX modes the scripts set have no effect on Windows.
+
 ---
 
 ## 2. Install the skill
@@ -69,7 +112,8 @@ sudo dnf install -y git jq python3 nodejs
    bash install.sh
    ```
 
-   It does four things:
+   On Windows, run both steps in Git Bash. The installer checks for jq, git, and a working
+   Python 3.8 or later first. Then it does four things:
    - Copies the skill (without `.git`) to `~/.claude/skills/parallel-lanes`. The clone
      can be deleted afterwards, or kept for updates.
    - Installs the `parallel-lanes-worker` agent type to
@@ -232,7 +276,13 @@ Other things to know:
 
 | Symptom | Fix |
 |---|---|
-| `install: jq is required but not installed` (or git, python3) | Install the tool (section 1) and rerun. |
+| `install: jq is required but not installed` (or git) | Install the tool (section 1) and rerun. On Windows: `winget install jqlang.jq`, then open a new Git Bash window. |
+| `find-python: no working Python 3.8 or later (tried: python3, python, py -3)` (the installer adds `install: Python 3.8 or later is required but none works`) | Install Python 3.8 or later (section 1; on Windows `winget install Python.Python.3.12`) and open a new shell. On Windows, the `python3` from the Microsoft Store is only a stub that opens the Store; install a real Python. |
+| `... parallel-lanes needs Git Bash on Windows: install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH ...` | Install Git for Windows (`winget install Git.Git`). If it is installed outside `C:\Program Files\Git`, set `CLAUDE_CODE_GIT_BASH_PATH` to its `bash.exe` and restart Claude Code. |
+| `cannot convert ... to a Windows path: cygpath ...` | The Git for Windows installation is incomplete. Reinstall it, or point `CLAUDE_CODE_GIT_BASH_PATH` at the `bash.exe` of a complete one. |
+| `Filename too long` from git on Windows | Run `git config --global core.longpaths true`, then ask Claude to resume the run. |
+| Scripts fail with `$'\r': command not found` | The files have Windows line endings, from a copy made before 1.3.0. Clone the repo again and rerun `bash install.sh`. |
+| Hook or tool errors that come from PowerShell on Windows | Claude Code did not find Git Bash. Install Git for Windows (or set `CLAUDE_CODE_GIT_BASH_PATH`) and restart Claude Code. |
 | `settings.json is not valid JSON` | Fix the syntax error in `~/.claude/settings.json`, then rerun. |
 | Claude says `not a fit (Workflow tool unavailable)` | Your Claude Code build lacks the Workflow tool. Update Claude Code, or use Superpowers' Subagent-driven mode. |
 | `superpowers not found; agents use built-in prompts` | Install Superpowers (section 3) and restart Claude Code. |

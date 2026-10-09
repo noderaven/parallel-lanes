@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -23,14 +23,40 @@ function freshConfig() {
   return dir;
 }
 
-function install(configDir, args = []) {
-  const res = spawnSync('bash', [INSTALL, ...args], {
+function runInstall(configDir, args = [], env = {}) {
+  return spawnSync('bash', [INSTALL, ...args], {
     cwd: SKILL_DIR,
     encoding: 'utf8',
-    env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+    env: { ...process.env, CLAUDE_CONFIG_DIR: configDir, ...env },
   });
+}
+
+function install(configDir, args = [], env = {}) {
+  const res = runInstall(configDir, args, env);
   assert.equal(res.status, 0, `install.sh ${args.join(' ')} failed: ${res.stderr}`);
   return res;
+}
+
+// The tools install.sh and find-python start, found on the real PATH.
+const TOOLS = ['bash', 'cat', 'chmod', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
+  'mktemp', 'mv', 'rm', 'sed', 'tar', 'tr', 'uname'];
+const which = (name) => spawnSync('bash', ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
+
+// A PATH of one fresh directory holding links to the real TOOLS except the
+// omitted ones, plus the named executable scripts (name -> body).
+function toolPath({ omit = [], scripts = {} } = {}) {
+  counter += 1;
+  const dir = join(TMP, `bin ${counter}`);
+  mkdirSync(dir);
+  for (const name of TOOLS) {
+    const found = which(name);
+    if (!omit.includes(name) && found) symlinkSync(found, join(dir, name));
+  }
+  for (const [name, body] of Object.entries(scripts)) {
+    writeFileSync(join(dir, name), `#!/bin/bash\n${body}\n`);
+    chmodSync(join(dir, name), 0o755);
+  }
+  return dir;
 }
 
 function settings(configDir) {
@@ -122,4 +148,30 @@ test('install.sh --uninstall removes the hooks, the skill, and the worker agent,
   assert.deepEqual(settings(dir), { theme: 'dark', hooks: {} });
   assert.ok(!existsSync(agentFile(dir)), 'the worker agent file is removed');
   assert.ok(!existsSync(skillDir(dir)), 'the skill directory is removed');
+});
+
+// A stock Windows Python install has python but no python3.
+test('install.sh needs a working Python, not a python3 command', { skip: SKIP }, () => {
+  const python3 = which('python3');
+  assert.ok(python3, 'python3 is on PATH');
+  const path = toolPath({ scripts: { python: `exec '${python3}' "$@"` } });
+  assert.equal(spawnSync('bash', ['-c', 'command -v python3'], { env: { PATH: path } }).status, 1,
+    'the test PATH has no python3');
+  const dir = freshConfig();
+  install(dir, [], { PATH: path });
+  assert.ok(existsSync(join(skillDir(dir), 'SKILL.md')), 'the skill is installed');
+});
+
+test('install.sh suggests winget for jq on Windows', () => {
+  const res = runInstall(freshConfig(), [], { PATH: toolPath({ omit: ['jq'] }), PL_UNAME: 'MINGW64_NT-10.0' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /jq is required but not installed/);
+  assert.ok(res.stderr.includes('winget install jqlang.jq'), res.stderr);
+});
+
+test('install.sh names jq without winget elsewhere', () => {
+  const res = runInstall(freshConfig(), [], { PATH: toolPath({ omit: ['jq'] }), PL_UNAME: 'Linux' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /jq is required but not installed/);
+  assert.ok(!res.stderr.includes('winget'), res.stderr);
 });
