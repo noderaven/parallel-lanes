@@ -159,10 +159,16 @@ first = _shell.find_bash()
 injected = _shell.find_bash(env={}, platform='linux', which=found('/other/bash'), isfile=files())
 print(json.dumps({'first': first, 'injected': injected, 'again': _shell.find_bash(),
   'which': shutil.which('bash'), 'argv': _shell.bash_argv('-c', 'true')}))`);
-  assert.equal(out.first, out.which);
+  if (process.platform === 'win32') {
+    // Windows: Git Bash in C:/ form, never a WSL launcher, whatever which says.
+    assert.match(out.first, /^[A-Z]:\/[^\\]*bash\.exe$/i, out.first);
+    assert.doesNotMatch(out.first, /\/system32\/|\/windowsapps\//i, out.first);
+  } else {
+    assert.equal(out.first, out.which);
+  }
   assert.equal(out.injected, '/other/bash');
-  assert.equal(out.again, out.which);
-  assert.deepEqual(out.argv, [out.which, '-c', 'true']);
+  assert.equal(out.again, out.first);
+  assert.deepEqual(out.argv, [out.first, '-c', 'true']);
 });
 
 test('native_path gives one Windows form', () => {
@@ -197,12 +203,45 @@ print(json.dumps({
   });
 });
 
-test('native_path fails clearly without cygpath for a POSIX path on Windows', () => {
+// A fake cygpath (a .cmd on Windows, a sh script elsewhere) running the given body.
+function fakeCygpath(name, posixBody, windowsBody) {
+  if (process.platform === 'win32') {
+    const file = join(TMP, `${name}.cmd`);
+    writeFileSync(file, `@${windowsBody}\r\n`);
+    return file;
+  }
+  const file = join(TMP, name);
+  writeFileSync(file, `#!/bin/sh\n${posixBody}\n`);
+  chmodSync(file, 0o755);
+  return file;
+}
+
+test('native_path decodes cygpath output as UTF-8 whatever the locale', () => {
+  // cygpath prints UTF-8 bytes; the child Python runs in a non-UTF-8 locale.
+  const cygpath = fakeCygpath(
+    'cygpath-utf8',
+    "[ \"$1\" = -m ] || exit 9\nprintf 'C:/Users/Jos\\303\\251/AppData/Local/Temp/x\\n'",
+    `"${process.execPath}" -e "process.stdout.write('C:/Users/Jos\\u00e9/AppData/Local/Temp/x\\n')"`,
+  );
   const out = py(`print(json.dumps(attempt(lambda: _shell.native_path(
-    '/tmp/x', platform='win32', cygpath=${JSON.stringify(join(TMP, 'missing', 'cygpath.exe'))}))))`);
-  assert.ok(out.error, JSON.stringify(out));
-  assert.match(out.message, /cygpath/);
-  assert.match(out.message, /\/tmp\/x/);
+    '/tmp/x', platform='win32', cygpath=${JSON.stringify(cygpath)}))))`,
+  { LC_ALL: 'C', LANG: 'C', PYTHONUTF8: '0', PYTHONCOERCECLOCALE: '0' });
+  assert.deepEqual(out, { ok: 'C:/Users/Jos\u00e9/AppData/Local/Temp/x' });
+});
+
+test('native_path fails clearly without cygpath for a POSIX path on Windows', () => {
+  const failing = fakeCygpath('cygpath-fails', 'echo broken >&2\nexit 1', 'exit /b 1');
+  const out = py(`print(json.dumps([attempt(lambda: _shell.native_path(
+    '/tmp/x', platform='win32', cygpath=cyg))
+    for cyg in [${JSON.stringify(join(TMP, 'missing', 'cygpath.exe'))}, ${JSON.stringify(failing)}]]))`);
+  assert.equal(out.length, 2);
+  for (const r of out) {
+    assert.equal(r.error, 'CygpathNotFound', JSON.stringify(r));
+    assert.match(r.message, /cygpath/);
+    assert.match(r.message, /\/tmp\/x/);
+    assert.match(r.message, /CLAUDE_CODE_GIT_BASH_PATH/);
+  }
+  assert.match(out[1].message, /exited 1/);
 });
 
 test('native_path finds cygpath next to the Git Bash find_bash returns', () => {

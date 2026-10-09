@@ -78,6 +78,13 @@ def _drive_form(p):
     return m.group(1).upper() + ":/" + (m.group(2) or "").replace("\\", "/")
 
 
+# The remedy every CygpathNotFound message ends with.
+_CYGPATH_HINT = (
+    "Install Git for Windows, or set " + VARIABLE
+    + " to the bash.exe of a complete Git for Windows installation."
+)
+
+
 def _not_found(detail):
     return BashNotFound(
         detail + ". parallel-lanes needs Git Bash on Windows: install Git for Windows, "
@@ -186,20 +193,26 @@ def native_path(p, platform=None, cygpath=None):
         return p.replace("\\", "/")
     if cygpath is None:
         cygpath = _default_cygpath()
+    # Git for Windows' cygpath prints UTF-8 whatever the Windows code page is.
     try:
         res = subprocess.run([cygpath, "-m", p], stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, universal_newlines=True)
+                             stderr=subprocess.PIPE, encoding="utf-8")
     except OSError as e:
         raise CygpathNotFound(
             "cannot convert " + p + " to a Windows path: cygpath " + cygpath
-            + " could not run (" + str(e) + "). Install Git for Windows, or set "
-            + VARIABLE + " to the bash.exe of a complete Git for Windows installation."
+            + " could not run (" + str(e) + "). " + _CYGPATH_HINT
+        )
+    except UnicodeDecodeError as e:
+        raise CygpathNotFound(
+            "cannot convert " + p + " to a Windows path: cygpath " + cygpath
+            + " printed output that is not UTF-8 (" + str(e) + "). " + _CYGPATH_HINT
         )
     out = res.stdout.strip("\r\n")
     if res.returncode != 0 or not out:
         raise CygpathNotFound(
             "cannot convert " + p + " to a Windows path: cygpath " + cygpath
             + " exited " + str(res.returncode) + ": " + res.stderr.strip()
+            + ". " + _CYGPATH_HINT
         )
     return _drive_form(out) or out
 
