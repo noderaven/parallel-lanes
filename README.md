@@ -87,12 +87,28 @@ proven route: install Claude Code inside WSL and follow the Linux steps.
   git config --global core.longpaths true
   ```
 
-  The skill does not change your git config for you.
+  The skill does not change your git config for you. Git's setting covers only git. If
+  another tool (Python, a build tool) later reports a path that is too long, turn on the
+  Windows switch too, from PowerShell run as Administrator, then sign out and back in:
+
+  ```powershell
+  New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+  ```
+
+  (The same switch is the Group Policy "Enable Win32 long paths", and the python.org
+  installer's "Disable path length limit" sets it.) Keeping projects in a short path such
+  as `C:\src\project` usually avoids the limit altogether.
 - **Run the installer from Git Bash** (`bash install.sh`, section 2). `~/.claude` is
   `%USERPROFILE%\.claude`. The repo's `.gitattributes` keeps every file's line endings LF
   whatever your `core.autocrlf` setting, so a fresh clone works as is.
-- **Shadow mode and symlinks:** without Windows Developer Mode, Git cannot create symbolic
-  links, so for a non-git folder that holds symlinks prefer a git repo over shadow mode.
+- **Symlinks:** parallel-lanes does not need Windows Developer Mode, and turning it on is
+  not recommended (it also relaxes other protections). Without it, Git cannot create
+  symbolic links, so for a non-git folder that holds symlinks use a git repo rather than
+  shadow mode.
+- **Antivirus scanning:** Windows Defender scans every file the lanes write, which slows
+  checkouts and test runs. Excluding the worktree folders (`<repo>-wt-<run_id>` next to
+  your project) from real-time scanning speeds runs up, but those files are then not
+  scanned; that is your call, and a managed machine may not allow it.
 - Run files under `~/.claude/parallel-lanes/` are private to your user through your profile
   folder's permissions; the POSIX modes the scripts set have no effect on Windows.
 
@@ -265,7 +281,9 @@ Other things to know:
 ## 6. Update or uninstall
 
 - **Update:** in your clone, run `git pull && bash install.sh`. It replaces the
-  installed skill and does not add the hooks twice.
+  installed skill and does not add the hooks twice. On Windows, a clone made before 1.3.0
+  keeps its Windows line endings after the pull: run `git rm -r -q --cached . && git reset
+  -q --hard` in it once first (it discards local changes in that clone).
 - **Uninstall:** run `bash install.sh --uninstall`. It removes both hooks (after backing up
   settings), the agent file `~/.claude/agents/parallel-lanes-worker.md`, and
   `~/.claude/skills/parallel-lanes`. Run records in
@@ -282,7 +300,7 @@ Other things to know:
 | `... parallel-lanes needs Git Bash on Windows: install Git for Windows, or set CLAUDE_CODE_GIT_BASH_PATH ...` | Install Git for Windows (`winget install Git.Git`). If it is installed outside `C:\Program Files\Git`, set `CLAUDE_CODE_GIT_BASH_PATH` to its `bash.exe` and restart Claude Code. |
 | `cannot convert ... to a Windows path: cygpath ...` | The Git for Windows installation is incomplete. Reinstall it, or point `CLAUDE_CODE_GIT_BASH_PATH` at the `bash.exe` of a complete one. |
 | `Filename too long` from git on Windows | Run `git config --global core.longpaths true`, then ask Claude to resume the run. |
-| Scripts fail with `$'\r': command not found` | The files have Windows line endings, from a copy made before 1.3.0. Clone the repo again and rerun `bash install.sh`. |
+| Scripts fail with `$'\r': command not found` | The files have Windows line endings, from a clone made before 1.3.0. Pulling does not rewrite them: in the clone, run `git rm -r -q --cached . && git reset -q --hard` once (it discards local changes in that clone), or clone again, then rerun `bash install.sh`. |
 | Hook or tool errors that come from PowerShell on Windows | Claude Code did not find Git Bash. Install Git for Windows (or set `CLAUDE_CODE_GIT_BASH_PATH`) and restart Claude Code. |
 | `settings.json is not valid JSON` | Fix the syntax error in `~/.claude/settings.json`, then rerun. |
 | Claude says `not a fit (Workflow tool unavailable)` | Your Claude Code build lacks the Workflow tool. Update Claude Code, or use Superpowers' Subagent-driven mode. |
