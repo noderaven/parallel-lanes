@@ -149,7 +149,15 @@ test('find-superpowers prints a C:/ path under Git Bash', () => {
     PATH: `${bin}${delimiter}${process.env.PATH}`,
   });
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(res.stdout, `C:/fake${join(root, 'sp', 'skills')}\n`);
+  const expected = join(root, 'sp', 'skills');
+  if (IS_WINDOWS) {
+    // The fake cygpath may get the Windows or the bash form of the path.
+    assert.match(res.stdout, /^C:\/fake.*\n$/);
+    const rest = res.stdout.slice('C:/fake'.length, -1);
+    assert.ok(samePath(rest, expected), `${rest} is not ${expected}`);
+  } else {
+    assert.equal(res.stdout, `C:/fake${expected}\n`);
+  }
 });
 
 test('find-superpowers rejects arguments with exit 2', () => {

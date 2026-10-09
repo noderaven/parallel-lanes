@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH } from './platform.mjs';
+import { BASH, SYMLINKS } from './platform.mjs';
 
 const PATHS = join(SKILL_DIR, 'scripts', '_paths.sh');
 const FIND_PYTHON = join(SKILL_DIR, 'scripts', 'find-python');
@@ -82,7 +82,7 @@ test('find-python skips an interpreter older than 3.8', () => {
   assert.equal(r.stdout, `${REAL_EXE}\n`);
 });
 
-test('find-python fails clearly when none works', () => {
+test('find-python fails clearly when none works', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   // Only the tools the script needs, so no real python is on PATH.
   const tools = fakeBin({ python3: 'exit 9009', python: 'exit 1', py: 'exit 1' });
   for (const name of ['bash', 'dirname', 'uname', 'head', 'tr']) {

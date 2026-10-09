@@ -5,11 +5,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, IS_WINDOWS, samePath } from './platform.mjs';
+import { BASH, IS_WINDOWS, SYMLINKS, samePath } from './platform.mjs';
 
 const INSTALL = join(SKILL_DIR, 'install.sh');
 const HAS_JQ = spawnSync(BASH, ['-c', 'command -v jq'], { encoding: 'utf8' }).status === 0;
 const SKIP = HAS_JQ ? false : 'jq is not on PATH';
+// toolPath links the real tools into a fresh PATH directory.
+const NO_SYMLINKS = !SYMLINKS && 'symlinks unavailable';
 
 const TMP = mkdtempSync(join(tmpdir(), 'pl-install-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
@@ -89,7 +91,9 @@ test('install.sh installs the skill, the worker agent, and both hooks, keeping o
 
   assert.ok(existsSync(agentFile(dir)), 'the worker agent file is installed');
   assert.match(readFileSync(agentFile(dir), 'utf8'), /^name: parallel-lanes-worker$/m);
-  assert.match(res.stdout, new RegExp(`Installed agent type parallel-lanes-worker to ${agentFile(dir)}`));
+  const installed = /^Installed agent type parallel-lanes-worker to (.*)$/m.exec(res.stdout);
+  assert.ok(installed, res.stdout);
+  assert.ok(samePath(installed[1], agentFile(dir)), `${installed[1]} is not ${agentFile(dir)}`);
   assert.ok(existsSync(join(skillDir(dir), 'SKILL.md')), 'the skill is installed');
   assert.ok(!existsSync(join(skillDir(dir), '.git')), 'the skill is installed without .git');
 
@@ -162,7 +166,7 @@ test('install.sh --uninstall removes the hooks, the skill, and the worker agent,
 });
 
 // A stock Windows Python install has python but no python3.
-test('install.sh needs a working Python, not a python3 command', { skip: SKIP }, () => {
+test('install.sh needs a working Python, not a python3 command', { skip: SKIP || NO_SYMLINKS }, () => {
   const python3 = which('python3');
   assert.ok(python3, 'python3 is on PATH');
   const path = toolPath({ scripts: { python: `exec '${python3}' "$@"` } });
@@ -173,14 +177,14 @@ test('install.sh needs a working Python, not a python3 command', { skip: SKIP },
   assert.ok(existsSync(join(skillDir(dir), 'SKILL.md')), 'the skill is installed');
 });
 
-test('install.sh suggests winget for jq on Windows', () => {
+test('install.sh suggests winget for jq on Windows', { skip: NO_SYMLINKS }, () => {
   const res = runInstall(freshConfig(), [], { PATH: toolPath({ omit: ['jq'] }), PL_UNAME: 'MINGW64_NT-10.0' });
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /jq is required but not installed/);
   assert.ok(res.stderr.includes('winget install jqlang.jq'), res.stderr);
 });
 
-test('install.sh names jq without winget elsewhere', () => {
+test('install.sh names jq without winget elsewhere', { skip: NO_SYMLINKS }, () => {
   const res = runInstall(freshConfig(), [], { PATH: toolPath({ omit: ['jq'] }), PL_UNAME: 'Linux' });
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /jq is required but not installed/);

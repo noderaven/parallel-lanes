@@ -62,6 +62,19 @@ function assertSamePaths(actual, expected) {
   for (const [k, p] of Object.entries(expected)) assert.ok(samePath(actual[k], p), `${k}: ${actual[k]} is not ${p}`);
 }
 
+// Asserts that discarded entries ('<path>: <porcelain status>') match the
+// expected [path, status] pairs in order: the path through samePath, the
+// status exactly. The split skips a drive letter's colon (C:/...).
+function assertDiscarded(actual, expected) {
+  assert.equal(actual.length, expected.length, JSON.stringify(actual));
+  expected.forEach(([path, status], i) => {
+    const at = actual[i].indexOf(': ', /^[a-zA-Z]:/.test(actual[i]) ? 2 : 0);
+    assert.ok(at > 0, `${actual[i]} has no path`);
+    assert.ok(samePath(actual[i].slice(0, at), path), `${actual[i]} is not under ${path}`);
+    assert.equal(actual[i].slice(at + 2), status, actual[i]);
+  });
+}
+
 function write(dir, rel, content) {
   const path = join(dir, rel);
   mkdirSync(dirname(path), { recursive: true });
@@ -193,9 +206,9 @@ test('setup: a rerun reuses branches and worktrees and lists the discarded edits
   const result = setupOk(c, m);
   assert.equal(result.feature_head, featureHead);
   assertSamePaths(result.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
-  assert.deepEqual(result.discarded.sort(), [
-    `${laneDir(c, 'a')}:  M README.md`,
-    `${laneDir(c, 'a')}: ?? "new file.txt"`,
+  assertDiscarded(result.discarded.sort(), [
+    [laneDir(c, 'a'), ' M README.md'],
+    [laneDir(c, 'a'), '?? "new file.txt"'],
   ]);
   assert.equal(readFileSync(join(laneDir(c, 'a'), 'README.md'), 'utf8'), 'hello\n');
   assert.equal(existsSync(join(laneDir(c, 'a'), 'new file.txt')), false);
@@ -353,7 +366,7 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
   // A rerun discards and lists edits in the feature worktree.
   write(feature, 'app.txt', 'edited\n');
   const again = setupOk(c, m);
-  assert.deepEqual(again.discarded, [`${feature}:  M app.txt`]);
+  assertDiscarded(again.discarded, [[feature, ' M app.txt']]);
   assert.equal(readFileSync(join(feature, 'app.txt'), 'utf8'), 'app\n');
   assert.deepEqual(readdirSync(project), ['app.txt']);
 });
