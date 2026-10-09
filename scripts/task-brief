@@ -54,6 +54,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _brief  # noqa: E402
+import _shell  # noqa: E402
 
 USAGE = "usage: task-brief PLAN TASK_ID OUT [--root DIR] [--also ID ...]"
 
@@ -101,7 +102,14 @@ def parse_args(argv):
 
 
 def main(argv):
+    _shell.setup_io()
     plan, task_id, out, root, also = parse_args(argv)
+    try:
+        plan, out = _shell.native_path(plan), _shell.native_path(out)
+        if root is not None:
+            root = _shell.native_path(root)
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     if root is not None:
         if os.path.islink(out):
             fail(3, f"brief path {out!r} is a symlink; nothing written")
@@ -119,8 +127,7 @@ def main(argv):
     parent = os.path.dirname(out)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(brief)
+    _shell.write_text(out, brief)
 
 
 if __name__ == "__main__":

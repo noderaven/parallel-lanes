@@ -34,6 +34,10 @@ import os
 import re
 import sys
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
+
 UNAVAILABLE = "unavailable"
 TOKEN_FIELDS = ("input_tokens", "output_tokens",
                 "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -303,6 +307,7 @@ def build(transcript_dir, manifest):
 
 
 def main(argv):
+    _shell.setup_io()
     args = argv[1:]
     out = None
     if "--out" in args:
@@ -315,7 +320,13 @@ def main(argv):
     if len(args) != 2:
         print("usage: run-report TRANSCRIPT_DIR MANIFEST [--out FILE]", file=sys.stderr)
         return 2
-    transcript_dir, manifest_path = args
+    try:
+        transcript_dir, manifest_path = (_shell.native_path(a) for a in args)
+        if out:
+            out = _shell.native_path(out)
+    except _shell.BashNotFound as e:
+        print(f"run-report: {e}", file=sys.stderr)
+        return 2
     if not os.path.isdir(transcript_dir):
         print(f"run-report: not a directory: {transcript_dir}", file=sys.stderr)
         return 2
@@ -327,8 +338,7 @@ def main(argv):
         return 2
     text = json.dumps(build(transcript_dir, manifest if isinstance(manifest, dict) else {}), indent=2) + "\n"
     if out:
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(text)
+        _shell.write_text(out, text)
     else:
         sys.stdout.write(text)
     return 0
