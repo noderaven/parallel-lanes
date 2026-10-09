@@ -288,6 +288,45 @@ test('derive-lanes reads multi-line bullet Files blocks and ignores fenced code'
   ]);
 });
 
+test('derive-lanes keeps every path after a ";" inside a parenthesised note', () => {
+  const plan = planFile(
+    [
+      '# Plan',
+      '',
+      '## Task 1: Widen',
+      '',
+      '**Files:**',
+      '- Modify: `src/prompts-task.js` (lines 56, 85), `src/adjudicator.js` (line 69), `src/validate.js` (lines 34, 64; required keys), `src/plan.js`, `src/main.js`, `src/phases.js` (`runAll` start)',
+      '',
+    ].join('\n'),
+  );
+  const t = byId(deriveJson(plan).out);
+  assert.deepEqual(t['1'].files, [
+    'src/prompts-task.js',
+    'src/adjudicator.js',
+    'src/validate.js',
+    'src/plan.js',
+    'src/main.js',
+    'src/phases.js',
+  ]);
+});
+
+test('derive-lanes keeps a ";" inside backticks', () => {
+  const plan = planFile(
+    ['# Plan', '', '## Task 1: Script', '', '**Files:**', '- Create: `bin/a;b.sh`', ''].join('\n'),
+  );
+  const t = byId(deriveJson(plan).out);
+  assert.deepEqual(t['1'].files, ['bin/a;b.sh']);
+});
+
+test('derive-lanes still splits clauses on a ";" outside parentheses', () => {
+  const plan = planFile(
+    ['# Plan', '', '## Task 1: Pair', '', '**Files:** Modify: `a.js`; Test: `a.test.js`', ''].join('\n'),
+  );
+  const t = byId(deriveJson(plan).out);
+  assert.deepEqual(t['1'].files, ['a.js', 'a.test.js']);
+});
+
 test('derive-lanes treats a Task heading without the colon form as a boundary, not a task', () => {
   const plan = planFile(
     [

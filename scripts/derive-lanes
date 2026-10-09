@@ -146,6 +146,28 @@ def path_of(token, task_id):
     return None if norm == "." else norm
 
 
+def split_clauses(item):
+    """Split item on ';' at parenthesis depth 0 and outside backtick spans, so
+    a note like '(lines 34, 64; required keys)' does not cut the paths after it."""
+    parts = []
+    start = depth = 0
+    in_tick = False
+    for i, ch in enumerate(item):
+        if ch == "`":
+            in_tick = not in_tick
+        elif in_tick:
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == ";" and depth == 0:
+            parts.append(item[start:i])
+            start = i + 1
+    parts.append(item[start:])
+    return parts
+
+
 def files_blocks(body):
     """Yield the clause texts of each Files block in a task body."""
     i = 0
@@ -163,7 +185,7 @@ def files_blocks(body):
             else:
                 items[-1] += " " + body[i].strip()
             i += 1
-        yield [part.strip() for item in items for part in item.split(";")]
+        yield [part.strip() for item in items for part in split_clauses(item)]
 
 
 def outside_asides(clause):
