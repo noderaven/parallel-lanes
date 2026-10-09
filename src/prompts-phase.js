@@ -560,9 +560,23 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
+// The task minors checklist for a final reviewer (taskMinorFindings): []
+// when there are none.
+function taskMinorsLines(minors) {
+  if (!Array.isArray(minors) || minors.length === 0) return [];
+  return [
+    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+    findingsText(minors),
+    'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
+    'issue (for example "[<id>] ..."); otherwise leave it.',
+    '',
+  ];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, and the findings/head result.
-function finalReviewFrame(m, intro, focus) {
+// branch range, the commit-rules scan, the task minors checklist, and the
+// findings/head result.
+function finalReviewFrame(m, intro, focus, minors = []) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -578,6 +592,7 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...taskMinorsLines(minors),
     ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
@@ -585,17 +600,20 @@ function finalReviewFrame(m, intro, focus) {
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
-    'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
-    `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
+    'applies), issue, fix}], head = the full sha printed by',
+    `git -C ${dir} rev-parse HEAD (a read-only command you may run), and`,
+    ...cannotVerifyLines(),
   ].join('\n');
 }
 
-function finalReviewPrompt(m, lens, e2e) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e));
+// minors: the task minors checklist (taskMinorsLines).
+function finalReviewPrompt(m, lens, e2e, minors = []) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
-// ctx = {e2e}: the e2e result, or null without an e2e hook.
+// ctx = {e2e, minors?}: the e2e result, or null without an e2e hook, and
+// the task minors checklist (taskMinorsLines).
 function combinedFinalReviewPrompt(m, ctx) {
   const focus = [
     'Review the whole branch through three lenses, in turn, and report every finding of each:',
@@ -609,7 +627,7 @@ function combinedFinalReviewPrompt(m, ctx) {
     '3. Correctness lens.',
     finalLensFocus(m, 'correctness', ctx.e2e),
   ].join('\n');
-  return finalReviewFrame(m, 'You are the final reviewer', focus);
+  return finalReviewFrame(m, 'You are the final reviewer', focus, ctx.minors || []);
 }
 
 function finalFixPrompt(m, findings, base) {
@@ -725,12 +743,20 @@ function checksLines(checks, mayCommit = false) {
     ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
 }
 
+// The key findings merge on, or null for one that stays apart: a
+// 'commit <sha>' file merges on the file, any other on its exact file and
+// line when the line is above 0.
 function findingKey(f) {
-  return JSON.stringify([f.file, f.line, f.issue]);
+  if (typeof f.file === 'string' && /^commit \S+$/.test(f.file)) return JSON.stringify([f.file]);
+  if (Number.isInteger(f.line) && f.line > 0) return JSON.stringify([f.file, f.line]);
+  return null;
 }
 
-// Merge the lenses' findings: identical file+line+issue becomes one entry
-// listing every lens that reported it, keeping the most severe severity.
+// Merge the lenses' findings (spec 1.3.1): findings on the same file and
+// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// every lens that reported it, keeping the most severe severity (and that
+// report's fix), the first issue text, and the other reports' distinct
+// issue texts as also_reported. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -739,14 +765,15 @@ function dedupeFindings(reports) {
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
       const key = findingKey(f);
-      const seen = byKey.get(key);
+      const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens] };
-        byKey.set(key, entry);
+        const entry = { ...f, lenses: [lens], also_reported: [] };
+        if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
+      if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) seen.also_reported.push(f.issue);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
         seen.severity = f.severity;
         seen.fix = f.fix;

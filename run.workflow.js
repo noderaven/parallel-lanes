@@ -876,10 +876,55 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
+// One line per finding; a finding merged from several reports
+// (dedupeFindings) also lists the other reports' issue text.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
-    + ` - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
+    + ` - ${f.issue} (suggested fix: ${f.fix})`
+    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
+      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+}
+
+// One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
+// the reviewer needed to check and could not, with source citing the task
+// step or spec section, why it could not be checked, and how to check it.
+function cannotVerifyItemSchema() {
+  return {
+    type: 'object',
+    properties: {
+      requirement: { type: 'string' },
+      source: { type: 'string' },
+      why: { type: 'string' },
+      check_by: { type: 'string' },
+    },
+    required: ['requirement', 'source', 'why', 'check_by'],
+  };
+}
+
+// A cannot_verify entry as text: '<requirement> (<source>): <why>; check:
+// <check_by>' for an object, the string itself for a plain string (an agent
+// from before 1.3.1).
+function cannotVerifyText(item) {
+  if (item === null || typeof item !== 'object') return String(item);
+  return `${item.requirement} (${item.source}): ${item.why}; check: ${item.check_by}`;
+}
+
+// A cannot_verify entry that names where its requirement comes from: only
+// these warn at acceptance; a plain string is kept as a note.
+function isSourced(item) {
+  return item !== null && typeof item === 'object' && present(item.source);
+}
+
+// What a reviewer returns as cannot_verify, and what it must leave out.
+function cannotVerifyLines() {
+  return [
+    'cannot_verify = [{requirement, source, why, check_by}], one per requirement from the plan or spec that you',
+    'needed to check and could not: source = the task step or spec section it comes from, why = why you could',
+    'not check it, check_by = how it can be checked. Leave out things you verified, verdicts or decisions,',
+    'limits the plan already accepts, the instruction not to re-run tests, and problems (those are findings);',
+    'empty when there is nothing.',
+  ];
 }
 
 // The note for a finding with file "start-task" (reviewStartFailure): the
@@ -1161,8 +1206,8 @@ function reviewResultText(m, task, where, rounds, head) {
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
-    'cannot_verify = requirements you could not verify from the diff. That result replaces the output format',
-    'named in the instructions above.',
+    ...cannotVerifyLines(),
+    'That result replaces the output format named in the instructions above.',
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
@@ -1402,7 +1447,8 @@ function reviewSchema() {
           required: ['severity', 'file', 'line', 'issue', 'fix'],
         },
       },
-      cannot_verify: { type: 'array', items: { type: 'string' } },
+      // Plain strings: agents from before 1.3.1 (kept as notes).
+      cannot_verify: { type: 'array', items: { anyOf: [cannotVerifyItemSchema(), { type: 'string' }] } },
     },
     required: ['verdict', 'findings', 'cannot_verify'],
   };
@@ -1970,9 +2016,23 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
+// The task minors checklist for a final reviewer (taskMinorFindings): []
+// when there are none.
+function taskMinorsLines(minors) {
+  if (!Array.isArray(minors) || minors.length === 0) return [];
+  return [
+    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+    findingsText(minors),
+    'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
+    'issue (for example "[<id>] ..."); otherwise leave it.',
+    '',
+  ];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, and the findings/head result.
-function finalReviewFrame(m, intro, focus) {
+// branch range, the commit-rules scan, the task minors checklist, and the
+// findings/head result.
+function finalReviewFrame(m, intro, focus, minors = []) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -1988,6 +2048,7 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...taskMinorsLines(minors),
     ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
@@ -1995,17 +2056,20 @@ function finalReviewFrame(m, intro, focus) {
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
-    'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
-    `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
+    'applies), issue, fix}], head = the full sha printed by',
+    `git -C ${dir} rev-parse HEAD (a read-only command you may run), and`,
+    ...cannotVerifyLines(),
   ].join('\n');
 }
 
-function finalReviewPrompt(m, lens, e2e) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e));
+// minors: the task minors checklist (taskMinorsLines).
+function finalReviewPrompt(m, lens, e2e, minors = []) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
-// ctx = {e2e}: the e2e result, or null without an e2e hook.
+// ctx = {e2e, minors?}: the e2e result, or null without an e2e hook, and
+// the task minors checklist (taskMinorsLines).
 function combinedFinalReviewPrompt(m, ctx) {
   const focus = [
     'Review the whole branch through three lenses, in turn, and report every finding of each:',
@@ -2019,7 +2083,7 @@ function combinedFinalReviewPrompt(m, ctx) {
     '3. Correctness lens.',
     finalLensFocus(m, 'correctness', ctx.e2e),
   ].join('\n');
-  return finalReviewFrame(m, 'You are the final reviewer', focus);
+  return finalReviewFrame(m, 'You are the final reviewer', focus, ctx.minors || []);
 }
 
 function finalFixPrompt(m, findings, base) {
@@ -2135,12 +2199,20 @@ function checksLines(checks, mayCommit = false) {
     ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
 }
 
+// The key findings merge on, or null for one that stays apart: a
+// 'commit <sha>' file merges on the file, any other on its exact file and
+// line when the line is above 0.
 function findingKey(f) {
-  return JSON.stringify([f.file, f.line, f.issue]);
+  if (typeof f.file === 'string' && /^commit \S+$/.test(f.file)) return JSON.stringify([f.file]);
+  if (Number.isInteger(f.line) && f.line > 0) return JSON.stringify([f.file, f.line]);
+  return null;
 }
 
-// Merge the lenses' findings: identical file+line+issue becomes one entry
-// listing every lens that reported it, keeping the most severe severity.
+// Merge the lenses' findings (spec 1.3.1): findings on the same file and
+// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// every lens that reported it, keeping the most severe severity (and that
+// report's fix), the first issue text, and the other reports' distinct
+// issue texts as also_reported. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -2149,14 +2221,15 @@ function dedupeFindings(reports) {
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
       const key = findingKey(f);
-      const seen = byKey.get(key);
+      const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens] };
-        byKey.set(key, entry);
+        const entry = { ...f, lenses: [lens], also_reported: [] };
+        if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
+      if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) seen.also_reported.push(f.issue);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
         seen.severity = f.severity;
         seen.fix = f.fix;
@@ -2456,7 +2529,8 @@ function checkedReview(v) {
 // whole task range. Reviews use reviewSettings with the changed_lines of the
 // implement or fix result under review.
 // Returns {task, status:'done'|'deferred'|'blocked', base, head, rounds,
-// tier_used, notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
+// tier_used, notes, rulings, next_note?, minor_findings? (done only: taskMinorFindings of the
+// approving review)}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
 // 'adjudicator_stop: <condition>').
 // base is owned by the script (the previous task's head, or the feature tip):
@@ -2751,8 +2825,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
 
   const notes = [];
   for (const f of verdict.findings || []) notes.push(`${f.severity} finding: ${f.file}:${f.line} - ${f.issue}`);
-  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
-  return result('done', doneNotes(notes));
+  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${cannotVerifyText(item)}`);
+  return result('done', doneNotes(notes), { minor_findings: taskMinorFindings(task, verdict.findings) });
+}
+
+// The minor findings of a task's approving review, for the final lenses:
+// each {id, severity, file, line, issue, fix}, id 'T<task>-<n>' numbered from
+// 1 (a task id that already starts with a letter, such as 'T2', is used as
+// it is: 'T2-1').
+function taskMinorFindings(task, findings) {
+  const prefix = /^[A-Za-z]/.test(task.id) ? task.id : `T${task.id}`;
+  return (Array.isArray(findings) ? findings : []).filter((f) => f && f.severity === 'minor')
+    .map((f, i) => ({
+      id: `${prefix}-${i + 1}`, severity: f.severity, file: f.file, line: f.line, issue: f.issue, fix: f.fix,
+    }));
 }
 
 // One batch unit (spec D3) for consecutive light tasks with the same batch
@@ -3050,7 +3136,10 @@ function acceptanceOf(input) {
       add('blocking_findings', 'failed', blocking.map((f) => `${f.id} [${f.severity}] ${f.file}:${f.line} ${f.issue} (${f.reason})`).join('; '));
     }
     for (const f of open.filter((x) => !isBlocking(x))) warnings.push(`open minor finding ${f.id}: ${f.file}:${f.line} ${f.issue}`);
-    for (const item of final.cannot_verify || []) warnings.push(`cannot verify: ${item}`);
+    // Only sourced entries warn; a plain string is a note in the report.
+    for (const item of (final.cannot_verify || []).filter(isSourced)) {
+      warnings.push(`cannot verify: ${present(item.lens) ? `${item.lens}: ` : ''}${cannotVerifyText(item)}`);
+    }
   } else {
     add('review_missing', 'missing', 'the final review did not run');
   }
@@ -3084,16 +3173,21 @@ function acceptanceOf(input) {
 // project checks (null: the project has none): once a fix agent ran,
 // whatever it returned, they run at the delivered head before the re-review,
 // which gets their result so it does not rerun them; the result is returned
-// as final.verify (absent when no fix agent ran).
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
+// as final.verify (absent when no fix agent ran). taskMinors: the minor
+// findings of approved task reviews (taskMinorFindings, ids T<task>-<n>):
+// every lens gets them as a checklist and raises one by putting its id in
+// brackets in a finding's issue; final.task_minors_open lists the ones no
+// lens raised. A lens's cannot_verify entries carry its name: an object as
+// lens, a plain string as a '<lens>: ' prefix.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
   // [label, lens name for findings and cannot_verify, prompt]
   const lenses = m.profile === 'lite'
-    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e })]]
+    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e)]);
+      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -3101,8 +3195,14 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   lenses.forEach(([, name], i) => {
     const r = results[i];
     if (!r || !Array.isArray(r.findings)) missing.push(name);
-    else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
+    else {
+      for (const item of r.cannot_verify || []) {
+        cannotVerify.push(item !== null && typeof item === 'object' ? { ...item, lens: name } : `${name}: ${item}`);
+      }
+    }
   });
+  const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
+    .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
   const findings = withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
@@ -3111,6 +3211,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   const tip = lensHead ? lensHead.head : base;
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
@@ -3276,7 +3377,7 @@ function withConsumesExtra(m, kept) {
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
@@ -3335,8 +3436,14 @@ async function runAll(manifest, io) {
       notes: '',
     };
   }
+  // The minor findings of approved task reviews, for the final lenses (a
+  // batch's results repeat them for each task: listed once by id).
+  const taskMinors = [];
   const record = (results) => {
     for (const r of results) {
+      if (r.status === 'done') {
+        for (const f of r.minor_findings || []) if (!taskMinors.some((x) => x.id === f.id)) taskMinors.push(f);
+      }
       tasks[r.task] = {
         // A task the ledger lists as deferred stays deferred when skipped.
         status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
@@ -3674,7 +3781,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
-    hasChecks ? verifyAt : null);
+    hasChecks ? verifyAt : null, taskMinors);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -3683,8 +3790,15 @@ async function runAll(manifest, io) {
     delete final.verify;
   }
   if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
-  if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
-  if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
+  // The run's own gaps are sourced entries (source 'run'), so they warn.
+  if (e2e !== null && e2e.notes) {
+    final.cannot_verify.unshift({ requirement: 'the e2e check returned no result', source: 'run',
+      why: e2e.notes, check_by: 'run the e2e hook at the delivered revision' });
+  }
+  if (fixUnreviewed) {
+    final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
+      why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.

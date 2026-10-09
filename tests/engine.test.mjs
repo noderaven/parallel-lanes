@@ -1451,3 +1451,64 @@ test('the final fix and the post-integrate fix use their own messages', async ()
   assert.ok(post.includes(POST_INTEGRATE_FIX_MESSAGE), post);
   assert.ok(!post.includes(FINAL_FIX_MESSAGE), post);
 });
+
+// ---- Structured cannot_verify (1.3.1) ----
+
+test('review prompts define cannot_verify and ask for the structured form', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt, reviewSchema, finalReviewSchema } = await loadHelpers([
+    'finalReviewPrompt', 'combinedFinalReviewPrompt', 'reviewSchema', 'finalReviewSchema']);
+  const m = manifest();
+  const prompts = {
+    review: reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', [finding('the bug')]),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(prompts)) {
+    for (const word of ['requirement', 'source', 'why', 'check_by']) {
+      assert.ok(text.includes(word), `${name}: ${word}`);
+    }
+    // What is not a cannot_verify entry.
+    assert.ok(/limits the plan already accepts/.test(text), `${name}: the exclusions`);
+  }
+  for (const schema of [reviewSchema(), finalReviewSchema()]) {
+    const items = schema.properties.cannot_verify.items;
+    assert.ok(Array.isArray(items.anyOf), JSON.stringify(items));
+    const obj = items.anyOf.find((s) => s.type === 'object');
+    assert.deepEqual(obj.required.slice().sort(), ['check_by', 'requirement', 'source', 'why']);
+    assert.ok(items.anyOf.some((s) => s.type === 'string'), 'plain strings stay accepted');
+  }
+});
+
+test('cannotVerifyText and isSourced', async () => {
+  const { cannotVerifyText, isSourced } = await loadHelpers(['cannotVerifyText', 'isSourced']);
+  const item = { requirement: 'bash 3.2', source: 'spec Testing', why: 'no macOS', check_by: 'CI' };
+  assert.equal(cannotVerifyText(item), 'bash 3.2 (spec Testing): no macOS; check: CI');
+  assert.equal(cannotVerifyText('a note'), 'a note');
+  assert.equal(isSourced(item), true);
+  assert.equal(isSourced({ ...item, source: '' }), false);
+  assert.equal(isSourced('a note'), false);
+  assert.equal(isSourced(null), false);
+});
+
+test('an approving review keeps its minor findings, numbered by task, and notes show cannot_verify text', async () => {
+  const minor = { severity: 'minor', file: 'src/a.js', line: 3, issue: 'naming', fix: 'rename' };
+  const cv = { requirement: 'bash 3.2', source: 'Task 2 Step 3', why: 'no macOS', check_by: 'CI' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'approve', findings: [minor, { ...minor, issue: 'typo' }], cannot_verify: [cv] }],
+  });
+  const r = await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'done');
+  assert.deepEqual(r.minor_findings.map((f) => [f.id, f.issue]), [['T2-1', 'naming'], ['T2-2', 'typo']]);
+  assert.ok(r.notes.includes('cannot verify: bash 3.2 (Task 2 Step 3): no macOS; check: CI'), r.notes);
+  // A plan task id with no letter gets the T prefix.
+  const s2 = stub({
+    '3 implement': [done('b0', 'h1')],
+    '3 review': [{ verdict: 'approve', findings: [minor], cannot_verify: [] }],
+  });
+  const r2 = await runTask(manifest(), task('3'), WHERE, 'b0', s2.io);
+  assert.deepEqual(r2.minor_findings.map((f) => f.id), ['T3-1']);
+});

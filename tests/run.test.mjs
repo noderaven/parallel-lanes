@@ -747,6 +747,7 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.ok(!labels(calls).includes('final fix'));
   assert.deepEqual(result.final, {
     findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: 'T5-h',
+    task_minors_open: [],
   });
   assert.equal(result.delivered_sha, 'T5-h');
   assert.ok(!labels(calls).includes('e2e recheck'), 'the e2e result already covers the delivered revision');
@@ -852,7 +853,11 @@ test('an e2e agent that returns null reruns on opus, then is listed under final 
   assert.deepEqual(e2eCalls.map((c) => c.model), ['sonnet', 'opus']);
   assert.ok(labels(calls).includes('e2e retry'));
   assert.equal(result.status, 'complete');
-  assert.ok(result.final.cannot_verify.includes('the e2e check returned no result'), JSON.stringify(result.final));
+  // A sourced entry (source 'run'), so it warns at acceptance.
+  const gap = result.final.cannot_verify.find((c) => c.requirement === 'the e2e check returned no result');
+  assert.ok(gap && gap.source === 'run', JSON.stringify(result.final));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('the e2e check returned no result')),
+    JSON.stringify(result.acceptance.warnings));
 });
 
 test('a final fix with no commits is still re-reviewed: its claims are checked, not trusted', async () => {
@@ -1552,8 +1557,8 @@ test('post-integrate re-review findings are reported and reach the final fix wav
   });
   assert.equal(viaHook.result.status, 'complete');
   assert.deepEqual(viaHook.result.integrate.fix_review, []);
-  assert.ok(viaHook.result.final.cannot_verify.includes('the post-integrate re-review returned no result'),
-    JSON.stringify(viaHook.result.final.cannot_verify));
+  assert.ok(viaHook.result.final.cannot_verify.some((c) => c.requirement === 'the post-integrate re-review returned no result'
+    && c.source === 'run'), JSON.stringify(viaHook.result.final.cannot_verify));
 });
 
 test('autonomous integrate failure without conflicts: one opus rerun, no resolver', async () => {
@@ -1938,7 +1943,9 @@ test('acceptance: a deferred task keeps the run from being accepted, now and on 
 test('acceptance: minor findings and cannot-verify items are warnings, not reasons', async () => {
   const minor = { ...finding('naming'), severity: 'minor' };
   const result = await acceptanceOf({
-    'final review sp': [{ findings: [minor], cannot_verify: ['load under 1k users'], head: 'T5-h' }],
+    'final review sp': [{ findings: [minor], cannot_verify: [{
+      requirement: 'load under 1k users', source: 'spec Performance', why: 'no load rig', check_by: 'a load test',
+    }, 'Tested: npm test passes'], head: 'T5-h' }],
     'final review security': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
     'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
     'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
@@ -1946,7 +1953,11 @@ test('acceptance: minor findings and cannot-verify items are warnings, not reaso
   assert.equal(result.acceptance.status, 'accepted');
   assert.deepEqual(result.acceptance.reasons, []);
   assert.ok(result.acceptance.warnings.some((w) => w.includes('open minor finding F1')));
-  assert.ok(result.acceptance.warnings.some((w) => w.includes('load under 1k users')));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('superpowers: load under 1k users (spec Performance)')),
+    JSON.stringify(result.acceptance.warnings));
+  // A plain string is kept in the report as a note, not a warning.
+  assert.ok(result.final.cannot_verify.includes('superpowers: Tested: npm test passes'));
+  assert.ok(!result.acceptance.warnings.some((w) => w.includes('Tested: npm test passes')));
 });
 
 test('an unblock note reaches a join task that depends on the unblocked lane task', async () => {
@@ -2119,4 +2130,90 @@ test('checksResultText: one line per result, empty for null', async () => {
     'The project checks already ran at f2: FAILED: npm test (exit 1), make (exit 2). Do not rerun them.');
   assert.equal(checksResultText({ head: 'I1', ok: true }), 'The project checks already ran at I1: passed. Do not rerun them.');
   assert.equal(checksResultText({ head: 'I1', ok: false }), 'The project checks already ran at I1: FAILED. Do not rerun them.');
+});
+
+// ---- Task minors to the final review, exact-line combining (1.3.1) ----
+
+const minorT2 = { severity: 'minor', file: 'src/T2.js', line: 5, issue: 'rename the helper', fix: 'rename it' };
+const lensLabels = ['final review sp', 'final review security', 'final review correctness'];
+
+test('final lenses get the open minor findings of approved task reviews', async () => {
+  const script = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { calls } = await run(manifest(), script);
+  for (const label of lensLabels) {
+    const p = calls.find((c) => c.label === label).prompt;
+    assert.ok(p.includes('[T2-1]') && p.includes('rename the helper'), `${label}: ${p}`);
+  }
+});
+
+test('a task minor no final lens raised is listed in final.task_minors_open', async () => {
+  const base = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { result } = await run(manifest(), base);
+  assert.deepEqual(result.final.task_minors_open.map((f) => f.id), ['T2-1']);
+  assert.equal(result.final.task_minors_open[0].issue, 'rename the helper');
+  const raised = {
+    ...phaseScript({
+      'final review correctness': [{
+        findings: [{ ...minorT2, issue: '[T2-1] the helper name still misleads' }], cannot_verify: [], head: 'T5-h',
+      }],
+    }),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const again = await run(manifest(), raised);
+  assert.deepEqual(again.result.final.task_minors_open, []);
+  // With no task minors the list is empty.
+  const none = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.deepEqual(none.result.final.task_minors_open, []);
+});
+
+test('findings on the same file and line merge across lenses; others stay apart', async () => {
+  const f = (issue, line) => ({ severity: 'minor', file: 'a.js', line, issue, fix: 'fix it' });
+  const script = {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review correctness': [{ findings: [f('x', 9), f('z', 0), f('z', 0)], cannot_verify: [], head: 'T5-h' }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  const got = result.final.findings.map((x) => [x.id, x.file, x.line, x.issue, x.lenses, x.also_reported]);
+  assert.deepEqual(got, [
+    ['F1', 'a.js', 7, 'x', ['superpowers', 'security'], ['y']],
+    ['F2', 'a.js', 9, 'x', ['correctness'], []],
+    ['F3', 'a.js', 0, 'z', ['correctness'], []],
+    ['F4', 'a.js', 0, 'z', ['correctness'], []],
+  ]);
+  // The fixer sees the merged-away report too.
+  const fix = (await run(manifest(), {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: 'T5-h' }],
+    }),
+    ...taskScript(ALL),
+  })).calls.find((c) => c.label === 'final fix').prompt;
+  assert.ok(fix.includes('[F1]') && fix.includes('y'), fix);
+});
+
+test('commit findings on the same sha merge', () => {
+  const c = (issue, line = 0) => ({ severity: 'minor', file: 'commit abc1234', line, issue, fix: 'none' });
+  const merged = dedupeFindings([
+    { lens: 'superpowers', findings: [c('trailer')] },
+    { lens: 'security', findings: [c('non-ASCII subject')] },
+    { lens: 'correctness', findings: [{ ...c('other'), file: 'commit def5678' }] },
+  ]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[0].lenses, ['superpowers', 'security']);
+  assert.equal(merged[0].issue, 'trailer');
+  assert.deepEqual(merged[0].also_reported, ['non-ASCII subject']);
+  assert.equal(merged[1].file, 'commit def5678');
 });

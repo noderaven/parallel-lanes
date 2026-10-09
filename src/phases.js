@@ -22,16 +22,21 @@
 // project checks (null: the project has none): once a fix agent ran,
 // whatever it returned, they run at the delivered head before the re-review,
 // which gets their result so it does not rerun them; the result is returned
-// as final.verify (absent when no fix agent ran).
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
+// as final.verify (absent when no fix agent ran). taskMinors: the minor
+// findings of approved task reviews (taskMinorFindings, ids T<task>-<n>):
+// every lens gets them as a checklist and raises one by putting its id in
+// brackets in a finding's issue; final.task_minors_open lists the ones no
+// lens raised. A lens's cannot_verify entries carry its name: an object as
+// lens, a plain string as a '<lens>: ' prefix.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
   // [label, lens name for findings and cannot_verify, prompt]
   const lenses = m.profile === 'lite'
-    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e })]]
+    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e)]);
+      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -39,8 +44,14 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   lenses.forEach(([, name], i) => {
     const r = results[i];
     if (!r || !Array.isArray(r.findings)) missing.push(name);
-    else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
+    else {
+      for (const item of r.cannot_verify || []) {
+        cannotVerify.push(item !== null && typeof item === 'object' ? { ...item, lens: name } : `${name}: ${item}`);
+      }
+    }
   });
+  const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
+    .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
   const findings = withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
@@ -49,6 +60,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   const tip = lensHead ? lensHead.head : base;
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
@@ -214,7 +226,7 @@ function withConsumesExtra(m, kept) {
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
@@ -273,8 +285,14 @@ async function runAll(manifest, io) {
       notes: '',
     };
   }
+  // The minor findings of approved task reviews, for the final lenses (a
+  // batch's results repeat them for each task: listed once by id).
+  const taskMinors = [];
   const record = (results) => {
     for (const r of results) {
+      if (r.status === 'done') {
+        for (const f of r.minor_findings || []) if (!taskMinors.some((x) => x.id === f.id)) taskMinors.push(f);
+      }
       tasks[r.task] = {
         // A task the ledger lists as deferred stays deferred when skipped.
         status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
@@ -612,7 +630,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
-    hasChecks ? verifyAt : null);
+    hasChecks ? verifyAt : null, taskMinors);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -621,8 +639,15 @@ async function runAll(manifest, io) {
     delete final.verify;
   }
   if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
-  if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
-  if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
+  // The run's own gaps are sourced entries (source 'run'), so they warn.
+  if (e2e !== null && e2e.notes) {
+    final.cannot_verify.unshift({ requirement: 'the e2e check returned no result', source: 'run',
+      why: e2e.notes, check_by: 'run the e2e hook at the delivered revision' });
+  }
+  if (fixUnreviewed) {
+    final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
+      why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.

@@ -97,10 +97,55 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
+// One line per finding; a finding merged from several reports
+// (dedupeFindings) also lists the other reports' issue text.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
-    + ` - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
+    + ` - ${f.issue} (suggested fix: ${f.fix})`
+    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
+      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+}
+
+// One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
+// the reviewer needed to check and could not, with source citing the task
+// step or spec section, why it could not be checked, and how to check it.
+function cannotVerifyItemSchema() {
+  return {
+    type: 'object',
+    properties: {
+      requirement: { type: 'string' },
+      source: { type: 'string' },
+      why: { type: 'string' },
+      check_by: { type: 'string' },
+    },
+    required: ['requirement', 'source', 'why', 'check_by'],
+  };
+}
+
+// A cannot_verify entry as text: '<requirement> (<source>): <why>; check:
+// <check_by>' for an object, the string itself for a plain string (an agent
+// from before 1.3.1).
+function cannotVerifyText(item) {
+  if (item === null || typeof item !== 'object') return String(item);
+  return `${item.requirement} (${item.source}): ${item.why}; check: ${item.check_by}`;
+}
+
+// A cannot_verify entry that names where its requirement comes from: only
+// these warn at acceptance; a plain string is kept as a note.
+function isSourced(item) {
+  return item !== null && typeof item === 'object' && present(item.source);
+}
+
+// What a reviewer returns as cannot_verify, and what it must leave out.
+function cannotVerifyLines() {
+  return [
+    'cannot_verify = [{requirement, source, why, check_by}], one per requirement from the plan or spec that you',
+    'needed to check and could not: source = the task step or spec section it comes from, why = why you could',
+    'not check it, check_by = how it can be checked. Leave out things you verified, verdicts or decisions,',
+    'limits the plan already accepts, the instruction not to re-run tests, and problems (those are findings);',
+    'empty when there is nothing.',
+  ];
 }
 
 // The note for a finding with file "start-task" (reviewStartFailure): the
@@ -382,8 +427,8 @@ function reviewResultText(m, task, where, rounds, head) {
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
-    'cannot_verify = requirements you could not verify from the diff. That result replaces the output format',
-    'named in the instructions above.',
+    ...cannotVerifyLines(),
+    'That result replaces the output format named in the instructions above.',
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
@@ -623,7 +668,8 @@ function reviewSchema() {
           required: ['severity', 'file', 'line', 'issue', 'fix'],
         },
       },
-      cannot_verify: { type: 'array', items: { type: 'string' } },
+      // Plain strings: agents from before 1.3.1 (kept as notes).
+      cannot_verify: { type: 'array', items: { anyOf: [cannotVerifyItemSchema(), { type: 'string' }] } },
     },
     required: ['verdict', 'findings', 'cannot_verify'],
   };
