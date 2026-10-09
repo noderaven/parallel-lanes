@@ -9,9 +9,10 @@ import {
   existsSync,
   statSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -125,6 +126,23 @@ test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', 
   const res = findSuperpowers(env);
   assert.equal(res.code, 0, res.stderr);
   assert.equal(res.stdout.trim(), join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
+});
+
+test('find-superpowers prints a C:/ path under Git Bash', () => {
+  const root = workDir();
+  fakeInstall(join(root, 'sp'), { pkgVersion: '6.4.2' });
+  // A fake cygpath prints C:/fake before its last argument.
+  const bin = join(workDir(), 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'cygpath'), '#!/bin/bash\necho "C:/fake${@: -1}"\n');
+  chmodSync(join(bin, 'cygpath'), 0o755);
+  const res = findSuperpowers({
+    PL_SEARCH_ROOTS: root,
+    PL_UNAME: 'MINGW64_NT-10.0',
+    PATH: `${bin}${delimiter}${process.env.PATH}`,
+  });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stdout, `C:/fake${join(root, 'sp', 'skills')}\n`);
 });
 
 test('find-superpowers rejects arguments with exit 2', () => {

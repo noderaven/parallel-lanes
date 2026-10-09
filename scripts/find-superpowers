@@ -13,8 +13,12 @@
 # PL_SEARCH_ROOTS (colon-separated directories) replaces the default; each
 # immediate subdirectory of a root is a candidate install.
 #
+# Under Git Bash the path takes the C:/ form.
+#
 # Exit 0 with the path on stdout; 2 on usage error; 3 (no output) if none found.
 set -euo pipefail
+
+. "$(dirname "${BASH_SOURCE[0]}")/_paths.sh"
 
 if [ "$#" -ne 0 ]; then
   echo "usage: find-superpowers" >&2
@@ -59,7 +63,7 @@ for dir in ${candidates[@]+"${candidates[@]}"}; do
   if [ -z "$version" ]; then
     version="$(read_version "$dir/.claude-plugin/plugin.json")"
   fi
-  abs="$(cd "$dir/skills" && pwd)"
+  abs="$(native "$(cd "$dir/skills" && pwd)")"
   entries+="${version:-0}"$'\t'"$abs"$'\n'
 done
 
