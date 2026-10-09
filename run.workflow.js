@@ -890,6 +890,40 @@ function startFindingNote(findings) {
     'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
 }
 
+// The rulings already made for this run (m.run_rulings, set only by the
+// workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
+// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
+// ruling quoted as written. Empty when there are none.
+function runRulingsLines(m) {
+  const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
+  if (rulings.length === 0) return [];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+}
+
+// The message a task fix round commits with: 'fix: address review findings
+// for Task <id>', or for a batch 'for Batch <first>-<last>'.
+function fixCommitMessage(task) {
+  return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
+}
+
+// What every reviewer, re-reviewer and final lens is told about fix commits:
+// each fix message, and that neither the plan's message on a task's first
+// commit nor a fix message on a fix commit is a commit-rule finding.
+function fixMessagesLines() {
+  return [
+    'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
+    '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
+    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message; neither is a",
+    'commit-rule finding.',
+  ];
+}
+
+// The line that tells a fix agent which message to commit with.
+function commitWithLine(message) {
+  return `Commit with the message \`${message}\`, in the form the commit rules use (for example their prefix style).`;
+}
+
 // Shared context every task agent gets. guidance (optional) is
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
@@ -922,6 +956,7 @@ function taskContext(m, task, where, guidance = null) {
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
     checkoutRules(where.dir, where.branch),
     ...briefs,
+    ...runRulingsLines(m),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -1119,6 +1154,7 @@ function reviewResultText(m, task, where, rounds, head) {
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
+    ...fixMessagesLines(),
     'Report a commit message that breaks the commit rules as a minor finding (file "commit <sha>", line 0):',
     'history is never rewritten, so it cannot hold up the task; it is reported to the user.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
@@ -1191,6 +1227,11 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
+    // A batch's commits are one per task, each with its brief's message.
+    ...(batch ? [] : [
+      'When HEAD already holds the task\'s first commit, commit further changes with the message',
+      `\`${fixCommitMessage(task)}\`, in the form the commit rules use (for example their prefix style).`,
+    ]),
   ].join('\n'));
   if (retry) {
     parts.push('', [
@@ -1275,6 +1316,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
     ...startFindingNote(findings),
@@ -1782,6 +1824,17 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   ].join('\n');
 }
 
+// The message the final fix commits with. A function, not a constant: the
+// test harness's loadHelpers returns before top-level bindings initialize.
+function finalFixMessage() {
+  return 'fix: address the final review findings';
+}
+
+// The message a post-integration fix commits with.
+function postIntegrateFixMessage() {
+  return 'fix: make the post-integration check pass';
+}
+
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
 // the notes the failing step returned.
@@ -1794,6 +1847,7 @@ function postIntegrateFixPrompt(m, failure) {
     failure,
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    commitWithLine(postIntegrateFixMessage()),
     'Rerun every project command afterwards and confirm they pass:',
     commandsText(m, null, featureDir(m)),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
@@ -1821,6 +1875,7 @@ function postIntegrateReReviewPrompt(m, base, head) {
     '',
     'Check the fix for correctness and for new critical or important problems; do not re-review code the fix',
     'did not touch.',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line, issue, fix}], every',
@@ -1925,8 +1980,10 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
@@ -1969,9 +2026,11 @@ function finalFixPrompt(m, findings, base) {
     'decline. Rerun every project command afterwards:',
     commandsText(m, null, featureDir(m)),
     'Commit your fixes per the commit rules.',
+    commitWithLine(finalFixMessage()),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -2005,6 +2064,8 @@ function finalReReviewPrompt(m, base, head, findings) {
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...runRulingsLines(m),
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
@@ -3102,20 +3163,6 @@ function labelTasks(m, label) {
   return [];
 }
 
-// A copy of the manifest whose notes for every not-yet-done task gain the
-// pre-flight ruling (spec C1). taskContext shows a task's note, so the ruling
-// binds every task agent for this run without an engine change.
-function preflightResolved(m, text) {
-  const line = `Pre-flight ruling (binding for this run): ${text}`;
-  const notes = { ...(m.notes || {}) };
-  const done = new Set(m.done);
-  for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    if (done.has(t.id)) continue;
-    notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
-  }
-  return { ...m, notes };
-}
-
 // A copy of the manifest whose notes carry the unblock note of each result
 // (next_note) to the tasks of later whose depends_on names its task: later
 // is the lanes and the join after the prelude, the join after the lanes (a
@@ -3221,6 +3268,9 @@ async function runAll(manifest, io) {
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
 
+  // Run rulings come from this run's pre-flight only, never from the
+  // manifest file.
+  m = { ...m, run_rulings: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -3345,6 +3395,9 @@ async function runAll(manifest, io) {
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
     m = withConsumesExtra(m, kept);
+    // Pre-flight's rulings bind every task and final reviewer of this run
+    // (taskContext and the final review prompts show m.run_rulings).
+    m = { ...m, run_rulings: [...pre.rulings] };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -3357,10 +3410,10 @@ async function runAll(manifest, io) {
         if (ruling.unavailable) return report('stopped', ruling.text);
         return report('preflight_conflicts');
       }
-      // The ruling binds every not-yet-done task: taskContext shows each
-      // task's note, so the ruling reaches every task agent.
+      // The ruling joins the run rulings, so it reaches every task agent
+      // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
-      m = preflightResolved(m, ruling.text);
+      m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
 

@@ -141,20 +141,6 @@ function labelTasks(m, label) {
   return [];
 }
 
-// A copy of the manifest whose notes for every not-yet-done task gain the
-// pre-flight ruling (spec C1). taskContext shows a task's note, so the ruling
-// binds every task agent for this run without an engine change.
-function preflightResolved(m, text) {
-  const line = `Pre-flight ruling (binding for this run): ${text}`;
-  const notes = { ...(m.notes || {}) };
-  const done = new Set(m.done);
-  for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    if (done.has(t.id)) continue;
-    notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
-  }
-  return { ...m, notes };
-}
-
 // A copy of the manifest whose notes carry the unblock note of each result
 // (next_note) to the tasks of later whose depends_on names its task: later
 // is the lanes and the join after the prelude, the join after the lanes (a
@@ -260,6 +246,9 @@ async function runAll(manifest, io) {
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
 
+  // Run rulings come from this run's pre-flight only, never from the
+  // manifest file.
+  m = { ...m, run_rulings: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -384,6 +373,9 @@ async function runAll(manifest, io) {
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
     m = withConsumesExtra(m, kept);
+    // Pre-flight's rulings bind every task and final reviewer of this run
+    // (taskContext and the final review prompts show m.run_rulings).
+    m = { ...m, run_rulings: [...pre.rulings] };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -396,10 +388,10 @@ async function runAll(manifest, io) {
         if (ruling.unavailable) return report('stopped', ruling.text);
         return report('preflight_conflicts');
       }
-      // The ruling binds every not-yet-done task: taskContext shows each
-      // task's note, so the ruling reaches every task agent.
+      // The ruling joins the run rulings, so it reaches every task agent
+      // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
-      m = preflightResolved(m, ruling.text);
+      m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
 

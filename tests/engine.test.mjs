@@ -1393,3 +1393,61 @@ test('prompts carry only the project rules: no ASCII or trailer rule of their ow
     assert.ok(!/trailer|co-authored|AI (name|attribution)|Claude/i.test(own), `${name}: a trailer or AI rule of its own`);
   }
 });
+
+// ---- Run rulings and fix commit messages (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer for this task";
+const TASK_FIX_MESSAGE = 'fix: address review findings for Task';
+const FINAL_FIX_MESSAGE = 'fix: address the final review findings';
+const POST_INTEGRATE_FIX_MESSAGE = 'fix: make the post-integration check pass';
+
+test('a user answer from a resume keeps its own label beside the run rulings', () => {
+  const m = manifest({ notes: { T2: 'yes' }, run_rulings: ['R1'] });
+  const p = implementPrompt(m, task('T2'), WHERE, 'b0');
+  assert.ok(p.includes(`${USER_ANSWER} (follow it where it settles a question): yes`), p);
+  const lines = p.split('\n');
+  const at = lines.indexOf(RUN_RULINGS);
+  assert.ok(at >= 0, p);
+  assert.equal(lines[at + 1], '- R1');
+  // The ruling is not given the user's label.
+  assert.ok(!lines.some((l) => l.includes(USER_ANSWER) && l.includes('R1')), p);
+  // Without run rulings there is no heading.
+  assert.ok(!implementPrompt(manifest(), task('T2'), WHERE, 'b0').includes(RUN_RULINGS));
+});
+
+test('fix rounds commit with the fix message, and reviewers are told it is expected', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt } = await loadHelpers(['finalReviewPrompt',
+    'combinedFinalReviewPrompt']);
+  const m = manifest();
+  const fs = [finding('the bug')];
+  assert.ok(fixPrompt(m, task('T2'), WHERE, fs, done('b0', 'h1'), 'h1')
+    .includes('fix: address review findings for Task T2'));
+  const unit = { id: 'T2-T3', title: 'batch', files: [], tier: 'light', security: false, batch: 'k',
+    tasks: [task('T2', { tier: 'light' }), task('T3', { tier: 'light' })] };
+  const batchFix = fixPrompt(m, unit, WHERE, fs, done('b0', 'h1'), 'h1');
+  assert.ok(batchFix.includes('fix: address review findings for Batch T2-T3'), batchFix);
+  const reviewers = {
+    review: reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', fs),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(reviewers)) {
+    assert.ok(text.includes(TASK_FIX_MESSAGE), `${name}: the task fix message`);
+    assert.ok(text.includes(FINAL_FIX_MESSAGE), `${name}: the final fix message`);
+  }
+});
+
+test('the final fix and the post-integrate fix use their own messages', async () => {
+  const { postIntegrateFixPrompt } = await loadHelpers(['postIntegrateFixPrompt']);
+  const m = manifest({ hooks: { post_integrate: 'smoke test' } });
+  const finalFix = finalFixPrompt(m, [{ ...finding('the bug'), id: 'F1' }], 'h1');
+  assert.ok(finalFix.includes(FINAL_FIX_MESSAGE), finalFix);
+  assert.ok(!finalFix.includes(POST_INTEGRATE_FIX_MESSAGE), finalFix);
+  const post = postIntegrateFixPrompt(m, 'npm test failed');
+  assert.ok(post.includes(POST_INTEGRATE_FIX_MESSAGE), post);
+  assert.ok(!post.includes(FINAL_FIX_MESSAGE), post);
+});

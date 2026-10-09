@@ -112,6 +112,40 @@ function startFindingNote(findings) {
     'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
 }
 
+// The rulings already made for this run (m.run_rulings, set only by the
+// workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
+// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
+// ruling quoted as written. Empty when there are none.
+function runRulingsLines(m) {
+  const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
+  if (rulings.length === 0) return [];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+}
+
+// The message a task fix round commits with: 'fix: address review findings
+// for Task <id>', or for a batch 'for Batch <first>-<last>'.
+function fixCommitMessage(task) {
+  return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
+}
+
+// What every reviewer, re-reviewer and final lens is told about fix commits:
+// each fix message, and that neither the plan's message on a task's first
+// commit nor a fix message on a fix commit is a commit-rule finding.
+function fixMessagesLines() {
+  return [
+    'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
+    '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
+    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message; neither is a",
+    'commit-rule finding.',
+  ];
+}
+
+// The line that tells a fix agent which message to commit with.
+function commitWithLine(message) {
+  return `Commit with the message \`${message}\`, in the form the commit rules use (for example their prefix style).`;
+}
+
 // Shared context every task agent gets. guidance (optional) is
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
@@ -144,6 +178,7 @@ function taskContext(m, task, where, guidance = null) {
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
     checkoutRules(where.dir, where.branch),
     ...briefs,
+    ...runRulingsLines(m),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -341,6 +376,7 @@ function reviewResultText(m, task, where, rounds, head) {
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
+    ...fixMessagesLines(),
     'Report a commit message that breaks the commit rules as a minor finding (file "commit <sha>", line 0):',
     'history is never rewritten, so it cannot hold up the task; it is reported to the user.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
@@ -413,6 +449,11 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
+    // A batch's commits are one per task, each with its brief's message.
+    ...(batch ? [] : [
+      'When HEAD already holds the task\'s first commit, commit further changes with the message',
+      `\`${fixCommitMessage(task)}\`, in the form the commit rules use (for example their prefix style).`,
+    ]),
   ].join('\n'));
   if (retry) {
     parts.push('', [
@@ -497,6 +538,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
     ...startFindingNote(findings),

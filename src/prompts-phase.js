@@ -415,6 +415,17 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   ].join('\n');
 }
 
+// The message the final fix commits with. A function, not a constant: the
+// test harness's loadHelpers returns before top-level bindings initialize.
+function finalFixMessage() {
+  return 'fix: address the final review findings';
+}
+
+// The message a post-integration fix commits with.
+function postIntegrateFixMessage() {
+  return 'fix: make the post-integration check pass';
+}
+
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
 // the notes the failing step returned.
@@ -427,6 +438,7 @@ function postIntegrateFixPrompt(m, failure) {
     failure,
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    commitWithLine(postIntegrateFixMessage()),
     'Rerun every project command afterwards and confirm they pass:',
     commandsText(m, null, featureDir(m)),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
@@ -454,6 +466,7 @@ function postIntegrateReReviewPrompt(m, base, head) {
     '',
     'Check the fix for correctness and for new critical or important problems; do not re-review code the fix',
     'did not touch.',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line, issue, fix}], every',
@@ -558,8 +571,10 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
@@ -602,9 +617,11 @@ function finalFixPrompt(m, findings, base) {
     'decline. Rerun every project command afterwards:',
     commandsText(m, null, featureDir(m)),
     'Commit your fixes per the commit rules.',
+    commitWithLine(finalFixMessage()),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -638,6 +655,8 @@ function finalReReviewPrompt(m, base, head, findings) {
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...runRulingsLines(m),
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,

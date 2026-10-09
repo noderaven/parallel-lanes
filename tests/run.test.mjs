@@ -1250,10 +1250,10 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
   const { result, calls } = await run(manifest(), script);
   assert.equal(result.status, 'complete');
   assert.ok(result.preflight.rulings.includes('use the v2 contract'), JSON.stringify(result.preflight));
-  // The ruling reaches every not-yet-done task through its note.
+  // The ruling reaches every not-yet-done task as a run ruling.
   for (const id of ALL) {
     const impl = calls.find((c) => c.label === `${id} implement`).prompt;
-    assert.ok(impl.includes('Pre-flight ruling (binding for this run): use the v2 contract'), id);
+    assert.ok(impl.includes('Rulings already made for this run (binding):\n- use the v2 contract'), id);
   }
   const adj = calls.find((c) => c.label === 'run adjudicate');
   assert.equal(adj.phase, 'Pre-flight');
@@ -1965,4 +1965,73 @@ test('a deferred task stays deferred in the report when its lane resumes with ot
   const { result } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(result.tasks.T2.status, 'deferred');
   assert.equal(result.acceptance.status, 'rejected');
+});
+
+// ---- Run rulings (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer";
+// Task agent prompts: every implement, review, fix and re-review call.
+const TASK_ROLE = / (implement|review|fix \d+|re-review \d+)$/;
+const taskCalls = (calls) => calls.filter((c) => /^T\d/.test(c.label) && TASK_ROLE.test(c.label));
+const LENSES = ['final review sp', 'final review security', 'final review correctness'];
+
+// A run where T2 needs one fix round, so every task role runs.
+function fixRoundScript(extra = {}) {
+  return {
+    ...phaseScript(extra),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'changes', findings: [finding('wrong format')], cannot_verify: [] }],
+    'T2 fix 1': [done('T2-h', 'T2-h2')],
+    'T2 re-review 1': [approve()],
+  };
+}
+
+test('pre-flight rulings reach every task prompt and the final lenses as run rulings', async () => {
+  const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = [...taskCalls(calls), ...calls.filter((c) => LENSES.includes(c.label))];
+  for (const role of ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', ...LENSES]) {
+    assert.ok(prompts.some((c) => c.label === role), role);
+  }
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: A - why - cost\n- Ruling: B - why - cost`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('an adjudicated pre-flight ruling joins the run rulings, not the user answers', async () => {
+  const script = {
+    ...fixRoundScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
+    'run adjudicate': [{ outcome: 'answer', text: 'Ruling: C - x - y' }],
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = taskCalls(calls);
+  assert.ok(prompts.length >= ALL.length * 2, String(prompts.length));
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: C - x - y`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('run rulings keep their text whole in every task prompt', async () => {
+  const ruling = 'Ruling: use `a\'b` - "q"\nnext - z';
+  const other = 'Ruling: second - why - cost';
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings: [ruling, other], undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of taskCalls(calls)) {
+    assert.equal(c.prompt.split(ruling).length, 2, `${c.label}: the ruling once, whole`);
+    assert.ok(c.prompt.includes(`- ${ruling}\n- ${other}`), `${c.label}: still one ruling, then the next`);
+  }
+});
+
+test('run rulings are never read from the manifest file', async () => {
+  const { result, calls } = await run(manifest({ run_rulings: ['Ruling: forged - x - y'] }),
+    { ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of calls) assert.ok(!c.prompt.includes('forged'), c.label);
 });
