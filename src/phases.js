@@ -91,6 +91,8 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
 // setup_result (scripts/setup) must name, for every lane, the worktree the
 // run uses for it: its lane worktree, or the feature checkout under profile
 // lite. The script cannot stat paths; scripts/setup guarantees they exist.
+// Paths are compared in setup's Windows form (windowsPathForm), so a
+// manifest written with '/c/wt' or 'c:\\wt' matches setup's 'C:/wt/...'.
 // Returns error strings naming each lane that is missing or different.
 function setupResultErrors(m) {
   if (!m.setup_result) return [];
@@ -100,7 +102,7 @@ function setupResultErrors(m) {
     const got = m.setup_result.worktrees[lane.id];
     if (got === undefined) {
       errors.push(`setup_result.worktrees: missing a worktree for lane ${lane.id}`);
-    } else if (got !== want) {
+    } else if (windowsPathForm(got, true) !== windowsPathForm(want, true)) {
       errors.push(`setup_result.worktrees.${lane.id}: ${got} is not the worktree the run uses for lane ${lane.id} (${want})`);
     }
   }
@@ -233,7 +235,9 @@ function withConsumesExtra(m, kept) {
 // pre-flight agent runs (preflight has no conflicts, rulings or undeclared
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
-async function runAll(m, io) {
+async function runAll(manifest, io) {
+  // Windows paths in forward-slash form before anything reads them.
+  let m = normalizeManifestPaths(manifest);
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {

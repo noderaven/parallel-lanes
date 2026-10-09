@@ -19,7 +19,41 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+die() { echo "install: $*" >&2; exit 1; }
+
+# The skill's files: next to this script, or in parallel-lanes/ of an
+# unzipped copy. Empty when neither holds SKILL.md (only --uninstall works).
+if [ -f "$here/SKILL.md" ]; then
+  src="$here"
+elif [ -f "$here/parallel-lanes/SKILL.md" ]; then
+  src="$here/parallel-lanes"
+else
+  src=""
+fi
+if [ -n "$src" ]; then
+  . "$src/scripts/_paths.sh"
+else
+  pl_is_windows() { return 1; }
+  native() { printf '%s\n' "$1"; }
+fi
+
+
+for tool in jq git; do
+  command -v "$tool" >/dev/null 2>&1 && continue
+  if [ "$tool" = jq ] && pl_is_windows; then
+    die "jq is required but not installed (on Windows: winget install jqlang.jq, then reopen Git Bash)"
+  fi
+  die "$tool is required but not installed"
+done
+
 claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# On Windows the config dir takes the C:/ form: jq.exe gets it as is, with no
+# Git Bash path conversion to depend on, and the hook commands name it the
+# same way whatever form CLAUDE_CONFIG_DIR or HOME used.
+if pl_is_windows; then
+  claude_dir="$(native "$claude_dir" 2>/dev/null)" || claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+fi
 dest="$claude_dir/skills/parallel-lanes"
 settings="$claude_dir/settings.json"
 agent_file="$claude_dir/agents/parallel-lanes-worker.md"
@@ -29,12 +63,6 @@ shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 start_cmd="bash $(shquote "$dest/hooks/session-start.sh")"
 notice_cmd="bash $(shquote "$dest/hooks/notice.sh")"
 
-die() { echo "install: $*" >&2; exit 1; }
-
-for tool in jq git python3; do
-  command -v "$tool" >/dev/null 2>&1 || die "$tool is required but not installed"
-done
-
 backup_settings() {
   [ -f "$settings" ] || return 0
   local bak="$settings.bak.$(date +%Y%m%d%H%M%S)"
@@ -42,9 +70,10 @@ backup_settings() {
   echo "Backed up settings to $bak"
 }
 
-# Drop every hook entry whose command points at this skill's hooks dir.
+# Drop every hook entry whose command points at this skill's hooks dir, with
+# either separator (an older install on Windows may have written backslashes).
 strip_filter='
-  def strip: map(.hooks |= map(select((.command // "") | contains("/skills/parallel-lanes/hooks/") | not)))
+  def strip: map(.hooks |= map(select((.command // "") | test("[/\\\\]skills[/\\\\]parallel-lanes[/\\\\]hooks[/\\\\]") | not)))
              | map(select(.hooks | length > 0));
   if .hooks then
     .hooks |= with_entries(.value |= strip) | .hooks |= with_entries(select(.value | length > 0))
@@ -70,14 +99,11 @@ if [ "${1:-}" = "--uninstall" ]; then
   exit 0
 fi
 [ $# -eq 0 ] || die "usage: bash install.sh [--uninstall]"
+[ -n "$src" ] || die "SKILL.md not found next to install.sh or in parallel-lanes/"
 
-if [ -f "$here/SKILL.md" ]; then
-  src="$here"
-elif [ -f "$here/parallel-lanes/SKILL.md" ]; then
-  src="$here/parallel-lanes"
-else
-  die "SKILL.md not found next to install.sh or in parallel-lanes/"
-fi
+# Any working Python 3.8 or later will do (python3, python, or py -3); the
+# skill finds the same one at run time. find-python explains a failure.
+bash "$src/scripts/find-python" >/dev/null || die "Python 3.8 or later is required but none works"
 
 mkdir -p "$claude_dir/skills"
 if [ "$src" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then

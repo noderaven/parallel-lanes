@@ -7,6 +7,7 @@ import { SKILL_DIR, loadScript } from './harness.mjs';
 const SKILL_MD = join(SKILL_DIR, 'SKILL.md');
 const REFERENCE_MD = join(SKILL_DIR, 'reference.md');
 const ADOPT_MD = join(SKILL_DIR, 'adopt.md');
+const README_MD = join(SKILL_DIR, 'README.md');
 
 const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
   'execution-method handoff), or when resuming a stopped parallel-lanes run.';
@@ -209,9 +210,14 @@ test('SKILL.md resume rechecks coverage, passes the manifest to ledger status, a
   assert.ok(text.includes('ledger accept <ledger_dir>'), 'an explicit acceptance is recorded');
 });
 
-test('SKILL.md stays under 2400 words', () => {
+// The limit guards against bloat; it is not a target to compress toward.
+// SKILL.md holds what every invocation needs (the flow, the hard rules, the
+// notices, the consent gate, the hand-back). Material needed only sometimes
+// moves whole to reference.md, with SKILL.md pointing to it. Never shorten
+// sentences or drop the reasons behind rules to stay under the limit.
+test('SKILL.md stays under 3000 words', () => {
   const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
-  assert.ok(words < 2400, `SKILL.md has ${words} words`);
+  assert.ok(words < 3000, `SKILL.md has ${words} words`);
 });
 
 test('reference.md has sections for profiles, tiers, batching, adjudicator, budgets, and the report', () => {
@@ -220,4 +226,25 @@ test('reference.md has sections for profiles, tiers, batching, adjudicator, budg
   for (const word of ['profiles', 'tiers', 'batching', 'adjudicator', 'budgets', 'report']) {
     assert.ok(headings.some((h) => h.includes(word)), `reference.md lacks a ${word} section`);
   }
+});
+
+test('SKILL.md finds Python first and uses <python> in every helper command', () => {
+  const skill = read(SKILL_MD).toString('utf8');
+  assert.ok(skill.includes('scripts/find-python'), 'SKILL.md does not run find-python');
+  assert.ok(skill.includes('<python> <skill_dir>/scripts/'), 'SKILL.md lacks <python> helper commands');
+  for (const [name, path] of [['SKILL.md', SKILL_MD], ['reference.md', REFERENCE_MD], ['adopt.md', ADOPT_MD]]) {
+    const text = read(path).toString('utf8');
+    assert.ok(!text.includes('python3 <skill_dir>'), `${name} still runs a helper with python3`);
+    assert.ok(!/(^|[`"(\s])python3 -c/m.test(text), `${name} still runs python3 -c`);
+  }
+});
+
+test('README has a Windows section', () => {
+  const text = read(README_MD).toString('utf8');
+  for (const term of ['Git for Windows', 'winget install jqlang.jq', 'CLAUDE_CODE_GIT_BASH_PATH',
+    'core.longpaths', 'PowerShell']) {
+    assert.ok(text.includes(term), `README lacks ${term}`);
+  }
+  assert.match(text, /^#+ .*Windows/m, 'README has no Windows heading');
+  assert.match(text, /preliminary/i, 'README does not call Windows support preliminary');
 });

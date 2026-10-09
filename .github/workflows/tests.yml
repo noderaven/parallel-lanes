@@ -23,12 +23,19 @@ jobs:
             node: 18
           - os: macos-latest
             node: 24
+          - os: windows-latest
+            node: 24
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v6
+        if: matrix.os == 'windows-latest'
+        with:
+          python-version: '3.12'
       - name: Tool versions
+        shell: bash
         run: |
           bash --version | head -n 1
           git --version
@@ -36,6 +43,7 @@ jobs:
           jq --version
           node --version
       - name: Git identity for the tests' temporary repos
+        shell: bash
         run: |
           git config --global user.name "ci"
           git config --global user.email "ci@example.invalid"

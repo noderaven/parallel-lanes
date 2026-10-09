@@ -227,7 +227,8 @@
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "pattern": "^/"
+            "pattern": "^(/|[A-Za-z]:[\\\\/])",
+            "description": "Absolute: /... or a Windows drive path (C:/... or C:\\...)."
           }
         },
         "discarded": {
@@ -383,6 +384,10 @@
     },
     "skill_dir": {
       "$ref": "#/$defs/text"
+    },
+    "python": {
+      "$ref": "#/$defs/text",
+      "description": "Optional, default python3: the Python every command the skill and its agents run starts with, shell-quoted (scripts/find-python prints it; an absolute path, in C:/... form on Windows). The skill always sets it when it builds or resumes a manifest."
     }
   },
   "$defs": {
@@ -448,10 +453,10 @@
             "type": "string",
             "minLength": 1,
             "not": {
-              "pattern": "^/"
+              "pattern": "^/|[:\\\\]"
             }
           },
-          "description": "Project-relative paths; none may leave the project. Compared normalized and case-insensitively across lanes."
+          "description": "Project-relative paths with / separators; none may be absolute (/... or C:/...), contain a backslash or a ':' (D:foo names another drive, a.js:s an NTFS stream), or leave the project. Compared normalized and case-insensitively across lanes."
         },
         "tier": {
           "enum": [

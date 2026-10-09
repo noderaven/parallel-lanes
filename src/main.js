@@ -15,13 +15,14 @@ export const meta = {
 // ---- Script body ----
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
-  const errors = validateManifest(args);
-  const agents = errors.length === 0 ? planAgents(args) : [];
+  const dry = normalizeManifestPaths(args);
+  const errors = validateManifest(dry);
+  const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
     dry_run: true,
     errors,
     agents,
-    lanes_effective: errors.length === 0 ? lanesEffective(args, agents) : 0,
+    lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
   };
 }
 

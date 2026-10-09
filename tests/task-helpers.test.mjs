@@ -9,13 +9,17 @@ import {
   existsSync,
   realpathSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, samePath, tempDir, mergeEnv, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-task-helpers-')));
+const TMP = realpathSync(tempDir('pl-task-helpers-'));
+// How start-task prints a path it was given: the C:/ form on Windows.
+const shown = (p) => (IS_WINDOWS ? p.replace(/\\/g, '/') : p);
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -31,15 +35,28 @@ const GIT_ENV = {
 function sh(cmd, args, extraEnv = {}) {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, ...extraEnv },
+    env: mergeEnv(process.env, GIT_ENV, extraEnv),
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = sh('git', ['-C', dir, ...args]);
   assert.equal(res.code, 0, `git ${args.join(' ')}: ${res.stderr}`);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
+}
+
+// Asserts that text is the expected lines, each ending in a newline, where
+// the lines named in paths are compared as paths.
+function assertLines(text, expected, paths) {
+  assert.ok(text.endsWith('\n'), text);
+  const lines = text.slice(0, -1).split('\n');
+  assert.equal(lines.length, expected.length, text);
+  expected.forEach((want, i) => {
+    if (paths.includes(i)) assert.ok(samePath(lines[i], want), `${lines[i]} is not ${want}`);
+    else assert.equal(lines[i], want);
+  });
 }
 
 function write(path, content) {
@@ -136,7 +153,7 @@ test('start-task regenerates and prints each brief', () => {
     const expected = readFileSync(ref, 'utf8');
     assert.equal(readFileSync(out, 'utf8'), expected);
     assert.ok(expected.includes(`Body of task ${id}.`));
-    assert.ok(res.stdout.includes(`===== brief ${id}: ${out} =====\n${expected}`), res.stdout);
+    assert.ok(res.stdout.includes(`===== brief ${id}: ${shown(out)} =====\n${expected}`), res.stdout);
   }
   assert.ok(res.stdout.indexOf('brief T1') < res.stdout.indexOf('brief T2'));
 });
@@ -167,7 +184,7 @@ test("start-task passes --also to the named task's brief only", () => {
   const text2 = readFileSync(out2, 'utf8');
   assert.ok(text2.endsWith(`\n\n${appended}`), text2);
   assert.ok(!readFileSync(out1, 'utf8').includes('## Produces of Task P'));
-  assert.ok(res.stdout.includes(`===== brief T2: ${out2} =====\n${text2}`), res.stdout);
+  assert.ok(res.stdout.includes(`===== brief T2: ${shown(out2)} =====\n${text2}`), res.stdout);
 });
 
 test('start-task exits 2 for --also naming a task without --brief', () => {
@@ -241,9 +258,31 @@ test('start-task --package runs the package script in DIR and prints its output'
     c.lane, c.plan, '--package', pkg, 'BASE', 'HEAD', out, '--brief', 'T1', brief,
   );
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(readFileSync(out, 'utf8'), [c.lane, c.plan, 'BASE', 'HEAD', out, ''].join('\n'));
-  assert.ok(res.stdout.endsWith(`===== review package =====\n${out}\n`), res.stdout);
+  assertLines(readFileSync(out, 'utf8'), [c.lane, c.plan, 'BASE', 'HEAD', out], [0, 1, 4]);
+  const marker = '===== review package =====\n';
+  assert.ok(res.stdout.includes(marker), res.stdout);
+  assertLines(res.stdout.slice(res.stdout.lastIndexOf(marker) + marker.length), [out], [0]);
   assert.ok(res.stdout.indexOf('===== brief T1') < res.stdout.indexOf('===== review package'));
+});
+
+test('start-task runs the package script with the resolved bash', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
+  const c = newCase();
+  const realBash = sh(BASH, ['-c', 'command -v bash']).stdout.trim();
+  const calls = join(c.root, 'calls');
+  const fake = join(c.root, 'fake bin', 'bash');
+  write(fake, `#!${realBash}\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${realBash}' "$@"\n`);
+  chmodSync(fake, 0o755);
+  const pkg = join(c.root, 'tools dir', 'package.sh');
+  write(pkg, 'echo packaged\n');
+  const out = join(c.root, 'review dir', 'package.md');
+  const brief = join(c.root, 'briefs', 'T1.md');
+  const res = scriptEnv('start-task')(
+    { PATH: `${dirname(fake)}${delimiter}${process.env.PATH}` },
+    c.lane, c.plan, '--package', pkg, 'BASE', 'HEAD', out, '--brief', 'T1', brief,
+  );
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith('===== review package =====\npackaged\n'), res.stdout);
+  assert.deepEqual(readFileSync(calls, 'utf8').split('\n'), [`${pkg} ${c.plan} BASE HEAD ${out}`, '']);
 });
 
 test('start-task exits 1 when the package script fails', () => {
@@ -277,7 +316,7 @@ test('start-task ignores GIT_DIR and friends pointing at another repo', () => {
   assert.ok(res.stdout.startsWith(`branch: lane-a\nhead: ${tip}\n`), res.stdout);
   assert.equal(git(c.lane, 'rev-parse', 'HEAD'), tip);
   assert.equal(git(other, 'rev-parse', 'HEAD'), otherHead);
-  assert.equal(readFileSync(out, 'utf8'), `${c.lane}\nunset\n`);
+  assertLines(readFileSync(out, 'utf8'), [c.lane, 'unset'], [0]);
 });
 
 test('start-task --record-start records the task base for every briefed task before any work', () => {

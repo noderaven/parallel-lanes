@@ -115,6 +115,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _brief  # noqa: E402
+import _shell  # noqa: E402
 
 LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -272,7 +273,8 @@ def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
         fail(3, str(e))
 
     def git(*args):
-        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, env=ENV)
+        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape", env=ENV)
 
     res = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{head}^{{commit}}")
     if res.returncode != 0 or not res.stdout.strip():
@@ -547,7 +549,8 @@ def accept(directory, checkout, head, text):
     if not text:
         fail(2, "TEXT must say what the user accepted")
     res = subprocess.run(["git", "-C", checkout, "rev-parse", "--verify", "--quiet", "--end-of-options",
-                          f"{head}^{{commit}}"], capture_output=True, text=True, env=ENV)
+                          f"{head}^{{commit}}"], capture_output=True, text=True, encoding="utf-8",
+                         errors="surrogateescape", env=ENV)
     if res.returncode != 0 or not res.stdout.strip():
         fail(3, f"{head!r} is not a commit in {checkout!r}; nothing recorded")
     write_entry(directory, "_run", {"task": "_run", "event": "accepted", "head": res.stdout.strip(), "text": text})
@@ -612,7 +615,27 @@ def backfill(directory, manifest_path):
         sys.exit(3)
 
 
+PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6), "status": (1,), "backfill": (1, 2), "accept": (1, 2)}
+PATH_OPTIONS = ("--plan", "--spec", "--manifest")
+
+
+def native_args(argv):
+    """argv with each path argument in the one Windows form (unchanged elsewhere)."""
+    if not argv:
+        return argv
+    positions = PATH_ARGS.get(argv[0], ())
+    return [
+        _shell.native_path(a) if i in positions or (i > 0 and argv[0] == "status" and argv[i - 1] in PATH_OPTIONS) else a
+        for i, a in enumerate(argv)
+    ]
+
+
 def main(argv):
+    _shell.setup_io()
+    try:
+        argv = native_args(argv)
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
     if len(argv) == 4 and argv[0] == "append" and argv[1]:
         append(argv[1], argv[2], argv[3])
     elif len(argv) == 9 and argv[0] == "reviewed" and all(argv[1:]):

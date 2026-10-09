@@ -7,12 +7,13 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SCRIPT_PATH, SKILL_DIR } from './harness.mjs';
+import { BASH, tempDir } from './platform.mjs';
 
 test('the committed run.workflow.js matches a fresh build of src/', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pl-build-'));
+  const dir = tempDir('pl-build-');
   try {
     const out = join(dir, 'run.workflow.js');
-    execFileSync('bash', ['scripts/build', '--out', out], { cwd: SKILL_DIR });
+    execFileSync(BASH, ['scripts/build', '--out', out], { cwd: SKILL_DIR });
     const fresh = readFileSync(out);
     const committed = readFileSync(SCRIPT_PATH);
     assert.ok(fresh.equals(committed),

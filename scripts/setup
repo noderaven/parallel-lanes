@@ -41,9 +41,10 @@ directory that is not such a worktree is refused (exit 3) and left alone. No
 worktree is removed and no branch is deleted.
 
 Then commands.setup (or the lane's lane_commands override) runs with bash
-in the feature checkout and in each lane checkout; under lite the lane's
-own list also runs in the feature checkout unless it is the same list.
-Command output goes to stderr.
+(the one _shell.find_bash resolves: Git Bash on Windows, never the WSL
+launcher; found before any change) in the feature checkout and in each lane
+checkout; under lite the lane's own list also runs in the feature checkout
+unless it is the same list. Command output goes to stderr.
 
 Before any change setup removes the records of missing worktrees under
 worktree_root (never another worktree's record). repo.base_ref is resolved
@@ -58,11 +59,16 @@ prints the manifest's setup_result:
    "discarded": [...], "preserved": [...]}
 The worktree paths are exactly the paths the run uses for the lanes.
 
+On Windows MANIFEST and repo.root, repo.git_dir, repo.worktree_root and
+repo.ledger_dir may be in any form (C:\\x, /c/x, /tmp/x); they are used, and
+printed, in the C:/... form.
+
 Exit 0 on success; 1 when a git or setup command fails; 2 on a usage error
 or an unreadable or malformed manifest (run_id or a lane id outside its
 pattern, a relative repo path, a base_ref starting with '-'); 3 on a refused
 condition (dirty main checkout, foreign directory or symlink at a run
-worktree path, missing shadow, a run locked by another owner).
+worktree path, missing shadow, a run locked by another owner, or no bash to
+run the setup commands with: the message names CLAUDE_CODE_GIT_BASH_PATH).
 """
 
 import datetime
@@ -73,6 +79,10 @@ import re
 import subprocess
 import sys
 import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 # Variables that would point git at another repo than the one named.
@@ -91,7 +101,8 @@ class Failure(Exception):
 
 
 def run_git(args, check=True):
-    res = subprocess.run(["git", *args], capture_output=True, text=True, env=ENV)
+    res = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
+                         errors="surrogateescape", env=ENV)
     if check and res.returncode != 0:
         raise Failure(1, f"git {' '.join(args)} failed: {res.stderr.strip()}")
     return res
@@ -119,6 +130,7 @@ def load_manifest(path):
         raise Failure(2, "manifest repo.git_dir is required in shadow mode")
     paths = ("root", "worktree_root", "ledger_dir") + (("git_dir",) if repo["mode"] == "shadow" else ())
     for key in paths:
+        repo[key] = _shell.native_path(repo[key])
         if not os.path.isabs(repo[key]):
             raise Failure(2, f"manifest repo.{key} must be an absolute path")
     if repo["base_ref"].startswith("-"):
@@ -262,7 +274,8 @@ def snapshot(path, run_id):
         env = dict(ENV, GIT_INDEX_FILE=os.path.join(tmp, "index"))
 
         def git(*args):
-            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, env=env)
+            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
+                                 encoding="utf-8", errors="surrogateescape", env=env)
             if res.returncode != 0:
                 raise Failure(1, f"saving the changes in {path} failed: git {args[0]}: {res.stderr.strip()}")
             return res.stdout.strip()
@@ -342,7 +355,7 @@ def check_branch(path, branch):
 
 def run_commands(path, cmds):
     for cmd in cmds:
-        res = subprocess.run(["bash", "-c", cmd], cwd=path, env=ENV,
+        res = subprocess.run(_shell.bash_argv("-c", cmd), cwd=path, env=ENV,
                              stdout=sys.stderr, stderr=sys.stderr)
         if res.returncode != 0:
             raise Failure(1, f"setup command failed in {path} (exit {res.returncode}): {cmd}")
@@ -366,6 +379,8 @@ def setup(m, owner=None):
                      if repo_cfg["mode"] == "shadow" else None)
     lanes = [] if lite else [(lane, lane_dir(m, lane), lane_branch(m, lane)) for lane in m["lanes"]]
     lane_states = [worktree_state(repo, path, lb) for _, path, lb in lanes]
+    if any(setup_commands(m, lane_id) for lane_id in [None] + [lane["id"] for lane in m["lanes"]]):
+        _shell.find_bash()
 
     base = repo.resolve(repo_cfg["base_ref"])
 
@@ -399,7 +414,7 @@ def setup(m, owner=None):
              "plan_sha256": file_sha256(m.get("plan")), "spec_sha256": file_sha256(m.get("spec"))}
     res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ledger"), "append",
                           repo_cfg["ledger_dir"], "_run", json.dumps(entry)],
-                         capture_output=True, text=True, env=ENV)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)
     if res.returncode != 0:
         raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
@@ -407,6 +422,7 @@ def setup(m, owner=None):
 
 
 def main(argv):
+    _shell.setup_io()
     try:
         owner = None
         if len(argv) == 3 and argv[1] == "--owner" and argv[2]:
@@ -415,7 +431,10 @@ def main(argv):
             raise Failure(2, "usage: setup MANIFEST [--owner TOKEN]")
         if not argv[0]:
             raise Failure(2, "usage: setup MANIFEST [--owner TOKEN]")
-        result = setup(load_manifest(argv[0]), owner)
+        result = setup(load_manifest(_shell.native_path(argv[0])), owner)
+    except _shell.BashNotFound as e:
+        print(f"setup: {e}", file=sys.stderr)
+        sys.exit(3)
     except Failure as e:
         print(f"setup: {e}", file=sys.stderr)
         sys.exit(e.code)

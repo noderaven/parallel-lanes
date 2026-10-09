@@ -104,6 +104,41 @@ test('a file that is absolute or leaves the project is reported', () => {
   }
 });
 
+test('Windows absolute paths are absolute', () => {
+  // D:foo is relative to drive D's current folder: another drive, not the
+  // project. src/a.js:s names an NTFS stream.
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  const banned = new RegExp(schema.$defs.task.properties.files.items.not.pattern);
+  for (const f of ['C:/x', 'c:\\x', '\\\\server\\x', 'src\\a.js', 'D:foo', 'src/a.js:s']) {
+    const m = validManifest();
+    m.lanes[0].tasks[0].files = [f];
+    assertError(validateManifest(m), JSON.stringify(f), 'absolute or leaves the project');
+    assert.ok(banned.test(f), `the schema allows ${JSON.stringify(f)}`);
+  }
+  assert.equal(banned.test('src/a.js'), false);
+  const m = validManifest();
+  m.setup_result.worktrees = { alpha: 'C:/wt/lane-alpha', beta: 'd:\\wt\\lane-beta' };
+  assert.deepEqual(validateManifest(m), []);
+  m.setup_result.worktrees.beta = 'C:wt';
+  assertError(validateManifest(m), 'setup_result.worktrees.beta', 'absolute path');
+});
+
+test('python must be a non-empty string when present', () => {
+  const m = validManifest();
+  assert.deepEqual(validateManifest(m), []);
+  for (const value of ['python3', '/usr/bin/python3', 'C:/Program Files/Python312/python.exe']) {
+    m.python = value;
+    assert.deepEqual(validateManifest(m), [], `python ${JSON.stringify(value)}`);
+  }
+  for (const value of ['', null, 3, ['python3']]) {
+    m.python = value;
+    assert.deepEqual(validateManifest(m), ['python: must be a non-empty string'], `python ${JSON.stringify(value)}`);
+  }
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  assert.equal(schema.properties.python.$ref, '#/$defs/text');
+  assert.ok(!schema.required.includes('python'), 'python is optional');
+});
+
 test('two lanes claiming one file through an alias or another case are reported', () => {
   for (const alias of ['src/../src/a.js', './src//a.js', 'SRC/a.js']) {
     const m = validManifest();

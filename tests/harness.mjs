@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BASH } from './platform.mjs';
 
 export const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The committed build output: the file the Workflow tool runs.
@@ -22,7 +23,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 let built = null;
 function buildScript() {
   if (built === null) {
-    built = execFileSync('bash', ['scripts/build', '--out', '-'], { cwd: SKILL_DIR, encoding: 'utf8' });
+    built = execFileSync(BASH, ['scripts/build', '--out', '-'], { cwd: SKILL_DIR, encoding: 'utf8' });
   }
   return built;
 }

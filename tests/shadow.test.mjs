@@ -19,11 +19,18 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv } from './platform.mjs';
 
 const SHADOW = join(SKILL_DIR, 'scripts', 'shadow');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-shadow-')));
+const TMP = realpathSync(tempDir('pl-shadow-'));
+// A file name with a shell-quoting character. Windows forbids '"' in names,
+// so there the name holds a single quote instead.
+const WEIRD = IS_WINDOWS ? "we'ird.txt" : 'we"ird.txt';
+// The lane's chmod +x of run.sh is a change only where git tracks file
+// modes; Git for Windows does not (core.fileMode false).
+const MODE_CHANGE = IS_WINDOWS ? [] : ['run.sh'];
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -56,13 +63,14 @@ function write(dir, rel, content) {
 }
 
 function shadow(base, args, env = {}) {
-  const res = spawnSync('bash', [SHADOW, ...args], {
+  const res = spawnSync(BASH, [SHADOW, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, PL_SHADOW_BASE: base, ...env },
+    env: mergeEnv(process.env, GIT_ENV, { PL_SHADOW_BASE: base }, env),
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+// git's own output, with CRLF line ends (if any) read as LF.
 function git(args, cwd = TMP) {
   const res = spawnSync('git', args, {
     cwd,
@@ -70,13 +78,14 @@ function git(args, cwd = TMP) {
     env: { ...process.env, ...GIT_ENV },
   });
   assert.equal(res.status, 0, `git ${args.join(' ')}: ${res.stderr}`);
-  return res.stdout;
+  return res.stdout.replace(/\r\n/g, '\n');
 }
 
 // Every entry under dir (lstat, symlinks not followed) with its content.
 function snapshot(dir) {
   const out = {};
-  for (const rel of readdirSync(dir, { recursive: true }).sort()) {
+  // Keys use '/' on every platform (readdirSync gives '\\' on Windows).
+  for (const rel of readdirSync(dir, { recursive: true }).map((r) => r.split(sep).join('/')).sort()) {
     const path = join(dir, rel);
     const st = lstatSync(path);
     if (st.isSymbolicLink()) out[rel] = `link:${readlinkSync(path)}`;
@@ -124,9 +133,12 @@ test('init without .gitignore: built-in excludes, private dir, baseline on pl-ba
   const before = snapshot(c.project);
   const gitdir = init(c);
 
-  const hash = createHash('sha256').update(c.project).digest('hex').slice(0, 16);
-  assert.equal(gitdir, join(c.base, hash));
-  assert.equal(statSync(gitdir).mode & 0o777, 0o700);
+  // shadow hashes the project path as Git Bash's pwd -P gives it (/c/... on Windows).
+  const physical = spawnSync(BASH, ['-c', 'cd "$1" && pwd -P', 'pwd', c.project], { encoding: 'utf8' }).stdout.trim();
+  const hash = createHash('sha256').update(physical).digest('hex').slice(0, 16);
+  assert.ok(samePath(gitdir, join(c.base, hash)), gitdir);
+  // Windows has no POSIX modes: init succeeding is the check there.
+  if (!IS_WINDOWS) assert.equal(statSync(gitdir).mode & 0o777, 0o700);
   assert.match(readFileSync(join(gitdir, 'info', 'exclude'), 'utf8'), /^node_modules\/$/m);
   assert.deepEqual(trackedFiles(gitdir), ['a.txt', 'src/main.py']);
   const baseline = readFileSync(join(gitdir, 'pl-baseline'), 'utf8').trim();
@@ -162,7 +174,9 @@ test('init runs no global hooks in the project and copies no template hooks', ()
   }
   write(templateDir, 'info/exclude', '# template\n');
   const config = join(c.root, 'gitconfig');
-  writeFileSync(config, `[core]\n\thooksPath = ${hooksDir}\n[init]\n\ttemplateDir = ${templateDir}\n`);
+  // git reads backslashes in a config value as escapes: give it forward slashes.
+  const fwd = (p) => p.replace(/\\/g, '/');
+  writeFileSync(config, `[core]\n\thooksPath = ${fwd(hooksDir)}\n[init]\n\ttemplateDir = ${fwd(templateDir)}\n`);
   const before = snapshot(c.project);
 
   const res = shadow(c.base, ['init', c.project], { GIT_CONFIG_GLOBAL: config });
@@ -180,6 +194,36 @@ test('init again reuses the shadow and keeps its baseline', () => {
   write(c.project, 'a.txt', 'changed\n');
   assert.equal(init(c), gitdir);
   assert.equal(readFileSync(join(gitdir, 'pl-baseline'), 'utf8'), baseline);
+});
+
+// A directory holding a fake cygpath that prints C:/fake before its last
+// argument, so the Git Bash rules of _paths.sh run on every platform.
+function fakeCygpath(root) {
+  const bin = join(root, 'fake bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'cygpath'), '#!/bin/bash\necho "C:/fake${@: -1}"\n');
+  chmodSync(join(bin, 'cygpath'), 0o755);
+  return { PL_UNAME: 'MINGW64_NT-10.0', PATH: `${bin}${delimiter}${process.env.PATH}` };
+}
+
+test('shadow prints C:/ paths under Git Bash', { skip: IS_WINDOWS && 'simulates Git Bash with a fake cygpath; on Windows every test runs the real one' }, () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const env = fakeCygpath(c.root);
+  const hash = createHash('sha256').update(c.project).digest('hex').slice(0, 16);
+  const first = shadow(c.base, ['init', c.project], env);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(first.stdout, `C:/fake${join(c.base, hash)}\n`);
+  // The shadow itself lives at the bash path, and a resumed init prints the same C:/ path.
+  assert.ok(existsSync(join(c.base, hash, 'pl-baseline')));
+  const again = shadow(c.base, ['init', c.project], env);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(again.stdout, first.stdout);
+  // Paths in refusals take the C:/ form too.
+  const other = newCase();
+  write(join(c.base, hash), 'pl-project', `${other.project}\n`);
+  const refused = shadow(c.base, ['init', c.project], env);
+  assert.equal(refused.code, 3);
+  assert.equal(refused.stderr, `shadow: C:/fake${join(c.base, hash)} belongs to another project\n`);
 });
 
 test('init refuses a project over the file limit unless --force', () => {
@@ -233,7 +277,7 @@ function laneScenario() {
   unlinkSync(join(wt, 'b.txt'));
   unlinkSync(join(wt, 'gone/only.txt'));
   write(wt, 'new dir/file name.txt', 'new\n');
-  write(wt, 'we"ird.txt', 'quoted\n');
+  write(wt, WEIRD, 'quoted\n');
   chmodSync(join(wt, 'run.sh'), 0o755);
   commitAll(wt);
   return { c, gitdir, wt };
@@ -245,8 +289,8 @@ test('preview lists the lane commit as add, modify and delete', () => {
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(JSON.parse(res.stdout), {
     conflicts: [],
-    add: ['new dir/file name.txt', 'we"ird.txt'],
-    modify: ['a.txt', 'run.sh'],
+    add: ['new dir/file name.txt', WEIRD],
+    modify: ['a.txt', ...MODE_CHANGE],
     delete: ['b.txt', 'gone/only.txt'],
     skipped: [],
   });
@@ -269,16 +313,19 @@ test('writeback applies exactly the previewed changes and keeps user files', () 
   delete expected.gone;
   expected['new dir'] = 'dir';
   expected['new dir/file name.txt'] = 'file:new\n';
-  expected['we"ird.txt'] = 'file:quoted\n';
+  expected[WEIRD] = 'file:quoted\n';
   const after = snapshot(c.project);
   // New files take the user's umask; compare their content only.
-  for (const rel of ['new dir/file name.txt', 'we"ird.txt']) {
+  for (const rel of ['new dir/file name.txt', WEIRD]) {
     after[rel] = after[rel].replace(/^file:\d+:/, 'file:');
   }
-  // run.sh gains the user execute bit and keeps its other bits.
-  const runMode = statSync(join(c.project, 'run.sh')).mode & 0o777;
-  assert.equal(runMode & 0o100, 0o100);
-  assert.equal(runMode & 0o666, parseInt(before['run.sh'].split(':')[1], 8) & 0o666);
+  // run.sh gains the user execute bit and keeps its other bits (Windows
+  // has no execute bit: writeback succeeding is the check there).
+  if (!IS_WINDOWS) {
+    const runMode = statSync(join(c.project, 'run.sh')).mode & 0o777;
+    assert.equal(runMode & 0o100, 0o100);
+    assert.equal(runMode & 0o666, parseInt(before['run.sh'].split(':')[1], 8) & 0o666);
+  }
   delete expected['run.sh'];
   delete after['run.sh'];
   assert.equal(readFileSync(join(c.project, 'run.sh'), 'utf8'), 'echo hi\n');
@@ -314,14 +361,14 @@ test('user-created or user-deleted paths the run also changed are conflicts', ()
   assert.deepEqual(JSON.parse(preview.stdout).conflicts, [
     'b.txt',
     'new dir/file name.txt',
-    'run.sh',
+    ...MODE_CHANGE,
   ]);
   const res = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
   assert.equal(res.code, 3);
   assert.deepEqual(snapshot(c.project), before);
 });
 
-test('paths under a directory the user replaced with a symlink are conflicts, never written through', () => {
+test('paths under a directory the user replaced with a symlink are conflicts, never written through', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const c = newCase({ 'a.txt': 'a\n', 'd/f.txt': 'f\n' });
   const gitdir = init(c);
   const wt = laneWorktree(c, gitdir);
@@ -383,7 +430,9 @@ test('preview rejects an unknown ref', () => {
 
 const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
-test('writeback preflight: an unwritable target or directory writes nothing', { skip: asRoot && 'root ignores permissions' }, () => {
+const permissionsSkip = (asRoot && 'root ignores permissions') || (IS_WINDOWS && 'Windows ignores POSIX directory modes');
+
+test('writeback preflight: an unwritable target or directory writes nothing', { skip: permissionsSkip }, () => {
   const c = newCase({ 'a.txt': 'a\n', 'locked/f.txt': 'f\n', 'ro.txt': 'ro\n' });
   const gitdir = init(c);
   const wt = laneWorktree(c, gitdir);
@@ -409,7 +458,7 @@ test('writeback preflight: an unwritable target or directory writes nothing', { 
   }
 });
 
-test('a write that fails midway names the paths already written', () => {
+test('a write that fails midway names the paths already written', { skip: IS_WINDOWS && 'Git Bash on Windows cannot set a file size limit (ulimit -f)' }, () => {
   const c = newCase({ 'a.txt': 'a\n', 'm.txt': 'm\n' });
   const gitdir = init(c);
   const wt = laneWorktree(c, gitdir);
@@ -418,7 +467,7 @@ test('a write that fails midway names the paths already written', () => {
   write(wt, 'z.bin', 'z'.repeat(64 * 1024));
   commitAll(wt);
   // A file size limit lets the small writes through and fails the large one.
-  const res = spawnSync('bash', ['-c', 'ulimit -c 0; ulimit -f 16; exec bash "$@"', 'limit', SHADOW, 'writeback', gitdir, c.project, 'lane'], {
+  const res = spawnSync(BASH, ['-c', 'ulimit -c 0; ulimit -f 16; exec bash "$@"', 'limit', SHADOW, 'writeback', gitdir, c.project, 'lane'], {
     encoding: 'utf8',
     env: { ...process.env, ...GIT_ENV, PL_SHADOW_BASE: c.base },
   });
@@ -461,7 +510,7 @@ test('remove deletes a shadow under the base', () => {
   assert.equal(readFileSync(join(c.project, 'a.txt'), 'utf8'), 'a\n');
 });
 
-test('remove refuses any path outside the shadow base', () => {
+test('remove refuses any path outside the shadow base', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const c = newCase({ 'a.txt': 'a\n' });
   const gitdir = init(c);
   const outside = join(c.root, 'precious');

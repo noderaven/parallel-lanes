@@ -12,13 +12,15 @@ import {
   realpathSync,
   symlinkSync,
   rmSync,
+  chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, SYMLINKS, samePath, tempDir, mergeEnv, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-setup-')));
+const TMP = realpathSync(tempDir('pl-setup-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -36,16 +38,41 @@ const GIT_ENV = {
 function sh(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, ...(opts.env || {}) },
+    env: mergeEnv(process.env, GIT_ENV, opts.env),
     cwd: opts.cwd,
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = sh('git', ['-C', dir, ...args]);
   assert.equal(res.code, 0, `git ${args.join(' ')}: ${res.stderr}`);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
+}
+
+// Asserts that a list, or a map of names to paths, holds the expected paths.
+function assertSamePaths(actual, expected) {
+  if (Array.isArray(expected)) {
+    assert.equal(actual.length, expected.length, JSON.stringify(actual));
+    expected.forEach((p, i) => assert.ok(samePath(actual[i], p), `${actual[i]} is not ${p}`));
+    return;
+  }
+  assert.deepEqual(Object.keys(actual).sort(), Object.keys(expected).sort());
+  for (const [k, p] of Object.entries(expected)) assert.ok(samePath(actual[k], p), `${k}: ${actual[k]} is not ${p}`);
+}
+
+// Asserts that discarded entries ('<path>: <porcelain status>') match the
+// expected [path, status] pairs in order: the path through samePath, the
+// status exactly. The split skips a drive letter's colon (C:/...).
+function assertDiscarded(actual, expected) {
+  assert.equal(actual.length, expected.length, JSON.stringify(actual));
+  expected.forEach(([path, status], i) => {
+    const at = actual[i].indexOf(': ', /^[a-zA-Z]:/.test(actual[i]) ? 2 : 0);
+    assert.ok(at > 0, `${actual[i]} has no path`);
+    assert.ok(samePath(actual[i].slice(0, at), path), `${actual[i]} is not under ${path}`);
+    assert.equal(actual[i].slice(at + 2), status, actual[i]);
+  });
 }
 
 function write(dir, rel, content) {
@@ -59,10 +86,11 @@ const q = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 let counter = 0;
 // A fresh case: a git project named 'my project' on main with one commit and
 // a .gitignore for scratch/, plus paths for the worktree root, the ledger and
-// a log every setup command appends its working directory to.
-function newCase() {
+// a log every setup command appends its working directory to. name, if
+// given, replaces 'case' at the start of the case folder's name.
+function newCase(name = 'case') {
   counter += 1;
-  const root = join(TMP, `case ${counter}`);
+  const root = join(TMP, `${name} ${counter}`);
   const project = join(root, 'my project');
   mkdirSync(project, { recursive: true });
   write(project, 'README.md', 'hello\n');
@@ -114,7 +142,7 @@ function setup(c, m, extra = [], env = {}) {
     env = { ...env, PL_ACTIVE_DIR: join(c.root, 'own active dir') };
     c.tokens = c.tokens || {};
     if (!c.tokens[m.run_id]) {
-      const got = sh('bash', [join(SCRIPTS, 'active-run'), 'acquire', m.run_id, path], { env });
+      const got = sh(BASH, [join(SCRIPTS, 'active-run'), 'acquire', m.run_id, path], { env });
       assert.equal(got.code, 0, got.stderr);
       c.tokens[m.run_id] = got.stdout.trim();
     }
@@ -139,21 +167,17 @@ const laneDir = (c, id) => `${c.worktreeRoot}/lane-${id}`;
 test('setup: a fresh git run creates the branch and lane worktrees and prints setup_result', () => {
   const c = newCase();
   const base = git(c.project, 'rev-parse', 'main');
-  const result = setupOk(c, manifest(c));
+  const { worktrees, ...result } = setupOk(c, manifest(c));
 
-  assert.deepEqual(result, {
-    feature_head: base,
-    worktrees: { a: laneDir(c, 'a'), b: laneDir(c, 'b') },
-    discarded: [],
-    preserved: [],
-  });
+  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [] });
+  assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
   assert.equal(git(laneDir(c, 'b'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-b');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', 'HEAD'), base);
   // Setup commands ran in the feature checkout and in each lane worktree,
   // lane b with its override.
-  assert.deepEqual(logLines(c), [
+  assertSamePaths(logLines(c), [
     c.project,
     laneDir(c, 'a'),
     laneDir(c, 'b'),
@@ -182,16 +206,32 @@ test('setup: a rerun reuses branches and worktrees and lists the discarded edits
 
   const result = setupOk(c, m);
   assert.equal(result.feature_head, featureHead);
-  assert.deepEqual(result.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
-  assert.deepEqual(result.discarded.sort(), [
-    `${laneDir(c, 'a')}:  M README.md`,
-    `${laneDir(c, 'a')}: ?? "new file.txt"`,
+  assertSamePaths(result.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
+  assertDiscarded(result.discarded.sort(), [
+    [laneDir(c, 'a'), ' M README.md'],
+    [laneDir(c, 'a'), '?? "new file.txt"'],
   ]);
   assert.equal(readFileSync(join(laneDir(c, 'a'), 'README.md'), 'utf8'), 'hello\n');
   assert.equal(existsSync(join(laneDir(c, 'a'), 'new file.txt')), false);
   assert.equal(readFileSync(join(laneDir(c, 'a'), 'scratch/keep.txt'), 'utf8'), 'ignored\n');
   assert.equal(git(laneDir(c, 'b'), 'rev-parse', 'HEAD'), laneHead);
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
+});
+
+test('setup: a rerun under a non-ASCII path reuses the worktrees it made', () => {
+  // git prints paths as UTF-8. Read with a Windows code page such as cp1252,
+  // U+00E9 (bytes C3 A9) becomes two other characters, so the path no longer
+  // matches and the rerun refuses its own worktrees; U+00DD (C3 9D) holds a
+  // byte cp1252 leaves undefined, so decoding raises.
+  const c = newCase('Jos\u00e9 \u00dd');
+  const m = manifest(c);
+  const first = setupOk(c, m);
+  assertSamePaths(first.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
+  write(laneDir(c, 'a'), 'README.md', 'edited\n');
+  const again = setupOk(c, m);
+  assertSamePaths(again.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
+  assertDiscarded(again.discarded, [[laneDir(c, 'a'), ' M README.md']]);
+  assert.equal(readFileSync(join(laneDir(c, 'a'), 'README.md'), 'utf8'), 'hello\n');
 });
 
 test('setup: a dirty main checkout exits 3 and creates nothing', () => {
@@ -224,12 +264,12 @@ test('setup: lite creates no lane worktree and maps the lane to the feature chec
     lanes: [{ id: 'b', name: 'Lane B', tasks: [] }],
   });
   const result = setupOk(c, m);
-  assert.deepEqual(result.worktrees, { b: c.project });
+  assertSamePaths(result.worktrees, { b: c.project });
   assert.equal(existsSync(laneDir(c, 'b')), false);
   assert.equal(sh('git', ['-C', c.project, 'show-ref', '--verify', '--quiet', 'refs/heads/pl-r1-b']).code, 1);
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   // The feature setup and the lane's own setup both run in the feature checkout.
-  assert.deepEqual(logLines(c), [c.project, c.project, 'b-override']);
+  assertSamePaths(logLines(c), [c.project, c.project, 'b-override']);
 });
 
 test('setup: lite runs an identical lane setup only once', () => {
@@ -239,7 +279,7 @@ test('setup: lite runs an identical lane setup only once', () => {
     lanes: [{ id: 'a', name: 'Lane A', tasks: [] }],
   });
   setupOk(c, m);
-  assert.deepEqual(logLines(c), [c.project]);
+  assertSamePaths(logLines(c), [c.project]);
 });
 
 test('setup: ledger records run_started and status reports the earliest start point', () => {
@@ -280,6 +320,22 @@ test('setup: a foreign directory at a lane path exits 3 and is left alone', () =
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
 });
 
+test('setup runs setup commands with the resolved bash', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
+  const c = newCase();
+  const realBash = sh(BASH, ['-c', 'command -v bash']).stdout.trim();
+  const calls = join(c.root, 'calls');
+  write(c.root, 'fake bin/bash', `#!${realBash}\nprintf '%s\\n' "$*" >> ${q(calls)}\nexec ${q(realBash)} "$@"\n`);
+  chmodSync(join(c.root, 'fake bin', 'bash'), 0o755);
+  const m = manifest(c, { lanes: [{ id: 'a', name: 'Lane A', tasks: [] }] });
+  const res = setup(c, m, [], { PATH: `${join(c.root, 'fake bin')}${delimiter}${process.env.PATH}` });
+  assert.equal(res.code, 0, res.stderr);
+  assertSamePaths(logLines(c), [c.project, laneDir(c, 'a')]);
+  const logCmd = m.commands.setup[0];
+  // The test's own active-run acquire also goes through the fake bash.
+  const commandCalls = readFileSync(calls, 'utf8').split('\n').filter((l) => l.startsWith('-c '));
+  assert.deepEqual(commandCalls, [`-c ${logCmd}`, `-c ${logCmd}`]);
+});
+
 test('setup: a failing setup command exits 1 and records no start point', () => {
   const c = newCase();
   const m = manifest(c);
@@ -297,7 +353,7 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
   const project = join(c.root, 'plain', 'my project');
   write(project, 'app.txt', 'app\n');
   const shadowBase = join(c.root, 'shadow base');
-  const init = sh('bash', [join(SCRIPTS, 'shadow'), 'init', project], {
+  const init = sh(BASH, [join(SCRIPTS, 'shadow'), 'init', project], {
     env: { PL_SHADOW_BASE: shadowBase },
   });
   assert.equal(init.code, 0, init.stderr);
@@ -315,23 +371,19 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
     },
   });
   const feature = `${c.worktreeRoot}/feature`;
-  const result = setupOk(c, m);
-  assert.deepEqual(result, {
-    feature_head: baseline,
-    worktrees: { a: laneDir(c, 'a'), b: laneDir(c, 'b') },
-    discarded: [],
-    preserved: [],
-  });
+  const { worktrees, ...result } = setupOk(c, m);
+  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [] });
+  assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(feature, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
   assert.equal(readFileSync(join(feature, 'app.txt'), 'utf8'), 'app\n');
   assert.deepEqual(readdirSync(project), ['app.txt']);
-  assert.deepEqual(logLines(c), [feature, laneDir(c, 'a'), laneDir(c, 'b'), 'b-override']);
+  assertSamePaths(logLines(c), [feature, laneDir(c, 'a'), laneDir(c, 'b'), 'b-override']);
 
   // A rerun discards and lists edits in the feature worktree.
   write(feature, 'app.txt', 'edited\n');
   const again = setupOk(c, m);
-  assert.deepEqual(again.discarded, [`${feature}:  M app.txt`]);
+  assertDiscarded(again.discarded, [[feature, ' M app.txt']]);
   assert.equal(readFileSync(join(feature, 'app.txt'), 'utf8'), 'app\n');
   assert.deepEqual(readdirSync(project), ['app.txt']);
 });
@@ -340,7 +392,7 @@ test('setup: shadow lite maps the lane to the feature worktree', () => {
   const c = newCase();
   const project = join(c.root, 'plain', 'my project');
   write(project, 'app.txt', 'app\n');
-  const init = sh('bash', [join(SCRIPTS, 'shadow'), 'init', project], {
+  const init = sh(BASH, [join(SCRIPTS, 'shadow'), 'init', project], {
     env: { PL_SHADOW_BASE: join(c.root, 'shadow base') },
   });
   assert.equal(init.code, 0, init.stderr);
@@ -358,7 +410,7 @@ test('setup: shadow lite maps the lane to the feature worktree', () => {
     },
   });
   const result = setupOk(c, m);
-  assert.deepEqual(result.worktrees, { a: `${c.worktreeRoot}/feature` });
+  assertSamePaths(result.worktrees, { a: `${c.worktreeRoot}/feature` });
   assert.equal(existsSync(laneDir(c, 'a')), false);
 });
 
@@ -413,7 +465,7 @@ test('setup: the feature branch starts at the resolved base_ref commit', () => {
   assert.equal(result.feature_head, base);
 });
 
-test('setup: a symlink at a lane path exits 3, even one to an empty directory', () => {
+test('setup: a symlink at a lane path exits 3, even one to an empty directory', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const c = newCase();
   const target = join(c.root, 'elsewhere');
   mkdirSync(target, { recursive: true });
@@ -436,13 +488,14 @@ test('setup: prunes only missing worktree records under worktree_root', () => {
   rmSync(own, { recursive: true, force: true });
   setupOk(c, manifest(c));
   const list = git(c.project, 'worktree', 'list', '--porcelain');
-  assert.ok(list.includes(`worktree ${own}`), "the user's missing worktree keeps its record");
+  const records = list.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice('worktree '.length));
+  assert.ok(records.some((p) => samePath(p, own)), "the user's missing worktree keeps its record");
   assert.ok(existsSync(join(laneDir(c, 'a'), 'README.md')), 'the lane worktree is recreated');
 });
 
 // --- review finding 7: overlapping launches and abandoned work ----------------
 
-const activeRun = (env, ...args) => sh('bash', [join(SCRIPTS, 'active-run'), ...args], { env });
+const activeRun = (env, ...args) => sh(BASH, [join(SCRIPTS, 'active-run'), ...args], { env });
 
 test('setup: a run locked by another launch is refused, and its in-progress work survives', () => {
   const c = newCase();
@@ -477,7 +530,7 @@ test('setup: changes it discards are saved first in a commit under a run ref', (
   const result = setupOk(c, m);
   assert.equal(result.preserved.length, 1);
   const [saved] = result.preserved;
-  assert.equal(saved.worktree, laneDir(c, 'a'));
+  assert.ok(samePath(saved.worktree, laneDir(c, 'a')), saved.worktree);
   assert.match(saved.ref, /^refs\/parallel-lanes\/r1\/abandoned\/lane-a-\d{8}T\d+Z$/);
   assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
   assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), laneHead);

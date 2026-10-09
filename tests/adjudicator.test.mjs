@@ -124,7 +124,7 @@ test('adjudicatorPrompt: stop conditions verbatim, outcomes, ruling format, cont
 
 test('adjudicatorPrompt: task-brief command when a task is set, cd-prefixed', () => {
   const p = adjudicatorPrompt(manifest(), blockedCtx());
-  const brief = "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/task-brief' " +
+  const brief = "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/task-brief' " +
     "'/work/my plan.md' 'T2' '/work/ledger/briefs/T2.md'";
   assert.ok(p.includes(brief), 'task-brief command');
 });
@@ -160,7 +160,7 @@ test('adjudicatorPrompt: ruling ledger command for lane _run in featureDir when 
 
   const shadow = manifest({ repo: { ...m.repo, mode: 'shadow' } });
   const sp = adjudicatorPrompt(shadow, preflightCtx());
-  assert.ok(sp.includes("cd '/work/wt/feature' && python3 "), 'shadow mode uses the feature worktree');
+  assert.ok(sp.includes("cd '/work/wt/feature' && 'python3' "), 'shadow mode uses the feature worktree');
 });
 
 test('adjudicatorPrompt: every provided ledger command starts with cd to the agent checkout', () => {

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Print the absolute path of a working Python 3.8 or later interpreter.
+#
+# usage: find-python
+#
+# Tries python3, python, then py -3, in that order. A candidate qualifies
+# when it runs and reports Python 3.8 or later; the Microsoft Store stub and
+# an older Python fail that check and are skipped. The path is printed in the
+# native form (C:/ under Git Bash).
+#
+# Exit 0 with the path on stdout; 2 on usage error; 3 if none works.
+set -euo pipefail
+
+. "$(dirname "${BASH_SOURCE[0]}")/_paths.sh"
+
+if [ "$#" -ne 0 ]; then
+  echo "usage: find-python" >&2
+  exit 2
+fi
+
+# No assert: PYTHONOPTIMIZE would strip it. Python 2 fails on the print call.
+check='import sys; sys.exit(1) if sys.version_info < (3, 8) else print(sys.executable)'
+
+# try WORDS...: run the interpreter command with the check; on success print
+# its native path and return 0.
+try() {
+  local out
+  out="$("$@" -c "$check" 2>/dev/null)" || return 1
+  out="$(printf '%s\n' "$out" | head -n 1 | tr -d '\r')"
+  [ -n "$out" ] || return 1
+  native "$out"
+}
+
+try python3 && exit 0
+try python && exit 0
+try py -3 && exit 0
+
+echo "find-python: no working Python 3.8 or later (tried: python3, python, py -3); on Windows, the python3 from the Microsoft Store is a stub" >&2
+exit 3

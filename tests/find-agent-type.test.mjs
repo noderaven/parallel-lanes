@@ -5,9 +5,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'find-agent-type');
-const TMP = mkdtempSync(join(tmpdir(), 'pl-agent-type-'));
+const TMP = tempDir('pl-agent-type-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 let counter = 0;
@@ -21,7 +22,7 @@ function configDir(content) {
 }
 
 function findAgentType(dir, args = []) {
-  const res = spawnSync('bash', [SCRIPT, ...args], {
+  const res = spawnSync(BASH, [SCRIPT, ...args], {
     encoding: 'utf8',
     env: { ...process.env, CLAUDE_CONFIG_DIR: dir },
   });

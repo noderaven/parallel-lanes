@@ -3,9 +3,10 @@
 
 usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd ...]
 
-Each COMMAND runs with bash -c in DIR, in the given order, and every one runs
-even after a failure: one group's failure never hides another's. Command
-output goes to stderr. stdout is one JSON line, also written to FILE with
+Each COMMAND runs with bash -c in DIR (the bash _shell.find_bash resolves:
+Git Bash on Windows, never the WSL launcher), in the given order, and every
+one runs even after a failure: one group's failure never hides another's.
+Command output goes to stderr. stdout is one JSON line, also written to FILE with
 --out (FILE must resolve inside ROOT with --root, the run's ledger directory):
   {"checkout": DIR, "branch": <abbrev-ref>, "head": <full sha checked>,
    "results": [{"group": GROUP, "command": COMMAND, "exit": <code>}],
@@ -16,17 +17,26 @@ head is read before the commands run and again after; if a command moved
 HEAD the result says so in "head_after" and ok is false (a check must not
 change the code it checks).
 
+On Windows DIR, FILE and ROOT may be given in any form (C:\\x, /c/x, /tmp/x)
+and are used in the C:/... form. FILE is written as UTF-8 with LF line
+endings.
+
 GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
 GIT_COMMON_DIR are removed from the environment.
 
 Exit 0 when ok; 1 when a command failed or moved HEAD; 2 on usage error; 3
-when DIR is not a git checkout or FILE is outside ROOT.
+when DIR is not a git checkout, FILE is outside ROOT, or no bash can be found
+(the message names CLAUDE_CODE_GIT_BASH_PATH; no command runs).
 """
 
 import json
 import os
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
 
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
@@ -40,7 +50,8 @@ def fail(code, message):
 
 
 def git(directory, *args):
-    return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, env=ENV)
+    return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="surrogateescape", env=ENV)
 
 
 def contained(path, root):
@@ -57,7 +68,7 @@ def contained(path, root):
 def parse(argv):
     if not argv or not argv[0] or argv[0].startswith("-"):
         fail(2, USAGE)
-    directory, rest = argv[0], argv[1:]
+    directory, rest = _shell.native_path(argv[0]), argv[1:]
     out = root = None
     cmds = []
     while rest:
@@ -66,9 +77,9 @@ def parse(argv):
             rest = rest[3:]
         elif rest[0] in ("--out", "--root") and len(rest) >= 2 and rest[1]:
             if rest[0] == "--out":
-                out = rest[1]
+                out = _shell.native_path(rest[1])
             else:
-                root = rest[1]
+                root = _shell.native_path(rest[1])
             rest = rest[2:]
         else:
             fail(2, USAGE)
@@ -83,14 +94,24 @@ def head_of(directory):
 
 
 def main(argv):
-    directory, out, root, cmds = parse(argv)
+    _shell.setup_io()
+    try:
+        run(*parse(argv))
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
+
+
+def run(directory, out, root, cmds):
     if out is not None and root is not None and (os.path.islink(out) or not contained(out, root)):
         fail(3, f"output path {out!r} is outside {root!r}")
+    if cmds:
+        # Found before anything runs: a missing bash fails no check halfway.
+        _shell.find_bash()
     head = head_of(directory)
     branch = git(directory, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     results = []
     for group, command in cmds:
-        res = subprocess.run(["bash", "-c", command], cwd=directory, env=ENV,
+        res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV,
                              stdout=sys.stderr, stderr=sys.stderr)
         results.append({"group": group, "command": command, "exit": res.returncode})
     after = head_of(directory)
@@ -104,8 +125,7 @@ def main(argv):
         parent = os.path.dirname(out)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(line + "\n")
+        _shell.write_text(out, line + "\n")
     print(line)
     sys.exit(0 if report["ok"] else 1)
 

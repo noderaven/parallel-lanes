@@ -11,9 +11,10 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-recovery-')));
+const TMP = realpathSync(tempDir('pl-recovery-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const ENV = {
   ...process.env,
@@ -26,10 +27,11 @@ function sh(cmd, args) {
   const res = spawnSync(cmd, args, { encoding: 'utf8', env: ENV });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = sh('git', ['-C', dir, ...args]);
   assert.equal(res.code, 0, res.stderr);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
 }
 const py = (script, ...args) => sh('python3', [join(SCRIPTS, script), ...args]);
 function ok(res) {

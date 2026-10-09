@@ -16,7 +16,9 @@ In order:
              task-brief call for that TASK_ID, in the given order; an --also
              whose TASK_ID has no --brief exits 2 before any work.
   --package  mkdir -p the parent of OUT, then bash SCRIPT PLAN BASE HEAD OUT
-             with DIR as the working directory (a failure exits 1).
+             with DIR as the working directory (a failure exits 1). bash is
+             the one _shell.find_bash resolves (Git Bash on Windows, never
+             the WSL launcher), found before anything else is done.
   --artifacts  every brief OUT (task-brief --root ROOT) and the package OUT
              must resolve, symlinks included, to a path inside ROOT (the run's
              ledger directory); otherwise exit 3 before anything is written.
@@ -31,6 +33,8 @@ In order:
              after a "===== files changed outside the task's Files list ====="
              line, or "(none)". --scope without --declared exits 2.
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
+On Windows every path argument may be given in any form (C:\\x, /c/x,
+/tmp/x) and is used in the C:/... form.
 GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
 GIT_COMMON_DIR are removed from the environment of git, task-brief and the
 package script, so DIR alone names the repository.
@@ -45,7 +49,8 @@ stdout, only on success:
 Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
 brief cannot be read, the package script fails, or the --scope diff fails; 2
 on usage error; 3 if DIR is not a git worktree, the fast-forward fails, an OUT
-is outside --artifacts, or the --record-start BASE is not a commit;
+is outside --artifacts, the --record-start BASE is not a commit, or no bash
+can be found (the message names CLAUDE_CODE_GIT_BASH_PATH);
 task-brief's code if a brief fails, the ledger's if a started append fails.
 """
 
@@ -60,6 +65,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 import _brief  # noqa: E402
+import _shell  # noqa: E402
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
@@ -109,6 +115,16 @@ def parse(argv):
     for task_id, _ in args.brief:
         if not _brief.is_safe_id(task_id):
             parser.error(f"unsafe task id {task_id!r}")
+    native = _shell.native_path
+    args.dir = native(args.dir)
+    args.plan = native(args.plan)
+    args.brief = [[task_id, native(out)] for task_id, out in args.brief]
+    if args.package is not None:
+        args.package = [native(args.package[0]), args.package[1], args.package[2], native(args.package[3])]
+    if args.artifacts is not None:
+        args.artifacts = native(args.artifacts)
+    if args.record_start is not None:
+        args.record_start = [native(args.record_start[0]), args.record_start[1], args.record_start[2]]
     briefed = {task_id for task_id, _ in args.brief}
     for task_id, _ in args.also:
         if task_id not in briefed:
@@ -134,7 +150,17 @@ def path_key(path):
 
 
 def main(argv):
-    args = parse(argv)
+    _shell.setup_io()
+    try:
+        run(parse(argv))
+    except _shell.BashNotFound as e:
+        fail(3, str(e))
+
+
+def run(args):
+    if args.package is not None:
+        # Found before any change: a missing bash leaves nothing half done.
+        _shell.find_bash()
     directory = args.dir
     if args.artifacts is not None:
         outs = [path for _, path in args.brief] + ([args.package[3]] if args.package else [])
@@ -158,7 +184,7 @@ def main(argv):
     head = rev_parse(1, directory, "HEAD")
 
     out = [f"branch: {branch}\n", f"head: {head}\n"]
-    plan = os.path.abspath(args.plan)
+    plan = _shell.native_path(os.path.abspath(args.plan))
     for task_id, path in args.brief:
         extra = [a for t, producer in args.also if t == task_id for a in ("--also", producer)]
         if args.artifacts is not None:
@@ -178,15 +204,17 @@ def main(argv):
 
     if args.package is not None:
         script, base, head_ref, package_out = args.package
-        script = os.path.abspath(script)
-        package_out = os.path.abspath(package_out)
+        script = _shell.native_path(os.path.abspath(script))
+        package_out = _shell.native_path(os.path.abspath(package_out))
         os.makedirs(os.path.dirname(package_out), exist_ok=True)
         res = subprocess.run(
-            ["bash", script, plan, base, head_ref, package_out],
+            _shell.bash_argv(script, plan, base, head_ref, package_out),
             cwd=directory,
             env=ENV,
             stdout=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if res.returncode != 0:
             fail(1, f"package script {script!r} exited {res.returncode}")
@@ -207,7 +235,7 @@ def main(argv):
         for task_id, _ in args.brief:
             entry = json.dumps({"task": task_id, "event": "started", "base": start_base})
             res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "append", ledger_dir, lane, entry],
-                                 env=ENV, capture_output=True, text=True)
+                                 env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if res.returncode != 0:
                 sys.stderr.write(res.stderr)
                 sys.exit(res.returncode)

@@ -6,13 +6,14 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { BASH, SYMLINKS, tempDir, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-boundaries-')));
+const TMP = realpathSync(tempDir('pl-boundaries-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const GIT_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
@@ -37,10 +38,11 @@ function py(script, args, opts = {}) {
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+// git's own output, trimmed, with CRLF line ends (if any) read as LF.
 function git(dir, ...args) {
   const res = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
   assert.equal(res.status, 0, res.stderr);
-  return res.stdout.trim();
+  return res.stdout.replace(/\r\n/g, '\n').trim();
 }
 function repo() {
   const dir = join(workDir(), 'repo');
@@ -62,7 +64,7 @@ test('task-brief refuses an unsafe task id before reading the plan or writing an
   assert.equal(readFileSync(join(dir, 'victim.md'), 'utf8'), 'ORIGINAL\n');
 });
 
-test('task-brief --root refuses a brief path outside the root, through .. or a symlink', () => {
+test('task-brief --root refuses a brief path outside the root, through .. or a symlink', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   const dir = workDir();
   write(join(dir, 'plan.md'), '# P\n\n### Task T1: one\n\nbody\n');
   write(join(dir, 'outside', 'keep.md'), 'ORIGINAL\n');
@@ -153,6 +155,46 @@ test('run-checks fails a command that moves HEAD: a check must not change what i
   const report = JSON.parse(res.stdout);
   assert.equal(report.ok, false);
   assert.notEqual(report.head_after, report.head);
+});
+
+const REAL_BASH = spawnSync(BASH, ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+const REAL_PYTHON = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
+// A directory holding a fake bash that logs its arguments to calls, then runs the real bash.
+function fakeBash(dir, calls) {
+  const bin = join(dir, 'fake bin');
+  write(join(bin, 'bash'), `#!${REAL_BASH}\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${REAL_BASH}' "$@"\n`);
+  chmodSync(join(bin, 'bash'), 0o755);
+  return bin;
+}
+
+test('run-checks starts each check with the bash find_bash resolves', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
+  const r = repo();
+  const calls = join(dirname(r), 'calls');
+  const bin = fakeBash(dirname(r), calls);
+  const res = spawnSync('python3', [join(SCRIPTS, 'run-checks'), r, '--cmd', 'test', 'true'], {
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, PATH: `${bin}${delimiter}${process.env.PATH}` },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).ok, true);
+  assert.ok(readFileSync(calls, 'utf8').split('\n').includes('-c true'), readFileSync(calls, 'utf8'));
+});
+
+test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', {
+  // On Windows find_bash also finds Git in its standard place, so no PATH hides it.
+  skip: (IS_WINDOWS && 'Git Bash is always found in its standard place on Windows') || (!SYMLINKS && 'symlinks unavailable'),
+}, () => {
+  const r = repo();
+  // PATH holds only python3: no bash (and no git) can be found on it.
+  const bin = join(dirname(r), 'python only');
+  mkdirSync(bin);
+  symlinkSync(REAL_PYTHON, join(bin, 'python3'));
+  const res = spawnSync(join(bin, 'python3'), [join(SCRIPTS, 'run-checks'), r, '--cmd', 'test', 'true'], {
+    encoding: 'utf8', env: { ...process.env, ...GIT_ENV, PATH: bin },
+  });
+  assert.equal(res.status, 3, res.stderr);
+  assert.equal(res.stdout, '');
+  assert.match(res.stderr, /CLAUDE_CODE_GIT_BASH_PATH/);
+  assert.doesNotMatch(res.stderr, /Traceback/);
 });
 
 // --- plan coverage ----------------------------------------------------------

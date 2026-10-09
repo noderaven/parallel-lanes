@@ -47,6 +47,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.dont_write_bytecode = True
+sys.path.insert(0, HERE)
+import _shell  # noqa: E402
+
 SHORTSTAT = re.compile(r"(\d+) (insertion|deletion)")
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -63,7 +67,8 @@ def fail(code, message):
 
 def git(directory, *args):
     return subprocess.run(
-        ["git", "-C", directory, *args], capture_output=True, text=True, env=ENV
+        ["git", "-C", directory, *args], capture_output=True, text=True, encoding="utf-8",
+        errors="surrogateescape", env=ENV
     )
 
 
@@ -95,8 +100,13 @@ def parse(argv):
 
 
 def main(argv):
+    _shell.setup_io()
     args = parse(argv)
-    directory = args.dir
+    try:
+        directory = _shell.native_path(args.dir)
+        args.ledger_dir = _shell.native_path(args.ledger_dir)
+    except _shell.BashNotFound as e:
+        fail(3, f"{e}; nothing recorded")
 
     if not SAFE.fullmatch(args.lane):
         fail(3, f"unsafe lane name {args.lane!r}; nothing recorded")

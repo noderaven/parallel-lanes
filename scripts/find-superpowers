@@ -10,11 +10,16 @@
 #
 # Default search, under the config dir ${CLAUDE_CONFIG_DIR:-~/.claude}:
 # <config>/remote/plugins/*/*/ and <config>/plugins/cache/*/superpowers/*/.
-# PL_SEARCH_ROOTS (colon-separated directories) replaces the default; each
-# immediate subdirectory of a root is a candidate install.
+# PL_SEARCH_ROOTS replaces the default: directories separated by ':', or by ';'
+# on Windows (where C: holds a colon), as in PATH. Each immediate
+# subdirectory of a root is a candidate install.
+#
+# Under Git Bash the path takes the C:/ form.
 #
 # Exit 0 with the path on stdout; 2 on usage error; 3 (no output) if none found.
 set -euo pipefail
+
+. "$(dirname "${BASH_SOURCE[0]}")/_paths.sh"
 
 if [ "$#" -ne 0 ]; then
   echo "usage: find-superpowers" >&2
@@ -25,7 +30,9 @@ shopt -s nullglob
 
 candidates=()
 if [ -n "${PL_SEARCH_ROOTS:-}" ]; then
-  IFS=':' read -r -a roots <<< "$PL_SEARCH_ROOTS"
+  sep=':'
+  if pl_is_windows; then sep=';'; fi
+  IFS="$sep" read -r -a roots <<< "$PL_SEARCH_ROOTS"
   for root in ${roots[@]+"${roots[@]}"}; do
     [ -n "$root" ] || continue
     candidates+=("$root"/*/)
@@ -59,7 +66,7 @@ for dir in ${candidates[@]+"${candidates[@]}"}; do
   if [ -z "$version" ]; then
     version="$(read_version "$dir/.claude-plugin/plugin.json")"
   fi
-  abs="$(cd "$dir/skills" && pwd)"
+  abs="$(native "$(cd "$dir/skills" && pwd)")"
   entries+="${version:-0}"$'\t'"$abs"$'\n'
 done
 

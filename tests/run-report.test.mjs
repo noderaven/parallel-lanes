@@ -5,11 +5,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'run-report');
 const FIX = join(SKILL_DIR, 'tests', 'fixtures', 'transcripts');
 const MANIFEST = join(FIX, 'manifest.json');
-const TMP = mkdtempSync(join(tmpdir(), 'pl-report-'));
+const TMP = tempDir('pl-report-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 function run(args) {
