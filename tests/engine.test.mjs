@@ -1393,3 +1393,122 @@ test('prompts carry only the project rules: no ASCII or trailer rule of their ow
     assert.ok(!/trailer|co-authored|AI (name|attribution)|Claude/i.test(own), `${name}: a trailer or AI rule of its own`);
   }
 });
+
+// ---- Run rulings and fix commit messages (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer for this task";
+const TASK_FIX_MESSAGE = 'fix: address review findings for Task';
+const FINAL_FIX_MESSAGE = 'fix: address the final review findings';
+const POST_INTEGRATE_FIX_MESSAGE = 'fix: make the post-integration check pass';
+
+test('a user answer from a resume keeps its own label beside the run rulings', () => {
+  const m = manifest({ notes: { T2: 'yes' }, run_rulings: ['R1'] });
+  const p = implementPrompt(m, task('T2'), WHERE, 'b0');
+  assert.ok(p.includes(`${USER_ANSWER} (follow it where it settles a question): yes`), p);
+  const lines = p.split('\n');
+  const at = lines.indexOf(RUN_RULINGS);
+  assert.ok(at >= 0, p);
+  assert.equal(lines[at + 1], '- R1');
+  // The ruling is not given the user's label.
+  assert.ok(!lines.some((l) => l.includes(USER_ANSWER) && l.includes('R1')), p);
+  // Without run rulings there is no heading.
+  assert.ok(!implementPrompt(manifest(), task('T2'), WHERE, 'b0').includes(RUN_RULINGS));
+});
+
+test('fix rounds commit with the fix message, and reviewers are told it is expected', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt } = await loadHelpers(['finalReviewPrompt',
+    'combinedFinalReviewPrompt']);
+  const m = manifest();
+  const fs = [finding('the bug')];
+  assert.ok(fixPrompt(m, task('T2'), WHERE, fs, done('b0', 'h1'), 'h1')
+    .includes('fix: address review findings for Task T2'));
+  const unit = { id: 'T2-T3', title: 'batch', files: [], tier: 'light', security: false, batch: 'k',
+    tasks: [task('T2', { tier: 'light' }), task('T3', { tier: 'light' })] };
+  const batchFix = fixPrompt(m, unit, WHERE, fs, done('b0', 'h1'), 'h1');
+  assert.ok(batchFix.includes('fix: address review findings for Batch T2-T3'), batchFix);
+  const reviewers = {
+    review: reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', fs),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(reviewers)) {
+    assert.ok(text.includes(TASK_FIX_MESSAGE), `${name}: the task fix message`);
+    assert.ok(text.includes(FINAL_FIX_MESSAGE), `${name}: the final fix message`);
+  }
+});
+
+test('the final fix and the post-integrate fix use their own messages', async () => {
+  const { postIntegrateFixPrompt } = await loadHelpers(['postIntegrateFixPrompt']);
+  const m = manifest({ hooks: { post_integrate: 'smoke test' } });
+  const finalFix = finalFixPrompt(m, [{ ...finding('the bug'), id: 'F1' }], 'h1');
+  assert.ok(finalFix.includes(FINAL_FIX_MESSAGE), finalFix);
+  assert.ok(!finalFix.includes(POST_INTEGRATE_FIX_MESSAGE), finalFix);
+  const post = postIntegrateFixPrompt(m, 'npm test failed');
+  assert.ok(post.includes(POST_INTEGRATE_FIX_MESSAGE), post);
+  assert.ok(!post.includes(FINAL_FIX_MESSAGE), post);
+});
+
+// ---- Structured cannot_verify (1.3.1) ----
+
+test('review prompts define cannot_verify and ask for the structured form', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt, reviewSchema, finalReviewSchema } = await loadHelpers([
+    'finalReviewPrompt', 'combinedFinalReviewPrompt', 'reviewSchema', 'finalReviewSchema']);
+  const m = manifest();
+  const prompts = {
+    review: reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', [finding('the bug')]),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(prompts)) {
+    for (const word of ['requirement', 'source', 'why', 'check_by']) {
+      assert.ok(text.includes(word), `${name}: ${word}`);
+    }
+    // What is not a cannot_verify entry.
+    assert.ok(/limits the plan already accepts/.test(text), `${name}: the exclusions`);
+  }
+  for (const schema of [reviewSchema(), finalReviewSchema()]) {
+    const items = schema.properties.cannot_verify.items;
+    assert.ok(Array.isArray(items.anyOf), JSON.stringify(items));
+    const obj = items.anyOf.find((s) => s.type === 'object');
+    assert.deepEqual(obj.required.slice().sort(), ['check_by', 'requirement', 'source', 'why']);
+    assert.ok(items.anyOf.some((s) => s.type === 'string'), 'plain strings stay accepted');
+  }
+});
+
+test('cannotVerifyText and isSourced', async () => {
+  const { cannotVerifyText, isSourced } = await loadHelpers(['cannotVerifyText', 'isSourced']);
+  const item = { requirement: 'bash 3.2', source: 'spec Testing', why: 'no macOS', check_by: 'CI' };
+  assert.equal(cannotVerifyText(item), 'bash 3.2 (spec Testing): no macOS; check: CI');
+  assert.equal(cannotVerifyText('a note'), 'a note');
+  assert.equal(isSourced(item), true);
+  assert.equal(isSourced({ ...item, source: '' }), false);
+  assert.equal(isSourced('a note'), false);
+  assert.equal(isSourced(null), false);
+});
+
+test('an approving review keeps its minor findings, numbered by task, and notes show cannot_verify text', async () => {
+  const minor = { severity: 'minor', file: 'src/a.js', line: 3, issue: 'naming', fix: 'rename' };
+  const cv = { requirement: 'bash 3.2', source: 'Task 2 Step 3', why: 'no macOS', check_by: 'CI' };
+  const s = stub({
+    'T2 implement': [done('b0', 'h1')],
+    'T2 review': [{ verdict: 'approve', findings: [minor, { ...minor, issue: 'typo' }], cannot_verify: [cv] }],
+  });
+  const r = await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  assert.equal(r.status, 'done');
+  assert.deepEqual(r.minor_findings.map((f) => [f.id, f.issue]), [['T2-1', 'naming'], ['T2-2', 'typo']]);
+  assert.ok(r.notes.includes('cannot verify: bash 3.2 (Task 2 Step 3): no macOS; check: CI'), r.notes);
+  // A plan task id with no letter gets the T prefix.
+  const s2 = stub({
+    '3 implement': [done('b0', 'h1')],
+    '3 review': [{ verdict: 'approve', findings: [minor], cannot_verify: [] }],
+  });
+  const r2 = await runTask(manifest(), task('3'), WHERE, 'b0', s2.io);
+  assert.deepEqual(r2.minor_findings.map((f) => f.id), ['T3-1']);
+});

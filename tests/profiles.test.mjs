@@ -112,8 +112,9 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   assert.equal(reviewers[0].model, 'opus');
   assert.equal(reviewers[0].phase, 'Final review');
   assert.ok(reviewers[0].schema.required.includes('head'));
-  // The single fix wave and its re-review follow, from the reviewer's head.
-  assert.deepEqual(names.slice(-3), ['final fix', 'final re-review', 'verify']);
+  // The single fix wave follows, from the reviewer's head, then verify and
+  // then the re-review.
+  assert.deepEqual(names.slice(-3), ['final fix', 'verify', 'final re-review']);
   assert.equal(result.acceptance.status, 'accepted');
   assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes('(now at T4-h)'));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['combined issue']);

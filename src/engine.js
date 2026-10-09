@@ -43,7 +43,8 @@ function checkedReview(v) {
 // whole task range. Reviews use reviewSettings with the changed_lines of the
 // implement or fix result under review.
 // Returns {task, status:'done'|'deferred'|'blocked', base, head, rounds,
-// tier_used, notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
+// tier_used, notes, rulings, next_note?, minor_findings? (done only: taskMinorFindings of the
+// approving review)}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
 // 'adjudicator_stop: <condition>').
 // base is owned by the script (the previous task's head, or the feature tip):
@@ -338,8 +339,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
 
   const notes = [];
   for (const f of verdict.findings || []) notes.push(`${f.severity} finding: ${f.file}:${f.line} - ${f.issue}`);
-  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
-  return result('done', doneNotes(notes));
+  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${cannotVerifyText(item)}`);
+  return result('done', doneNotes(notes), { minor_findings: taskMinorFindings(task, verdict.findings) });
+}
+
+// The minor findings of a task's approving review, for the final lenses:
+// each {id, severity, file, line, issue, fix}, id 'T<task>-<n>' numbered from
+// 1 (a task id that already starts with a letter, such as 'T2', is used as
+// it is: 'T2-1').
+function taskMinorFindings(task, findings) {
+  const prefix = /^[A-Za-z]/.test(task.id) ? task.id : `T${task.id}`;
+  return (Array.isArray(findings) ? findings : []).filter((f) => f && f.severity === 'minor')
+    .map((f, i) => ({
+      id: `${prefix}-${i + 1}`, severity: f.severity, file: f.file, line: f.line, issue: f.issue, fix: f.fix,
+    }));
 }
 
 // One batch unit (spec D3) for consecutive light tasks with the same batch

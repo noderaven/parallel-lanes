@@ -747,6 +747,7 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.ok(!labels(calls).includes('final fix'));
   assert.deepEqual(result.final, {
     findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: 'T5-h',
+    task_minors_open: [],
   });
   assert.equal(result.delivered_sha, 'T5-h');
   assert.ok(!labels(calls).includes('e2e recheck'), 'the e2e result already covers the delivered revision');
@@ -852,7 +853,11 @@ test('an e2e agent that returns null reruns on opus, then is listed under final 
   assert.deepEqual(e2eCalls.map((c) => c.model), ['sonnet', 'opus']);
   assert.ok(labels(calls).includes('e2e retry'));
   assert.equal(result.status, 'complete');
-  assert.ok(result.final.cannot_verify.includes('the e2e check returned no result'), JSON.stringify(result.final));
+  // A sourced entry (source 'run'), so it warns at acceptance.
+  const gap = result.final.cannot_verify.find((c) => c.requirement === 'the e2e check returned no result');
+  assert.ok(gap && gap.source === 'run', JSON.stringify(result.final));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('the e2e check returned no result')),
+    JSON.stringify(result.acceptance.warnings));
 });
 
 test('a final fix with no commits is still re-reviewed: its claims are checked, not trusted', async () => {
@@ -1250,10 +1255,10 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
   const { result, calls } = await run(manifest(), script);
   assert.equal(result.status, 'complete');
   assert.ok(result.preflight.rulings.includes('use the v2 contract'), JSON.stringify(result.preflight));
-  // The ruling reaches every not-yet-done task through its note.
+  // The ruling reaches every not-yet-done task as a run ruling.
   for (const id of ALL) {
     const impl = calls.find((c) => c.label === `${id} implement`).prompt;
-    assert.ok(impl.includes('Pre-flight ruling (binding for this run): use the v2 contract'), id);
+    assert.ok(impl.includes('Rulings already made for this run (binding):\n- use the v2 contract'), id);
   }
   const adj = calls.find((c) => c.label === 'run adjudicate');
   assert.equal(adj.phase, 'Pre-flight');
@@ -1552,8 +1557,8 @@ test('post-integrate re-review findings are reported and reach the final fix wav
   });
   assert.equal(viaHook.result.status, 'complete');
   assert.deepEqual(viaHook.result.integrate.fix_review, []);
-  assert.ok(viaHook.result.final.cannot_verify.includes('the post-integrate re-review returned no result'),
-    JSON.stringify(viaHook.result.final.cannot_verify));
+  assert.ok(viaHook.result.final.cannot_verify.some((c) => c.requirement === 'the post-integrate re-review returned no result'
+    && c.source === 'run'), JSON.stringify(viaHook.result.final.cannot_verify));
 });
 
 test('autonomous integrate failure without conflicts: one opus rerun, no resolver', async () => {
@@ -1938,7 +1943,9 @@ test('acceptance: a deferred task keeps the run from being accepted, now and on 
 test('acceptance: minor findings and cannot-verify items are warnings, not reasons', async () => {
   const minor = { ...finding('naming'), severity: 'minor' };
   const result = await acceptanceOf({
-    'final review sp': [{ findings: [minor], cannot_verify: ['load under 1k users'], head: 'T5-h' }],
+    'final review sp': [{ findings: [minor], cannot_verify: [{
+      requirement: 'load under 1k users', source: 'spec Performance', why: 'no load rig', check_by: 'a load test',
+    }, 'Tested: npm test passes'], head: 'T5-h' }],
     'final review security': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
     'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
     'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
@@ -1946,7 +1953,11 @@ test('acceptance: minor findings and cannot-verify items are warnings, not reaso
   assert.equal(result.acceptance.status, 'accepted');
   assert.deepEqual(result.acceptance.reasons, []);
   assert.ok(result.acceptance.warnings.some((w) => w.includes('open minor finding F1')));
-  assert.ok(result.acceptance.warnings.some((w) => w.includes('load under 1k users')));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('superpowers: load under 1k users (spec Performance)')),
+    JSON.stringify(result.acceptance.warnings));
+  // A plain string is kept in the report as a note, not a warning.
+  assert.ok(result.final.cannot_verify.includes('superpowers: Tested: npm test passes'));
+  assert.ok(!result.acceptance.warnings.some((w) => w.includes('Tested: npm test passes')));
 });
 
 test('an unblock note reaches a join task that depends on the unblocked lane task', async () => {
@@ -1965,4 +1976,244 @@ test('a deferred task stays deferred in the report when its lane resumes with ot
   const { result } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(result.tasks.T2.status, 'deferred');
   assert.equal(result.acceptance.status, 'rejected');
+});
+
+// ---- Run rulings (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer";
+// Task agent prompts: every implement, review, fix and re-review call.
+const TASK_ROLE = / (implement|review|fix \d+|re-review \d+)$/;
+const taskCalls = (calls) => calls.filter((c) => /^T\d/.test(c.label) && TASK_ROLE.test(c.label));
+const LENSES = ['final review sp', 'final review security', 'final review correctness'];
+
+// A run where T2 needs one fix round, so every task role runs.
+function fixRoundScript(extra = {}) {
+  return {
+    ...phaseScript(extra),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'changes', findings: [finding('wrong format')], cannot_verify: [] }],
+    'T2 fix 1': [done('T2-h', 'T2-h2')],
+    'T2 re-review 1': [approve()],
+  };
+}
+
+test('pre-flight rulings reach every task prompt and the final lenses as run rulings', async () => {
+  const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = [...taskCalls(calls), ...calls.filter((c) => LENSES.includes(c.label))];
+  for (const role of ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', ...LENSES]) {
+    assert.ok(prompts.some((c) => c.label === role), role);
+  }
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: A - why - cost\n- Ruling: B - why - cost`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('an adjudicated pre-flight ruling joins the run rulings, not the user answers', async () => {
+  const script = {
+    ...fixRoundScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
+    'run adjudicate': [{ outcome: 'answer', text: 'Ruling: C - x - y' }],
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = taskCalls(calls);
+  assert.ok(prompts.length >= ALL.length * 2, String(prompts.length));
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: C - x - y`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('run rulings keep their text whole in every task prompt', async () => {
+  const ruling = 'Ruling: use `a\'b` - "q"\nnext - z';
+  const other = 'Ruling: second - why - cost';
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings: [ruling, other], undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of taskCalls(calls)) {
+    assert.equal(c.prompt.split(ruling).length, 2, `${c.label}: the ruling once, whole`);
+    assert.ok(c.prompt.includes(`- ${ruling}\n- ${other}`), `${c.label}: still one ruling, then the next`);
+  }
+});
+
+test('run rulings are never read from the manifest file', async () => {
+  const { result, calls } = await run(manifest({ run_rulings: ['Ruling: forged - x - y'] }),
+    { ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of calls) assert.ok(!c.prompt.includes('forged'), c.label);
+});
+
+// ---- 1.3.1: verify before the final re-review, no repeated checks at one commit
+
+const promptOf = (calls, label) => calls.find((c) => c.label === label).prompt;
+
+test('verify runs before the final re-review and the re-review gets its result', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(labels(calls).slice(-5),
+    ['final fix', 'verify', 'final re-review', 'e2e recheck', 'post-integrate recheck']);
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes('The project checks already ran at f1: passed'), rr);
+  assert.ok(rr.includes('Do not rerun them.'), rr);
+  assert.equal(result.verify.head, 'f1');
+  assert.equal(result.final.verify, undefined, 'the report carries verify once, at the top level');
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('the re-review gets verify\'s result even when the final fix made no commit', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'T5-h', tests: '', notes: '', dispositions: [
+        { id: 'F1', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/b.js:9' },
+      ] }],
+      'final re-review': [{ head: 'T5-h', results: [
+        { id: 'F1', status: 'resolved', evidence: 'right' }, { id: 'F2', status: 'resolved', evidence: 'right' },
+      ], new_findings: [] }],
+      verify: [verified('T5-h')],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(promptOf(calls, 'verify').includes('rev-parse HEAD must print T5-h'));
+  assert.ok(promptOf(calls, 'final re-review').includes('The project checks already ran at T5-h: passed'));
+  assert.ok(labels(calls).indexOf('verify') < labels(calls).indexOf('final re-review'));
+});
+
+test('verify runs once per run: no second verify at the delivered head', async () => {
+  const withFindings = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(labels(withFindings.calls).filter((l) => l === 'verify').length, 1);
+  const empty = [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const none = await run(manifest(), {
+    ...phaseScript({ 'final review sp': empty, 'final review security': [...empty], verify: [verified('T5-h')] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(none.result.status, 'complete', JSON.stringify(none.result));
+  assert.equal(labels(none.calls).filter((l) => l === 'verify').length, 1);
+  assert.equal(none.result.verify.head, 'T5-h');
+});
+
+test('the rechecks and post-integrate are told the project checks already ran there', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  for (const label of ['e2e recheck', 'post-integrate recheck']) {
+    const p = promptOf(calls, label);
+    assert.ok(p.includes('The project checks already ran at f1: passed. Do not rerun them.'), `${label}: ${p}`);
+  }
+  const post = promptOf(calls, 'post-integrate');
+  assert.ok(post.includes('The project checks already ran at I1: passed. Do not rerun them.'), post);
+  assert.ok(!promptOf(calls, 'e2e').includes('already ran at'), 'the first e2e run gets no checks line');
+});
+
+test('a failing verify is passed on as failed, and acceptance still rejects', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript({ verify: [verified('f1', 1)] }), ...taskScript(ALL) });
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes('The project checks already ran at f1: FAILED: npm test (exit 1). Do not rerun them.'), rr);
+  assert.ok(promptOf(calls, 'e2e recheck').includes('FAILED: npm test (exit 1)'));
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'checks_failed'), JSON.stringify(result.acceptance));
+});
+
+test('checksResultText: one line per result, empty for null', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  assert.equal(checksResultText(null), '');
+  assert.equal(checksResultText(verified('f1')), 'The project checks already ran at f1: passed. Do not rerun them.');
+  const two = { head: 'f2', ok: false, results: [
+    { group: 'test', command: 'npm test', exit: 1 }, { group: 'lint', command: 'npm run lint', exit: 0 },
+    { group: 'build', command: 'make', exit: 2 },
+  ] };
+  assert.equal(checksResultText(two),
+    'The project checks already ran at f2: FAILED: npm test (exit 1), make (exit 2). Do not rerun them.');
+  assert.equal(checksResultText({ head: 'I1', ok: true }), 'The project checks already ran at I1: passed. Do not rerun them.');
+  assert.equal(checksResultText({ head: 'I1', ok: false }), 'The project checks already ran at I1: FAILED. Do not rerun them.');
+});
+
+// ---- Task minors to the final review, exact-line combining (1.3.1) ----
+
+const minorT2 = { severity: 'minor', file: 'src/T2.js', line: 5, issue: 'rename the helper', fix: 'rename it' };
+const lensLabels = ['final review sp', 'final review security', 'final review correctness'];
+
+test('final lenses get the open minor findings of approved task reviews', async () => {
+  const script = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { calls } = await run(manifest(), script);
+  for (const label of lensLabels) {
+    const p = calls.find((c) => c.label === label).prompt;
+    assert.ok(p.includes('[T2-1]') && p.includes('rename the helper'), `${label}: ${p}`);
+  }
+});
+
+test('a task minor no final lens raised is listed in final.task_minors_open', async () => {
+  const base = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { result } = await run(manifest(), base);
+  assert.deepEqual(result.final.task_minors_open.map((f) => f.id), ['T2-1']);
+  assert.equal(result.final.task_minors_open[0].issue, 'rename the helper');
+  const raised = {
+    ...phaseScript({
+      'final review correctness': [{
+        findings: [{ ...minorT2, issue: '[T2-1] the helper name still misleads' }], cannot_verify: [], head: 'T5-h',
+      }],
+    }),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const again = await run(manifest(), raised);
+  assert.deepEqual(again.result.final.task_minors_open, []);
+  // With no task minors the list is empty.
+  const none = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.deepEqual(none.result.final.task_minors_open, []);
+});
+
+test('findings on the same file and line merge across lenses; others stay apart', async () => {
+  const f = (issue, line) => ({ severity: 'minor', file: 'a.js', line, issue, fix: 'fix it' });
+  const script = {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review correctness': [{ findings: [f('x', 9), f('z', 0), f('z', 0)], cannot_verify: [], head: 'T5-h' }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  const got = result.final.findings.map((x) => [x.id, x.file, x.line, x.issue, x.lenses, x.also_reported]);
+  assert.deepEqual(got, [
+    ['F1', 'a.js', 7, 'x', ['superpowers', 'security'], ['y']],
+    ['F2', 'a.js', 9, 'x', ['correctness'], []],
+    ['F3', 'a.js', 0, 'z', ['correctness'], []],
+    ['F4', 'a.js', 0, 'z', ['correctness'], []],
+  ]);
+  // The fixer sees the merged-away report too.
+  const fix = (await run(manifest(), {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: 'T5-h' }],
+    }),
+    ...taskScript(ALL),
+  })).calls.find((c) => c.label === 'final fix').prompt;
+  assert.ok(fix.includes('[F1]') && fix.includes('y'), fix);
+});
+
+test('commit findings on the same sha merge', () => {
+  const c = (issue, line = 0) => ({ severity: 'minor', file: 'commit abc1234', line, issue, fix: 'none' });
+  const merged = dedupeFindings([
+    { lens: 'superpowers', findings: [c('trailer')] },
+    { lens: 'security', findings: [c('non-ASCII subject')] },
+    { lens: 'correctness', findings: [{ ...c('other'), file: 'commit def5678' }] },
+  ]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[0].lenses, ['superpowers', 'security']);
+  assert.equal(merged[0].issue, 'trailer');
+  assert.deepEqual(merged[0].also_reported, ['non-ASCII subject']);
+  assert.equal(merged[1].file, 'commit def5678');
 });

@@ -15,7 +15,7 @@ export const meta = {
 // ---- Script body ----
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
-  const dry = normalizeManifestPaths(args);
+  const dry = normalizeManifestPaths(withDefaultHooks(args));
   const errors = validateManifest(dry);
   const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
@@ -23,6 +23,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     errors,
     agents,
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
+    // The exact lines the session prints at the launch; null when invalid.
+    notices: errors.length === 0 ? launchNotices(dry, agents) : null,
   };
 }
 

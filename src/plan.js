@@ -42,6 +42,15 @@ function normalizeManifestPaths(m) {
   return out;
 }
 
+// The manifest with hooks {} when it has no hooks key (hooks is optional; a
+// present value, even an invalid one, is kept for validateManifest to
+// check). A copy; anything that is not an object is returned unchanged.
+// Applied with normalizeManifestPaths before anything reads the manifest.
+function withDefaultHooks(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m) || 'hooks' in m) return m;
+  return { ...m, hooks: {} };
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings
@@ -68,7 +77,9 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// whenever a test, lint or build command exists; e2e_recheck and
+// once, whenever a test, lint or build command exists: after the final fix
+// and before the final re-review (which gets its result), or after the
+// lenses when they found nothing; it is listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -105,13 +116,24 @@ function planAgents(m) {
   const lenses = lite
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
-  for (const role of [...lenses, 'final_fix', 'final_re_review']) {
-    add('Final review', null, null, role, standard);
-  }
+  for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
   if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
+}
+
+// The lines the session prints when it launches the run (launch) or
+// relaunches it with tasks already committed (resume), and runAll logs:
+// launch counts the distinct lanes among agents (planAgents(m)) and the
+// agents; resume counts m.done. Expects a valid manifest.
+function launchNotices(m, agents) {
+  const lanes = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane)).size;
+  return {
+    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents`,
+    resume: `parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`,
+  };
 }
 
 // Lanes that would run at once: lanes with at least one planned agent,

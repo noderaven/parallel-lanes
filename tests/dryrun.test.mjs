@@ -120,8 +120,8 @@ test('full plan lists every role in run order with phase, lane and task', () => 
     ['Final review', null, null, 'final_review_security'],
     ['Final review', null, null, 'final_review_correctness'],
     ['Final review', null, null, 'final_fix'],
-    ['Final review', null, null, 'final_re_review'],
     ['Verify', null, null, 'verify'],
+    ['Final review', null, null, 'final_re_review'],
     ['Verify', null, null, 'e2e_recheck'],
     ['Verify', null, null, 'post_integrate_recheck'],
   ]);
@@ -195,8 +195,8 @@ test('lite plan: no pre-flight, integrate or post-integrate; one combined final 
     ['E2E', null, null, 'e2e', 'sonnet'],
     ['Final review', null, null, 'final_review_combined', 'opus'],
     ['Final review', null, null, 'final_fix', 'opus'],
-    ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'verify', 'sonnet'],
+    ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'e2e_recheck', 'sonnet'],
   ]);
 });
@@ -245,6 +245,18 @@ test('a post_integrate agent is present only when hooks.post_integrate is set', 
   assert.deepEqual(planAgents(manifest()).filter((a) => a.role === 'post_integrate'), []);
   const withHook = planAgents(manifest({ hooks: { post_integrate: 'check contracts' } }));
   assert.equal(withHook.filter((a) => a.role === 'post_integrate').length, 1);
+});
+
+test('the dry run returns the exact launch and resume notices', async () => {
+  const { result } = await dryRun(manifest());
+  assert.equal(result.notices.launch, `parallel-lanes: launching run run-1: 2 lanes, ${result.agents.length} agents`);
+  const resumed = await dryRun(manifest({ done: ['T1'], backfill: { T1: { base: 'b', head: 'h' } } }));
+  assert.deepEqual(resumed.result.errors, []);
+  assert.equal(resumed.result.notices.resume, 'parallel-lanes: resuming run run-1: 1 tasks already committed');
+  // An invalid manifest has no notices to print.
+  const bad = manifest();
+  delete bad.plan;
+  assert.equal((await dryRun(bad)).result.notices, null);
 });
 
 test('lanes_effective counts lanes with work, capped by max_parallel_lanes', async () => {
@@ -341,4 +353,13 @@ test('parity: a lite run with setup_result spawns exactly the planned agents', a
   await assertParity(liteManifest({
     setup_result: { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } },
   }));
+});
+
+test('the dry run lists verify before the final re-review', async () => {
+  const m = manifest({ hooks: { post_integrate: 'check contracts', e2e: 'run e2e' } });
+  const { result } = await dryRun(m);
+  const roles = result.agents.map((a) => a.role);
+  assert.deepEqual(roles.slice(-5), ['final_fix', 'verify', 'final_re_review', 'e2e_recheck', 'post_integrate_recheck']);
+  assert.equal(result.agents.length, planAgents(m).length);
+  assert.equal(result.agents.length, 22, 'the count is unchanged');
 });

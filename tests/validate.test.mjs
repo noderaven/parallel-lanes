@@ -88,6 +88,30 @@ test('a launch needs setup_result; a dry run does not', () => {
   assert.deepEqual(validateManifest({ ...m, dry_run: true }), []);
 });
 
+test('a manifest without hooks validates and runs as if hooks were {}', async () => {
+  const m = validManifest();
+  delete m.hooks;
+  assert.deepEqual(validateManifest(m), []);
+  assert.ok(!manifestRequiredKeys().includes('hooks'));
+  // The dry run plans the same agents as with hooks {}.
+  const dry = await loadScript({ args: { ...m, dry_run: true } });
+  assert.deepEqual(dry.errors, []);
+  assert.deepEqual(dry.agents, planAgents({ ...m, hooks: {}, dry_run: true }));
+  // A launch reads the hooks too: it starts with the pre-flight agent.
+  const labels = [];
+  const result = await loadScript({
+    args: m,
+    agent: async (prompt, opts) => {
+      labels.push(opts.label);
+      return null;
+    },
+  });
+  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry']);
+  assert.equal(result.status, 'stopped');
+  // A hooks value that is present is still checked.
+  assertError(validateManifest({ ...m, hooks: null }), 'hooks: must be an object');
+});
+
 test('a task id that is not a safe file name is reported', () => {
   for (const id of ['../../victim', 'a/b', '.hidden', '-x']) {
     const m = validManifest();
