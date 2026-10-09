@@ -11,9 +11,10 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-recovery-')));
+const TMP = realpathSync(tempDir('pl-recovery-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const ENV = {
   ...process.env,

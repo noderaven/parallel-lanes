@@ -21,10 +21,13 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, IS_WINDOWS, SYMLINKS, samePath } from './platform.mjs';
+import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv } from './platform.mjs';
 
 const SHADOW = join(SKILL_DIR, 'scripts', 'shadow');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-shadow-')));
+const TMP = realpathSync(tempDir('pl-shadow-'));
+// A file name with a shell-quoting character. Windows forbids '"' in names,
+// so there the name holds a single quote instead.
+const WEIRD = IS_WINDOWS ? "we'ird.txt" : 'we"ird.txt';
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -59,7 +62,7 @@ function write(dir, rel, content) {
 function shadow(base, args, env = {}) {
   const res = spawnSync(BASH, [SHADOW, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, PL_SHADOW_BASE: base, ...env },
+    env: mergeEnv(process.env, GIT_ENV, { PL_SHADOW_BASE: base }, env),
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -126,7 +129,8 @@ test('init without .gitignore: built-in excludes, private dir, baseline on pl-ba
   const before = snapshot(c.project);
   const gitdir = init(c);
 
-  const hash = createHash('sha256').update(c.project).digest('hex').slice(0, 16);
+  // shadow hashes the project path in the form it prints (C:/... on Windows).
+  const hash = createHash('sha256').update(IS_WINDOWS ? c.project.replace(/\\/g, '/') : c.project).digest('hex').slice(0, 16);
   assert.ok(samePath(gitdir, join(c.base, hash)), gitdir);
   // Windows has no POSIX modes: init succeeding is the check there.
   if (!IS_WINDOWS) assert.equal(statSync(gitdir).mode & 0o777, 0o700);
@@ -165,7 +169,9 @@ test('init runs no global hooks in the project and copies no template hooks', ()
   }
   write(templateDir, 'info/exclude', '# template\n');
   const config = join(c.root, 'gitconfig');
-  writeFileSync(config, `[core]\n\thooksPath = ${hooksDir}\n[init]\n\ttemplateDir = ${templateDir}\n`);
+  // git reads backslashes in a config value as escapes: give it forward slashes.
+  const fwd = (p) => p.replace(/\\/g, '/');
+  writeFileSync(config, `[core]\n\thooksPath = ${fwd(hooksDir)}\n[init]\n\ttemplateDir = ${fwd(templateDir)}\n`);
   const before = snapshot(c.project);
 
   const res = shadow(c.base, ['init', c.project], { GIT_CONFIG_GLOBAL: config });
@@ -195,7 +201,7 @@ function fakeCygpath(root) {
   return { PL_UNAME: 'MINGW64_NT-10.0', PATH: `${bin}${delimiter}${process.env.PATH}` };
 }
 
-test('shadow prints C:/ paths under Git Bash', () => {
+test('shadow prints C:/ paths under Git Bash', { skip: IS_WINDOWS && 'simulates Git Bash with a fake cygpath; on Windows every test runs the real one' }, () => {
   const c = newCase({ 'a.txt': 'a\n' });
   const env = fakeCygpath(c.root);
   const hash = createHash('sha256').update(c.project).digest('hex').slice(0, 16);
@@ -266,7 +272,7 @@ function laneScenario() {
   unlinkSync(join(wt, 'b.txt'));
   unlinkSync(join(wt, 'gone/only.txt'));
   write(wt, 'new dir/file name.txt', 'new\n');
-  write(wt, 'we"ird.txt', 'quoted\n');
+  write(wt, WEIRD, 'quoted\n');
   chmodSync(join(wt, 'run.sh'), 0o755);
   commitAll(wt);
   return { c, gitdir, wt };
@@ -278,7 +284,7 @@ test('preview lists the lane commit as add, modify and delete', () => {
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(JSON.parse(res.stdout), {
     conflicts: [],
-    add: ['new dir/file name.txt', 'we"ird.txt'],
+    add: ['new dir/file name.txt', WEIRD],
     modify: ['a.txt', 'run.sh'],
     delete: ['b.txt', 'gone/only.txt'],
     skipped: [],
@@ -302,10 +308,10 @@ test('writeback applies exactly the previewed changes and keeps user files', () 
   delete expected.gone;
   expected['new dir'] = 'dir';
   expected['new dir/file name.txt'] = 'file:new\n';
-  expected['we"ird.txt'] = 'file:quoted\n';
+  expected[WEIRD] = 'file:quoted\n';
   const after = snapshot(c.project);
   // New files take the user's umask; compare their content only.
-  for (const rel of ['new dir/file name.txt', 'we"ird.txt']) {
+  for (const rel of ['new dir/file name.txt', WEIRD]) {
     after[rel] = after[rel].replace(/^file:\d+:/, 'file:');
   }
   // run.sh gains the user execute bit and keeps its other bits (Windows
@@ -447,7 +453,7 @@ test('writeback preflight: an unwritable target or directory writes nothing', { 
   }
 });
 
-test('a write that fails midway names the paths already written', () => {
+test('a write that fails midway names the paths already written', { skip: IS_WINDOWS && 'Git Bash on Windows cannot set a file size limit (ulimit -f)' }, () => {
   const c = newCase({ 'a.txt': 'a\n', 'm.txt': 'm\n' });
   const gitdir = init(c);
   const wt = laneWorktree(c, gitdir);

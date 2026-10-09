@@ -5,10 +5,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'derive-lanes');
 const FIXTURE = join(SKILL_DIR, 'tests', 'fixtures', 'plan-five-lanes.md');
-const TMP = mkdtempSync(join(tmpdir(), 'pl-derive-'));
+const TMP = tempDir('pl-derive-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 let counter = 0;

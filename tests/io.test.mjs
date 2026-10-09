@@ -7,9 +7,10 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-io-')));
+const TMP = realpathSync(tempDir('pl-io-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 const HELPERS = ['ledger', 'task-brief', 'finish-task', 'coverage', 'derive-lanes', 'run-report'];
@@ -130,7 +131,8 @@ test('a CRLF plan gives the same brief and section hash as LF', () => {
   ].join('\n');
   const res = spawnSync('python3', ['-c', code, lf, crlf], { encoding: 'utf8' });
   assert.equal(res.status, 0, res.stderr);
-  const [a, b] = res.stdout.trim().split('\n');
+  // print() on Windows ends lines with CRLF; only the hashes matter here.
+  const [a, b] = res.stdout.replace(/\r\n/g, '\n').trim().split('\n');
   assert.match(a, /^[0-9a-f]{64}$/);
   assert.equal(a, b);
 });

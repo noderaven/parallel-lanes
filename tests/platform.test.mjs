@@ -10,9 +10,10 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
+import { tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-platform-')));
+const TMP = realpathSync(tempDir('pl-platform-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 const PRELUDE = [

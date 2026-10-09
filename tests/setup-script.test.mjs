@@ -17,10 +17,10 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, SYMLINKS, samePath } from './platform.mjs';
+import { BASH, SYMLINKS, samePath, tempDir, mergeEnv, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-setup-')));
+const TMP = realpathSync(tempDir('pl-setup-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -38,7 +38,7 @@ const GIT_ENV = {
 function sh(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, ...(opts.env || {}) },
+    env: mergeEnv(process.env, GIT_ENV, opts.env),
     cwd: opts.cwd,
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
@@ -320,7 +320,7 @@ test('setup: a foreign directory at a lane path exits 3 and is left alone', () =
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
 });
 
-test('setup runs setup commands with the resolved bash', () => {
+test('setup runs setup commands with the resolved bash', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
   const c = newCase();
   const realBash = sh(BASH, ['-c', 'command -v bash']).stdout.trim();
   const calls = join(c.root, 'calls');

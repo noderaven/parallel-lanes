@@ -10,10 +10,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, SYMLINKS } from './platform.mjs';
+import { BASH, SYMLINKS, tempDir, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-boundaries-')));
+const TMP = realpathSync(tempDir('pl-boundaries-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const GIT_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
@@ -167,7 +167,7 @@ function fakeBash(dir, calls) {
   return bin;
 }
 
-test('run-checks starts each check with the bash find_bash resolves', () => {
+test('run-checks starts each check with the bash find_bash resolves', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
   const r = repo();
   const calls = join(dirname(r), 'calls');
   const bin = fakeBash(dirname(r), calls);
@@ -179,7 +179,10 @@ test('run-checks starts each check with the bash find_bash resolves', () => {
   assert.ok(readFileSync(calls, 'utf8').split('\n').includes('-c true'), readFileSync(calls, 'utf8'));
 });
 
-test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
+test('run-checks names CLAUDE_CODE_GIT_BASH_PATH when no bash can be found', {
+  // On Windows find_bash also finds Git in its standard place, so no PATH hides it.
+  skip: (IS_WINDOWS && 'Git Bash is always found in its standard place on Windows') || (!SYMLINKS && 'symlinks unavailable'),
+}, () => {
   const r = repo();
   // PATH holds only python3: no bash (and no git) can be found on it.
   const bin = join(dirname(r), 'python only');

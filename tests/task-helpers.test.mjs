@@ -14,10 +14,12 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, samePath } from './platform.mjs';
+import { BASH, samePath, tempDir, mergeEnv, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'pl-task-helpers-')));
+const TMP = realpathSync(tempDir('pl-task-helpers-'));
+// How start-task prints a path it was given: the C:/ form on Windows.
+const shown = (p) => (IS_WINDOWS ? p.replace(/\\/g, '/') : p);
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -33,7 +35,7 @@ const GIT_ENV = {
 function sh(cmd, args, extraEnv = {}) {
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
-    env: { ...process.env, ...GIT_ENV, ...extraEnv },
+    env: mergeEnv(process.env, GIT_ENV, extraEnv),
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -151,7 +153,7 @@ test('start-task regenerates and prints each brief', () => {
     const expected = readFileSync(ref, 'utf8');
     assert.equal(readFileSync(out, 'utf8'), expected);
     assert.ok(expected.includes(`Body of task ${id}.`));
-    assert.ok(res.stdout.includes(`===== brief ${id}: ${out} =====\n${expected}`), res.stdout);
+    assert.ok(res.stdout.includes(`===== brief ${id}: ${shown(out)} =====\n${expected}`), res.stdout);
   }
   assert.ok(res.stdout.indexOf('brief T1') < res.stdout.indexOf('brief T2'));
 });
@@ -182,7 +184,7 @@ test("start-task passes --also to the named task's brief only", () => {
   const text2 = readFileSync(out2, 'utf8');
   assert.ok(text2.endsWith(`\n\n${appended}`), text2);
   assert.ok(!readFileSync(out1, 'utf8').includes('## Produces of Task P'));
-  assert.ok(res.stdout.includes(`===== brief T2: ${out2} =====\n${text2}`), res.stdout);
+  assert.ok(res.stdout.includes(`===== brief T2: ${shown(out2)} =====\n${text2}`), res.stdout);
 });
 
 test('start-task exits 2 for --also naming a task without --brief', () => {
@@ -263,7 +265,7 @@ test('start-task --package runs the package script in DIR and prints its output'
   assert.ok(res.stdout.indexOf('===== brief T1') < res.stdout.indexOf('===== review package'));
 });
 
-test('start-task runs the package script with the resolved bash', () => {
+test('start-task runs the package script with the resolved bash', { skip: IS_WINDOWS && 'a fake bash script cannot stand in for bash.exe on Windows (find_bash is unit-tested in tests/platform.test.mjs)' }, () => {
   const c = newCase();
   const realBash = sh(BASH, ['-c', 'command -v bash']).stdout.trim();
   const calls = join(c.root, 'calls');

@@ -14,10 +14,10 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, IS_WINDOWS, samePath } from './platform.mjs';
+import { BASH, IS_WINDOWS, samePath, tempDir, pathList, mergeEnv } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
-const TMP = mkdtempSync(join(tmpdir(), 'pl-scripts-'));
+const TMP = tempDir('pl-scripts-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 let counter = 0;
@@ -32,7 +32,7 @@ function workDir() {
 function run(interpreter, script, args, env = {}) {
   const res = spawnSync(interpreter, [join(SCRIPTS, script), ...args], {
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: mergeEnv(process.env, env),
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -96,7 +96,7 @@ test('find-superpowers compares versions numerically across roots', () => {
   fakeInstall(join(rootA, 'a'), { pkgVersion: '6.4.2' });
   fakeInstall(join(rootB, 'b'), { pluginVersion: '6.10.0' });
   fakeInstall(join(rootB, 'c'), { pkgVersion: '9.0.0', prompt: false });
-  const res = findSuperpowers({ PL_SEARCH_ROOTS: `${rootA}:${rootB}` });
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: pathList(rootA, rootB) });
   assert.equal(res.code, 0, res.stderr);
   assertPathLine(res.stdout, join(rootB, 'b', 'skills'));
 });
@@ -104,13 +104,13 @@ test('find-superpowers compares versions numerically across roots', () => {
 test('find-superpowers exits 3 with no output when nothing is installed', () => {
   const root = workDir();
   fakeInstall(join(root, 'incomplete'), { pkgVersion: '6.4.2', prompt: false });
-  const res = findSuperpowers({ PL_SEARCH_ROOTS: `${root}:${join(root, 'missing')}` });
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: pathList(root, join(root, 'missing')) });
   assert.equal(res.code, 3);
   assert.equal(res.stdout, '');
 });
 
 test('find-superpowers exits 3 when the search roots have no candidates at all', () => {
-  const res = findSuperpowers({ PL_SEARCH_ROOTS: `${workDir()}:` });
+  const res = findSuperpowers({ PL_SEARCH_ROOTS: pathList(workDir(), '') });
   assert.equal(res.code, 3);
   assert.equal(res.stdout, '');
   assert.equal(res.stderr, '');
@@ -135,7 +135,7 @@ test('find-superpowers searches the CLAUDE_CONFIG_DIR plugin cache by default', 
   assertPathLine(res.stdout, join(config, 'plugins', 'cache', 'mkt', 'superpowers', '6.4.2', 'skills'));
 });
 
-test('find-superpowers prints a C:/ path under Git Bash', () => {
+test('find-superpowers prints a C:/ path under Git Bash', { skip: IS_WINDOWS && 'simulates Git Bash with a fake cygpath; on Windows every test runs the real one' }, () => {
   const root = workDir();
   fakeInstall(join(root, 'sp'), { pkgVersion: '6.4.2' });
   // A fake cygpath prints C:/fake before its last argument.

@@ -5,10 +5,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH } from './platform.mjs';
+import { BASH, tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'find-agent-type');
-const TMP = mkdtempSync(join(tmpdir(), 'pl-agent-type-'));
+const TMP = tempDir('pl-agent-type-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 let counter = 0;
