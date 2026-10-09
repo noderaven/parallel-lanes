@@ -12,8 +12,15 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || exit 0
 [ -f "$here/bootstrap.md" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
+# On Windows jq.exe gets the C:/ form: Git Bash's own path conversion skips
+# some paths (one with a ';', for instance). Without the helper, or when it
+# fails, the path is used as it is.
+ctx_file="$here/bootstrap.md"
+if [ -f "$here/../scripts/_paths.sh" ] && . "$here/../scripts/_paths.sh" 2>/dev/null && pl_is_windows; then
+  ctx_file="$(native "$ctx_file" 2>/dev/null)" || ctx_file="$here/bootstrap.md"
+fi
 markers="$(bash "$here/../scripts/active-run" list 2>/dev/null)" || markers='[]'
-out="$(jq -n --rawfile ctx "$here/bootstrap.md" --argjson markers "$markers" '
+out="$(jq -n --rawfile ctx "$ctx_file" --argjson markers "$markers" '
   ($markers | map(
       (.run_id | gsub("[[:cntrl:]]"; " ")) as $id
       | (.manifest | gsub("[[:cntrl:]]"; " ")) as $manifest

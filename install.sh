@@ -19,15 +19,6 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-dest="$claude_dir/skills/parallel-lanes"
-settings="$claude_dir/settings.json"
-agent_file="$claude_dir/agents/parallel-lanes-worker.md"
-# The hook commands run through a shell, so the paths are single-quoted
-# (a config dir may contain spaces or quotes).
-shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-start_cmd="bash $(shquote "$dest/hooks/session-start.sh")"
-notice_cmd="bash $(shquote "$dest/hooks/notice.sh")"
 
 die() { echo "install: $*" >&2; exit 1; }
 
@@ -44,7 +35,9 @@ if [ -n "$src" ]; then
   . "$src/scripts/_paths.sh"
 else
   pl_is_windows() { return 1; }
+  native() { printf '%s\n' "$1"; }
 fi
+
 
 for tool in jq git; do
   command -v "$tool" >/dev/null 2>&1 && continue
@@ -54,6 +47,22 @@ for tool in jq git; do
   die "$tool is required but not installed"
 done
 
+claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# On Windows the config dir takes the C:/ form: jq.exe gets it as is, with no
+# Git Bash path conversion to depend on, and the hook commands name it the
+# same way whatever form CLAUDE_CONFIG_DIR or HOME used.
+if pl_is_windows; then
+  claude_dir="$(native "$claude_dir" 2>/dev/null)" || claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+fi
+dest="$claude_dir/skills/parallel-lanes"
+settings="$claude_dir/settings.json"
+agent_file="$claude_dir/agents/parallel-lanes-worker.md"
+# The hook commands run through a shell, so the paths are single-quoted
+# (a config dir may contain spaces or quotes).
+shquote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+start_cmd="bash $(shquote "$dest/hooks/session-start.sh")"
+notice_cmd="bash $(shquote "$dest/hooks/notice.sh")"
+
 backup_settings() {
   [ -f "$settings" ] || return 0
   local bak="$settings.bak.$(date +%Y%m%d%H%M%S)"
@@ -61,9 +70,10 @@ backup_settings() {
   echo "Backed up settings to $bak"
 }
 
-# Drop every hook entry whose command points at this skill's hooks dir.
+# Drop every hook entry whose command points at this skill's hooks dir, with
+# either separator (an older install on Windows may have written backslashes).
 strip_filter='
-  def strip: map(.hooks |= map(select((.command // "") | contains("/skills/parallel-lanes/hooks/") | not)))
+  def strip: map(.hooks |= map(select((.command // "") | test("[/\\\\]skills[/\\\\]parallel-lanes[/\\\\]hooks[/\\\\]") | not)))
              | map(select(.hooks | length > 0));
   if .hooks then
     .hooks |= with_entries(.value |= strip) | .hooks |= with_entries(select(.value | length > 0))
