@@ -6,10 +6,13 @@ Import with:
 
 find_bash() is the one way to find the bash to start. On Windows the order is:
 CLAUDE_CODE_GIT_BASH_PATH (it must name an existing bash.exe, bash, sh.exe or
-sh, as Claude Code requires, or find_bash fails naming it), then bash on PATH
-(skipping the WSL launchers in %SystemRoot%\\System32 and under
-%LOCALAPPDATA%\\Microsoft\\WindowsApps), then C:/Program Files/Git and
-C:/Program Files (x86)/Git. A <git>/usr/bin/bash.exe result becomes
+sh, as Claude Code requires, or find_bash fails naming it), then each absolute
+PATH folder in order: its bash.exe (skipping the WSL launchers in
+%SystemRoot%\\System32 and under %LOCALAPPDATA%\\Microsoft\\WindowsApps), or
+<git>/bin/bash.exe for a <git>/cmd folder that holds git.exe (the PATH entry the
+Git for Windows installer adds). Relative PATH folders, and the current
+directory Windows' own search would try, are never used. Then C:/Program
+Files/Git and C:/Program Files (x86)/Git. A <git>/usr/bin/bash.exe result becomes
 <git>/bin/bash.exe when that exists: the launcher puts Git's tools on PATH. On
 Linux and macOS it is the bash on PATH. Failure raises BashNotFound.
 
@@ -112,7 +115,29 @@ def _prefer_launcher(p, isfile):
     return p
 
 
-def _find_windows_bash(env, which, isfile):
+def _absolute_windows(p):
+    """Whether p is an absolute Windows path: a drive path (C:/x, C:\\x) or UNC."""
+    return bool(re.match(r"^[A-Za-z]:[\\/]", p)) or p.startswith(("\\\\", "//"))
+
+
+def _path_candidates(env, isfile):
+    """The bash.exe each absolute PATH folder offers, in PATH order."""
+    for folder in (_getenv(env, "PATH") or "").split(";"):
+        folder = folder.strip().strip('"')
+        if not _absolute_windows(folder):
+            continue
+        folder = (_drive_form(folder) or folder.replace("\\", "/")).rstrip("/")
+        own = folder + "/bash.exe"
+        if isfile(own):
+            yield own
+        parent, _, name = folder.rpartition("/")
+        if name.lower() == "cmd" and parent and isfile(folder + "/git.exe"):
+            launcher = parent + "/bin/bash.exe"
+            if isfile(launcher):
+                yield launcher
+
+
+def _find_windows_bash(env, isfile):
     configured = _getenv(env, VARIABLE)
     if configured:
         native = _drive_form(configured) or configured
@@ -124,9 +149,9 @@ def _find_windows_bash(env, which, isfile):
                 VARIABLE + " is set to " + configured + ", which is not bash.exe, bash, sh.exe or sh"
             )
         return _prefer_launcher(native, isfile)
-    on_path = which("bash")
-    if on_path and not _is_wsl_launcher(on_path, env):
-        return _prefer_launcher(_drive_form(on_path) or on_path, isfile)
+    for on_path in _path_candidates(env, isfile):
+        if not _is_wsl_launcher(on_path, env):
+            return _prefer_launcher(on_path, isfile)
     for standard in _STANDARD:
         if isfile(standard):
             return standard
@@ -137,8 +162,9 @@ def find_bash(env=None, platform=None, which=None, isfile=None):
     """The absolute path of the bash to start; raises BashNotFound.
 
     Defaults: os.environ, sys.platform, shutil.which (on env's PATH),
-    os.path.isfile. The result is cached per process only for a call with
-    every default.
+    os.path.isfile. which is used on Linux and macOS only: on Windows the
+    PATH folders in env are searched with isfile. The result is cached per
+    process only for a call with every default.
     """
     global _cached_bash
     defaults = env is None and platform is None and which is None and isfile is None
@@ -151,7 +177,7 @@ def find_bash(env=None, platform=None, which=None, isfile=None):
         which = lambda name: shutil.which(name, path=path)  # noqa: E731
     isfile = os.path.isfile if isfile is None else isfile
     if _is_windows(platform):
-        found = _find_windows_bash(env, which, isfile)
+        found = _find_windows_bash(env, isfile)
     else:
         found = which("bash")
         if not found:

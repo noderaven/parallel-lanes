@@ -91,7 +91,8 @@ X is about 2 x runnable tasks + 10; the table gives the exact number. "Go ahead"
 Fields: reference.md "Manifest fields". In order:
 
 0. Python: `bash <skill_dir>/scripts/find-python` (exit 3: tell the user and stop); `python` =
-   its output, `<python>` below. On Windows every manifest path takes the `C:/...` form.
+   its output, `<python>` below, written single-quoted (`'<python>'`). On Windows manifest
+   paths take the `C:/...` form.
 1. Superpowers: `bash <skill_dir>/scripts/find-superpowers`. Exit 0: `sp_dir` = the printed
    path. Exit 3: print `parallel-lanes: superpowers not found; agents use built-in prompts`
    and set `sp_dir: null`.
@@ -217,7 +218,7 @@ The run returns `status`:
   "<what>"`.
 
 Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
-<run_dir>/<plan-name>.<run_id>.report.json` on the transcript dir printed at launch and append
+<run_dir>/<plan-name>.<run_id>.report.json` (Launch step 4's transcript dir) and append
 its output. Per task: status, commits (`skipped`:
 from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md

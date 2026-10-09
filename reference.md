@@ -21,11 +21,13 @@ On Windows (Git Bash) every path in the manifest (`plan`, `spec`, `skill_dir`, `
 `python`, and the `repo` paths) takes the `C:/Users/...` form: drive letter, forward slashes,
 what `cygpath -m` prints and what the helpers print. Never write the Git Bash form
 (`/c/Users/...`): Python and Node read it as a path on the current drive. The workflow turns
-`C:\...` backslashes into `/` before it uses a path, and the validator accepts `/...` and
-`C:/...` (or `C:\...`) as absolute. Task `files` stay project-relative with forward slashes:
-an absolute path in either form, a `\\server\share` path, or any backslash is an error.
-Helpers start Git Bash by its path (`CLAUDE_CODE_GIT_BASH_PATH` when set, else from PATH or
-`C:/Program Files/Git`), never the WSL `bash.exe` in System32.
+`C:\...` and `c:/...` into `C:/...` before it uses a path (and `/c/...` too once any manifest
+path has a drive letter), and the validator accepts `/...` and `C:/...` (or `C:\...`) as
+absolute. Task `files` stay project-relative with forward slashes: an absolute path in either
+form, a `\\server\share` path, any backslash, or any `:` (`D:foo` names another drive) is an
+error. Helpers start Git Bash by its path (`CLAUDE_CODE_GIT_BASH_PATH` when set, else a
+`bash.exe` in an absolute PATH folder or the `<git>/bin/bash.exe` of a `<git>/cmd` folder on
+PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 
 ## Manifest fields
 

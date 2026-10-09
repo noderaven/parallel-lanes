@@ -18,7 +18,8 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-check='import sys; assert sys.version_info >= (3, 8); print(sys.executable)'
+# No assert: PYTHONOPTIMIZE would strip it. Python 2 fails on the print call.
+check='import sys; sys.exit(1) if sys.version_info < (3, 8) else print(sys.executable)'
 
 # try WORDS...: run the interpreter command with the check; on success print
 # its native path and return 0.

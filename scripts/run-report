@@ -27,6 +27,10 @@ bound). Lines with no stop_reason key are taken as final.
 Models: resolved_models maps every model that served the agent to its
 message count (a fallback model shows up here even when the workflow
 recorded the requested one); top-level models counts agents per model.
+
+Exit 0 on success; 2 on a usage error or an unreadable TRANSCRIPT_DIR or
+MANIFEST; 3 when a path needs converting on Windows and no Git Bash or
+cygpath is found.
 """
 import glob
 import json
@@ -326,7 +330,7 @@ def main(argv):
             out = _shell.native_path(out)
     except _shell.BashNotFound as e:
         print(f"run-report: {e}", file=sys.stderr)
-        return 2
+        return 3
     if not os.path.isdir(transcript_dir):
         print(f"run-report: not a directory: {transcript_dir}", file=sys.stderr)
         return 2

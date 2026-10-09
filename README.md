@@ -74,7 +74,8 @@ proven route: install Claude Code inside WSL and follow the Linux steps.
 
   Node is optional (tests only). Any Python 3.8 or later works: the skill looks for
   `python3`, then `python`, then `py -3`, and skips the Microsoft Store `python3` stub.
-- **Git in another place:** the skill finds Git Bash on PATH or under `C:\Program Files\Git`.
+- **Git in another place:** the skill finds Git Bash on PATH (also through the `Git\cmd` folder
+  the Git installer puts there) or under `C:\Program Files\Git`.
   If Git is installed somewhere else, set the Windows environment variable
   `CLAUDE_CODE_GIT_BASH_PATH` to its `bash.exe` (for example `D:\Tools\Git\bin\bash.exe`);
   Claude Code reads the same variable. The skill never uses the WSL `bash.exe` in

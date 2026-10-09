@@ -213,6 +213,8 @@ def run(args):
             env=ENV,
             stdout=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if res.returncode != 0:
             fail(1, f"package script {script!r} exited {res.returncode}")
@@ -233,7 +235,7 @@ def run(args):
         for task_id, _ in args.brief:
             entry = json.dumps({"task": task_id, "event": "started", "base": start_base})
             res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "append", ledger_dir, lane, entry],
-                                 env=ENV, capture_output=True, text=True)
+                                 env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if res.returncode != 0:
                 sys.stderr.write(res.stderr)
                 sys.exit(res.returncode)

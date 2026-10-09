@@ -34,11 +34,12 @@ function isAbsolutePathText(path) {
 
 // A project-relative file path, normalized: '.' and empty segments dropped,
 // '..' resolved. Returns null for an absolute path (either form), one with a
-// backslash (a Windows separator or a '\\server' share), or one that
-// leaves the project.
+// backslash (a Windows separator or a '\\server' share), one with a ':'
+// (a Windows drive-relative path such as 'D:foo', which names another
+// drive, or an NTFS stream such as 'a.js:s'), or one that leaves the project.
 function normalizePath(path) {
   if (typeof path !== 'string' || path.length === 0) return null;
-  if (isAbsolutePathText(path) || path.includes('\\')) return null;
+  if (isAbsolutePathText(path) || path.includes('\\') || path.includes(':')) return null;
   const out = [];
   for (const part of path.split('/')) {
     if (part === '' || part === '.') continue;

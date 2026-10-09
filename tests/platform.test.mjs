@@ -85,19 +85,55 @@ test('find_bash accepts the names Claude Code allows for CLAUDE_CODE_GIT_BASH_PA
   ]);
 });
 
+// WIN_ENV with PATH set to the given folders, as a Python dict literal.
+const winEnv = (...folders) => `dict(${WIN_ENV}, PATH=${JSON.stringify(folders.join(';'))})`;
+
 test('find_bash skips WSL launchers on PATH', () => {
   const out = py(`print(json.dumps([attempt(lambda: _shell.find_bash(
-    env=${WIN_ENV},
+    env=dict(${WIN_ENV}, PATH=folder),
     platform='win32',
-    which=found(launcher),
-    isfile=files('${GIT_BASH}')))
-    for launcher in [
-      'C:\\\\Windows\\\\System32\\\\bash.exe',
-      'c:/windows/SYSTEM32/bash.exe',
-      'C:\\\\Users\\\\me\\\\AppData\\\\Local\\\\Microsoft\\\\WindowsApps\\\\bash.exe',
-      'c:/users/ME/appdata/local/microsoft/windowsapps/bash.exe',
+    which=found(None),
+    isfile=files(launcher, '${GIT_BASH}')))
+    for folder, launcher in [
+      ('C:\\\\Windows\\\\System32', 'C:/Windows/System32/bash.exe'),
+      ('c:/windows/SYSTEM32', 'C:/windows/SYSTEM32/bash.exe'),
+      ('C:\\\\Users\\\\me\\\\AppData\\\\Local\\\\Microsoft\\\\WindowsApps',
+       'C:/Users/me/AppData/Local/Microsoft/WindowsApps/bash.exe'),
+      ('c:/users/ME/appdata/local/microsoft/windowsapps', 'C:/users/ME/appdata/local/microsoft/windowsapps/bash.exe'),
     ]]))`);
   assert.deepEqual(out, Array(4).fill({ ok: GIT_BASH }));
+});
+
+test('find_bash keeps searching PATH after a WSL launcher', () => {
+  const out = py(`print(json.dumps(attempt(lambda: _shell.find_bash(
+    env=${winEnv('C:\\Windows\\System32', 'D:\\Git\\usr\\bin')},
+    platform='win32',
+    which=found('C:/Windows/System32/bash.exe'),
+    isfile=files('C:/Windows/System32/bash.exe', 'D:/Git/usr/bin/bash.exe', '${GIT_BASH}')))))`);
+  assert.deepEqual(out, { ok: 'D:/Git/usr/bin/bash.exe' });
+});
+
+test('find_bash finds Git Bash from the cmd folder of Git on PATH', () => {
+  const out = py(`print(json.dumps(attempt(lambda: _shell.find_bash(
+    env=${winEnv('C:/Windows/System32', '"D:\\Tools\\Git\\cmd"')},
+    platform='win32',
+    which=found(None),
+    isfile=files('C:/Windows/System32/bash.exe', 'D:/Tools/Git/cmd/git.exe',
+                 'D:/Tools/Git/bin/bash.exe', '${GIT_BASH}')))))`);
+  assert.deepEqual(out, { ok: 'D:/Tools/Git/bin/bash.exe' });
+});
+
+test('find_bash ignores relative PATH folders, the current directory and bash.cmd', () => {
+  // Windows' own search would return .\\bash.exe from the current directory,
+  // or a bash.cmd that routes -c through cmd.exe; neither is Git Bash.
+  // Every relative path exists here, so only the absolute rule keeps them out.
+  const out = py(`print(json.dumps(attempt(lambda: _shell.find_bash(
+    env=${winEnv('', '.', 'tools', '.\\\\bin', 'C:/x')},
+    platform='win32',
+    which=found('.\\\\bash.exe'),
+    isfile=lambda p: p in ('${GIT_BASH}', 'C:/x/bash.cmd', 'C:/x/bash.bat')
+        or not _shell._absolute_windows(p)))))`);
+  assert.deepEqual(out, { ok: GIT_BASH });
 });
 
 test('find_bash falls back to the x86 Git folder', () => {
@@ -111,21 +147,21 @@ test('find_bash falls back to the x86 Git folder', () => {
 
 test('find_bash prefers the Git bin launcher over usr/bin', () => {
   const out = py(`print(json.dumps([attempt(lambda: _shell.find_bash(
-    env=${WIN_ENV},
     platform='win32',
-    which=found(onpath),
-    isfile=files('${GIT_BASH}', 'C:/program files/git/bin/bash.exe')))
-    for onpath in [
-      'C:\\\\Program Files\\\\Git\\\\usr\\\\bin\\\\bash.exe',
-      'c:/program files/git/USR/BIN/bash.exe',
+    env=dict(${WIN_ENV}, PATH=folder),
+    which=found(None),
+    isfile=files(onpath, '${GIT_BASH}', 'C:/program files/git/bin/bash.exe')))
+    for folder, onpath in [
+      ('C:\\\\Program Files\\\\Git\\\\usr\\\\bin', 'C:/Program Files/Git/usr/bin/bash.exe'),
+      ('c:/program files/git/USR/BIN', 'C:/program files/git/USR/BIN/bash.exe'),
     ]]))`);
   assert.deepEqual(out, [{ ok: GIT_BASH }, { ok: 'C:/program files/git/bin/bash.exe' }]);
   // Without the launcher the usr/bin bash is kept.
   const kept = py(`print(json.dumps(attempt(lambda: _shell.find_bash(
-    env=${WIN_ENV},
+    env=${winEnv('D:\\Git\\usr\\bin')},
     platform='win32',
-    which=found('D:\\\\Git\\\\usr\\\\bin\\\\bash.exe'),
-    isfile=files()))))`);
+    which=found(None),
+    isfile=files('D:/Git/usr/bin/bash.exe')))))`);
   assert.deepEqual(kept, { ok: 'D:/Git/usr/bin/bash.exe' });
 });
 

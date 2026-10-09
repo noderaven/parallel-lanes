@@ -105,11 +105,17 @@ test('a file that is absolute or leaves the project is reported', () => {
 });
 
 test('Windows absolute paths are absolute', () => {
-  for (const f of ['C:/x', 'c:\\x', '\\\\server\\x', 'src\\a.js']) {
+  // D:foo is relative to drive D's current folder: another drive, not the
+  // project. src/a.js:s names an NTFS stream.
+  const schema = JSON.parse(readFileSync(join(SKILL_DIR, 'manifest.schema.json'), 'utf8'));
+  const banned = new RegExp(schema.$defs.task.properties.files.items.not.pattern);
+  for (const f of ['C:/x', 'c:\\x', '\\\\server\\x', 'src\\a.js', 'D:foo', 'src/a.js:s']) {
     const m = validManifest();
     m.lanes[0].tasks[0].files = [f];
     assertError(validateManifest(m), JSON.stringify(f), 'absolute or leaves the project');
+    assert.ok(banned.test(f), `the schema allows ${JSON.stringify(f)}`);
   }
+  assert.equal(banned.test('src/a.js'), false);
   const m = validManifest();
   m.setup_result.worktrees = { alpha: 'C:/wt/lane-alpha', beta: 'd:\\wt\\lane-beta' };
   assert.deepEqual(validateManifest(m), []);

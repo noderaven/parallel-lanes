@@ -453,10 +453,10 @@
             "type": "string",
             "minLength": 1,
             "not": {
-              "pattern": "^/|^[A-Za-z]:[\\\\/]|\\\\"
+              "pattern": "^/|[:\\\\]"
             }
           },
-          "description": "Project-relative paths with / separators; none may be absolute (/... or C:/...), contain a backslash, or leave the project. Compared normalized and case-insensitively across lanes."
+          "description": "Project-relative paths with / separators; none may be absolute (/... or C:/...), contain a backslash or a ':' (D:foo names another drive, a.js:s an NTFS stream), or leave the project. Compared normalized and case-insensitively across lanes."
         },
         "tier": {
           "enum": [

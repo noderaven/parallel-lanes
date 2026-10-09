@@ -82,6 +82,22 @@ test('find-python skips an interpreter older than 3.8', () => {
   assert.equal(r.stdout, `${REAL_EXE}\n`);
 });
 
+test('find-python skips a Python older than 3.8 even with PYTHONOPTIMIZE set', () => {
+  // python3 is the real interpreter posing as /old/python3.6, version 3.6;
+  // PYTHONOPTIMIZE strips an assert, so an assert-based check would take it.
+  const old = `for a; do code=$a; done; exec '${REAL_EXE}' -c "import sys; sys.version_info = (3, 6, 0); sys.executable = '/old/python3.6'; exec(sys.argv[1])" "$code"`;
+  const fake = fakeBin({ python3: old, python: execReal });
+  const r = run([FIND_PYTHON], {
+    path: `${fake}${delimiter}${REAL_PATH}`,
+    env: { PL_UNAME: 'Linux', PYTHONOPTIMIZE: '1' },
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, `${REAL_EXE}\n`);
+  // The fake itself really reports 3.6.
+  const probe = run(['-c', `python3 -c 'import sys; print(sys.version_info[:2])'`], { path: `${fake}${delimiter}${REAL_PATH}` });
+  assert.equal(probe.stdout, '(3, 6)\n');
+});
+
 test('find-python fails clearly when none works', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
   // Only the tools the script needs, so no real python is on PATH.
   const tools = fakeBin({ python3: 'exit 9009', python: 'exit 1', py: 'exit 1' });

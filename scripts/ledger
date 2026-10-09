@@ -273,7 +273,8 @@ def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
         fail(3, str(e))
 
     def git(*args):
-        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, env=ENV)
+        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="surrogateescape", env=ENV)
 
     res = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{head}^{{commit}}")
     if res.returncode != 0 or not res.stdout.strip():
@@ -548,7 +549,8 @@ def accept(directory, checkout, head, text):
     if not text:
         fail(2, "TEXT must say what the user accepted")
     res = subprocess.run(["git", "-C", checkout, "rev-parse", "--verify", "--quiet", "--end-of-options",
-                          f"{head}^{{commit}}"], capture_output=True, text=True, env=ENV)
+                          f"{head}^{{commit}}"], capture_output=True, text=True, encoding="utf-8",
+                         errors="surrogateescape", env=ENV)
     if res.returncode != 0 or not res.stdout.strip():
         fail(3, f"{head!r} is not a commit in {checkout!r}; nothing recorded")
     write_entry(directory, "_run", {"task": "_run", "event": "accepted", "head": res.stdout.strip(), "text": text})

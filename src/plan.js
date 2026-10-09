@@ -1,19 +1,42 @@
-// The manifest with its Windows paths in forward-slash form: each absolute
-// path field written as 'C:\x\y' becomes 'C:/x/y' (Git Bash and the
-// helpers accept it, and it needs no escaping in prompts). A pure string
-// change on a copy; other values, and anything that is not an object, are
-// returned unchanged.
+// A drive path ('C:\\x\\y', 'c:/x/y') in the one form scripts/setup prints
+// (_shell.native_path): upper-case drive letter, '/' separators. With
+// msys true, an MSYS drive path ('/c/x', what Git Bash prints) becomes
+// 'C:/x' too. Anything else is returned unchanged.
+function windowsPathForm(v, msys) {
+  if (typeof v !== 'string') return v;
+  if (/^[A-Za-z]:[\\/]/.test(v)) return v[0].toUpperCase() + ':/' + v.slice(3).split('\\').join('/');
+  const drive = msys ? /^\/([A-Za-z])(\/|$)/.exec(v) : null;
+  if (drive) return drive[1].toUpperCase() + ':/' + v.slice(drive[0].length);
+  return v;
+}
+
+const MANIFEST_PATH_KEYS = ['plan', 'spec', 'skill_dir', 'sp_dir', 'python'];
+const MANIFEST_REPO_PATH_KEYS = ['root', 'git_dir', 'worktree_root', 'ledger_dir'];
+
+// The manifest with its Windows paths in the form scripts/setup prints, so
+// the worktree paths the run derives match setup_result: each path field
+// written as 'C:\\x\\y' or 'c:/x/y' becomes 'C:/x/y' (Git Bash and the
+// helpers accept it, and it needs no escaping in prompts). When any path
+// field is a drive path (a Windows manifest), '/c/x' fields become 'C:/x'
+// as well; on Linux and macOS '/c/x' is an ordinary path and stays. A pure
+// string change on a copy; other values, and anything that is not an
+// object, are returned unchanged.
 function normalizeManifestPaths(m) {
   if (m === null || typeof m !== 'object' || Array.isArray(m)) return m;
-  const fix = (v) => (typeof v === 'string' && /^[A-Za-z]:\\/.test(v) ? v.split('\\').join('/') : v);
+  const repo = m.repo !== null && typeof m.repo === 'object' && !Array.isArray(m.repo) ? m.repo : null;
+  const values = [
+    ...MANIFEST_PATH_KEYS.map((k) => m[k]),
+    ...(repo ? MANIFEST_REPO_PATH_KEYS.map((k) => repo[k]) : []),
+  ];
+  const msys = values.some((v) => typeof v === 'string' && /^[A-Za-z]:[\\/]/.test(v));
   const out = { ...m };
-  for (const key of ['plan', 'spec', 'skill_dir', 'sp_dir', 'python']) {
-    if (key in out) out[key] = fix(out[key]);
+  for (const key of MANIFEST_PATH_KEYS) {
+    if (key in out) out[key] = windowsPathForm(out[key], msys);
   }
-  if (out.repo !== null && typeof out.repo === 'object' && !Array.isArray(out.repo)) {
-    out.repo = { ...out.repo };
-    for (const key of ['root', 'git_dir', 'worktree_root', 'ledger_dir']) {
-      if (key in out.repo) out.repo[key] = fix(out.repo[key]);
+  if (repo) {
+    out.repo = { ...repo };
+    for (const key of MANIFEST_REPO_PATH_KEYS) {
+      if (key in out.repo) out.repo[key] = windowsPathForm(out.repo[key], msys);
     }
   }
   return out;

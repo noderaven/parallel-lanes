@@ -3,7 +3,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -59,6 +59,35 @@ test('every Python helper calls setup_io and writes files through write_text', (
   assert.equal(res.stdout.trim(), '', 'no helper may write text with open()');
   assert.match(readFileSync(join(SCRIPTS, 'task-brief'), 'utf8'), /write_text\(/);
   assert.match(readFileSync(join(SCRIPTS, 'run-report'), 'utf8'), /write_text\(/);
+});
+
+test('every subprocess the Python scripts read as text is decoded as UTF-8', () => {
+  // git prints paths as UTF-8; decoding with the Windows code page (the
+  // text=True default there) garbles a non-ASCII path or raises.
+  const scripts = readdirSync(SCRIPTS)
+    .map((name) => join(SCRIPTS, name))
+    .filter((path) => path.endsWith('.py') || /^#!.*python/.test(readFileSync(path, 'utf8').split('\n')[0]));
+  assert.ok(scripts.length >= 10, `found only ${scripts.length} Python scripts`);
+  const code = [
+    'import ast, sys',
+    'bad = []',
+    'for path in sys.argv[1:]:',
+    '    with open(path, encoding="utf-8") as f:',
+    '        tree = ast.parse(f.read(), path)',
+    '    for node in ast.walk(tree):',
+    '        if not isinstance(node, ast.Call):',
+    '            continue',
+    '        kw = {k.arg: k.value for k in node.keywords}',
+    '        texty = any(isinstance(kw.get(k), ast.Constant) and kw[k].value is True',
+    '                    for k in ("text", "universal_newlines"))',
+    '        enc = kw.get("encoding")',
+    '        if texty and not (isinstance(enc, ast.Constant) and enc.value == "utf-8"):',
+    '            bad.append(f"{path}:{node.lineno}: text=True without encoding=\'utf-8\'")',
+    'print("\\n".join(bad))',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, ...scripts], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), '');
 });
 
 const PLAN = [
@@ -142,7 +171,7 @@ test('a path that cannot be converted fails with the helper message, not a trace
     ['coverage', ['/nowhere/plan.md', '/nowhere/manifest.json'], 3],
     ['derive-lanes', ['/nowhere/plan.md'], 3],
     ['finish-task', ['/nowhere/wt', 'b', 'HEAD', '/nowhere/ledger', 'alpha', '--task', '1'], 3],
-    ['run-report', ['/nowhere/transcripts', '/nowhere/manifest.json'], 2],
+    ['run-report', ['/nowhere/transcripts', '/nowhere/manifest.json'], 3],
   ];
   for (const [name, args, status] of cases) {
     const res = spawnSync('python3', ['-c', code, join(SCRIPTS, name), ...args], { encoding: 'utf8', env });

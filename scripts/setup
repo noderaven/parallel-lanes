@@ -101,7 +101,8 @@ class Failure(Exception):
 
 
 def run_git(args, check=True):
-    res = subprocess.run(["git", *args], capture_output=True, text=True, env=ENV)
+    res = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
+                         errors="surrogateescape", env=ENV)
     if check and res.returncode != 0:
         raise Failure(1, f"git {' '.join(args)} failed: {res.stderr.strip()}")
     return res
@@ -273,7 +274,8 @@ def snapshot(path, run_id):
         env = dict(ENV, GIT_INDEX_FILE=os.path.join(tmp, "index"))
 
         def git(*args):
-            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, env=env)
+            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
+                                 encoding="utf-8", errors="surrogateescape", env=env)
             if res.returncode != 0:
                 raise Failure(1, f"saving the changes in {path} failed: git {args[0]}: {res.stderr.strip()}")
             return res.stdout.strip()
@@ -412,7 +414,7 @@ def setup(m, owner=None):
              "plan_sha256": file_sha256(m.get("plan")), "spec_sha256": file_sha256(m.get("spec"))}
     res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ledger"), "append",
                           repo_cfg["ledger_dir"], "_run", json.dumps(entry)],
-                         capture_output=True, text=True, env=ENV)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)
     if res.returncode != 0:
         raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}

@@ -152,6 +152,30 @@ test('backslash manifest paths are normalized in the dry run and the run', async
     'no backslash path reaches a prompt');
 });
 
+test('lower-case and Git Bash drive paths match the C:/ worktrees setup prints', async () => {
+  // scripts/setup prints worktrees in _shell.native_path form: 'C:/wt/...'.
+  const printed = { alpha: 'C:/wt/lane-alpha', beta: 'C:/wt/lane-beta' };
+  const windows = (worktreeRoot, extra = {}) => {
+    const base = manifest();
+    return {
+      ...base,
+      repo: { ...base.repo, worktree_root: worktreeRoot },
+      setup_result: { ...base.setup_result, worktrees: printed },
+      ...extra,
+    };
+  };
+  for (const worktreeRoot of ['c:\\wt', 'c:/wt', '/c/wt']) {
+    const m = windows(worktreeRoot, { python: 'C:/Py/python.exe' });
+    const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+    assert.equal(result.status, 'complete', `${worktreeRoot}: ${JSON.stringify(result.errors)}`);
+    const prompt = calls.find((c) => c.label === 'T2 implement').prompt;
+    assert.ok(prompt.includes("'C:/wt/lane-alpha'"), `${worktreeRoot}: the lane works in setup's path`);
+  }
+  // No drive path anywhere: '/c/wt' stays as written, and still matches.
+  const { result } = await run(windows('/c/wt'), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result.errors));
+});
+
 test('happy path: complete, phases in order, report filled in', async () => {
   const m = manifest();
   const { result, calls, logs, phases } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
