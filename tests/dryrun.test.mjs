@@ -120,8 +120,8 @@ test('full plan lists every role in run order with phase, lane and task', () => 
     ['Final review', null, null, 'final_review_security'],
     ['Final review', null, null, 'final_review_correctness'],
     ['Final review', null, null, 'final_fix'],
-    ['Final review', null, null, 'final_re_review'],
     ['Verify', null, null, 'verify'],
+    ['Final review', null, null, 'final_re_review'],
     ['Verify', null, null, 'e2e_recheck'],
     ['Verify', null, null, 'post_integrate_recheck'],
   ]);
@@ -195,8 +195,8 @@ test('lite plan: no pre-flight, integrate or post-integrate; one combined final 
     ['E2E', null, null, 'e2e', 'sonnet'],
     ['Final review', null, null, 'final_review_combined', 'opus'],
     ['Final review', null, null, 'final_fix', 'opus'],
-    ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'verify', 'sonnet'],
+    ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'e2e_recheck', 'sonnet'],
   ]);
 });
@@ -341,4 +341,13 @@ test('parity: a lite run with setup_result spawns exactly the planned agents', a
   await assertParity(liteManifest({
     setup_result: { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } },
   }));
+});
+
+test('the dry run lists verify before the final re-review', async () => {
+  const m = manifest({ hooks: { post_integrate: 'check contracts', e2e: 'run e2e' } });
+  const { result } = await dryRun(m);
+  const roles = result.agents.map((a) => a.role);
+  assert.deepEqual(roles.slice(-5), ['final_fix', 'verify', 'final_re_review', 'e2e_recheck', 'post_integrate_recheck']);
+  assert.equal(result.agents.length, planAgents(m).length);
+  assert.equal(result.agents.length, 22, 'the count is unchanged');
 });

@@ -475,8 +475,11 @@ function postIntegrateReReviewPrompt(m, base, head) {
 }
 
 // checkOnly: a recheck at the delivered revision after later commits; the
-// agent verifies only and changes nothing.
-function postIntegratePrompt(m, checkOnly = false) {
+// agent verifies only and changes nothing. checks: the project checks'
+// result at the revision the agent starts from ({head, ok, results?}:
+// verify's run-checks JSON, or integrate's run), so the agent runs only what
+// the hook adds; null when none ran there.
+function postIntegratePrompt(m, checkOnly = false, checks = null) {
   const change = checkOnly ? [
     'This is a recheck of the delivered revision: verify only. Change no file, make no commit, and do not',
     'record a start point; if the instructions would need a change, return status failed naming it.',
@@ -491,6 +494,7 @@ function postIntegratePrompt(m, checkOnly = false) {
     'Follow these project instructions:',
     m.hooks.post_integrate,
     '',
+    ...checksLines(checks, !checkOnly),
     ...change,
     '',
     `Plan: ${m.plan}`,
@@ -505,13 +509,16 @@ function postIntegratePrompt(m, checkOnly = false) {
   ].join('\n');
 }
 
-function e2ePrompt(m) {
+// checks: verify's result at the revision a recheck covers (null when none
+// ran there): the checker runs only what the hook adds.
+function e2ePrompt(m, checks = null) {
   return [
     `You are the end-to-end checker for parallel-lanes run ${m.run_id}.`,
     `The integrated code is in ${featureDir(m)} on ${m.repo.branch}.`,
     'Follow these project instructions:',
     m.hooks.e2e,
     '',
+    ...checksLines(checks),
     'Rules: use scratch directories only (mktemp -d, outside the checkout and the project; remove them',
     'when done); never change tracked files or commit; stop every server you start before returning and',
     'confirm its port is free.',
@@ -634,8 +641,9 @@ function finalFixPrompt(m, findings, base) {
 }
 
 // findings carry their id and the fixer's dispositions for it
-// ([{status, reason, evidence}]; none when the fixer gave none).
-function finalReReviewPrompt(m, base, head, findings) {
+// ([{status, reason, evidence}]; none when the fixer gave none). verify:
+// the project checks' result at head (run before the re-review), or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -651,6 +659,11 @@ function finalReReviewPrompt(m, base, head, findings) {
     'Findings under verification, with what the fixer said about each:',
     findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     '',
+    ...(verify ? [
+      checksResultText(verify),
+      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      '',
+    ] : []),
     'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
@@ -682,8 +695,34 @@ function verifyPrompt(m, sha) {
     keepFilesRule(),
     phaseRules(m),
     '',
+    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
   ].join('\n');
+}
+
+// What the project checks found, for an agent that would otherwise rerun
+// them at the same commit: one line, or '' for null (or a result naming no
+// head). checks is verify's run-checks JSON, or {head, ok} for a run without
+// per-command results (integrate's). Passed means ok and every exit 0.
+function checksResultText(checks) {
+  if (!checks || !present(checks.head)) return '';
+  const results = Array.isArray(checks.results) ? checks.results : [];
+  const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
+  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
+    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
+}
+
+// The checks line for a hook agent (e2e, post-integrate), followed by the
+// instruction to run only what the hook adds; [] when no checks ran there.
+// mayCommit: the agent may commit a change, after which the commands run
+// again.
+function checksLines(checks, mayCommit = false) {
+  const text = checksResultText(checks);
+  if (text === '') return [];
+  return [text, `Run only what the instructions above add to them${mayCommit
+    ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
 }
 
 function findingKey(f) {

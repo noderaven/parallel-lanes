@@ -2035,3 +2035,88 @@ test('run rulings are never read from the manifest file', async () => {
   assert.equal(result.status, 'complete', JSON.stringify(result));
   for (const c of calls) assert.ok(!c.prompt.includes('forged'), c.label);
 });
+
+// ---- 1.3.1: verify before the final re-review, no repeated checks at one commit
+
+const promptOf = (calls, label) => calls.find((c) => c.label === label).prompt;
+
+test('verify runs before the final re-review and the re-review gets its result', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(labels(calls).slice(-5),
+    ['final fix', 'verify', 'final re-review', 'e2e recheck', 'post-integrate recheck']);
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes('The project checks already ran at f1: passed'), rr);
+  assert.ok(rr.includes('Do not rerun them.'), rr);
+  assert.equal(result.verify.head, 'f1');
+  assert.equal(result.final.verify, undefined, 'the report carries verify once, at the top level');
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('the re-review gets verify\'s result even when the final fix made no commit', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: 'T5-h', tests: '', notes: '', dispositions: [
+        { id: 'F1', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/b.js:9' },
+      ] }],
+      'final re-review': [{ head: 'T5-h', results: [
+        { id: 'F1', status: 'resolved', evidence: 'right' }, { id: 'F2', status: 'resolved', evidence: 'right' },
+      ], new_findings: [] }],
+      verify: [verified('T5-h')],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(promptOf(calls, 'verify').includes('rev-parse HEAD must print T5-h'));
+  assert.ok(promptOf(calls, 'final re-review').includes('The project checks already ran at T5-h: passed'));
+  assert.ok(labels(calls).indexOf('verify') < labels(calls).indexOf('final re-review'));
+});
+
+test('verify runs once per run: no second verify at the delivered head', async () => {
+  const withFindings = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(labels(withFindings.calls).filter((l) => l === 'verify').length, 1);
+  const empty = [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const none = await run(manifest(), {
+    ...phaseScript({ 'final review sp': empty, 'final review security': [...empty], verify: [verified('T5-h')] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(none.result.status, 'complete', JSON.stringify(none.result));
+  assert.equal(labels(none.calls).filter((l) => l === 'verify').length, 1);
+  assert.equal(none.result.verify.head, 'T5-h');
+});
+
+test('the rechecks and post-integrate are told the project checks already ran there', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  for (const label of ['e2e recheck', 'post-integrate recheck']) {
+    const p = promptOf(calls, label);
+    assert.ok(p.includes('The project checks already ran at f1: passed. Do not rerun them.'), `${label}: ${p}`);
+  }
+  const post = promptOf(calls, 'post-integrate');
+  assert.ok(post.includes('The project checks already ran at I1: passed. Do not rerun them.'), post);
+  assert.ok(!promptOf(calls, 'e2e').includes('already ran at'), 'the first e2e run gets no checks line');
+});
+
+test('a failing verify is passed on as failed, and acceptance still rejects', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript({ verify: [verified('f1', 1)] }), ...taskScript(ALL) });
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes('The project checks already ran at f1: FAILED: npm test (exit 1). Do not rerun them.'), rr);
+  assert.ok(promptOf(calls, 'e2e recheck').includes('FAILED: npm test (exit 1)'));
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'checks_failed'), JSON.stringify(result.acceptance));
+});
+
+test('checksResultText: one line per result, empty for null', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  assert.equal(checksResultText(null), '');
+  assert.equal(checksResultText(verified('f1')), 'The project checks already ran at f1: passed. Do not rerun them.');
+  const two = { head: 'f2', ok: false, results: [
+    { group: 'test', command: 'npm test', exit: 1 }, { group: 'lint', command: 'npm run lint', exit: 0 },
+    { group: 'build', command: 'make', exit: 2 },
+  ] };
+  assert.equal(checksResultText(two),
+    'The project checks already ran at f2: FAILED: npm test (exit 1), make (exit 2). Do not rerun them.');
+  assert.equal(checksResultText({ head: 'I1', ok: true }), 'The project checks already ran at I1: passed. Do not rerun them.');
+  assert.equal(checksResultText({ head: 'I1', ok: false }), 'The project checks already ran at I1: FAILED. Do not rerun them.');
+});

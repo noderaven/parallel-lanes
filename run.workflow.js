@@ -668,7 +668,9 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// whenever a test, lint or build command exists; e2e_recheck and
+// once, whenever a test, lint or build command exists: after the final fix
+// and before the final re-review (which gets its result), or after the
+// lenses when they found nothing; it is listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -705,10 +707,9 @@ function planAgents(m) {
   const lenses = lite
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
-  for (const role of [...lenses, 'final_fix', 'final_re_review']) {
-    add('Final review', null, null, role, standard);
-  }
+  for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
   if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
@@ -1884,8 +1885,11 @@ function postIntegrateReReviewPrompt(m, base, head) {
 }
 
 // checkOnly: a recheck at the delivered revision after later commits; the
-// agent verifies only and changes nothing.
-function postIntegratePrompt(m, checkOnly = false) {
+// agent verifies only and changes nothing. checks: the project checks'
+// result at the revision the agent starts from ({head, ok, results?}:
+// verify's run-checks JSON, or integrate's run), so the agent runs only what
+// the hook adds; null when none ran there.
+function postIntegratePrompt(m, checkOnly = false, checks = null) {
   const change = checkOnly ? [
     'This is a recheck of the delivered revision: verify only. Change no file, make no commit, and do not',
     'record a start point; if the instructions would need a change, return status failed naming it.',
@@ -1900,6 +1904,7 @@ function postIntegratePrompt(m, checkOnly = false) {
     'Follow these project instructions:',
     m.hooks.post_integrate,
     '',
+    ...checksLines(checks, !checkOnly),
     ...change,
     '',
     `Plan: ${m.plan}`,
@@ -1914,13 +1919,16 @@ function postIntegratePrompt(m, checkOnly = false) {
   ].join('\n');
 }
 
-function e2ePrompt(m) {
+// checks: verify's result at the revision a recheck covers (null when none
+// ran there): the checker runs only what the hook adds.
+function e2ePrompt(m, checks = null) {
   return [
     `You are the end-to-end checker for parallel-lanes run ${m.run_id}.`,
     `The integrated code is in ${featureDir(m)} on ${m.repo.branch}.`,
     'Follow these project instructions:',
     m.hooks.e2e,
     '',
+    ...checksLines(checks),
     'Rules: use scratch directories only (mktemp -d, outside the checkout and the project; remove them',
     'when done); never change tracked files or commit; stop every server you start before returning and',
     'confirm its port is free.',
@@ -2043,8 +2051,9 @@ function finalFixPrompt(m, findings, base) {
 }
 
 // findings carry their id and the fixer's dispositions for it
-// ([{status, reason, evidence}]; none when the fixer gave none).
-function finalReReviewPrompt(m, base, head, findings) {
+// ([{status, reason, evidence}]; none when the fixer gave none). verify:
+// the project checks' result at head (run before the re-review), or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -2060,6 +2069,11 @@ function finalReReviewPrompt(m, base, head, findings) {
     'Findings under verification, with what the fixer said about each:',
     findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     '',
+    ...(verify ? [
+      checksResultText(verify),
+      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      '',
+    ] : []),
     'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
@@ -2091,8 +2105,34 @@ function verifyPrompt(m, sha) {
     keepFilesRule(),
     phaseRules(m),
     '',
+    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
   ].join('\n');
+}
+
+// What the project checks found, for an agent that would otherwise rerun
+// them at the same commit: one line, or '' for null (or a result naming no
+// head). checks is verify's run-checks JSON, or {head, ok} for a run without
+// per-command results (integrate's). Passed means ok and every exit 0.
+function checksResultText(checks) {
+  if (!checks || !present(checks.head)) return '';
+  const results = Array.isArray(checks.results) ? checks.results : [];
+  const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
+  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
+    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
+}
+
+// The checks line for a hook agent (e2e, post-integrate), followed by the
+// instruction to run only what the hook adds; [] when no checks ran there.
+// mayCommit: the agent may commit a change, after which the commands run
+// again.
+function checksLines(checks, mayCommit = false) {
+  const text = checksResultText(checks);
+  if (text === '') return [];
+  return [text, `Run only what the instructions above add to them${mayCommit
+    ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
 }
 
 function findingKey(f) {
@@ -3040,8 +3080,12 @@ function acceptanceOf(input) {
 // (declines still need judging). Returns {findings, fixed, declined, open,
 // cannot_verify, missing_lenses, head}: head is the delivered feature head
 // (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason.
-async function runFinalReview(m, e2e, base, io, carried = []) {
+// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// project checks (null: the project has none): once a fix agent ran,
+// whatever it returned, they run at the delivered head before the re-review,
+// which gets their result so it does not rerun them; the result is returned
+// as final.verify (absent when no fix agent ran).
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -3090,18 +3134,25 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // A refused first call spawned no fix agent: no code changed, so the
+  // caller's budget stop runs the checks.
+  const fixRan = !(fix && fix.__budget);
   // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
   // fix's head stands unless its Opus rerun reports a head of its own.
   if (fix && present(fix.head)) final.head = fix.head;
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
   if (fix && present(fix.head)) final.head = fix.head;
+  // The checks at the delivered head, before the re-review (spec: no
+  // repeated checks at one commit).
+  if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
+    finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
@@ -3226,7 +3277,7 @@ function withConsumesExtra(m, kept) {
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
-//  verify (the run-checks result at the delivered revision)|null,
+//  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
@@ -3267,6 +3318,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.
@@ -3547,8 +3599,14 @@ async function runAll(manifest, io) {
       }
       tip = integ.head;
     }
+    // Integrate reran the project commands at its head: the post-integrate
+    // agent starting there is told their result, not to rerun them (null once
+    // a post-integrate fix moved the tip, or when the project has none).
+    const integrateChecks = () => (hasChecks && integ.head === tip
+      ? { head: integ.head, ok: !integ.tests_failed } : null);
     if (m.hooks.post_integrate) {
-      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+        statusSchema());
       if (state.refused.length > 0) return budgetReport();
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
@@ -3556,7 +3614,8 @@ async function runAll(manifest, io) {
         const from = await fixPostIntegration(pr.notes, tip);
         if (from === BUDGET) return budgetReport();
         tip = from;
-        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+          statusSchema());
         if (state.refused.length > 0) return budgetReport();
         pr = phaseResult(post, 'post-integrate');
       }
@@ -3581,11 +3640,12 @@ async function runAll(manifest, io) {
   // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
   // Opus (same label) and the Opus result is used. It records the revision
   // its checks covered.
-  const runE2e = async (label, phaseName) => {
-    let r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), sonnetHigh);
+  // checks: verify's result at the revision a recheck covers, or null.
+  const runE2e = async (label, phaseName, checks = null) => {
+    let r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), sonnetHigh);
     if (state.refused.length > 0) return null;
     if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
-      r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), standard);
+      r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), standard);
       if (state.refused.length > 0) return null;
     }
     return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
@@ -3596,7 +3656,6 @@ async function runAll(manifest, io) {
   // the last change the run has evidence even when the budget is spent.
   const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
     { ...sonnetHigh, overBudget: true });
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -3614,24 +3673,34 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
+  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
+    hasChecks ? verifyAt : null);
+  // Checks that ran inside the final review (a fix agent ran) are the run's
+  // verify: the report carries them once, at the top level.
+  const verifiedInReview = 'verify' in final;
+  if (verifiedInReview) {
+    verify = final.verify;
+    delete final.verify;
+  }
+  if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.
-  // The project checks always run there (scripts/run-checks); the e2e and
-  // post-integrate checks rerun only when a later commit made their evidence
-  // stale (the post-integrate one check-only).
+  // The project checks always run there (scripts/run-checks), once: here
+  // only when the final review ran no fix agent. The e2e and post-integrate
+  // checks rerun only when a later commit made their evidence stale (the
+  // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
-  if (hasChecks) verify = await verifyAt(delivered);
+  if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
-    e2e = await runE2e('e2e recheck', 'Verify');
+    e2e = await runE2e('e2e recheck', 'Verify', checksHere);
     if (state.refused.length > 0) return budgetReport();
   }
   if (m.hooks.post_integrate && !lite && (!postCheck || postCheck.checked_sha !== delivered)) {
-    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true), statusSchema());
+    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true, checksHere), statusSchema());
     if (state.refused.length > 0) return budgetReport();
     const pr = phaseCheck(r, 'post-integrate recheck');
     postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };

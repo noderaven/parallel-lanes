@@ -18,8 +18,12 @@
 // (declines still need judging). Returns {findings, fixed, declined, open,
 // cannot_verify, missing_lenses, head}: head is the delivered feature head
 // (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason.
-async function runFinalReview(m, e2e, base, io, carried = []) {
+// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// project checks (null: the project has none): once a fix agent ran,
+// whatever it returned, they run at the delivered head before the re-review,
+// which gets their result so it does not rerun them; the result is returned
+// as final.verify (absent when no fix agent ran).
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -68,18 +72,25 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // A refused first call spawned no fix agent: no code changed, so the
+  // caller's budget stop runs the checks.
+  const fixRan = !(fix && fix.__budget);
   // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
   // fix's head stands unless its Opus rerun reports a head of its own.
   if (fix && present(fix.head)) final.head = fix.head;
   if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
   if (fix && present(fix.head)) final.head = fix.head;
+  // The checks at the delivered head, before the re-review (spec: no
+  // repeated checks at one commit).
+  if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
+    finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
@@ -204,7 +215,7 @@ function withConsumesExtra(m, kept) {
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
-//  verify (the run-checks result at the delivered revision)|null,
+//  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
@@ -245,6 +256,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.
@@ -525,8 +537,14 @@ async function runAll(manifest, io) {
       }
       tip = integ.head;
     }
+    // Integrate reran the project commands at its head: the post-integrate
+    // agent starting there is told their result, not to rerun them (null once
+    // a post-integrate fix moved the tip, or when the project has none).
+    const integrateChecks = () => (hasChecks && integ.head === tip
+      ? { head: integ.head, ok: !integ.tests_failed } : null);
     if (m.hooks.post_integrate) {
-      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+        statusSchema());
       if (state.refused.length > 0) return budgetReport();
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
@@ -534,7 +552,8 @@ async function runAll(manifest, io) {
         const from = await fixPostIntegration(pr.notes, tip);
         if (from === BUDGET) return budgetReport();
         tip = from;
-        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+          statusSchema());
         if (state.refused.length > 0) return budgetReport();
         pr = phaseResult(post, 'post-integrate');
       }
@@ -559,11 +578,12 @@ async function runAll(manifest, io) {
   // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
   // Opus (same label) and the Opus result is used. It records the revision
   // its checks covered.
-  const runE2e = async (label, phaseName) => {
-    let r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), sonnetHigh);
+  // checks: verify's result at the revision a recheck covers, or null.
+  const runE2e = async (label, phaseName, checks = null) => {
+    let r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), sonnetHigh);
     if (state.refused.length > 0) return null;
     if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
-      r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), standard);
+      r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), standard);
       if (state.refused.length > 0) return null;
     }
     return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
@@ -574,7 +594,6 @@ async function runAll(manifest, io) {
   // the last change the run has evidence even when the budget is spent.
   const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
     { ...sonnetHigh, overBudget: true });
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -592,24 +611,34 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
+  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
+    hasChecks ? verifyAt : null);
+  // Checks that ran inside the final review (a fix agent ran) are the run's
+  // verify: the report carries them once, at the top level.
+  const verifiedInReview = 'verify' in final;
+  if (verifiedInReview) {
+    verify = final.verify;
+    delete final.verify;
+  }
+  if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
   if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
   if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.
-  // The project checks always run there (scripts/run-checks); the e2e and
-  // post-integrate checks rerun only when a later commit made their evidence
-  // stale (the post-integrate one check-only).
+  // The project checks always run there (scripts/run-checks), once: here
+  // only when the final review ran no fix agent. The e2e and post-integrate
+  // checks rerun only when a later commit made their evidence stale (the
+  // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
-  if (hasChecks) verify = await verifyAt(delivered);
+  if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
-    e2e = await runE2e('e2e recheck', 'Verify');
+    e2e = await runE2e('e2e recheck', 'Verify', checksHere);
     if (state.refused.length > 0) return budgetReport();
   }
   if (m.hooks.post_integrate && !lite && (!postCheck || postCheck.checked_sha !== delivered)) {
-    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true), statusSchema());
+    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true, checksHere), statusSchema());
     if (state.refused.length > 0) return budgetReport();
     const pr = phaseCheck(r, 'post-integrate recheck');
     postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };
