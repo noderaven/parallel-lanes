@@ -15,7 +15,6 @@
     "prelude",
     "lanes",
     "join",
-    "hooks",
     "limits",
     "dry_run",
     "done",
@@ -158,6 +157,7 @@
       "$ref": "#/$defs/taskList"
     },
     "hooks": {
+      "description": "Optional; a manifest without it runs as if it were {}.",
       "type": "object",
       "properties": {
         "post_integrate": {

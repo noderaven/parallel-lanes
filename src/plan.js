@@ -42,6 +42,15 @@ function normalizeManifestPaths(m) {
   return out;
 }
 
+// The manifest with hooks {} when it has no hooks key (hooks is optional; a
+// present value, even an invalid one, is kept for validateManifest to
+// check). A copy; anything that is not an object is returned unchanged.
+// Applied with normalizeManifestPaths before anything reads the manifest.
+function withDefaultHooks(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m) || 'hooks' in m) return m;
+  return { ...m, hooks: {} };
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings
@@ -113,6 +122,18 @@ function planAgents(m) {
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
+}
+
+// The lines the session prints when it launches the run (launch) or
+// relaunches it with tasks already committed (resume), and runAll logs:
+// launch counts the distinct lanes among agents (planAgents(m)) and the
+// agents; resume counts m.done. Expects a valid manifest.
+function launchNotices(m, agents) {
+  const lanes = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane)).size;
+  return {
+    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents`,
+    resume: `parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`,
+  };
 }
 
 // Lanes that would run at once: lanes with at least one planned agent,

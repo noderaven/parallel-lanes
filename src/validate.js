@@ -1,9 +1,10 @@
 // Top-level manifest keys that must be present (manifest.schema.json lists
-// the same keys as its top-level "required").
+// the same keys as its top-level "required"). hooks is optional: a manifest
+// without it runs as if it were {} (withDefaultHooks).
 function manifestRequiredKeys() {
   return [
     'version', 'run_id', 'plan', 'spec', 'commit_rules', 'repo', 'commands',
-    'prelude', 'lanes', 'join', 'hooks', 'limits', 'dry_run', 'done',
+    'prelude', 'lanes', 'join', 'limits', 'dry_run', 'done',
     'reviewed', 'sp_dir', 'skill_dir',
   ];
 }

@@ -386,6 +386,26 @@ test('a clean run under the default budget completes and counts every agent', as
   assert.equal(result.budget, undefined);
 });
 
+test('the run records every agent it started with its model and effort', async () => {
+  const script = cleanScript();
+  // A small diff: T1's review runs at medium effort.
+  script['T1 implement'] = [{ ...done('T1-b', 'T1-h'), changed_lines: 12 }];
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.agent_settings.length, calls.length);
+  assert.deepEqual(result.agent_settings, calls.map((c) => ({ label: c.label, model: c.model, effort: c.effort })));
+  assert.deepEqual(result.agent_settings.find((a) => a.label === 'T1 review'),
+    { label: 'T1 review', model: 'opus', effort: 'medium' });
+  assert.deepEqual(result.agent_settings.find((a) => a.label === 'T2 review'),
+    { label: 'T2 review', model: 'opus', effort: 'high' });
+
+  // A refused call adds no entry.
+  const capped = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
+  const stopped = await run(capped, cleanScript());
+  assert.equal(stopped.result.reason, 'budget');
+  assert.deepEqual(stopped.result.agent_settings, [{ label: 'pre-flight', model: 'opus', effort: 'high' }]);
+});
+
 test('a run reports agent_type_fallback only when a failing agent type switched it to the default', async () => {
   const clean = await run(typed(), cleanScript());
   assert.equal(clean.result.status, 'complete');

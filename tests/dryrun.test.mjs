@@ -247,6 +247,18 @@ test('a post_integrate agent is present only when hooks.post_integrate is set', 
   assert.equal(withHook.filter((a) => a.role === 'post_integrate').length, 1);
 });
 
+test('the dry run returns the exact launch and resume notices', async () => {
+  const { result } = await dryRun(manifest());
+  assert.equal(result.notices.launch, `parallel-lanes: launching run run-1: 2 lanes, ${result.agents.length} agents`);
+  const resumed = await dryRun(manifest({ done: ['T1'], backfill: { T1: { base: 'b', head: 'h' } } }));
+  assert.deepEqual(resumed.result.errors, []);
+  assert.equal(resumed.result.notices.resume, 'parallel-lanes: resuming run run-1: 1 tasks already committed');
+  // An invalid manifest has no notices to print.
+  const bad = manifest();
+  delete bad.plan;
+  assert.equal((await dryRun(bad)).result.notices, null);
+});
+
 test('lanes_effective counts lanes with work, capped by max_parallel_lanes', async () => {
   const m = manifest({ done: ['T4'], reviewed: ['T4'], backfill: { T4: { base: 'b', head: 'h' } } });
   assert.equal((await dryRun(m)).result.lanes_effective, 1);

@@ -232,8 +232,9 @@ function withConsumesExtra(m, kept) {
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
 //  acceptanceOf), agents_spawned,
-//  rulings_spent (adjudications that ran; a relaunch subtracts it from
-//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
+//  agent_settings ([{label, model, effort}] of every agent started, in start
+//  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
+//  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
@@ -245,8 +246,9 @@ function withConsumesExtra(m, kept) {
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
-  // Windows paths in forward-slash form before anything reads them.
-  let m = normalizeManifestPaths(manifest);
+  // Windows paths in forward-slash form, and hooks {} when absent, before
+  // anything reads them.
+  let m = normalizeManifestPaths(withDefaultHooks(manifest));
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
@@ -254,12 +256,12 @@ async function runAll(manifest, io) {
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
       integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0,
+      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
   // Every agent of the run spawns through the budget wrapper (budget.js).
-  const state = { agents: 0, rulings: 0, refused: [] };
+  const state = { agents: 0, rulings: 0, refused: [], spawned: [] };
   const counted = makeIo(m, io, state);
   const standard = tierSettings('standard');
   const sonnetHigh = { model: 'sonnet', effort: 'high' };
@@ -334,6 +336,7 @@ async function runAll(manifest, io) {
     acceptance,
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
+    agent_settings: state.spawned.slice(),
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -358,13 +361,8 @@ async function runAll(manifest, io) {
     return report('stopped', 'budget');
   };
 
-  const planned = planAgents(m);
-  if (m.done.length > 0) {
-    io.log(`parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`);
-  } else {
-    const lanesWithWork = new Set(planned.filter((a) => a.lane !== null).map((a) => a.lane)).size;
-    io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
-  }
+  const notices = launchNotices(m, planAgents(m));
+  io.log(m.done.length > 0 ? notices.resume : notices.launch);
 
   // Setup: the session ran scripts/setup and passed its output (the only
   // setup; validateManifest requires it for a launch).

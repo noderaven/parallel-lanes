@@ -64,11 +64,12 @@ function keepFilesRule() {
 }
 
 // Top-level manifest keys that must be present (manifest.schema.json lists
-// the same keys as its top-level "required").
+// the same keys as its top-level "required"). hooks is optional: a manifest
+// without it runs as if it were {} (withDefaultHooks).
 function manifestRequiredKeys() {
   return [
     'version', 'run_id', 'plan', 'spec', 'commit_rules', 'repo', 'commands',
-    'prelude', 'lanes', 'join', 'hooks', 'limits', 'dry_run', 'done',
+    'prelude', 'lanes', 'join', 'limits', 'dry_run', 'done',
     'reviewed', 'sp_dir', 'skill_dir',
   ];
 }
@@ -642,6 +643,15 @@ function normalizeManifestPaths(m) {
   return out;
 }
 
+// The manifest with hooks {} when it has no hooks key (hooks is optional; a
+// present value, even an invalid one, is kept for validateManifest to
+// check). A copy; anything that is not an object is returned unchanged.
+// Applied with normalizeManifestPaths before anything reads the manifest.
+function withDefaultHooks(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m) || 'hooks' in m) return m;
+  return { ...m, hooks: {} };
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings
@@ -713,6 +723,18 @@ function planAgents(m) {
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
+}
+
+// The lines the session prints when it launches the run (launch) or
+// relaunches it with tasks already committed (resume), and runAll logs:
+// launch counts the distinct lanes among agents (planAgents(m)) and the
+// agents; resume counts m.done. Expects a valid manifest.
+function launchNotices(m, agents) {
+  const lanes = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane)).size;
+  return {
+    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents`,
+    resume: `parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`,
+  };
 }
 
 // Lanes that would run at once: lanes with at least one planned agent,
@@ -2397,8 +2419,10 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused, untyped?, typedNulls?}), and refuses
-// calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
+// state ({agents, rulings, refused, spawned?, untyped?, typedNulls?}),
+// records each agent it starts as {label, model, effort} in state.spawned
+// (created on first use; in start order; refused calls add nothing), and
+// refuses calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
@@ -2437,6 +2461,12 @@ function makeIo(m, baseIo, state) {
     // Only calls that run count: state.rulings is the adjudications spent.
     if (ruling) state.rulings += 1;
     state.agents += 1;
+    if (!state.spawned) state.spawned = [];
+    state.spawned.push({
+      label,
+      model: opts.model === undefined ? null : opts.model,
+      effort: opts.effort === undefined ? null : opts.effort,
+    });
     return baseIo.agent(prompt, opts);
   };
   return {
@@ -3383,8 +3413,9 @@ function withConsumesExtra(m, kept) {
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
 //  acceptanceOf), agents_spawned,
-//  rulings_spent (adjudications that ran; a relaunch subtracts it from
-//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
+//  agent_settings ([{label, model, effort}] of every agent started, in start
+//  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
+//  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
@@ -3396,8 +3427,9 @@ function withConsumesExtra(m, kept) {
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
-  // Windows paths in forward-slash form before anything reads them.
-  let m = normalizeManifestPaths(manifest);
+  // Windows paths in forward-slash form, and hooks {} when absent, before
+  // anything reads them.
+  let m = normalizeManifestPaths(withDefaultHooks(manifest));
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
@@ -3405,12 +3437,12 @@ async function runAll(manifest, io) {
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
       integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0,
+      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
   // Every agent of the run spawns through the budget wrapper (budget.js).
-  const state = { agents: 0, rulings: 0, refused: [] };
+  const state = { agents: 0, rulings: 0, refused: [], spawned: [] };
   const counted = makeIo(m, io, state);
   const standard = tierSettings('standard');
   const sonnetHigh = { model: 'sonnet', effort: 'high' };
@@ -3485,6 +3517,7 @@ async function runAll(manifest, io) {
     acceptance,
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
+    agent_settings: state.spawned.slice(),
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -3509,13 +3542,8 @@ async function runAll(manifest, io) {
     return report('stopped', 'budget');
   };
 
-  const planned = planAgents(m);
-  if (m.done.length > 0) {
-    io.log(`parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`);
-  } else {
-    const lanesWithWork = new Set(planned.filter((a) => a.lane !== null).map((a) => a.lane)).size;
-    io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
-  }
+  const notices = launchNotices(m, planAgents(m));
+  io.log(m.done.length > 0 ? notices.resume : notices.launch);
 
   // Setup: the session ran scripts/setup and passed its output (the only
   // setup; validateManifest requires it for a launch).
@@ -3841,7 +3869,7 @@ function phaseCheck(r, label) {
 // ---- Script body ----
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
-  const dry = normalizeManifestPaths(args);
+  const dry = normalizeManifestPaths(withDefaultHooks(args));
   const errors = validateManifest(dry);
   const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
@@ -3849,6 +3877,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     errors,
     agents,
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
+    // The exact lines the session prints at the launch; null when invalid.
+    notices: errors.length === 0 ? launchNotices(dry, agents) : null,
   };
 }
 
