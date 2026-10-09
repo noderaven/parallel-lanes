@@ -132,6 +132,26 @@ function backfillFor(ids) {
   return Object.fromEntries(ids.map((id) => [id, { base: `${id}-old-b`, head: `${id}-old-h` }]));
 }
 
+test('backslash manifest paths are normalized in the dry run and the run', async () => {
+  const windows = (extra = {}) => {
+    const base = manifest(extra);
+    return { ...base, repo: { ...base.repo, root: 'C:\\repo' }, skill_dir: 'C:\\skills\\pl', python: 'C:\\Py\\python.exe' };
+  };
+  const dry = await loadScript({ args: windows({ dry_run: true }) });
+  assert.deepEqual(dry.errors, []);
+  assert.ok(dry.agents.length > 0);
+
+  const m = windows();
+  const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete');
+  assert.equal(m.repo.root, 'C:\\repo', 'the caller manifest is not changed');
+  const prompts = calls.map((c) => c.prompt).join('\n');
+  assert.ok(prompts.includes("cd 'C:/repo'"), 'commands start in the normalized root');
+  assert.ok(prompts.includes("'C:/Py/python.exe' 'C:/skills/pl/scripts/"), 'helpers run with the normalized python');
+  assert.ok(!prompts.includes('C:\\repo') && !prompts.includes('C:\\Py') && !prompts.includes('C:\\skills'),
+    'no backslash path reaches a prompt');
+});
+
 test('happy path: complete, phases in order, report filled in', async () => {
   const m = manifest();
   const { result, calls, logs, phases } = await run(m, { ...phaseScript(), ...taskScript(ALL) });

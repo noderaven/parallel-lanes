@@ -27,11 +27,18 @@ function taskIdPattern() {
   return laneIdPattern();
 }
 
+// An absolute path: '/...' or a Windows drive path ('C:/...' or 'C:\...').
+function isAbsolutePathText(path) {
+  return typeof path === 'string' && (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path));
+}
+
 // A project-relative file path, normalized: '.' and empty segments dropped,
-// '..' resolved. Returns null for an absolute path or one that leaves the
-// project.
+// '..' resolved. Returns null for an absolute path (either form), one with a
+// backslash (a Windows separator or a '\\server' share), or one that
+// leaves the project.
 function normalizePath(path) {
-  if (typeof path !== 'string' || path.length === 0 || path.startsWith('/')) return null;
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (isAbsolutePathText(path) || path.includes('\\')) return null;
   const out = [];
   for (const part of path.split('/')) {
     if (part === '' || part === '.') continue;
@@ -61,7 +68,7 @@ function validateManifest(m) {
   const isTextOrNull = (v) => v === null || isText(v);
   const isTextList = (v) => Array.isArray(v) && v.every(isText);
   const isPositiveInt = (v) => Number.isInteger(v) && v >= 1;
-  const isAbsolutePath = (v) => isText(v) && v.startsWith('/');
+  const isAbsolutePath = (v) => isText(v) && isAbsolutePathText(v);
 
   if (!isObject(m)) return ['manifest: must be an object'];
 
@@ -79,6 +86,9 @@ function validateManifest(m) {
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
   }
+  // python: the interpreter every helper command starts with (optional;
+  // python3 when absent).
+  if ('python' in m && !isText(m.python)) err('python: must be a non-empty string');
   if ('agent_type' in m && m.agent_type !== null
     && !(typeof m.agent_type === 'string' && new RegExp(agentTypePattern()).test(m.agent_type))) {
     err(`agent_type: must be null or a name matching ${agentTypePattern()}`);

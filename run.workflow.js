@@ -18,6 +18,12 @@ function shellQuote(s) {
   return "'" + String(s).split("'").join("'\\''") + "'";
 }
 
+// The shell-quoted Python that starts every helper of the skill: the
+// manifest's python (scripts/find-python found it), python3 when unset.
+function pythonCommand(m) {
+  return shellQuote(m.python || 'python3');
+}
+
 // A non-empty string (an agent-reported sha, for instance).
 function present(v) {
   return typeof v === 'string' && v.length > 0;
@@ -86,11 +92,18 @@ function taskIdPattern() {
   return laneIdPattern();
 }
 
+// An absolute path: '/...' or a Windows drive path ('C:/...' or 'C:\...').
+function isAbsolutePathText(path) {
+  return typeof path === 'string' && (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path));
+}
+
 // A project-relative file path, normalized: '.' and empty segments dropped,
-// '..' resolved. Returns null for an absolute path or one that leaves the
-// project.
+// '..' resolved. Returns null for an absolute path (either form), one with a
+// backslash (a Windows separator or a '\\server' share), or one that
+// leaves the project.
 function normalizePath(path) {
-  if (typeof path !== 'string' || path.length === 0 || path.startsWith('/')) return null;
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (isAbsolutePathText(path) || path.includes('\\')) return null;
   const out = [];
   for (const part of path.split('/')) {
     if (part === '' || part === '.') continue;
@@ -120,7 +133,7 @@ function validateManifest(m) {
   const isTextOrNull = (v) => v === null || isText(v);
   const isTextList = (v) => Array.isArray(v) && v.every(isText);
   const isPositiveInt = (v) => Number.isInteger(v) && v >= 1;
-  const isAbsolutePath = (v) => isText(v) && v.startsWith('/');
+  const isAbsolutePath = (v) => isText(v) && isAbsolutePathText(v);
 
   if (!isObject(m)) return ['manifest: must be an object'];
 
@@ -138,6 +151,9 @@ function validateManifest(m) {
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
   }
+  // python: the interpreter every helper command starts with (optional;
+  // python3 when absent).
+  if ('python' in m && !isText(m.python)) err('python: must be a non-empty string');
   if ('agent_type' in m && m.agent_type !== null
     && !(typeof m.agent_type === 'string' && new RegExp(agentTypePattern()).test(m.agent_type))) {
     err(`agent_type: must be null or a name matching ${agentTypePattern()}`);
@@ -581,6 +597,27 @@ function effectiveLimits(m) {
   };
 }
 
+// The manifest with its Windows paths in forward-slash form: each absolute
+// path field written as 'C:\x\y' becomes 'C:/x/y' (Git Bash and the
+// helpers accept it, and it needs no escaping in prompts). A pure string
+// change on a copy; other values, and anything that is not an object, are
+// returned unchanged.
+function normalizeManifestPaths(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m)) return m;
+  const fix = (v) => (typeof v === 'string' && /^[A-Za-z]:\\/.test(v) ? v.split('\\').join('/') : v);
+  const out = { ...m };
+  for (const key of ['plan', 'spec', 'skill_dir', 'sp_dir', 'python']) {
+    if (key in out) out[key] = fix(out[key]);
+  }
+  if (out.repo !== null && typeof out.repo === 'object' && !Array.isArray(out.repo)) {
+    out.repo = { ...out.repo };
+    for (const key of ['root', 'git_dir', 'worktree_root', 'ledger_dir']) {
+      if (key in out.repo) out.repo[key] = fix(out.repo[key]);
+    }
+  }
+  return out;
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings
@@ -770,7 +807,7 @@ function batchLines(task) {
 function ledgerCommand(m, laneId, entry, dir) {
   if (!present(dir)) throw new Error('ledgerCommand: dir (the agent checkout) is required');
   const ledger = `${m.skill_dir}/scripts/ledger`;
-  return `cd ${shellQuote(dir)} && python3 ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
@@ -799,7 +836,7 @@ function checksCommand(m, laneId, dir, out = null) {
   }
   if (parts.length === 0) return null;
   const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
-  return [`cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
+  return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
 }
 
@@ -945,7 +982,7 @@ function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
   const parts = [
-    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
+    `cd ${shellQuote(where.dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/start-task`)}`,
     shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
@@ -999,7 +1036,7 @@ function startBlock(m, task, where, opts, failure) {
 // event an adjudicator's outcome needs, with the range as git has it.
 function finishCommand(m, task, where, from, settled = null) {
   return [
-    `cd ${shellQuote(where.dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
+    `cd ${shellQuote(where.dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/finish-task`)}`,
     shellQuote(where.dir), shellQuote(where.branch), shellQuote(from), shellQuote(m.repo.ledger_dir),
     shellQuote(where.lane),
     ...unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`),
@@ -1013,7 +1050,7 @@ function finishCommand(m, task, where, from, settled = null) {
 // reviewer fills <blocking> with its count of critical and important
 // findings; the command records nothing unless it is 0.
 function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
-  return `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
     `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
 }
@@ -2072,7 +2109,7 @@ function adjudicatorPrompt(m, ctx) {
   ];
   if (task) {
     const files = taskFiles(m, task);
-    const brief = `cd ${shellQuote(dir)} && python3 ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
+    const brief = `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/task-brief`)} ` +
       `${shellQuote(m.plan)} ${shellQuote(task.id)} ${shellQuote(files.brief)} --root ${shellQuote(m.repo.ledger_dir)}` +
       ((m.consumes_extra || {})[task.id] || []).map((p) => ` --also ${shellQuote(p)}`).join('');
     parts.push(
@@ -3133,7 +3170,9 @@ function withConsumesExtra(m, kept) {
 // pre-flight agent runs (preflight has no conflicts, rulings or undeclared
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
-async function runAll(m, io) {
+async function runAll(manifest, io) {
+  // Windows paths in forward-slash form before anything reads them.
+  let m = normalizeManifestPaths(manifest);
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
@@ -3540,13 +3579,14 @@ function phaseCheck(r, label) {
 // ---- Script body ----
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
-  const errors = validateManifest(args);
-  const agents = errors.length === 0 ? planAgents(args) : [];
+  const dry = normalizeManifestPaths(args);
+  const errors = validateManifest(dry);
+  const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
     dry_run: true,
     errors,
     agents,
-    lanes_effective: errors.length === 0 ? lanesEffective(args, agents) : 0,
+    lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
   };
 }
 

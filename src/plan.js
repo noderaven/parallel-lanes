@@ -1,3 +1,24 @@
+// The manifest with its Windows paths in forward-slash form: each absolute
+// path field written as 'C:\x\y' becomes 'C:/x/y' (Git Bash and the
+// helpers accept it, and it needs no escaping in prompts). A pure string
+// change on a copy; other values, and anything that is not an object, are
+// returned unchanged.
+function normalizeManifestPaths(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m)) return m;
+  const fix = (v) => (typeof v === 'string' && /^[A-Za-z]:\\/.test(v) ? v.split('\\').join('/') : v);
+  const out = { ...m };
+  for (const key of ['plan', 'spec', 'skill_dir', 'sp_dir', 'python']) {
+    if (key in out) out[key] = fix(out[key]);
+  }
+  if (out.repo !== null && typeof out.repo === 'object' && !Array.isArray(out.repo)) {
+    out.repo = { ...out.repo };
+    for (const key of ['root', 'git_dir', 'worktree_root', 'ledger_dir']) {
+      if (key in out.repo) out.repo[key] = fix(out.repo[key]);
+    }
+  }
+  return out;
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings

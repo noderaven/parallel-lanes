@@ -6,12 +6,12 @@ const {
   runTask, runLane, runLanes,
   implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
   implementSchema, implementResultText, finalFixSchema, reviewSettings,
-  finalFixPrompt, agentRules,
+  finalFixPrompt, agentRules, adjudicatorPrompt,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
   'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
   'implementSchema', 'implementResultText', 'finalFixSchema', 'reviewSettings',
-  'finalFixPrompt', 'agentRules',
+  'finalFixPrompt', 'agentRules', 'adjudicatorPrompt',
 ]);
 
 function task(id, extra = {}) {
@@ -392,10 +392,53 @@ test('each prompt names the ledger event its agent records', () => {
 test('ledgerCommand starts in the checkout of the agent that runs it', () => {
   const m = manifest();
   const cmd = ledgerCommand(m, 'alpha', { task: 'T2', event: 'blocked', reason: 'x' }, "/work/it's here");
-  assert.equal(cmd, "cd '/work/it'\\''s here' && python3 '/skills/parallel-lanes/scripts/ledger' append " +
+  assert.equal(cmd, "cd '/work/it'\\''s here' && 'python3' '/skills/parallel-lanes/scripts/ledger' append " +
     '\'/work/ledger\' \'alpha\' \'{"task":"T2","event":"blocked","reason":"x"}\'');
   for (const dir of [undefined, null, '']) {
     assert.throws(() => ledgerCommand(m, 'alpha', { task: 'T2' }, dir), /checkout/);
+  }
+});
+
+// Every prompt that hands an agent a Python helper command: the four task
+// prompts and the adjudicator's (task-brief and the ruling ledger command).
+function pythonPrompts(m) {
+  const ctx = { kind: 'blocked', task: task('T2'), where: WHERE, details: 'Blocked: which key?', findings: [] };
+  return { ...allPrompts(m), adjudicator: adjudicatorPrompt(m, ctx) };
+}
+
+// The lines of a prompt that start a Python helper of the skill.
+const helperLines = (text) => text.split('\n').filter((l) => /scripts\/(ledger|task-brief|start-task|finish-task|run-checks)' /.test(l));
+
+test('every Python command uses the manifest python', () => {
+  const m = manifest({ python: '/opt/py/bin/python3' });
+  for (const [name, text] of Object.entries(pythonPrompts(m))) {
+    const lines = helperLines(text);
+    assert.ok(lines.length > 0, name);
+    for (const line of lines) {
+      assert.ok(line.includes("&& '/opt/py/bin/python3' '/skills/parallel-lanes/scripts/"), `${name}: ${line.trim()}`);
+    }
+    assert.ok(!/(^|\s)python3 '/m.test(text), `${name}: a command still starts with python3`);
+  }
+});
+
+test('a python path with a space is quoted in every command', () => {
+  const m = manifest({ python: 'C:/Program Files/Python312/python.exe' });
+  for (const [name, text] of Object.entries(pythonPrompts(m))) {
+    const lines = helperLines(text);
+    assert.ok(lines.length > 0, name);
+    for (const line of lines) {
+      assert.ok(line.includes("&& 'C:/Program Files/Python312/python.exe' '"), `${name}: ${line.trim()}`);
+    }
+  }
+});
+
+test('a manifest without python still runs python3', () => {
+  const m = manifest();
+  assert.ok(!('python' in m));
+  for (const [name, text] of Object.entries(pythonPrompts(m))) {
+    const lines = helperLines(text);
+    assert.ok(lines.length > 0, name);
+    for (const line of lines) assert.ok(line.includes("&& 'python3' '"), `${name}: ${line.trim()}`);
   }
 });
 
@@ -408,7 +451,7 @@ test('task prompts run provided commands from the task worktree', () => {
     assert.ok(lines.length > 0, name);
     for (const line of lines) assert.ok(line.trim().startsWith(prefix), `${name}: ${line.trim()}`);
   }
-  assert.ok(p.review.includes(`${prefix}python3 '/skills/parallel-lanes/scripts/start-task' `), 'start-task first');
+  assert.ok(p.review.includes(`${prefix}'python3' '/skills/parallel-lanes/scripts/start-task' `), 'start-task first');
 });
 
 test('a reviewer start failure is a start-task finding the fix and retry prompts route to blocked', () => {
@@ -1058,11 +1101,11 @@ test('implement prompt opens with start-task and syncs when the lane needs it', 
   const m = manifest();
   const synced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
   assert.ok(synced.includes(
-    "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
+    "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
     "'/work/my plan.md' --artifacts '/work/ledger' --sync 'pl/run-1' --brief 'T2' '/work/ledger/briefs/T2.md'"), synced);
   const plain = implementPrompt(m, task('T2'), WHERE, 'b0');
   assert.ok(plain.includes(
-    "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
+    "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
     "'/work/my plan.md' --artifacts '/work/ledger' --brief 'T2' '/work/ledger/briefs/T2.md'"), plain);
   assert.ok(!plain.includes('--sync'));
 });
@@ -1091,7 +1134,7 @@ test('review prompts without superpowers keep the git log and diff steps', () =>
 
 test('implement and fix prompts record commits with finish-task from their start commit', () => {
   const p = allPrompts(manifest());
-  const finish = (from) => "cd '/work/wt/lane-alpha' && python3 '/skills/parallel-lanes/scripts/finish-task' " +
+  const finish = (from) => "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/finish-task' " +
     `'/work/wt/lane-alpha' 'pl-run-1-alpha' '${from}' '/work/ledger' 'alpha' --task 'T2'`;
   assert.ok(p.implement.includes(finish('b0')), p.implement);
   assert.ok(p.fix.includes(finish('h1')), p.fix);
