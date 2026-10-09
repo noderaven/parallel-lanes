@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv, nativeWhich } from './platform.mjs';
+import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv, nativeWhich, pathList } from './platform.mjs';
 
 const INSTALL = join(SKILL_DIR, 'install.sh');
 const HAS_JQ = spawnSync(BASH, ['-c', 'command -v jq'], { encoding: 'utf8' }).status === 0;
@@ -182,7 +182,17 @@ test('install.sh --uninstall removes the hooks, the skill, and the worker agent,
 test('install.sh needs a working Python, not a python3 command', { skip: SKIP || NO_SYMLINKS }, (t) => {
   const python3 = which('python3');
   assert.ok(python3, 'python3 is on PATH');
-  const path = toolPath({ scripts: { python: `exec '${python3}' "$@"` } });
+  const python = { python: `exec '${python3}' "$@"` };
+  let path;
+  if (IS_WINDOWS) {
+    // Linked tools do not run on Windows (the runner's jq is a Chocolatey
+    // shim), so there the PATH is the real one without its python3 folders.
+    const real = (process.env.Path || process.env.PATH || '').split(';')
+      .filter((d) => d && !existsSync(join(d, 'python3.exe')) && !existsSync(join(d, 'python3')));
+    path = pathList(toolPath({ omit: TOOLS, scripts: python }), ...real);
+  } else {
+    path = toolPath({ scripts: python });
+  }
   const probe = spawnSync(BASH, ['-c', 'command -v python3'], { encoding: 'utf8', env: mergeEnv(process.env, { PATH: path }) });
   if (probe.status === 0) {
     // Seen on the macOS runner: bash still found a python3 with PATH set to

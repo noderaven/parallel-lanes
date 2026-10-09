@@ -19,7 +19,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv } from './platform.mjs';
 
@@ -28,6 +28,9 @@ const TMP = realpathSync(tempDir('pl-shadow-'));
 // A file name with a shell-quoting character. Windows forbids '"' in names,
 // so there the name holds a single quote instead.
 const WEIRD = IS_WINDOWS ? "we'ird.txt" : 'we"ird.txt';
+// The lane's chmod +x of run.sh is a change only where git tracks file
+// modes; Git for Windows does not (core.fileMode false).
+const MODE_CHANGE = IS_WINDOWS ? [] : ['run.sh'];
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Hermetic git: no global or system config, fixed identity.
@@ -81,7 +84,8 @@ function git(args, cwd = TMP) {
 // Every entry under dir (lstat, symlinks not followed) with its content.
 function snapshot(dir) {
   const out = {};
-  for (const rel of readdirSync(dir, { recursive: true }).sort()) {
+  // Keys use '/' on every platform (readdirSync gives '\\' on Windows).
+  for (const rel of readdirSync(dir, { recursive: true }).map((r) => r.split(sep).join('/')).sort()) {
     const path = join(dir, rel);
     const st = lstatSync(path);
     if (st.isSymbolicLink()) out[rel] = `link:${readlinkSync(path)}`;
@@ -129,8 +133,9 @@ test('init without .gitignore: built-in excludes, private dir, baseline on pl-ba
   const before = snapshot(c.project);
   const gitdir = init(c);
 
-  // shadow hashes the project path in the form it prints (C:/... on Windows).
-  const hash = createHash('sha256').update(IS_WINDOWS ? c.project.replace(/\\/g, '/') : c.project).digest('hex').slice(0, 16);
+  // shadow hashes the project path as Git Bash's pwd -P gives it (/c/... on Windows).
+  const physical = spawnSync(BASH, ['-c', 'cd "$1" && pwd -P', 'pwd', c.project], { encoding: 'utf8' }).stdout.trim();
+  const hash = createHash('sha256').update(physical).digest('hex').slice(0, 16);
   assert.ok(samePath(gitdir, join(c.base, hash)), gitdir);
   // Windows has no POSIX modes: init succeeding is the check there.
   if (!IS_WINDOWS) assert.equal(statSync(gitdir).mode & 0o777, 0o700);
@@ -285,7 +290,7 @@ test('preview lists the lane commit as add, modify and delete', () => {
   assert.deepEqual(JSON.parse(res.stdout), {
     conflicts: [],
     add: ['new dir/file name.txt', WEIRD],
-    modify: ['a.txt', 'run.sh'],
+    modify: ['a.txt', ...MODE_CHANGE],
     delete: ['b.txt', 'gone/only.txt'],
     skipped: [],
   });
@@ -356,7 +361,7 @@ test('user-created or user-deleted paths the run also changed are conflicts', ()
   assert.deepEqual(JSON.parse(preview.stdout).conflicts, [
     'b.txt',
     'new dir/file name.txt',
-    'run.sh',
+    ...MODE_CHANGE,
   ]);
   const res = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
   assert.equal(res.code, 3);
