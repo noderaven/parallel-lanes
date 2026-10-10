@@ -561,7 +561,7 @@ test('setup: a run with no launch lock is refused, even with a token from a rele
   assert.match(res.stderr, /no launch lock/);
   const token = activeRun(env, 'acquire', 'r1', '/m.json').stdout.trim();
   setupOk(c, m, ['--owner', token], env);
-  assert.equal(activeRun(env, 'release', 'r1', 'stopped').code, 0);
+  assert.equal(activeRun(env, 'release', 'r1', 'stopped', '--owner', token).code, 0);
   write(laneDir(c, 'a'), 'wip.txt', 'work of a session still running\n');
   res = setup(c, m, ['--owner', token], env);
   assert.equal(res.code, 3, res.stderr);
@@ -577,4 +577,146 @@ test('active-run: remove refuses a locked run unless --takeover', () => {
   assert.match(res.stderr, /--takeover/);
   assert.equal(activeRun(env, 'remove', 'r1', '--takeover').code, 0);
   assert.equal(JSON.parse(activeRun(env, 'list').stdout).length, 0);
+});
+
+// --- F4: one run per feature checkout ------------------------------------------
+
+// A git-mode manifest for run runId on root (default the case's project), with
+// its own feature branch pl-<runId> and worktree root, so two runs on one
+// checkout collide only on the checkout itself.
+function runManifest(c, runId, root = c.project) {
+  const m = manifest(c, { run_id: runId, lanes: [{ id: 'a', name: 'Lane A', tasks: [] }], lane_commands: {} });
+  m.repo = { ...m.repo, root, branch: `pl-${runId}`, worktree_root: join(c.root, `wt ${runId}`) };
+  return m;
+}
+
+// The active dir setup() gives a case, and the checkout locks in it. Lock
+// names are found by globbing, never recomputed from a stat here.
+const ownActiveDir = (c) => join(c.root, 'own active dir');
+const checkoutLocks = (c) => readdirSync(ownActiveDir(c)).filter((f) => /^checkout-.*\.lock$/.test(f));
+const hasBranch = (dir, branch) => sh('git', ['-C', dir, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0;
+
+test('setup: a second run on the same checkout is refused before any branch switch', () => {
+  const c = newCase();
+  setupOk(c, runManifest(c, 'first'));
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  const res = setup(c, runManifest(c, 'second'));
+  assert.equal(res.code, 4, res.stderr);
+  assert.equal(res.stdout, '');
+  assert.match(res.stderr, /\bfirst\b/);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+  assert.equal(existsSync(join(c.root, 'wt second')), false);
+});
+
+test('setup: the same run keeps its checkout lock on a relaunch', () => {
+  const c = newCase();
+  const m = runManifest(c, 'first');
+  setupOk(c, m);
+  setupOk(c, m);
+  const locks = checkoutLocks(c);
+  assert.equal(locks.length, 1, JSON.stringify(locks));
+  const held = JSON.parse(readFileSync(join(ownActiveDir(c), locks[0]), 'utf8'));
+  assert.equal(held.run_id, 'first');
+  assert.ok(samePath(held.checkout, c.project), held.checkout);
+});
+
+test('setup: a stale checkout lock is taken over', () => {
+  const c = newCase();
+  setupOk(c, runManifest(c, 'first'));
+  // As after a crashed session whose launch lock was then removed by hand.
+  rmSync(join(ownActiveDir(c), 'first.lock'));
+  setupOk(c, runManifest(c, 'second'));
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-second');
+  const locks = checkoutLocks(c);
+  assert.equal(locks.length, 1, JSON.stringify(locks));
+  assert.equal(JSON.parse(readFileSync(join(ownActiveDir(c), locks[0]), 'utf8')).run_id, 'second');
+  assert.deepEqual(readdirSync(ownActiveDir(c)).filter((f) => f.endsWith('.stale')), []);
+});
+
+test('setup: an unreadable checkout lock is refused', () => {
+  const c = newCase();
+  setupOk(c, runManifest(c, 'first'));
+  const [lock] = checkoutLocks(c);
+  writeFileSync(join(ownActiveDir(c), lock), 'not json');
+  const res = setup(c, runManifest(c, 'second'));
+  assert.equal(res.code, 4, res.stderr);
+  assert.ok(res.stderr.includes(lock), res.stderr);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+  assert.equal(readFileSync(join(ownActiveDir(c), lock), 'utf8'), 'not json');
+});
+
+test('setup: runs in separate worktrees of one repo do not block each other', () => {
+  const c = newCase();
+  const side = join(c.root, 'side checkout');
+  git(c.project, 'worktree', 'add', '-q', '-b', 'side', side);
+  setupOk(c, runManifest(c, 'first'));
+  setupOk(c, runManifest(c, 'second', side));
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(git(side, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-second');
+  assert.equal(checkoutLocks(c).length, 2);
+});
+
+test('setup: a symlink to a locked checkout is the same checkout', { skip: (IS_WINDOWS || !SYMLINKS) && 'POSIX symlinks only' }, () => {
+  const c = newCase();
+  setupOk(c, runManifest(c, 'first'));
+  const link = join(c.root, 'link to project');
+  symlinkSync(c.project, link);
+  const res = setup(c, runManifest(c, 'second', link));
+  assert.equal(res.code, 4, res.stderr);
+  assert.match(res.stderr, /\bfirst\b/);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+});
+
+test('setup: a differently cased path to a locked checkout is the same checkout', (t) => {
+  const c = newCase();
+  const upper = c.project.toUpperCase();
+  if (upper === c.project || !existsSync(upper)) {
+    t.skip('case-sensitive file system');
+    return;
+  }
+  setupOk(c, runManifest(c, 'first'));
+  const res = setup(c, runManifest(c, 'second', upper));
+  assert.equal(res.code, 4, res.stderr);
+  assert.match(res.stderr, /\bfirst\b/);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+});
+
+test('setup: a subdirectory of a locked checkout is the same checkout', () => {
+  const c = newCase();
+  const sub = join(c.project, 'nested dir');
+  mkdirSync(sub);
+  setupOk(c, runManifest(c, 'first'));
+  const res = setup(c, runManifest(c, 'second', sub));
+  assert.equal(res.code, 4, res.stderr);
+  assert.match(res.stderr, /\bfirst\b/);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+  assert.equal(checkoutLocks(c).length, 1);
+});
+
+test('setup: shadow mode takes no checkout lock', () => {
+  const c = newCase();
+  const project = join(c.root, 'plain', 'my project');
+  write(project, 'app.txt', 'app\n');
+  const init = sh(BASH, [join(SCRIPTS, 'shadow'), 'init', project], {
+    env: { PL_SHADOW_BASE: join(c.root, 'shadow base') },
+  });
+  assert.equal(init.code, 0, init.stderr);
+  const m = manifest(c, {
+    repo: {
+      mode: 'shadow',
+      root: project,
+      git_dir: init.stdout.trim(),
+      base_ref: 'pl-base',
+      branch: 'pl-r1',
+      worktree_root: c.worktreeRoot,
+      ledger_dir: c.ledgerDir,
+    },
+  });
+  setupOk(c, m);
+  assert.deepEqual(checkoutLocks(c), []);
 });

@@ -18,6 +18,7 @@ after(() => rmSync(TMP, { recursive: true, force: true }));
 
 const PRELUDE = [
   'import json, os, sys',
+  'sys.dont_write_bytecode = True',
   `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
   'import _shell',
   'def attempt(f):',
@@ -299,6 +300,7 @@ print('null')`);
   // A child that calls setup_io: LF and UTF-8 even when Python was told otherwise.
   const child = spawnSync('python3', ['-c', [
     'import sys',
+    'sys.dont_write_bytecode = True',
     `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
     'import _shell',
     '_shell.setup_io()',

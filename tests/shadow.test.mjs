@@ -552,6 +552,171 @@ test('CRLF files come back from writeback byte for byte under autocrlf=true', ()
   assert.equal(readFileSync(join(c.project, 'other.txt'), 'utf8'), 'other\n');
 });
 
+// --- git attributes ---------------------------------------------------------
+
+// A global git config holding text, with the env that selects it.
+function globalConfig(c, text) {
+  const config = join(c.root, 'gitconfig');
+  writeFileSync(config, text);
+  return { GIT_CONFIG_GLOBAL: config };
+}
+
+// The raw bytes of the blob at spec (such as pl-base:x.dat) in gitdir.
+function blobBytes(gitdir, spec, env = {}) {
+  const res = spawnSync('git', ['--git-dir', gitdir, 'cat-file', 'blob', spec], {
+    env: { ...process.env, ...GIT_ENV, ...env },
+  });
+  assert.equal(res.status, 0, String(res.stderr));
+  return res.stdout;
+}
+
+test('a new shadow overrides every attribute that changes bytes', () => {
+  const c = newCase({ 'a.txt': 'a\n' });
+  const gitdir = init(c);
+  assert.equal(
+    readFileSync(join(gitdir, 'info', 'attributes'), 'utf8'),
+    '* -text -eol -filter -ident -working-tree-encoding\n',
+  );
+});
+
+test('an untouched CRLF file under text=auto is not a conflict', () => {
+  const c = newCase({
+    '.gitattributes': '* text=auto eol=lf\n',
+    'hello.txt': 'original\r\n',
+    'other.txt': 'keep\r\n',
+  });
+  const gitdir = init(c);
+  const otherBefore = readFileSync(join(c.project, 'other.txt'));
+  const wt = laneWorktree(c, gitdir);
+  assert.equal(readFileSync(join(wt, 'hello.txt'), 'utf8'), 'original\r\n', 'the baseline keeps CRLF bytes');
+  write(wt, 'hello.txt', 'original\r\nchanged\r\n');
+  commitAll(wt);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
+  assert.equal(wb.code, 0, wb.stderr);
+  assert.deepEqual(readFileSync(join(c.project, 'hello.txt')), readFileSync(join(wt, 'hello.txt')));
+  assert.equal(readFileSync(join(c.project, 'hello.txt'), 'utf8'), 'original\r\nchanged\r\n');
+  assert.deepEqual(readFileSync(join(c.project, 'other.txt')), otherBefore);
+});
+
+test('a nested .gitattributes does not change the bytes', () => {
+  const c = newCase({
+    'sub/.gitattributes': '*.txt text eol=crlf\n',
+    'sub/lf.txt': 'a\n',
+    'sub/crlf.txt': 'c\r\n',
+  });
+  const gitdir = init(c);
+  const wt = laneWorktree(c, gitdir);
+  assert.equal(readFileSync(join(wt, 'sub', 'lf.txt'), 'utf8'), 'a\n', 'the baseline keeps LF bytes');
+  assert.equal(readFileSync(join(wt, 'sub', 'crlf.txt'), 'utf8'), 'c\r\n', 'the baseline keeps CRLF bytes');
+  write(wt, 'sub/lf.txt', 'a\nb\n');
+  write(wt, 'sub/crlf.txt', 'c\r\nd\r\n');
+  commitAll(wt);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
+  assert.equal(wb.code, 0, wb.stderr);
+  assert.equal(readFileSync(join(c.project, 'sub', 'lf.txt'), 'utf8'), 'a\nb\n');
+  assert.equal(readFileSync(join(c.project, 'sub', 'crlf.txt'), 'utf8'), 'c\r\nd\r\n');
+});
+
+test('a user core.attributesFile does not change the baseline', () => {
+  const c = newCase({ 'w.txt': 'one\r\n' });
+  const attributes = join(c.root, 'user attributes');
+  writeFileSync(attributes, '* text=auto\n');
+  const env = globalConfig(c, `[core]\n\tattributesFile = "${attributes.split(sep).join('/')}"\n`);
+  const res = shadow(c.base, ['init', c.project], env);
+  assert.equal(res.code, 0, res.stderr);
+  const gitdir = res.stdout.trim();
+  assert.equal(blobBytes(gitdir, 'pl-base:w.txt', env).toString('utf8'), 'one\r\n');
+  const wt = laneWorktree(c, gitdir, 'lane', env);
+  write(wt, 'w.txt', 'one\r\ntwo\r\n');
+  commitAll(wt, 'lane work', env);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane'], env);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+});
+
+test('a clean filter does not change the baseline', () => {
+  const c = newCase({ '.gitattributes': '*.dat filter=up\n', 'x.dat': 'lower\n' });
+  const env = globalConfig(c, '[filter "up"]\n\tclean = tr a-z A-Z\n');
+  const res = shadow(c.base, ['init', c.project], env);
+  assert.equal(res.code, 0, res.stderr);
+  const gitdir = res.stdout.trim();
+  assert.deepEqual(blobBytes(gitdir, 'pl-base:x.dat', env), readFileSync(join(c.project, 'x.dat')));
+
+  const wt = laneWorktree(c, gitdir, 'lane', env);
+  write(wt, 'x.dat', 'lower\nmore\n');
+  commitAll(wt, 'lane work', env);
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane'], env);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+});
+
+test('a project edit is still a conflict under text=auto', () => {
+  const c = newCase({ '.gitattributes': '* text=auto eol=lf\n', 'hello.txt': 'original\r\n' });
+  const gitdir = init(c);
+  const wt = laneWorktree(c, gitdir);
+  write(wt, 'hello.txt', 'original\r\nchanged\r\n');
+  commitAll(wt);
+  write(c.project, 'hello.txt', 'user edit\r\n');
+  const before = snapshot(c.project);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, ['hello.txt']);
+  const wb = shadow(c.base, ['writeback', gitdir, c.project, 'lane']);
+  assert.equal(wb.code, 3);
+  assert.deepEqual(snapshot(c.project), before);
+});
+
+test('a shadow without the attributes override keeps working', () => {
+  const c = newCase({ 'a.txt': 'a\n', 'b.txt': 'b\r\n' });
+  const gitdir = init(c);
+  // A shadow made before 1.4.0 has no info/attributes.
+  rmSync(join(gitdir, 'info', 'attributes'), { force: true });
+  const wt = laneWorktree(c, gitdir);
+  write(wt, 'a.txt', 'a from lane\n');
+  commitAll(wt);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout), {
+    conflicts: [],
+    add: [],
+    modify: ['a.txt'],
+    delete: [],
+    skipped: [],
+  });
+});
+
+test('a shadow made before 1.4.0 with a normalised baseline shows no false conflict', () => {
+  const c = newCase({ '.gitattributes': 'docs/*.md text=auto eol=lf\n', 'docs/x.md': 'one\r\n' });
+  const gitdir = init(c);
+  // Remake the baseline as 1.3.1 did: without the override, so git add
+  // applies the project's attributes (a pattern with a slash).
+  rmSync(join(gitdir, 'info', 'attributes'));
+  const g = ['--git-dir', gitdir, '--work-tree', c.project];
+  git([...g, 'add', '--renormalize', '-A'], c.project);
+  git([...g, 'commit', '-q', '-m', 'normalised baseline'], c.project);
+  assert.equal(blobBytes(gitdir, 'pl-base:docs/x.md').toString('utf8'), 'one\n');
+  writeFileSync(join(gitdir, 'pl-baseline'), git(['--git-dir', gitdir, 'rev-parse', 'pl-base']));
+  const wt = laneWorktree(c, gitdir);
+  write(wt, 'docs/x.md', 'one\ntwo\n');
+  commitAll(wt);
+
+  const preview = shadow(c.base, ['preview', gitdir, c.project, 'lane']);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, []);
+  assert.deepEqual(JSON.parse(preview.stdout).modify, ['docs/x.md']);
+});
+
 // --- remove -----------------------------------------------------------------
 
 test('remove deletes a shadow under the base', () => {

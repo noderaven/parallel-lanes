@@ -29,6 +29,12 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// A string with some text in it, not only whitespace (agent-reported
+// evidence, for instance).
+function hasText(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
 // A commit sha as an agent reports it: 7 to 40 lowercase hex digits. Any
 // other head an agent reports (a note such as 'see below', a branch name)
 // counts as no head: the run cannot tell which commit it means.
@@ -100,6 +106,13 @@ function taskIdPattern() {
   return laneIdPattern();
 }
 
+// True when id names a Windows device (CON, PRN, AUX, NUL, COM1-COM9,
+// LPT1-LPT9, any case) before its first '.': such a file name opens the
+// device instead of a file on Windows 10 (Windows 11 accepts it).
+function reservedName(id) {
+  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(id.split('.')[0].toUpperCase());
+}
+
 // An absolute path: '/...' or a Windows drive path ('C:/...' or 'C:\...').
 function isAbsolutePathText(path) {
   return typeof path === 'string' && (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path));
@@ -132,6 +145,43 @@ function agentTypePattern() {
   return '^[a-z0-9-]+$';
 }
 
+// Where each task of m runs: position (its index in run order: prelude,
+// lanes in manifest order, join) and groupOf ('prelude', 'lane <id>' or
+// 'join'), keyed by task id. Entries that are not tasks with an id are
+// skipped, so a manifest still under validation is safe to pass.
+function taskPlacement(m) {
+  const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const position = new Map();
+  const groupOf = new Map();
+  let index = 0;
+  const place = (list, group) => {
+    if (!Array.isArray(list)) return;
+    for (const t of list) {
+      if (!isObject(t) || typeof t.id !== 'string' || t.id.length === 0) continue;
+      position.set(t.id, index);
+      groupOf.set(t.id, group);
+      index += 1;
+    }
+  };
+  if (!isObject(m)) return { position, groupOf };
+  place(m.prelude, 'prelude');
+  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
+  place(m.join, 'join');
+  return { position, groupOf };
+}
+
+// Whether the run order meets a code dependency of taskId on producerId (the
+// producer runs earlier and its commits are in the task's checkout): the
+// producer is a prelude task, an earlier task of the same lane, or anything
+// before a join task. validateManifest applies it to depends_on kind code,
+// runAll to the code dependencies pre-flight reports.
+function codeDepMet(m, taskId, producerId) {
+  const { position, groupOf } = taskPlacement(m);
+  const [mine, theirs] = [groupOf.get(taskId), groupOf.get(producerId)];
+  return position.get(producerId) < position.get(taskId)
+    && (theirs === 'prelude' || theirs === mine || mine === 'join');
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -156,6 +206,8 @@ function validateManifest(m) {
   }
   if (isText(m.run_id) && !new RegExp(runIdPattern()).test(m.run_id)) {
     err('run_id: must use only a-z, 0-9 and - (it becomes part of branch names)');
+  } else if (isText(m.run_id) && reservedName(m.run_id)) {
+    err(`run_id: id ${m.run_id} is a reserved device name on Windows`);
   }
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
@@ -207,9 +259,19 @@ function validateManifest(m) {
   };
   if ('commands' in m) checkCommands('commands', m.commands, true);
 
+  // Ids name files, so two that differ only in letter case would share them
+  // on a case-insensitive file system (Windows, macOS). firstSpelling maps a
+  // lower-cased id to the first spelling seen; it reports the later one.
+  const caseClash = (kind, firstSpelling, id) => {
+    const first = firstSpelling.get(id.toLowerCase());
+    if (first === undefined) firstSpelling.set(id.toLowerCase(), id);
+    else err(`${kind} ${id}: id differs from ${first} only in letter case (they would share files on Windows and macOS)`);
+  };
+
   // Tasks: shape, tier/security and batch rules, and id uniqueness across
   // all groups. allTasks collects every task object for the profile rules.
   const taskIds = new Set();
+  const taskSpelling = new Map();
   const allTasks = [];
   const checkTask = (where, t) => {
     if (!isObject(t)) {
@@ -222,7 +284,11 @@ function validateManifest(m) {
     else if (!new RegExp(taskIdPattern()).test(t.id)) {
       err(`${where}.id: task id ${JSON.stringify(t.id)} must match ${taskIdPattern()} (it names files)`);
     } else if (taskIds.has(t.id)) err(`task ${t.id}: id appears more than once`);
-    else taskIds.add(t.id);
+    else {
+      taskIds.add(t.id);
+      caseClash('task', taskSpelling, t.id);
+      if (reservedName(t.id)) err(`${where}: id ${t.id} is a reserved device name on Windows`);
+    }
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
     else {
@@ -288,6 +354,7 @@ function validateManifest(m) {
   // Lanes: shape, unique lane ids, and no file claimed by two lanes unless an
   // overlaps entry records it.
   const laneIds = new Set();
+  const laneSpelling = new Map();
   const laneOfTask = new Map();
   if ('lanes' in m) {
     if (!Array.isArray(m.lanes)) {
@@ -303,9 +370,13 @@ function validateManifest(m) {
         if (!isText(lane.id)) err(`${where}.id: must be a non-empty string`);
         else if (!new RegExp(laneIdPattern()).test(lane.id)) {
           err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
-        } else if (lane.id === 'prelude' || lane.id === 'join') err(`lane ${lane.id}: id is reserved`);
+        } else if (['prelude', 'join'].includes(lane.id.toLowerCase())) err(`lane ${lane.id}: id is reserved`);
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
-        else laneIds.add(lane.id);
+        else {
+          laneIds.add(lane.id);
+          caseClash('lane', laneSpelling, lane.id);
+          if (reservedName(lane.id)) err(`${where}: id ${lane.id} is a reserved device name on Windows`);
+        }
         if (!isText(lane.name)) err(`${where}.name: must be a non-empty string`);
         if ('setup_note' in lane && !isText(lane.setup_note)) err(`${where}.setup_note: must be a non-empty string`);
         checkTaskList(`${where}.tasks`, lane.tasks);
@@ -352,24 +423,8 @@ function validateManifest(m) {
   }
 
   // Dependencies: known ids, no cycles, and a code dependency that can be
-  // met by the run order (the dependency runs earlier and its commits are in
-  // the dependent's checkout): a prelude task, an earlier task of the same
-  // lane, or anything before a join task.
-  const position = new Map();
-  const groupOf = new Map();
-  let index = 0;
-  const place = (list, group) => {
-    if (!Array.isArray(list)) return;
-    for (const t of list) {
-      if (!isObject(t) || !isText(t.id)) continue;
-      position.set(t.id, index);
-      groupOf.set(t.id, group);
-      index += 1;
-    }
-  };
-  place(m.prelude, 'prelude');
-  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
-  place(m.join, 'join');
+  // met by the run order (codeDepMet).
+  const { groupOf } = taskPlacement(m);
   const deps = new Map();
   for (const t of allTasks) {
     if (!isObject(t) || !isText(t.id) || !Array.isArray(t.depends_on)) continue;
@@ -387,9 +442,7 @@ function validateManifest(m) {
       deps.get(t.id).push(d.id);
       if (d.kind !== 'code') continue;
       const [mine, theirs] = [groupOf.get(t.id), groupOf.get(d.id)];
-      const met = position.get(d.id) < position.get(t.id)
-        && (theirs === 'prelude' || theirs === mine || mine === 'join');
-      if (!met) {
+      if (!codeDepMet(m, t.id, d.id)) {
         err(`task ${t.id}: code dependency on ${d.id} (${theirs}) cannot be met from ${mine}; ` +
           'move the task to join or the same lane, or make it a contract dependency');
       }
@@ -685,9 +738,10 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// once, whenever a test, lint or build command exists: after the final fix
-// and before the final re-review (which gets its result), or after the
-// lenses when they found nothing; it is listed in that place; e2e_recheck and
+// once, whenever a project or lane test, lint or build command exists
+// (finalChecks): after the final fix and before the final re-review (which
+// gets its result), or after the lenses when they found nothing; it is
+// listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -725,7 +779,7 @@ function planAgents(m) {
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
-  if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  if (finalChecks(m).length > 0) add('Verify', null, null, 'verify', sonnetHigh);
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
@@ -879,19 +933,53 @@ function commandList(m, laneId, name) {
   return list.length > 0 ? list.join(' && ') : '(none)';
 }
 
-// The scripts/run-checks call that runs every test, lint and build command
-// of a ledger lane in dir, each separately, and exits non-zero when any one
-// fails (the setup group is not a check). out (optional) is the evidence file
-// it writes under the ledger dir. null when there is no check command.
-function checksCommand(m, laneId, dir, out = null) {
-  const parts = [];
-  for (const name of ['test', 'lint', 'build']) {
-    for (const cmd of commandGroup(m, laneId, name)) parts.push('--cmd', shellQuote(name), shellQuote(cmd));
+// The final check inventory (spec F3): the project test, lint and build
+// commands in group order, then for each lane in manifest order the ones its
+// lane_commands overrides add, in group order, as [{group, command}]. A
+// {group, command} already listed is not repeated: the same command in the
+// same feature checkout is the same check.
+function finalChecks(m) {
+  const out = [];
+  for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
+  for (const lane of m.lanes || []) {
+    for (const group of ['test', 'lint', 'build']) {
+      for (const command of commandGroup(m, lane.id, group)) {
+        if (!out.some((c) => c.group === group && c.command === command)) out.push({ group, command });
+      }
+    }
   }
-  if (parts.length === 0) return null;
+  return out;
+}
+
+// The setup commands the final checks need: the project's, then each lane's
+// setup override commands not already listed, in manifest order.
+function finalSetup(m) {
+  const out = [...commandGroup(m, null, 'setup')];
+  for (const lane of m.lanes || []) {
+    for (const command of commandGroup(m, lane.id, 'setup')) if (!out.includes(command)) out.push(command);
+  }
+  return out;
+}
+
+// The scripts/run-checks call that runs each check of a [{group, command}]
+// list in dir, separately, and exits non-zero when any one fails. out
+// (optional) is the evidence file it writes under the ledger dir. null for
+// an empty list.
+function runChecksCommand(m, dir, checks, out = null) {
+  if (checks.length === 0) return null;
+  const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
+}
+
+// The scripts/run-checks call for every test, lint and build command of a
+// ledger lane in dir (the setup group is not a check). null when there is no
+// check command.
+function checksCommand(m, laneId, dir, out = null) {
+  const checks = ['test', 'lint', 'build']
+    .flatMap((group) => commandGroup(m, laneId, group).map((command) => ({ group, command })));
+  return runChecksCommand(m, dir, checks, out);
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
@@ -1554,25 +1642,28 @@ function statusSchema() {
 }
 
 function preflightSchema() {
+  // undeclared and code_deps share the item shape {task, producer, what}.
+  const dependencies = () => ({
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        producer: { type: 'string' },
+        what: { type: 'string' },
+      },
+      required: ['task', 'producer', 'what'],
+    },
+  });
   return {
     type: 'object',
     properties: {
       conflicts: { type: 'array', items: { type: 'string' } },
       rulings: { type: 'array', items: { type: 'string' } },
-      undeclared: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            producer: { type: 'string' },
-            what: { type: 'string' },
-          },
-          required: ['task', 'producer', 'what'],
-        },
-      },
+      undeclared: dependencies(),
+      code_deps: dependencies(),
     },
-    required: ['conflicts', 'rulings', 'undeclared'],
+    required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
 }
 
@@ -1696,8 +1787,10 @@ function verifySchema() {
       },
       ok: { type: 'boolean' },
       clean: { type: 'boolean' },
+      tracked_before: { type: 'array', items: { type: 'string' } },
+      tracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
   };
 }
 
@@ -1715,13 +1808,14 @@ function preflightPrompt(m) {
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
     '   or cannot work as written).',
-    '3. Cross-lane code dependencies: a lane task that needs code another lane writes (beyond a contract the',
-    '   plan defines) must be in join.',
+    '3. Code dependencies: a lane task that needs real code another task produces (beyond a contract the',
+    '   plan defines). Report each in code_deps, not as a conflict: return it as {task, producer, what},',
+    '   what in one sentence. The run checks the schedule against these.',
     '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
-    'Report serious problems (implementers would build the wrong thing, or a check above fails) as conflicts,',
+    'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
     '',
@@ -2200,17 +2294,19 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
   ].join('\n');
 }
 
-// The verify step: every project check at the delivered revision, through
-// scripts/run-checks, whose JSON the agent returns as it printed it.
+// The verify step: every check of the final inventory (project and lane
+// commands, finalChecks) at the delivered revision, through one
+// scripts/run-checks call, whose JSON the agent returns as it printed it.
 function verifyPrompt(m, sha) {
   const dir = featureDir(m);
-  const cmd = checksCommand(m, null, dir, `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
     `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
-    `2. Run the project's setup commands first: ${commandList(m, null, 'setup')}`,
+    `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     `3. Run, as one call: ${cmd}`,
     '',
     keepFilesRule(),
@@ -2218,20 +2314,32 @@ function verifyPrompt(m, sha) {
     '',
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
-    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
+    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
+    'tracked_after.',
   ].join('\n');
 }
 
 // What the project checks found, for an agent that would otherwise rerun
 // them at the same commit: one line, or '' for null (or a result naming no
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
-// per-command results (integrate's). Passed means ok and every exit 0.
+// per-command results (integrate's). Passed means ok and every exit 0, on a
+// checkout with no tracked change before or after the commands; checks that
+// passed on uncommitted tracked changes do not cover head, and a failure on
+// them may come from the uncommitted edit, so it is not reported as head's. A missing tracked
+// list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
   const results = Array.isArray(checks.results) ? checks.results : [];
   const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
-    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  const tracked = new Set([checks.tracked_before, checks.tracked_after]
+    .flatMap((l) => (Array.isArray(l) ? l : []))
+    .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
+  const files = `${tracked.size} file${tracked.size === 1 ? '' : 's'}`;
+  const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
+      + (tracked.size > 0 ? ` (on uncommitted tracked changes, ${files}, so not at ${checks.head})` : '')
+    : tracked.size > 0 ? `ran on uncommitted tracked changes (${files}),`
+      + ` so they do not cover ${checks.head}`
+      : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
 
@@ -3069,10 +3177,12 @@ function withFindingIds(findings, prefix = 'F') {
 // no disposition, a re-review that says open or leaves the id out, or no
 // re-review at all). rr is the re-review result {head, results, new_findings},
 // or null when none ran (whyNot says why). New findings are open with ids N1...
-// Answers are checked across fields, not just for shape: a re-review of
-// another revision than delivered (the fix head) settles nothing (its new
-// findings are still kept, open), a disposition without evidence settles
-// nothing, and two different answers for one id leave it open.
+// Answers are checked across fields, not just for shape, in this order: a
+// re-review of another revision than delivered (the fix head) settles nothing
+// (its new findings are still kept, open); two different answers for one id
+// leave it open; so do a missing disposition, a disposition whose evidence is
+// empty or only whitespace, a missing or non-resolved re-review result, and a
+// re-review result whose evidence is empty or only whitespace.
 // reReviewProblem says why a re-review result settles nothing, or null.
 function reReviewProblem(rr, whyNot, delivered) {
   if (rr === null) return whyNot;
@@ -3107,10 +3217,12 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     if (none !== null) open.push({ ...withNotes, reason: none });
     else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
     else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
-    else if (d && !present(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
+    else if (!d) open.push({ ...withNotes, reason: 'the final fix gave no disposition for it' });
+    else if (!hasText(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
-    } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
+    } else if (!hasText(v.evidence)) open.push({ ...withNotes, reason: 'the final re-review gave no evidence for it' });
+    else if (d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
     else fixed.push(withNotes);
   }
   const fresh = rr && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
@@ -3119,11 +3231,25 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
 }
 
 // The test, lint and build commands the verify step must have run, in order
-// ({group, command}).
+// ({group, command}): the final inventory, lane checks included.
 function expectedChecks(m) {
-  const out = [];
-  for (const group of ['test', 'lint', 'build']) for (const command of m.commands[group] || []) out.push({ group, command });
-  return out;
+  return finalChecks(m);
+}
+
+// Why a verify result at sha does not cover the commit itself, or null when
+// git status showed no tracked or staged change before and after the checks
+// (run-checks' tracked_before and tracked_after, porcelain lines). A result
+// without the lists cannot show that, so it does not cover the commit either.
+function uncleanChecksDetail(verify, sha) {
+  const parts = [];
+  for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
+    const lines = verify[field];
+    if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
+    else if (lines.length > 0) {
+      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
+    }
+  }
+  return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
 }
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
@@ -3163,10 +3289,14 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
+  // Checks that ran on uncommitted tracked or staged changes, or changed a
+  // tracked file, tested something other than the delivered commit.
+  const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
+  if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
-  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+  if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
     warnings.push(verify.clean === false
       ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
       : `the project checks did not report whether the checkout was clean at ${sha}`);
@@ -3194,6 +3324,9 @@ function acceptanceOf(input) {
   if (final) {
     if (final.unreviewed_fix) add('final_fix_unreviewed', 'missing', final.unreviewed_fix);
     for (const lens of final.missing_lenses || []) add('review_missing', 'missing', `the ${lens} final review returned no result`);
+    // Lenses that did not all review one commit (F2): their findings are not
+    // bound to the delivered revision.
+    if (hasText(final.review_problem)) add('review_unbound', 'missing', final.review_problem);
     const open = final.open || [];
     const blocking = open.filter(isBlocking);
     if (blocking.length > 0) {
@@ -3231,9 +3364,11 @@ function acceptanceOf(input) {
 // is judged by the re-reviewer, not just by the fixer. The re-review runs
 // whenever there are findings and a fix result, even without fix commits
 // (declines still need judging). Returns {findings, fixed, declined, open,
-// cannot_verify, missing_lenses, head}: head is the delivered feature head
-// (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// cannot_verify, missing_lenses, head, lens_heads, review_problem?}: head is
+// the delivered feature head (the fix head when the fix committed), open
+// lists every finding not fixed and not rightly declined, each with a reason;
+// lens_heads is the head each lens reported and review_problem (absent when
+// they all reviewed one commit) says why they did not. verifyAt(sha) runs the
 // project checks (null: the project has none): once a fix agent ran,
 // whatever it returned, they run at the delivered head before the re-review,
 // which gets their result so it does not rerun them; the result is returned
@@ -3273,10 +3408,14 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   ]));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
+  const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    lens_heads: lensHeads,
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
+  const unbound = reviewProblemOf(lensHeads, results);
+  if (unbound !== null) final.review_problem = unbound;
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
   // its commits are delivered unreviewed (unreviewed_fix, acceptance
@@ -3335,6 +3474,30 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
       : 'no result from final re-review');
   }
   return settle(dispositions, rr, undefined, final.head);
+}
+
+// The head each final lens reported reviewing ({lens, head}): the string it
+// reported, or null when it returned no result (or reported no string).
+function lensHeadsOf(names, results) {
+  return names.map((lens, i) => {
+    const r = results[i];
+    return { lens, head: r && !r.__budget && typeof r.head === 'string' ? r.head : null };
+  });
+}
+
+// Why the final lenses' findings are not bound to one revision (F2), or null:
+// a lens that returned findings (an array, even an empty one) without a
+// commit sha as its head, or lenses that report different commit shas. The
+// sentence names every lens and its head; a lens that returned no result is
+// review_missing, so alone it is no problem here.
+function reviewProblemOf(lensHeads, results) {
+  const reviewed = (i) => Boolean(results[i] && Array.isArray(results[i].findings));
+  const shas = new Set(lensHeads.filter((l, i) => reviewed(i) && isSha(l.head)).map((l) => l.head));
+  const noSha = lensHeads.some((l, i) => reviewed(i) && !isSha(l.head));
+  if (!noSha && shas.size <= 1) return null;
+  const each = lensHeads.map((l, i) => (!reviewed(i) ? `${l.lens} returned no result`
+    : l.head === null ? `${l.lens} reported no head` : `${l.lens} reported head ${JSON.stringify(l.head)}`));
+  return `the final review lenses did not all review one commit: ${each.join(', ')}`;
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -3410,8 +3573,8 @@ function withCarriedNotes(m, results, later) {
   return { ...m, notes };
 }
 
-// The undeclared dependencies pre-flight reported, split into the entries
-// the run keeps and the ones it drops with a reason: an entry must be an
+// The undeclared (or code_deps) entries pre-flight reported, split into the
+// entries the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
 // the manifest, and name a task that is not done and reviewed (a done task
 // still to review keeps its entry: its reviewer and fix agents use it).
@@ -3447,12 +3610,25 @@ function withConsumesExtra(m, kept) {
   return { ...m, consumes_extra: extra };
 }
 
+// The schedule change that meets a code dependency codeDepMet says the run
+// order does not meet (entry = {task, producer}): move the task to join or
+// behind its producer in the producer's lane; a join producer leaves only
+// join, after it; a prelude producer (the task runs before it in the
+// prelude) needs the task after it there.
+function scheduleFix(m, entry) {
+  const { task, producer } = entry;
+  if (m.join.some((t) => t.id === producer)) return `move ${task} to join after ${producer}`;
+  if (m.prelude.some((t) => t.id === producer)) return `move ${task} after ${producer} in the prelude`;
+  return `move ${task} to join, or into ${producer}'s lane after it`;
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
-//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
+//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
+//    review_problem?, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
@@ -3468,7 +3644,7 @@ function withConsumesExtra(m, kept) {
 // (C2); they also reach the final fix wave. Task status is done, deferred
 // (parked or unblocked by the adjudicator: never accepted), blocked, skipped
 // (done and reviewed earlier), or not_run. Under profile lite no
-// pre-flight agent runs (preflight has no conflicts, rulings or undeclared
+// pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
@@ -3496,7 +3672,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  const hasChecks = finalChecks(m).length > 0;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.
@@ -3612,7 +3788,7 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -3620,12 +3796,24 @@ async function runAll(manifest, io) {
     if (!pre) return report('stopped', 'no result from pre-flight');
     // Undeclared dependencies only add context: they reach the briefs of
     // their task and never stop the run or call the adjudicator.
-    const { kept, dropped } = preflightUndeclared(m, pre.undeclared);
-    for (const d of dropped) {
+    const undeclared = preflightUndeclared(m, pre.undeclared);
+    for (const d of undeclared.dropped) {
       io.log(`parallel-lanes: pre-flight: dropped undeclared entry ${JSON.stringify(d.entry)} (${d.reason})`);
     }
+    // Code dependencies (F8) pass the same entry checks. One the run order
+    // meets (codeDepMet) only adds context, like an undeclared entry; any
+    // other is a schedule problem no ruling can fix, so it stops the run
+    // below before the adjudicator is considered.
+    const codeDeps = preflightUndeclared(m, pre.code_deps);
+    for (const d of codeDeps.dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped code_deps entry ${JSON.stringify(d.entry)} (${d.reason})`);
+    }
+    const kept = [...undeclared.kept, ...codeDeps.kept.filter((e) => codeDepMet(m, e.task, e.producer))];
+    const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
+      .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings).

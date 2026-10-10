@@ -50,3 +50,14 @@ jobs:
           git config --global init.defaultBranch main
       - name: Run the test suite
         run: node --test tests/
+      # A test that writes into the checkout (a __pycache__, a stray file)
+      # can make the next run on the same checkout fail; CI runs only once.
+      - name: The test suite leaves the checkout unchanged
+        shell: bash
+        run: |
+          status="$(git status --porcelain)"
+          if [ -n "$status" ]; then
+            echo "the test suite changed the checkout:"
+            echo "$status"
+            exit 1
+          fi

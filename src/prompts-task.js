@@ -71,19 +71,53 @@ function commandList(m, laneId, name) {
   return list.length > 0 ? list.join(' && ') : '(none)';
 }
 
-// The scripts/run-checks call that runs every test, lint and build command
-// of a ledger lane in dir, each separately, and exits non-zero when any one
-// fails (the setup group is not a check). out (optional) is the evidence file
-// it writes under the ledger dir. null when there is no check command.
-function checksCommand(m, laneId, dir, out = null) {
-  const parts = [];
-  for (const name of ['test', 'lint', 'build']) {
-    for (const cmd of commandGroup(m, laneId, name)) parts.push('--cmd', shellQuote(name), shellQuote(cmd));
+// The final check inventory (spec F3): the project test, lint and build
+// commands in group order, then for each lane in manifest order the ones its
+// lane_commands overrides add, in group order, as [{group, command}]. A
+// {group, command} already listed is not repeated: the same command in the
+// same feature checkout is the same check.
+function finalChecks(m) {
+  const out = [];
+  for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
+  for (const lane of m.lanes || []) {
+    for (const group of ['test', 'lint', 'build']) {
+      for (const command of commandGroup(m, lane.id, group)) {
+        if (!out.some((c) => c.group === group && c.command === command)) out.push({ group, command });
+      }
+    }
   }
-  if (parts.length === 0) return null;
+  return out;
+}
+
+// The setup commands the final checks need: the project's, then each lane's
+// setup override commands not already listed, in manifest order.
+function finalSetup(m) {
+  const out = [...commandGroup(m, null, 'setup')];
+  for (const lane of m.lanes || []) {
+    for (const command of commandGroup(m, lane.id, 'setup')) if (!out.includes(command)) out.push(command);
+  }
+  return out;
+}
+
+// The scripts/run-checks call that runs each check of a [{group, command}]
+// list in dir, separately, and exits non-zero when any one fails. out
+// (optional) is the evidence file it writes under the ledger dir. null for
+// an empty list.
+function runChecksCommand(m, dir, checks, out = null) {
+  if (checks.length === 0) return null;
+  const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
+}
+
+// The scripts/run-checks call for every test, lint and build command of a
+// ledger lane in dir (the setup group is not a check). null when there is no
+// check command.
+function checksCommand(m, laneId, dir, out = null) {
+  const checks = ['test', 'lint', 'build']
+    .flatMap((group) => commandGroup(m, laneId, group).map((command) => ({ group, command })));
+  return runChecksCommand(m, dir, checks, out);
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that

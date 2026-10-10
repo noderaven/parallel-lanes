@@ -88,7 +88,9 @@ async function run(m, script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 // The run-checks JSON the verify agent returns for these manifests' commands.
-const verified = (sha) => ({ head: sha, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true });
+const verified = (sha) => ({
+  head: sha, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true, tracked_before: [], tracked_after: [],
+});
 const LITE = ['T1', 'T2', 'T3', 'T4'];
 
 test('lite: no setup, pre-flight, integrate or post-integrate agent; one combined final reviewer', async () => {
@@ -119,7 +121,7 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes(`(now at ${H('T4-h')})`));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['combined issue']);
   assert.deepEqual(result.final.cannot_verify, ['combined: e2e: none']);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: [], undeclared: [] });
+  assert.deepEqual(result.preflight, { conflicts: [], rulings: [], undeclared: [], schedule: [] });
   assert.equal(result.integrate, null);
   assert.equal(result.agents_spawned, calls.length);
 });
@@ -226,7 +228,7 @@ test('full profile unchanged: pre-flight, integrate, the three lenses and verify
   const m = manifest({ profile: 'full', hooks: { post_integrate: 'POST' } });
   m.setup_result = { feature_head: H('F0'), worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
   const script = {
-    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }],
     integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
     'post-integrate': [{ status: 'done', head: H('P1'), notes: '' }],
     ...taskScript(LITE),

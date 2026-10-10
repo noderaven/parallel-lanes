@@ -22,7 +22,7 @@ when it's time to execute the plan.
 | **jq** 1.6 or later | Installer and SessionStart hook | `jq --version` |
 | **Python** 3.8 or later, as `python3`, `python`, or `py -3` | Lane planning, setup, ledger, reports | `bash scripts/find-python` in the clone prints the one it uses |
 | *Optional:* **node** 22 or later | Only for running the test suite | `node --version` |
-| *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
+| *Recommended:* **Superpowers** plugin (tested with 6.4.2; 7.0.0 ships the same prompts) | Supplies the per-task implementer and reviewer prompts | See step 3 |
 
 Platforms: macOS, Linux, and Windows 11. CI runs the test suite on all three, with the stock
 bash 3.2 on macOS, so no newer bash is needed. On Windows 11, Claude Code installed natively
@@ -254,13 +254,16 @@ session lists it, and you can resume with one word. Finished tasks are skipped.
 3. **Dry run and consent.** The workflow validates the manifest without spawning anything,
    and Claude shows the table. "Just run it" and auto mode do not skip it.
 4. **Execute.** The run takes a launch lock (a second session cannot reset it), then
-   `scripts/setup` creates the feature branch and lane worktrees, saving any changes it has
+   `scripts/setup` also locks the project checkout in git mode (two runs cannot switch one
+   checkout to their feature branches), creates the feature branch and lane worktrees, saving any changes it has
    to discard under a git ref first. The phases run: pre-flight conflict check, prelude,
    lanes in parallel, integration, join, E2E, a final review with three lenses and one fix
-   round, and a verify step that reruns the project checks (and any stale E2E or
-   post-integration check) on the exact revision delivered.
+   round, and a verify step that reruns the project checks (every lane's checks included) and any stale E2E or
+   post-integration check on the exact revision delivered. The full pre-flight stops the run,
+   naming the move that fixes it, when a task needs code from a task scheduled after it.
 5. **Hand-back.** The report leads with acceptance: `accepted` only when every check passed
-   on the delivered revision, no blocking finding is open, and nothing was deferred;
+   on the delivered revision (and ran on committed files, not uncommitted tracked changes), all
+   final reviewers judged the same commit, no blocking finding is open, and nothing was deferred;
    otherwise `rejected` or `unverified`, with every reason, and the run stays resumable. It
    also covers each task's commits, review rounds, model and token usage, rulings made on
    your behalf, and the E2E result.
@@ -312,6 +315,9 @@ Other things to know:
 | The skill never fires at plan execution | Restart Claude Code so the SessionStart hook loads, and check section 4, step 2. Invoking it by name also works. |
 | `setup: the main checkout ... has uncommitted changes` | Commit or stash your changes, then ask Claude to run or resume the plan again. |
 | `setup: run <id> has no launch lock` or `is locked by another launch` | Another session may be running that run. If it has ended, tell Claude so; it takes the lock over (`active-run acquire --takeover`) and resumes. |
+| `setup: the checkout ... is in use by run ...` (exit 4) | Another run that is still locked holds this checkout. Finish that run, or tell Claude its session ended so it can be released. A checkout lock whose run has no launch lock is taken over automatically. |
+| `usage: active-run ... release RUN_ID ... --owner TOKEN` (exit 2) | `release` needs the owner token `active-run acquire` printed: `active-run release <run_id> <status> --owner <token>` (or `--remove --owner <token>`). Exit 4 means a takeover replaced your lock, so nothing was released. |
+| `active-run: <path> is held; if no active-run is running, remove it` | A crashed `active-run` left its mutex directory. Make sure none is running, delete that directory, and retry (`PL_MUTEX_WAIT` sets the seconds it waits, default 10). |
 | You want to undo the settings change | Restore the newest `~/.claude/settings.json.bak.*` file. |
 
 ---

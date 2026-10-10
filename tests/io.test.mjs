@@ -3,7 +3,9 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -12,6 +14,23 @@ import { tempDir } from './platform.mjs';
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const TMP = realpathSync(tempDir('pl-io-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
+
+// The Python lines that make the helper modules in dir importable (the
+// snippets below import _brief, _plan and _shell directly). Like every
+// helper script, they turn off bytecode writing first, so no __pycache__ is
+// left in scripts/.
+function helperImports(dir) {
+  return ['import sys', 'sys.dont_write_bytecode = True', `sys.path.insert(0, ${JSON.stringify(dir)})`];
+}
+
+// The Python scripts in dir: files named *.py or starting with a python
+// shebang (directories, such as a stray __pycache__, are skipped).
+function pythonScripts(dir) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(dir, entry.name))
+    .filter((path) => path.endsWith('.py') || /^#!.*python/.test(readFileSync(path, 'utf8').split('\n')[0]));
+}
 
 const HELPERS = ['ledger', 'task-brief', 'finish-task', 'coverage', 'derive-lanes', 'run-report'];
 
@@ -65,9 +84,7 @@ test('every Python helper calls setup_io and writes files through write_text', (
 test('every subprocess the Python scripts read as text is decoded as UTF-8', () => {
   // git prints paths as UTF-8; decoding with the Windows code page (the
   // text=True default there) garbles a non-ASCII path or raises.
-  const scripts = readdirSync(SCRIPTS)
-    .map((name) => join(SCRIPTS, name))
-    .filter((path) => path.endsWith('.py') || /^#!.*python/.test(readFileSync(path, 'utf8').split('\n')[0]));
+  const scripts = pythonScripts(SCRIPTS);
   assert.ok(scripts.length >= 10, `found only ${scripts.length} Python scripts`);
   const code = [
     'import ast, sys',
@@ -122,8 +139,7 @@ test('a CRLF plan gives the same brief and section hash as LF', () => {
   assert.deepEqual(briefs[0], briefs[1]);
 
   const code = [
-    'import sys',
-    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    ...helperImports(SCRIPTS),
     'import _brief',
     'for p in sys.argv[1:]:',
     '    with open(p, encoding="utf-8") as f:',
@@ -161,7 +177,7 @@ test('a path that cannot be converted fails with the helper message, not a trace
   // implementation by platform at import); _shell reads it at call time.
   const code = [
     'import argparse, glob, hashlib, json, os, posixpath, re, runpy, shutil, subprocess, sys',
-    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    ...helperImports(SCRIPTS),
     'import _shell',
     'sys.platform = "win32"',
     'sys.argv = sys.argv[1:]',
@@ -195,4 +211,43 @@ test('run-report --out writes LF only', () => {
   assert.equal(res.status, 0, res.stderr);
   const bytes = readFileSync(out);
   assert.ok(bytes.length > 0 && !bytes.includes(13));
+});
+
+// The snippets above import the helper modules straight from scripts/. A
+// bytecode cache they leave there is untracked output in the checkout, and
+// the next run's pythonScripts(SCRIPTS) would read the cache directory.
+test('importing the helpers the way these tests do leaves no bytecode cache', () => {
+  const dir = join(TMP, 'no-pycache');
+  mkdirSync(dir);
+  for (const name of ['_brief.py', '_plan.py', '_shell.py']) copyFileSync(join(SCRIPTS, name), join(dir, name));
+  // An inherited PYTHONDONTWRITEBYTECODE would hide a missing setting.
+  const env = { ...process.env };
+  delete env.PYTHONDONTWRITEBYTECODE;
+  const res = spawnSync('python3', ['-c', [...helperImports(dir), 'import _brief, _shell'].join('\n')],
+    { encoding: 'utf8', env });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(!existsSync(join(dir, '__pycache__')), 'the import wrote a __pycache__ directory');
+});
+
+test('pythonScripts lists only files, whatever directories sit beside them', () => {
+  const dir = join(TMP, 'listing');
+  mkdirSync(join(dir, '__pycache__'), { recursive: true });
+  writeFileSync(join(dir, 'a.py'), 'x = 1\n');
+  writeFileSync(join(dir, 'tool'), '#!/usr/bin/env python3\n');
+  writeFileSync(join(dir, 'notes.txt'), 'not python\n');
+  assert.deepEqual(pythonScripts(dir).sort(), [join(dir, 'a.py'), join(dir, 'tool')]);
+});
+
+// Every Python snippet in the tests that imports the helpers from scripts/
+// must turn off bytecode writing first, or it leaves scripts/__pycache__.
+test('every test that puts scripts/ on the Python path turns off bytecode writing', () => {
+  const insert = 'sys.path' + '.insert(0, ';
+  const guard = 'sys.dont_write_bytecode' + ' = True';
+  const testsDir = join(SKILL_DIR, 'tests');
+  for (const name of readdirSync(testsDir).filter((n) => n.endsWith('.mjs'))) {
+    const source = readFileSync(join(testsDir, name), 'utf8');
+    const inserts = source.split(insert).length - 1;
+    const guards = source.split(guard).length - 1;
+    assert.ok(guards >= inserts, `${name}: ${inserts} snippet(s) put scripts/ on sys.path, ${guards} turn off bytecode`);
+  }
 });

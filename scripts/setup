@@ -28,6 +28,19 @@ It refuses (exit 3, nothing changed) when the lock does not exist or --owner
 TOKEN does not match it: without the lock another session may be running
 this run, and setup would discard its work.
 
+Checkout lock (git mode only; shadow mode gives each run its own feature
+worktree): right after the launch lock check, before any change, setup takes
+<active dir>/checkout-<st_dev>-<st_ino>.lock for repo.root, keyed by the
+directory's file identity (so a symlink or another spelling of the same
+checkout is the same lock, and separate worktrees of one repo are not),
+created atomically and holding {"run_id", "checkout"}. A lock of this run
+is kept (a relaunch or resume). A lock of another run whose launch lock
+still exists is refused (exit 4, naming that run). A lock of another run
+without a launch lock is stale: it is renamed aside (one taker wins) and
+taken over. An unreadable or malformed checkout lock is refused (exit 4,
+naming the file). active-run release and remove delete a run's checkout
+locks.
+
 A reused worktree (the run's own: the shadow feature worktree or a lane
 worktree) must be a worktree of this repo on its branch. Before its
 uncommitted changes are discarded (reset --hard HEAD and clean -fd; ignored
@@ -68,7 +81,9 @@ or an unreadable or malformed manifest (run_id or a lane id outside its
 pattern, a relative repo path, a base_ref starting with '-'); 3 on a refused
 condition (dirty main checkout, foreign directory or symlink at a run
 worktree path, missing shadow, a run locked by another owner, or no bash to
-run the setup commands with: the message names CLAUDE_CODE_GIT_BASH_PATH).
+run the setup commands with: the message names CLAUDE_CODE_GIT_BASH_PATH);
+4 when the checkout is locked by another run, or its checkout lock is
+unreadable (nothing changed).
 """
 
 import datetime
@@ -323,6 +338,102 @@ def check_lock(run_id, owner):
                          "--takeover and pass the new token as --owner")
 
 
+def moved_lock_run(path):
+    """The run_id of the lock file at path, or None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            held = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return held.get("run_id") if isinstance(held, dict) else None
+
+
+def checkout_lock(m):
+    """Take the checkout lock of repo.root for this run (git mode).
+
+    Keyed by the file identity of the checkout's top level (so a repo.root
+    inside the checkout is the same checkout); refuses (exit 4) a checkout
+    another locked run holds, takes over one whose run has no launch lock.
+    """
+    root = m["repo"]["root"]
+    run_id = m["run_id"]
+    if not os.path.isdir(root):
+        raise Failure(2, f"repo.root is not a directory: {root}")
+    top = run_git(["-C", root, "rev-parse", "--show-toplevel"], check=False)
+    if top.returncode != 0 or not top.stdout.strip():
+        raise Failure(2, f"repo.root is not inside a git checkout: {root}: {top.stderr.strip()}")
+    st = os.stat(top.stdout.strip())
+    adir = active_dir()
+    path = os.path.join(adir, f"checkout-{st.st_dev}-{st.st_ino}.lock")
+    content = json.dumps({"run_id": run_id, "checkout": root}) + "\n"
+
+    def create():
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        except OSError as e:
+            raise Failure(3, f"cannot create the checkout lock {path}: {e}")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+        except OSError as e:
+            # A partial lock would make every later setup refuse it as unreadable.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise Failure(3, f"cannot write the checkout lock {path}: {e}")
+        return True
+
+    # Two rounds: a takeover another setup wins once is read again, then refused.
+    for _ in range(2):
+        if create():
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                held = json.load(f)
+        except FileNotFoundError:
+            continue  # its holder released it meanwhile
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise Failure(4, f"the checkout lock {path} is unreadable ({e}); remove it once no run uses "
+                             f"the checkout {root} (nothing was changed)")
+        other = held.get("run_id") if isinstance(held, dict) else None
+        if not is_text(other) or not RUN_ID.fullmatch(other):
+            raise Failure(4, f"the checkout lock {path} is malformed (no valid run_id); remove it once no run "
+                             f"uses the checkout {root} (nothing was changed)")
+        if other == run_id:
+            return
+        if os.path.exists(os.path.join(adir, f"{other}.lock")):
+            raise Failure(4, f"the checkout {root} is in use by run {other} (locked by another session); "
+                             "finish or release that run first (nothing was changed)")
+        # Stale: its run has no launch lock. Renaming moves whatever is at path
+        # now, which may not be the lock read above, so what was moved is read
+        # again and put back when it is not that stale lock.
+        stale = f"{path}.{os.getpid()}.stale"
+        try:
+            os.rename(path, stale)
+        except OSError:
+            continue  # another taker won: read its lock again
+        if moved_lock_run(stale) != other or os.path.exists(os.path.join(adir, f"{other}.lock")):
+            if not os.path.exists(path):
+                try:
+                    os.rename(stale, path)
+                except OSError:
+                    pass
+            raise Failure(4, f"the checkout lock {path} changed while setup was taking it over; another run "
+                             f"is setting up the checkout {root} (nothing was changed)")
+        created = create()
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+        if created:
+            return
+    raise Failure(4, f"the checkout lock {path} changed while setup was taking it over; another run is "
+                     f"setting up the checkout {root} (nothing was changed)")
+
+
 def file_sha256(path):
     if not is_text(path):
         return None
@@ -364,6 +475,8 @@ def run_commands(path, cmds):
 def setup(m, owner=None):
     check_lock(m["run_id"], owner)
     repo_cfg = m["repo"]
+    if repo_cfg["mode"] == "git":
+        checkout_lock(m)
     lite = m.get("profile", "full") == "lite"
     branch = repo_cfg["branch"]
     repo = Repo(m)

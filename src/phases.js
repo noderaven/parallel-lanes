@@ -16,9 +16,11 @@
 // is judged by the re-reviewer, not just by the fixer. The re-review runs
 // whenever there are findings and a fix result, even without fix commits
 // (declines still need judging). Returns {findings, fixed, declined, open,
-// cannot_verify, missing_lenses, head}: head is the delivered feature head
-// (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// cannot_verify, missing_lenses, head, lens_heads, review_problem?}: head is
+// the delivered feature head (the fix head when the fix committed), open
+// lists every finding not fixed and not rightly declined, each with a reason;
+// lens_heads is the head each lens reported and review_problem (absent when
+// they all reviewed one commit) says why they did not. verifyAt(sha) runs the
 // project checks (null: the project has none): once a fix agent ran,
 // whatever it returned, they run at the delivered head before the re-review,
 // which gets their result so it does not rerun them; the result is returned
@@ -58,10 +60,14 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   ]));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
+  const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    lens_heads: lensHeads,
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
+  const unbound = reviewProblemOf(lensHeads, results);
+  if (unbound !== null) final.review_problem = unbound;
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
   // its commits are delivered unreviewed (unreviewed_fix, acceptance
@@ -120,6 +126,30 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
       : 'no result from final re-review');
   }
   return settle(dispositions, rr, undefined, final.head);
+}
+
+// The head each final lens reported reviewing ({lens, head}): the string it
+// reported, or null when it returned no result (or reported no string).
+function lensHeadsOf(names, results) {
+  return names.map((lens, i) => {
+    const r = results[i];
+    return { lens, head: r && !r.__budget && typeof r.head === 'string' ? r.head : null };
+  });
+}
+
+// Why the final lenses' findings are not bound to one revision (F2), or null:
+// a lens that returned findings (an array, even an empty one) without a
+// commit sha as its head, or lenses that report different commit shas. The
+// sentence names every lens and its head; a lens that returned no result is
+// review_missing, so alone it is no problem here.
+function reviewProblemOf(lensHeads, results) {
+  const reviewed = (i) => Boolean(results[i] && Array.isArray(results[i].findings));
+  const shas = new Set(lensHeads.filter((l, i) => reviewed(i) && isSha(l.head)).map((l) => l.head));
+  const noSha = lensHeads.some((l, i) => reviewed(i) && !isSha(l.head));
+  if (!noSha && shas.size <= 1) return null;
+  const each = lensHeads.map((l, i) => (!reviewed(i) ? `${l.lens} returned no result`
+    : l.head === null ? `${l.lens} reported no head` : `${l.lens} reported head ${JSON.stringify(l.head)}`));
+  return `the final review lenses did not all review one commit: ${each.join(', ')}`;
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -195,8 +225,8 @@ function withCarriedNotes(m, results, later) {
   return { ...m, notes };
 }
 
-// The undeclared dependencies pre-flight reported, split into the entries
-// the run keeps and the ones it drops with a reason: an entry must be an
+// The undeclared (or code_deps) entries pre-flight reported, split into the
+// entries the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
 // the manifest, and name a task that is not done and reviewed (a done task
 // still to review keeps its entry: its reviewer and fix agents use it).
@@ -232,12 +262,25 @@ function withConsumesExtra(m, kept) {
   return { ...m, consumes_extra: extra };
 }
 
+// The schedule change that meets a code dependency codeDepMet says the run
+// order does not meet (entry = {task, producer}): move the task to join or
+// behind its producer in the producer's lane; a join producer leaves only
+// join, after it; a prelude producer (the task runs before it in the
+// prelude) needs the task after it there.
+function scheduleFix(m, entry) {
+  const { task, producer } = entry;
+  if (m.join.some((t) => t.id === producer)) return `move ${task} to join after ${producer}`;
+  if (m.prelude.some((t) => t.id === producer)) return `move ${task} after ${producer} in the prelude`;
+  return `move ${task} to join, or into ${producer}'s lane after it`;
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
-//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
+//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
+//    review_problem?, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
@@ -253,7 +296,7 @@ function withConsumesExtra(m, kept) {
 // (C2); they also reach the final fix wave. Task status is done, deferred
 // (parked or unblocked by the adjudicator: never accepted), blocked, skipped
 // (done and reviewed earlier), or not_run. Under profile lite no
-// pre-flight agent runs (preflight has no conflicts, rulings or undeclared
+// pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
@@ -281,7 +324,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  const hasChecks = finalChecks(m).length > 0;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.
@@ -397,7 +440,7 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -405,12 +448,24 @@ async function runAll(manifest, io) {
     if (!pre) return report('stopped', 'no result from pre-flight');
     // Undeclared dependencies only add context: they reach the briefs of
     // their task and never stop the run or call the adjudicator.
-    const { kept, dropped } = preflightUndeclared(m, pre.undeclared);
-    for (const d of dropped) {
+    const undeclared = preflightUndeclared(m, pre.undeclared);
+    for (const d of undeclared.dropped) {
       io.log(`parallel-lanes: pre-flight: dropped undeclared entry ${JSON.stringify(d.entry)} (${d.reason})`);
     }
+    // Code dependencies (F8) pass the same entry checks. One the run order
+    // meets (codeDepMet) only adds context, like an undeclared entry; any
+    // other is a schedule problem no ruling can fix, so it stops the run
+    // below before the adjudicator is considered.
+    const codeDeps = preflightUndeclared(m, pre.code_deps);
+    for (const d of codeDeps.dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped code_deps entry ${JSON.stringify(d.entry)} (${d.reason})`);
+    }
+    const kept = [...undeclared.kept, ...codeDeps.kept.filter((e) => codeDepMet(m, e.task, e.producer))];
+    const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
+      .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings).

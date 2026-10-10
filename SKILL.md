@@ -175,9 +175,13 @@ this. Say the table is the one required check, show it, and wait.
    `bash <skill_dir>/scripts/active-run acquire <run_id> <manifest file>`: it prints the owner
    token (keep it for relaunches). Exit 4: another session holds the run; stop and ask, and use
    `--takeover` only when the user confirms that session ended. Then run
-   `<python> <skill_dir>/scripts/setup <manifest file> --owner <token>`. It creates the feature branch and
+   `<python> <skill_dir>/scripts/setup <manifest file> --owner <token>`. Its exit 4 naming another
+   run (`the checkout ... is in use by run ...`) means that run holds the checkout: setup changed
+   nothing, so release this run's own launch lock first (`active-run release <run_id> setup_failed
+   --owner <token>`, or `active-run release <run_id> --remove --owner <token>` for a new run that never
+   started), then stop and report it. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
-   wait 10 seconds and retry once; then `active-run release <run_id> setup_failed`, report,
+   wait 10 seconds and retry once; then `active-run release <run_id> setup_failed --owner <token>`, report,
    and stop. Put its output in `setup_result`
    and copy the `start_points` of `<python> <skill_dir>/scripts/ledger status <ledger_dir>`
    into `start_points` exactly as it prints them: `prelude` after setup, `join` only once an
@@ -195,7 +199,7 @@ this. Say the table is the one required check, show it, and wait.
    line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)
    keeps the lock until it is fixed: `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status>
    <agents_spawned> <rulings_spent> && bash <skill_dir>/scripts/active-run release <run_id>
-   <release>`, where `<release>` is `--remove` only for `complete` with `acceptance.status`
+   <release> --owner <token>`, where `<release>` is `--remove` only for `complete` with `acceptance.status`
    `accepted`, otherwise `<status>`, so a later session offers the resume.
 
 ## Transient stops (relaunch once, no prompt)
@@ -227,6 +231,8 @@ The run returns `status`:
 - `invalid`: notify, show `errors`, fix the manifest, back to Confirmation.
 - `preflight_conflicts`: no task ran (setup commands did; show the checkouts' `git status`).
   Notify, show `preflight.conflicts` and `rulings`; the user decides; then Confirmation again.
+  When `preflight.schedule` is non-empty, move each named task as its `fix` says (record the
+  dependency as `code` in `depends_on`), then Confirmation again.
 - `stopped`: transient: relaunch as above. Otherwise show `reason` and each `stopped_lanes`
   entry (lane, task, reason), notify, keep the marker. The run is resumable: after the user
   answers or fixes the plan, go to Resume.
@@ -272,7 +278,7 @@ never `branch -D`. Keep the manifest and ledger.
 3. `backfill`: `<python> <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
    Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
-   Record an answer in `notes` as `{"<task id>": "<answer>"}` (plain ASCII); a plan fix needs
+   Record an answer in `notes` as `{"<task id>": "<answer>"}`; a plan fix needs
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
 6. Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
