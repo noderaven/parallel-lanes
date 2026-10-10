@@ -190,3 +190,70 @@ test('an entry with an empty source does not warn', () => {
   input.final = { ...input.final, cannot_verify: [{ requirement: 'r', source: '', why: 'w', check_by: 'c' }] };
   assert.deepEqual(acceptanceOf(input).warnings, []);
 });
+
+// ---- Final findings need a disposition and real evidence (1.4.0, F7) ----
+
+const { settleFinalFindings } = await loadHelpers(['settleFinalFindings']);
+
+const F1 = { file: 'src/a.js', line: 4, issue: 'off by one', severity: 'important', id: 'F1' };
+const fixedF1 = (evidence = 'changed line 4') => ({ id: 'F1', status: 'fixed', evidence });
+const resolvedF1 = (evidence = 'checked line 4') => ({ id: 'F1', status: 'resolved', evidence });
+const settle = (dispositions, results) => settleFinalFindings([F1], dispositions, { head: SHA, results, new_findings: [] },
+  'not re-reviewed', SHA);
+const openReason = (s) => {
+  assert.deepEqual([s.fixed, s.declined, s.open.length], [[], [], 1], JSON.stringify(s));
+  return s.open[0].reason;
+};
+
+test('a final finding without a disposition stays open, even when the re-review resolves it', () => {
+  assert.equal(openReason(settle([], [resolvedF1()])), 'the final fix gave no disposition for it');
+});
+
+test('a final disposition with empty evidence leaves the finding open', () => {
+  assert.equal(openReason(settle([fixedF1('')], [resolvedF1()])), 'the final fix gave no evidence for it');
+});
+
+test('a final disposition with blank evidence leaves the finding open', () => {
+  assert.equal(openReason(settle([fixedF1('   ')], [resolvedF1()])), 'the final fix gave no evidence for it');
+});
+
+test('a final re-review result with empty evidence leaves the finding open', () => {
+  assert.equal(openReason(settle([fixedF1()], [resolvedF1('')])), 'the final re-review gave no evidence for it');
+});
+
+test('a final re-review result with blank evidence leaves the finding open', () => {
+  assert.equal(openReason(settle([fixedF1()], [resolvedF1(' \n ')])), 'the final re-review gave no evidence for it');
+});
+
+test('two contradictory final dispositions leave the finding open', () => {
+  const declinedF1 = { id: 'F1', status: 'declined', evidence: 'not a bug', reason: 'intended' };
+  assert.equal(openReason(settle([fixedF1(), declinedF1], [resolvedF1()])),
+    'the final fix gave contradictory dispositions for it');
+});
+
+test('two contradictory final re-review results leave the finding open', () => {
+  const openF1 = { id: 'F1', status: 'open', evidence: 'still wrong' };
+  assert.equal(openReason(settle([fixedF1()], [resolvedF1(), openF1])),
+    'the final re-review gave contradictory results for it');
+});
+
+test('a final re-review without a result for the finding leaves it open', () => {
+  assert.equal(openReason(settle([fixedF1()], [])), 'the final re-review gave no result for it');
+});
+
+test('a final finding with evidence on both sides is fixed or declined', () => {
+  const fixed = settle([fixedF1()], [resolvedF1()]);
+  assert.deepEqual([fixed.fixed.map((f) => f.id), fixed.declined, fixed.open], [['F1'], [], []]);
+  const declinedF1 = { id: 'F1', status: 'declined', evidence: 'the spec allows it', reason: 'intended' };
+  const declined = settle([declinedF1], [resolvedF1()]);
+  assert.deepEqual([declined.fixed, declined.declined.map((f) => f.id), declined.open], [[], ['F1'], []]);
+});
+
+test('a final finding without a disposition rejects the run', () => {
+  const input = passing();
+  input.final = { ...input.final, open: settle([], [resolvedF1()]).open };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'rejected');
+  assert.deepEqual(kinds(a), [['blocking_findings', 'failed']]);
+  assert.match(a.reasons[0].detail, /F1 \[important\].*the final fix gave no disposition for it/);
+});

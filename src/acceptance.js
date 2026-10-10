@@ -23,10 +23,12 @@ function withFindingIds(findings, prefix = 'F') {
 // no disposition, a re-review that says open or leaves the id out, or no
 // re-review at all). rr is the re-review result {head, results, new_findings},
 // or null when none ran (whyNot says why). New findings are open with ids N1...
-// Answers are checked across fields, not just for shape: a re-review of
-// another revision than delivered (the fix head) settles nothing (its new
-// findings are still kept, open), a disposition without evidence settles
-// nothing, and two different answers for one id leave it open.
+// Answers are checked across fields, not just for shape, in this order: a
+// re-review of another revision than delivered (the fix head) settles nothing
+// (its new findings are still kept, open); two different answers for one id
+// leave it open; so do a missing disposition, a disposition whose evidence is
+// empty or only whitespace, a missing or non-resolved re-review result, and a
+// re-review result whose evidence is empty or only whitespace.
 // reReviewProblem says why a re-review result settles nothing, or null.
 function reReviewProblem(rr, whyNot, delivered) {
   if (rr === null) return whyNot;
@@ -61,10 +63,12 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     if (none !== null) open.push({ ...withNotes, reason: none });
     else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
     else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
-    else if (d && !present(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
+    else if (!d) open.push({ ...withNotes, reason: 'the final fix gave no disposition for it' });
+    else if (!hasText(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
-    } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
+    } else if (!hasText(v.evidence)) open.push({ ...withNotes, reason: 'the final re-review gave no evidence for it' });
+    else if (d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
     else fixed.push(withNotes);
   }
   const fresh = rr && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];

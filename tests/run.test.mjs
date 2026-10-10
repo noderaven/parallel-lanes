@@ -646,7 +646,7 @@ test('a finding without a disposition or a re-review result is open, never fixed
   const { result } = await run(manifest(), script);
   assert.deepEqual(result.final.fixed.map((f) => f.id), ['F1']);
   assert.deepEqual(result.final.open.map((f) => f.id), ['F2', 'N1']);
-  assert.match(result.final.open[0].reason, /no result for it/);
+  assert.match(result.final.open[0].reason, /the final fix gave no disposition for it/);
   assert.equal(result.acceptance.status, 'rejected');
 });
 
@@ -1190,7 +1190,7 @@ test('final review lenses report the feature head; the final fix starts from the
   const second = await run(m, noop);
   assert.ok(second.calls.find((c) => c.label === 'final re-review').prompt.includes(`'${H('FF2')}..${H('FF2')}'`));
   assert.deepEqual(second.result.final.fixed, []);
-  assert.deepEqual(second.result.final.open.map((f) => f.reason), ['the final re-review gave no result for it']);
+  assert.deepEqual(second.result.final.open.map((f) => f.reason), ['the final fix gave no disposition for it']);
 });
 
 test('integrate allows earlier final-fix commits after the join tip only when every join task is done', async () => {

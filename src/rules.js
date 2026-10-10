@@ -14,6 +14,12 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// A string with some text in it, not only whitespace (agent-reported
+// evidence, for instance).
+function hasText(v) {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
 // A commit sha as an agent reports it: 7 to 40 lowercase hex digits. Any
 // other head an agent reports (a note such as 'see below', a branch name)
 // counts as no head: the run cannot tell which commit it means.
