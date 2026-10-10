@@ -422,8 +422,15 @@ test('agents handed the every-check run-checks call are told where its logs go a
   const texts = Object.entries(allPrompts(manifest())).filter(([, t]) => t.includes('- every check at once'));
   assert.ok(texts.length > 0);
   for (const [name, text] of texts) {
-    assert.ok(text.includes('in a new\n  temporary directory each call'), name);
-    assert.ok(text.includes("remove that directory\n  (the log's parent)"), name);
+    // The call itself: run-checks with no --out, which is what puts each
+    // call's logs in a new temporary directory.
+    const lines = text.split('\n');
+    const call = lines[lines.findIndex((l) => l.includes('- every check at once')) + 1];
+    assert.match(call, /scripts\/run-checks' /, name);
+    assert.ok(!/ --out | --root /.test(call), `${name}: ${call}`);
+    const flat = text.replace(/\s+/g, ' ');
+    assert.ok(flat.includes('in a new temporary directory each call'), name);
+    assert.ok(flat.includes("remove that directory (the log's parent)"), name);
   }
 });
 
@@ -1493,8 +1500,12 @@ test('the final fix and the post-integrate fix use their own messages', async ()
 // ---- Structured cannot_verify (1.3.1) ----
 
 test('review prompts define cannot_verify and ask for the structured form', async () => {
-  const { finalReviewPrompt, combinedFinalReviewPrompt, reviewSchema, finalReviewSchema } = await loadHelpers([
-    'finalReviewPrompt', 'combinedFinalReviewPrompt', 'reviewSchema', 'finalReviewSchema']);
+  const { finalReviewPrompt, combinedFinalReviewPrompt, reviewSchema, finalReviewSchema, cannotVerifyItemSchema,
+    cannotVerifyLines } = await loadHelpers(['finalReviewPrompt', 'combinedFinalReviewPrompt', 'reviewSchema',
+    'finalReviewSchema', 'cannotVerifyItemSchema', 'cannotVerifyLines']);
+  // The prompt names exactly the fields the schema requires, in its order.
+  const fields = cannotVerifyItemSchema().required;
+  assert.deepEqual(Object.keys(cannotVerifyItemSchema().properties), fields);
   const m = manifest();
   const prompts = {
     review: reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')),
@@ -1505,11 +1516,9 @@ test('review prompts define cannot_verify and ask for the structured form', asyn
     combined: combinedFinalReviewPrompt(m, { e2e: null }),
   };
   for (const [name, text] of Object.entries(prompts)) {
-    for (const word of ['requirement', 'source', 'why', 'check_by']) {
-      assert.ok(text.includes(word), `${name}: ${word}`);
-    }
-    // What is not a cannot_verify entry.
-    assert.ok(/limits the plan already accepts/.test(text), `${name}: the exclusions`);
+    assert.ok(text.includes(`cannot_verify = [{${fields.join(', ')}}]`), `${name}: the fields`);
+    // The whole definition, exclusions included, from its one source.
+    assert.ok(text.includes(cannotVerifyLines().join('\n')), `${name}: the definition`);
   }
   for (const schema of [reviewSchema(), finalReviewSchema()]) {
     const items = schema.properties.cannot_verify.items;

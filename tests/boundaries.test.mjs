@@ -189,9 +189,17 @@ test('run-checks caps a tail by characters: one long line does not reach its std
 
 test('run-checks ignores --root without --out: the logs are in a temporary directory', () => {
   const r = repo();
-  const res = py('run-checks', [r, '--root', join(dirname(r), 'ledger'), '--cmd', 'test', 'true']);
+  const root = join(dirname(r), 'ledger');
+  const res = py('run-checks', [r, '--root', root, '--cmd', 'test', 'true']);
   assert.equal(res.code, 0, res.stderr);
-  assert.equal(JSON.parse(res.stdout).ok, true);
+  const out = JSON.parse(res.stdout);
+  assert.equal(out.ok, true);
+  const { log } = out.results[0];
+  assert.ok(isAbsolute(log) && existsSync(log), `the log ${log} exists`);
+  // A temporary directory of run-checks' own, not --root or the repo.
+  assert.match(log.split(/[\\/]/).slice(-2, -1)[0], /^run-checks-/, log);
+  assert.ok(!existsSync(root), 'nothing is written under --root');
+  assert.ok(!realpathSync(log).startsWith(realpathSync(dirname(r))), log);
 });
 
 test('run-checks puts each command\'s log beside --out', () => {
