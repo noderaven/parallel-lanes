@@ -189,7 +189,7 @@ configuration is needed.
 4. Optional: run the test suite:
 
    ```bash
-   cd ~/.claude/skills/parallel-lanes && node --test tests/
+   cd ~/.claude/skills/parallel-lanes && node tests/run-tests.mjs
    ```
 
 5. Optional: to make parallel-lanes the default even more firmly, add this paragraph to
@@ -335,7 +335,7 @@ Other things to know:
 | `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `agents/` | The `parallel-lanes-worker` agent definition |
-| `tests/` | `node --test tests/` |
+| `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, two files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |
 
 ## License
 
