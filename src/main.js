@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v@VERSION@: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -14,11 +14,18 @@ export const meta = {
 
 // ---- Script body ----
 
+// The skill version this script was built from (scripts/build stamps VERSION
+// here and in the meta description): the version actually running. Logged
+// first and returned with every result, dry runs included.
+const VERSION = '@VERSION@';
+log(`parallel-lanes v${VERSION} loaded`);
+
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
   const dry = normalizeManifestPaths(withDefaultHooks(args));
   const errors = validateManifest(dry);
   const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
+    version: VERSION,
     dry_run: true,
     errors,
     agents,
@@ -28,4 +35,4 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
   };
 }
 
-return await runAll(args, { agent, log, phase, parallel });
+return { version: VERSION, ...(await runAll(args, { agent, log, phase, parallel })) };

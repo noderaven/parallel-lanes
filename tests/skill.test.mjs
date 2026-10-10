@@ -86,7 +86,9 @@ function manifest(extra = {}) {
 async function loggedNotices(m) {
   const logs = [];
   await loadScript({ args: m, agent: async () => null, log: (msg) => logs.push(msg) });
-  return logs.filter((l) => l.startsWith('parallel-lanes'));
+  // The fixed notices start with 'parallel-lanes:'; the version line
+  // ('parallel-lanes v<version> loaded') is not one of them.
+  return logs.filter((l) => l.startsWith('parallel-lanes:'));
 }
 
 test('SKILL.md frontmatter has the exact name and description', () => {

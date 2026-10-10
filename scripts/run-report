@@ -9,9 +9,13 @@ model) and agent-*.jsonl (resolved message.model and usage per line).
 MANIFEST is the run manifest, used to recognise task ids. Prints JSON (or
 writes it to FILE):
 
-  {agents: [...], tiers: {<tier>: {...}}, totals: {...}, models: {...},
-   unavailable: N, output_incomplete: N, escalations: N, fix_rounds: N,
-   retries: N}
+  {engine_version: "x.y.z", agents: [...], tiers: {<tier>: {...}},
+   totals: {...}, models: {...}, unavailable: N, output_incomplete: N,
+   escalations: N, fix_rounds: N, retries: N}
+
+engine_version: the result.version of the workflow result file (the skill
+version run.workflow.js was built from, the one that ran); "unavailable"
+without that file or field (runs before 1.4.3).
 
 Anything that cannot be read or derived is the string "unavailable", never a
 guess; totals sum only known values.
@@ -79,15 +83,26 @@ def manifest_task_ids(manifest):
     return {i for i in ids if isinstance(i, str)}
 
 
-def agent_efforts(transcript_dir):
-    """{label: [effort, ...]} from the workflow result file's
-    result.agent_settings (see _shell.result_paths), in start order; {} when
-    no readable result file is found."""
-    result = None
+def workflow_result(transcript_dir):
+    """The result object of the workflow result file (see
+    _shell.result_paths); None when no readable result file is found."""
     for path in _shell.result_paths(transcript_dir):
         if os.path.isfile(path):
             result = read_json(path).get("result")
-            break
+            return result if isinstance(result, dict) else None
+    return None
+
+
+def engine_version(result):
+    """result.version, the skill version the workflow ran as; UNAVAILABLE
+    when there is no result or no non-empty string version in it."""
+    version = result.get("version") if isinstance(result, dict) else None
+    return version if isinstance(version, str) and version else UNAVAILABLE
+
+
+def agent_efforts(result):
+    """{label: [effort, ...]} from the workflow result's
+    result.agent_settings, in start order; {} without a result."""
     settings = result.get("agent_settings") if isinstance(result, dict) else None
     efforts = {}
     for s in settings if isinstance(settings, list) else []:
@@ -230,7 +245,8 @@ def blank_bucket():
 
 def build(transcript_dir, manifest):
     ids = manifest_task_ids(manifest)
-    efforts = agent_efforts(transcript_dir)
+    result = workflow_result(transcript_dir)
+    efforts = agent_efforts(result)
     metas = sorted(glob.glob(os.path.join(transcript_dir, "agent-*.meta.json")), key=start_key)
     agents = []
     for meta_path in metas:
@@ -311,6 +327,7 @@ def build(transcript_dir, manifest):
         del a["_base"]
         del a["_retried"]
     return {
+        "engine_version": engine_version(result),
         "agents": agents,
         "tiers": tiers,
         "totals": totals,

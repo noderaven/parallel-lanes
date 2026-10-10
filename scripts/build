@@ -6,9 +6,11 @@
 # Concatenates, in this order: the meta literal of src/main.js (through its
 # first line that is exactly "};"), a generated-file comment, rules,
 # validate, plan, prompts-task, prompts-phase, adjudicator, budget, engine,
-# phases, and the rest of src/main.js (the script body). Writes
-# run.workflow.js beside src/ by default; --out FILE writes FILE instead, and
-# --out - writes to stdout.
+# phases, and the rest of src/main.js (the script body). Every @VERSION@ in
+# the output becomes the version in VERSION beside src/ (one x.y.z line; the
+# build fails and writes nothing otherwise), so the meta description and the
+# script carry the version they were built from. Writes run.workflow.js beside
+# src/ by default; --out FILE writes FILE instead, and --out - writes to stdout.
 set -euo pipefail
 
 usage() {
@@ -49,6 +51,11 @@ if ! grep -qx '};' "$src/main.js"; then
   echo "build: $src/main.js has no line \"};\" closing the meta literal" >&2
   exit 1
 fi
+version="$(tr -d '\r\n' < "$root/VERSION" 2>/dev/null || true)"
+if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "build: $root/VERSION must hold one x.y.z version, not '$version'" >&2
+  exit 1
+fi
 
 emit() {
   # The meta literal, through the first line that is exactly "};".
@@ -68,12 +75,17 @@ emit() {
        $0 == "};" { state = 1 }' "$src/main.js"
 }
 
+stamped() {
+  # version is digits and dots only (checked above), so it is safe in sed.
+  emit | sed "s/@VERSION@/$version/g"
+}
+
 if [ "$out" = "-" ]; then
-  emit
+  stamped
 else
   tmp="$out.tmp.$$"
   trap 'rm -f "$tmp"' EXIT
-  emit > "$tmp"
+  stamped > "$tmp"
   mv "$tmp" "$out"
   trap - EXIT
 fi
