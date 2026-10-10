@@ -3,7 +3,7 @@
 
 usage:
   ledger append DIR LANE JSON
-  ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING
+  ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]
   ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST]
   ledger backfill DIR MANIFEST
   ledger accept DIR CHECKOUT HEAD TEXT
@@ -15,7 +15,8 @@ and an 'event' of:
   committed    with 'commits': non-empty list of strings; finish-task also
                writes 'base' and 'head' (non-empty strings, both or neither)
   reviewed     with 'rounds': integer >= 0; 'ledger reviewed' also writes
-               'brief_sha256' (64 hex digits) and 'head'
+               'brief_sha256' (64 hex digits) and 'head', and with SPEC
+               'spec_sha256' (64 hex digits or null)
   ruling       with 'text': string
   blocked      with 'reason': string
   run_started  with 'phase': "setup" or "join", and 'head': non-empty string;
@@ -38,7 +39,10 @@ and the full sha HEAD resolves to (the code it approved, the head of the range
 under review). It refuses (exit 3, nothing recorded) when BLOCKING, the
 number of critical and important findings the reviewer reports, is not 0 (an
 approval with blocking findings is not an approval), when PLAN has no section
-for TASK, or when HEAD is not a commit that CHECKOUT's HEAD contains.
+for TASK, or when HEAD is not a commit that CHECKOUT's HEAD contains. With
+SPEC, the spec the review read (a path, or - for none), it also records
+spec_sha256: the file's sha256, or null for -; a SPEC it cannot read is exit
+3 and nothing is recorded. Without SPEC no spec_sha256 is recorded.
 
 status reads every DIR/*.jsonl and prints
   {"done": [...], "reviewed": [...], "blocked": [...], "deferred": [...],
@@ -66,9 +70,13 @@ event with "by": "adjudicator" after its last 'committed'.
 With --plan PLAN, every reviewed task (not settled) is checked against PLAN:
 stale lists [{task, reason}] when the review's brief_sha256 differs from the
 task's current section, the task has no section, or the review's head is not
-the task's recorded head; unbound lists reviewed tasks whose review recorded
-no brief_sha256. Both are left out of reviewed, so a resume reviews them
-again. inputs: {"plan_changed", "spec_changed"}: true or false against the
+the task's recorded head, or the spec moved on: a review that recorded
+spec_sha256 is stale when it differs from SPEC's sha256 (null without
+--spec: no spec now) ("the spec changed since its review"), and one that
+recorded none is stale when inputs.spec_changed is true ("the spec changed
+since the last launch and the review did not record it"). unbound lists
+reviewed tasks whose review recorded no brief_sha256. Both are left out of
+reviewed, so a resume reviews them again. inputs: {"plan_changed", "spec_changed"}: true or false against the
 hashes the latest setup run_started recorded (the last launch; with --plan /
 --spec), null when nothing was recorded or no file was given.
 spent: {"agents", "rulings", "unrecorded_launches"}: the sums of 'agents'
@@ -183,6 +191,9 @@ def entry_error(entry):
             return "'brief_sha256' must be 64 lowercase hex digits"
         if "head" in entry and not is_text(entry["head"]):
             return "'head' must be a non-empty string"
+        v = entry.get("spec_sha256")
+        if "spec_sha256" in entry and v is not None and not (isinstance(v, str) and SHA256.fullmatch(v)):
+            return "'spec_sha256' must be 64 lowercase hex digits or null"
     elif event == "run_started":
         if entry.get("phase") not in START_POINTS:
             return "'phase' must be one of setup, join"
@@ -266,7 +277,7 @@ def file_sha256(path):
         fail(3, f"cannot read {path!r}: {e}")
 
 
-def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
+def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking, spec=None):
     if not re.fullmatch(r"[0-9]+", rounds):
         fail(2, "ROUNDS must be an integer >= 0")
     if not re.fullmatch(r"[0-9]+", blocking):
@@ -278,6 +289,10 @@ def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
         digest = _brief.section_sha256(read_text(plan, "plan"), task)
     except _brief.BriefError as e:
         fail(3, str(e))
+    entry = {"task": task, "event": "reviewed", "rounds": int(rounds), "brief_sha256": digest}
+    if spec is not None:
+        # What the review read as the spec: its hash, or null for none ("-").
+        entry["spec_sha256"] = None if spec == "-" else file_sha256(spec)
 
     def git(*args):
         return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, encoding="utf-8",
@@ -289,8 +304,8 @@ def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking):
     sha = res.stdout.strip()
     if git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
         fail(3, f"{head!r} is not in the history of {checkout!r}'s HEAD; nothing recorded")
-    write_entry(directory, lane, {"task": task, "event": "reviewed", "rounds": int(rounds),
-                                  "brief_sha256": digest, "head": sha})
+    entry["head"] = sha
+    write_entry(directory, lane, entry)
 
 
 def read_events(directory):
@@ -405,6 +420,13 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         if not any(i["task"] == task for i in inconsistent):
             inconsistent.append({"task": task, "reason": reason})
 
+    inputs = {"plan_changed": None, "spec_changed": None}
+    if setup_hashes is not None:
+        if plan_sha is not None:
+            inputs["plan_changed"] = setup_hashes[0] != plan_sha
+        if spec_sha is not None:
+            inputs["spec_changed"] = setup_hashes[1] != spec_sha
+
     stale, unbound = [], []
     if plan_given:
         for task, by in reviewed_by.items():
@@ -424,6 +446,13 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             elif "head" in rev and task in ranges and rev["head"] != ranges[task]["head"]:
                 stale.append({"task": task, "reason":
                               f"the review approved {rev['head']}, not the recorded head {ranges[task]['head']}"})
+            elif "spec_sha256" in rev:
+                # No --spec means no spec now: a review that read one is stale.
+                if rev["spec_sha256"] != spec_sha:
+                    stale.append({"task": task, "reason": "the spec changed since its review"})
+            elif inputs["spec_changed"]:
+                stale.append({"task": task, "reason":
+                              "the spec changed since the last launch and the review did not record it"})
     if manifest is not None and stale:
         # A dependent built on, or against, a stale approval is reviewed again
         # too: transitively, in run order.
@@ -453,12 +482,6 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
     if manifest is not None:
         undeclared = undeclared_files(manifest, ranges)
 
-    inputs = {"plan_changed": None, "spec_changed": None}
-    if setup_hashes is not None:
-        if plan_sha is not None:
-            inputs["plan_changed"] = setup_hashes[0] != plan_sha
-        if spec_sha is not None:
-            inputs["spec_changed"] = setup_hashes[1] != spec_sha
     return {
         "done": list(done),
         "reviewed": [t for t, v in reviewed_by.items() if v and t not in excluded],
@@ -633,7 +656,7 @@ def backfill(directory, manifest_path):
         sys.exit(3)
 
 
-PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
+PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6, 9), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
              "ended": (1,)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
@@ -657,7 +680,7 @@ def main(argv):
         fail(3, str(e))
     if len(argv) == 4 and argv[0] == "append" and argv[1]:
         append(argv[1], argv[2], argv[3])
-    elif len(argv) == 9 and argv[0] == "reviewed" and all(argv[1:]):
+    elif len(argv) in (9, 10) and argv[0] == "reviewed" and all(argv[1:]):
         if not LANE.fullmatch(argv[3]):
             fail(3, f"unsafe task id {argv[3]!r}")
         reviewed(*argv[1:])
@@ -677,7 +700,8 @@ def main(argv):
     elif len(argv) == 5 and argv[0] == "ended" and argv[1]:
         ended(*argv[1:])
     else:
-        fail(2, "usage: ledger append DIR LANE JSON | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING"
+        fail(2, "usage: ledger append DIR LANE JSON"
+                " | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]"
                 " | ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST] | ledger backfill DIR MANIFEST"
                 " | ledger accept DIR CHECKOUT HEAD TEXT | ledger ended DIR STATUS AGENTS RULINGS")
 
