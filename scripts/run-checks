@@ -16,6 +16,11 @@ directory, FILE and its logs must resolve inside ROOT; --root does nothing
 without --out):
   {"checkout": DIR, "branch": <abbrev-ref>, "head": <full sha checked>,
    "results": [{"group": GROUP, "command": COMMAND, "exit": <code>,
+                "started": <UTC ISO 8601 with milliseconds when it began,
+                            e.g. 2026-10-10T07:00:00.123Z>,
+                "ended": <the same stamp when it finished>,
+                "duration_s": <seconds it ran, from time.monotonic(),
+                               rounded to 0.001>,
                 "log": <absolute path of its log>,
                 "tail": <its last 20 lines, joined with \\n; at most the
                          last 4096 characters of them, starting with
@@ -56,6 +61,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -161,6 +168,11 @@ def log_paths(out, count):
             for n in range(1, count + 1)]
 
 
+def utc_stamp():
+    """The current UTC time as ISO 8601 with milliseconds and a Z suffix."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def tail_of(path):
     """The last TAIL_LINES lines of the file at path, joined with \\n, kept to
     the last TAIL_CHARS characters: a command that prints one long line must
@@ -207,9 +219,12 @@ def run(directory, out, root, cmds):
     results = []
     for (group, command), log in zip(cmds, logs):
         with open(log, "wb") as f:
+            started, t0 = utc_stamp(), time.monotonic()
             res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV,
                                  stdout=f, stderr=subprocess.STDOUT)
+            duration, ended = time.monotonic() - t0, utc_stamp()
         results.append({"group": group, "command": command, "exit": res.returncode,
+                        "started": started, "ended": ended, "duration_s": round(duration, 3),
                         "log": log, "tail": tail_of(log)})
     tracked_after = tracked_changes(directory)
     untracked_after = untracked_changes(directory)
