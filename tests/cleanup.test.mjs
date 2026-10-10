@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, mergeEnv, samePath, tempDir } from './platform.mjs';
+import { BASH, IS_WINDOWS, mergeEnv, samePath, tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const CLEANUP = join(SCRIPTS, 'cleanup');
@@ -436,6 +436,74 @@ test('cleanup: a dirty main checkout is never switched', () => {
   const kept = findItem(out.kept, 'branch', (i) => i.branch === 'feature/x');
   assert.ok(kept, JSON.stringify(out.kept));
   assert.match(kept.reason, /uncommitted/);
+});
+
+// Runs cleanup --yes and checks that the main checkout stayed on feature/x
+// with main and feature/x unchanged; returns the reason feature/x was kept.
+function featureKept(c) {
+  const before = { main: sha(c, 'main'), feature: sha(c, 'feature/x') };
+  const out = cleanupOk(c, ['--yes']);
+  assert.equal(currentBranch(c), 'feature/x');
+  assert.deepEqual({ main: sha(c, 'main'), feature: sha(c, 'feature/x') }, before);
+  const kept = findItem(out.kept, 'branch', (i) => i.branch === 'feature/x');
+  assert.ok(kept, JSON.stringify(out.kept));
+  return kept.reason;
+}
+
+test('cleanup: a local base that cannot fast-forward is never switched to', () => {
+  const c = newCase();
+  mergeIntoOrigin(c);
+  // A commit on the local main that the upstream does not have.
+  const local = git(c.project, 'commit-tree', 'main^{tree}', '-p', 'main', '-m', 'local only');
+  git(c.project, 'update-ref', 'refs/heads/main', local);
+  assert.match(featureKept(c), /cannot fast-forward/);
+  assert.equal(sha(c, 'main'), local);
+});
+
+test('cleanup: a failed fetch or a base without upstream keeps the feature branch', () => {
+  const c = newCase();
+  mergeIntoOrigin(c);
+  git(c.project, 'remote', 'set-url', 'origin', join(c.root, 'missing.git'));
+  assert.match(featureKept(c), /git fetch origin refs\/heads\/main failed/);
+  const d = newCase();
+  mergeIntoOrigin(d);
+  git(d.project, 'branch', '--unset-upstream', 'main');
+  assert.match(featureKept(d), /has no upstream/);
+});
+
+test('cleanup: a locked lane worktree and its branch are kept', () => {
+  const c = newCase();
+  git(c.project, 'worktree', 'lock', c.lanes.a);
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(existsSync(c.lanes.a));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'));
+  const kept = findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a));
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /locked/);
+  assert.ok(findItem(out.kept, 'branch', (i) => i.branch === 'pl-r1-a'), JSON.stringify(out.kept));
+  // The other lane is still cleaned up.
+  assert.ok(!existsSync(c.lanes.b));
+});
+
+test('cleanup: an index folder outside the history dir is refused', () => {
+  for (const bad of ['../x', '/x', 'C:/x', 'a/../../x']) {
+    const c = newCase();
+    writeIndex(c.history, c.manifest, bad);
+    const res = cleanup(c, ['--yes']);
+    assert.equal(res.code, 2, `${bad}: ${res.stderr}`);
+    assert.match(res.stderr, /bad folder/);
+    assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'), 'nothing was removed');
+    assert.ok(!existsSync(join(c.root, 'x')), 'no restore point outside the history dir');
+  }
+});
+
+test('cleanup: a Git Bash path to the manifest works on Windows', { skip: !IS_WINDOWS }, () => {
+  const c = newCase();
+  const msys = c.manifest.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_m, d) => `/${d.toLowerCase()}`);
+  const res = sh('python3', [CLEANUP, msys, '--json', '--history-dir', c.history], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).run_id, 'r1');
 });
 
 test('cleanup: abandoned refs survive', () => {

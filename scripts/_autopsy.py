@@ -37,7 +37,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 1
+AUTOPSY_VERSION = 2
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -288,16 +288,15 @@ def fingerprint(run_folder):
 # ---- loading ----
 
 def _launch(folder, wf_dir, manifest):
-    """One launch: its wf json, run-report view and agents with events."""
+    """One launch: its wf json and agents (run-report's entries) with events."""
     name = os.path.basename(wf_dir)
     wf_json = os.path.join(folder, name + ".json")
     data = _transcripts.read_json(wf_json) if os.path.isfile(wf_json) else {}
     result = data.get("result") if isinstance(data.get("result"), dict) else None
-    report = _transcripts.build_report(wf_dir, manifest)
-    metas = sorted(glob.glob(os.path.join(wf_dir, "agent-*.meta.json")), key=_transcripts.start_key)
     agents = []
-    # build_report lists agents in the same start_key order.
-    for meta_path, entry in zip(metas, report["agents"]):
+    # Each entry comes with its own meta path, so events never pair with
+    # another agent's entry.
+    for meta_path, entry in _transcripts.agent_entries(wf_dir, manifest):
         events, skipped, notes = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
         agents.append({"entry": entry, "events": events, "skipped": skipped, "notes": notes,
                        "launch": name})
@@ -309,11 +308,12 @@ def _launch(folder, wf_dir, manifest):
         if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
             end = start + duration_ms / 1000.0
     if start is None or end is None:
-        # No workflow timing: the launch spans its agents' first to last event.
+        # No workflow timing: the launch spans its agents' first timed line
+        # (the prompt included) to their last event.
         times = [e["ts"] for a in agents for e in a["events"]]
-        start, end = (min(times), max(times)) if times else (None, None)
-    return {"wf": name, "result": result, "report": report, "agents": agents,
-            "start": start, "end": end}
+        firsts = times + [n["ts"] for a in agents for n in a["notes"]]
+        start, end = (min(firsts), max(times)) if times else (None, None)
+    return {"wf": name, "result": result, "agents": agents, "start": start, "end": end}
 
 
 def load(run_folder):
@@ -329,12 +329,14 @@ def load(run_folder):
 
 
 def span_agent(agent):
-    """Set an agent's start, end and tool time from its events."""
+    """Set an agent's start, end and tool time from its events. It starts at
+    its earliest timed line, the prompt included, so the first model turn is
+    part of its time; it ends at its last event."""
     events = agent["events"]
     if not events:
         agent["start"] = agent["end"] = agent["tool"] = None
         return
-    agent["start"] = min(e["ts"] for e in events)
+    agent["start"] = min([e["ts"] for e in events] + [n["ts"] for n in agent.get("notes", [])])
     agent["end"] = max(e["ts"] for e in events)
     uses = {}
     spans = []
@@ -441,9 +443,11 @@ def _span(agents):
 
 def launch_idle_gaps(launch):
     """[(start, end)]: the spans over IDLE_GAP_S inside a launch with no
-    agent of it running. None for a launch without timing or without a
-    timed agent: its gaps cannot be told from missing timestamps."""
-    if launch["start"] is None or not _timed(launch["agents"]):
+    agent of it running. None for a launch without timing, without a timed
+    agent, or with an agent that has no timestamps (it may have run in what
+    looks like a gap): its gaps cannot be told from missing timestamps."""
+    timed = _timed(launch["agents"])
+    if launch["start"] is None or not timed or len(timed) != len(launch["agents"]):
         return None
     gaps = []
     cursor = launch["start"]
@@ -467,11 +471,13 @@ def time_section(run):
         ordered = sorted(groups.items(), key=lambda kv: (_span(kv[1])[0] is None, _span(kv[1])[0] or 0.0))
         for name, members in ordered:
             start, end = _span(members)
+            # start and end are what the timed members show; the wall time
+            # needs every member timed, as a lane's busy time does.
+            complete = start is not None and len(_timed(members)) == len(members)
             phases.append({"phase": name, "launch": launch["wf"], "start": iso(start), "end": iso(end),
-                           "wall_s": seconds(None if start is None else end - start),
+                           "wall_s": seconds(end - start if complete else None),
                            "agents": len(members)})
             if name in lanes_by_phase:
-                complete = start is not None and len(_timed(members)) == len(members)
                 busy = union_length([(a["start"], a["end"]) for a in members]) if complete else None
                 lanes.append({"lane": lanes_by_phase[name], "launch": launch["wf"],
                               "start": iso(start), "end": iso(end), "busy_s": seconds(busy),
@@ -519,31 +525,10 @@ def critical_agents(run):
 
 # ---- tokens ----
 
-def _incomplete(entry):
-    return entry["input_tokens"] != UNAVAILABLE and entry["output_tokens"] == UNAVAILABLE
+_incomplete = _transcripts.is_output_incomplete
 
-
-def buckets(entries, key):
-    """{key(entry): bucket} in run-report's token-field shape and rules: only
-    known values are summed, and a bucket holding an output-incomplete agent
-    has output_tokens "unavailable" (output_tokens_min still sums)."""
-    out = {}
-    for e in entries:
-        k = key(e)
-        if k is None:
-            continue
-        b = out.setdefault(k, _transcripts.blank_bucket())
-        b["agents"] += 1
-        if e["input_tokens"] == UNAVAILABLE:
-            continue
-        for field in TOKEN_FIELDS + ("output_tokens_min",):
-            if e[field] != UNAVAILABLE:
-                b[field] += e[field]
-    for e in entries:
-        k = key(e)
-        if k is not None and _incomplete(e):
-            out[k]["output_tokens"] = UNAVAILABLE
-    return out
+# {key(entry): bucket}, summed by the same code and rules as run-report.
+buckets = _transcripts.token_buckets
 
 
 def _agent_tokens(e):
@@ -587,11 +572,19 @@ def tokens_section(run):
 # The marker strings the detectors look for in tool results, matched
 # case-insensitively. A slowdown's evidence.marker is one of these (or HEREDOC
 # or RUN_CHECKS), never text taken from the transcript.
+# background_check and timeout match only Claude Code's own notice on the
+# first line of a Bash result (after an 'Exit code N' line, if any), never
+# command output, file contents or another tool's result: a timeout notice
+# starts that line, and a background notice is a line starting with
+# 'Command ' that holds the marker. Claude Code writes a call that hit its
+# timeout as 'Command did not complete within its 600s timeout and was moved
+# to the background (ID: x)', which is both.
 MARKERS = {
-    "background_check": ("Command running in background with ID",),
-    "timeout": ("timed out",),
+    "background_check": ("Command running in background with ID", "was moved to the background"),
+    "timeout": ("Command did not complete within its", "Command timed out after"),
     "edit_retry": ("String to replace not found", "has been modified since", "has not been read yet"),
 }
+NOTICE_TOOLS = ("Bash",)
 HEREDOC = "<<"
 RUN_CHECKS = "run-checks"
 LONG_CALL_S = 120
@@ -634,11 +627,18 @@ UNCLEAN_TEXT = ("Commit any file a check needs; add only known generated output 
                 "never ignore a file a check reads.")
 UNCLEAN_NAMES = 10
 
-_EXIT = re.compile(r"exit code[:\s]+(-?\d+)", re.I)
-_BACKGROUND_ID = re.compile(r"command running in background with id[:\s]*([A-Za-z0-9_-]+)", re.I)
+# Claude Code starts a failed Bash result with an 'Exit code N' line.
+_EXIT = re.compile(r"\s*exit code[:\s]+(-?\d+)", re.I)
+_EXIT_LINE = re.compile(r"\s*exit code[:\s]+-?\d+[^\n]*\n", re.I)
+_BACKGROUND_ID = re.compile(r"(?:background with id[:\s]*|\(id:\s*)([A-Za-z0-9_-]+)", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*\bcommit\b")
 _FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
+# Words that lead into a command (stripped), and simple commands that run no
+# program of their own (skipped), when program_of looks for the program.
+_LEAD_WORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "{", "time")
+_NOT_PROGRAMS = ("cd", "pushd", "popd", "for", "case", "select", "function", "fi", "done", "esac", "}",
+                 "export", "set", "unset", "shopt", "trap", "umask", "ulimit", "local", "declare", "readonly")
 
 
 def _marker(kind, text):
@@ -647,36 +647,141 @@ def _marker(kind, text):
     return next((m for m in MARKERS[kind] if m.lower() in low), None)
 
 
+def _notice_line(call):
+    """The first line of a Bash call's result, after a leading 'Exit code N'
+    line; '' for any other tool, or a call without a result."""
+    if call["name"] not in NOTICE_TOOLS or call["end"] is None:
+        return ""
+    text = call["text"] or ""
+    m = _EXIT_LINE.match(text)
+    if m:
+        text = text[m.end():]
+    return text.lstrip().split("\n", 1)[0]
+
+
+def notice(kind, call):
+    """The MARKERS[kind] string of Claude Code's timeout or background notice
+    on the first line of a Bash call's result, or None."""
+    line = _notice_line(call).lower()
+    if kind == "timeout":
+        return next((m for m in MARKERS[kind] if line.startswith(m.lower())), None)
+    if not line.startswith("command "):
+        return None
+    return next((m for m in MARKERS[kind] if m.lower() in line), None)
+
+
 def exit_code(text):
-    """The exit code a tool result reports ('Exit code N'), or None."""
-    m = _EXIT.search(text or "")
+    """The exit code a tool result reports on its leading 'Exit code N'
+    line, or None."""
+    m = _EXIT.match(text or "")
     return int(m.group(1)) if m else None
 
 
 def program_of(command):
-    """The program a Bash command runs: its first word that is not a
-    NAME=value assignment or 'env', reduced to its basename. None when there
-    is none, or when that word still holds '=', '@' or ':' (it may carry a
-    secret or a URL)."""
-    for word in _words(command):
-        if word == "env" or _ASSIGNMENT.match(word):
+    """The program a Bash command runs: in the first simple command that runs
+    one (not 'cd DIR', 'export ...', a loop header or a closing keyword;
+    leading keywords such as 'if' or 'do' are skipped), its first word that
+    is not a NAME=value assignment or a prefix such as env, nohup or
+    'timeout DURATION', reduced to its basename. None when there is none,
+    or when that word still holds '=', '@' or ':' (it may carry a secret or
+    a URL)."""
+    if not isinstance(command, str):
+        return None
+    for words in _segments(without_heredoc_bodies(command)):
+        i = 0
+        while i < len(words) and words[i] in _LEAD_WORDS:
+            i += 1
+        words = words[i:]
+        if not words or words[0] in _NOT_PROGRAMS or words[0].startswith("-"):
             continue
-        name = _basename(word)
+        i = _skip_prefixes(words)
+        if i >= len(words):
+            continue
+        name = _basename(words[i])
         if not name or any(c in name for c in "=@:"):
             return None
         return name
     return None
 
 
-def _words(command):
-    """A command line's shell words ([] for a non-string); split on
-    whitespace when its quoting does not parse."""
-    if not isinstance(command, str):
-        return []
+_HEREDOC_START = re.compile(r"(?<!<)<<(?!<)(-?)\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|<>()'\"]+))")
+
+
+def heredocs(command):
+    """Whether a command line holds a heredoc (<<WORD, not a <<< here-string)."""
+    return isinstance(command, str) and _HEREDOC_START.search(command) is not None
+
+
+def without_heredoc_bodies(command):
+    """A command line without its heredoc bodies (the lines after a <<WORD
+    up to the WORD line), so their text is never read as commands."""
+    out = []
+    pending = []  # (delimiter, tabs stripped) of the heredocs still open
+    for line in command.split("\n"):
+        if pending:
+            delimiter, tabs = pending[0]
+            body = line.rstrip("\r")
+            if (body.lstrip("\t") if tabs else body) == delimiter:
+                pending.pop(0)
+            continue
+        out.append(line)
+        for m in _HEREDOC_START.finditer(line):
+            word = next(g for g in m.groups()[1:] if g is not None)
+            pending.append((word, m.group(1) == "-"))
+    return "\n".join(out)
+
+
+_REDIRECT_CHARS = "();<>|&\n"
+_WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>")
+
+
+def _pipelines(command):
+    """The pipelines of a command line (heredoc bodies left out) as shell
+    tokens, redirect operators as their own tokens; None when its quoting
+    does not parse."""
     try:
-        return shlex.split(command)
+        tokens = _shell_tokens(without_heredoc_bodies(command), _REDIRECT_CHARS)
     except ValueError:
-        return command.split()
+        return None
+    out = [[]]
+    for token in tokens:
+        if token and all(c in _REDIRECT_CHARS for c in token) and not any(c in token for c in "<>") \
+                and token not in ("|", "|&"):
+            out.append([])
+        else:
+            out[-1].append(token)
+    return [p for p in out if p]
+
+
+def _writes(pipeline):
+    """Whether a pipeline writes a file: a > or >> redirect to a file (not
+    /dev/null or a descriptor), or tee as one of its programs."""
+    for i, token in enumerate(pipeline):
+        if token in _WRITE_REDIRECTS and i + 1 < len(pipeline):
+            target = pipeline[i + 1]
+            if target and target != "/dev/null" and not all(c in _REDIRECT_CHARS for c in target):
+                return True
+        if _basename(token) == "tee" and (i == 0 or pipeline[i - 1] in ("|", "|&")):
+            return True
+    return False
+
+
+def heredoc_write(command):
+    """Whether a command line feeds a heredoc into a file write in the same
+    pipeline (cat > f <<EOF, tee f <<EOF), as opposed to an inline script
+    such as python3 - <<EOF."""
+    if not heredocs(command):
+        return False
+    pipelines = _pipelines(command)
+    if pipelines is None:
+        return False
+    return any("<<" in p and _writes(p) for p in pipelines)
+
+
+def file_write(command):
+    """Whether a command line writes a file with a redirect or tee."""
+    pipelines = _pipelines(command) if isinstance(command, str) else None
+    return bool(pipelines) and any(_writes(p) for p in pipelines)
 
 
 def _basename(word):
@@ -717,9 +822,15 @@ def _bash_failed(call):
 
 
 def _wrote(call):
-    """A write of a file that succeeded."""
+    """A write of a file with an Edit or Write tool that succeeded."""
     return (call["name"] in WRITE_TOOLS and call["end"] is not None and not call["is_error"]
             and _marker("edit_retry", call["text"]) is None)
+
+
+def _bash_wrote(call):
+    """A Bash call that succeeded and writes a file (a redirect or tee)."""
+    return (call["name"] == "Bash" and call["end"] is not None and not _failed(call)
+            and file_write(_command(call)))
 
 
 def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
@@ -745,15 +856,23 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
     }
 
 
+def _event_text(event):
+    """What a later event says, for finding an ID: a tool result's or an
+    assistant turn's text, or a tool call's input."""
+    if event["kind"] == "tool_use":
+        return json.dumps(event["input"]) if event["input"] is not None else ""
+    return event["text"] or ""
+
+
 def _mention_after(agent, call):
-    """When a backgrounded call's ID is first mentioned in a later tool
-    result or notice of the same agent; None when it never is."""
-    m = _BACKGROUND_ID.search(call["text"])
+    """When a backgrounded call's ID is first mentioned in a later event
+    (a tool result, a tool call's input such as BashOutput's bash_id, or
+    assistant text) or notice of the same agent; None when it never is."""
+    m = _BACKGROUND_ID.search(_notice_line(call))
     if not m:
         return None
     pattern = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(m.group(1)) + r"(?![A-Za-z0-9_-])")
-    times = [e["ts"] for e in agent["events"][call["result_i"] + 1:]
-             if e["kind"] == "tool_result" and pattern.search(e["text"])]
+    times = [e["ts"] for e in agent["events"][call["result_i"] + 1:] if pattern.search(_event_text(e))]
     times += [n["ts"] for n in agent.get("notes", []) if pattern.search(n["text"])]
     later = [t for t in times if t >= call["end"]]
     return min(later) if later else None
@@ -770,18 +889,19 @@ def tool_slowdowns(agent, test_commands):
         counted.update(indexes)
 
     for i, c in enumerate(calls):
-        if c["end"] is None:
-            continue
-        marker = _marker("background_check", c["text"])
+        timeout = notice("timeout", c)
+        if timeout:
+            add("timeout", [i], c["start"], c["end"], "measured", c, timeout)
+        marker = notice("background_check", c)
         if marker:
+            # A call moved to the background at its timeout: the timeout
+            # covers the call, the background wait starts at its result.
+            start = c["end"] if timeout else c["start"]
             mention = _mention_after(agent, c)
-            if mention is None:
-                add("background_check", [i], c["start"], c["end"], "measured", c, marker)
-            else:
-                add("background_check", [i], c["start"], mention, "bound", c, marker)
-        marker = _marker("timeout", c["text"])
-        if marker:
-            add("timeout", [i], c["start"], c["end"], "measured", c, marker)
+            if mention is not None:
+                add("background_check", [i], start, mention, "bound", c, marker)
+            elif not timeout:
+                add("background_check", [i], start, c["end"], "measured", c, marker)
 
     failures = {}
     for i, c in enumerate(calls):
@@ -792,13 +912,16 @@ def tool_slowdowns(agent, test_commands):
             first, last = calls[indexes[0]], calls[indexes[-1]]
             add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
 
+    # Only a heredoc that feeds a file write (cat > f <<EOF) counts; a
+    # failing inline script (python3 - <<EOF) is not a quoting failure. The
+    # span ends at the next file write that succeeds, by a tool or by Bash.
     until = None
     for i, c in enumerate(calls):
-        if not _bash_failed(c) or HEREDOC not in _command(c):
+        if not _bash_failed(c) or not heredoc_write(_command(c)):
             continue
         if until is not None and c["start"] < until:
             continue  # a retry inside the previous heredoc failure's span
-        write = next((w for w in calls[i + 1:] if _wrote(w)), None)
+        write = next((w for w in calls[i + 1:] if _wrote(w) or _bash_wrote(w)), None)
         if write is None:
             add("heredoc_failure", [i], c["start"], c["end"], "measured", c, HEREDOC)
             until = c["end"]
@@ -844,8 +967,7 @@ def tool_slowdowns(agent, test_commands):
     return out
 
 
-def _model(entry):
-    return entry["resolved_model"] if entry["resolved_model"] != UNAVAILABLE else entry["requested_model"]
+_model = _transcripts.agent_model
 
 
 def run_slowdowns(run):
@@ -864,21 +986,14 @@ def run_slowdowns(run):
         sd["_cost"] = sum(a["end"] - a["start"] for a in timed) if len(timed) == len(members) else None
         out.append(sd)
     for launch in run["launches"]:
-        # Escalations as run-report counts them: the same label (without
-        # ' retry') running again at another model tier in the same launch.
-        last_model = {}
-        for a in launch["agents"]:
-            label = a["entry"]["label"]
-            retried = label.endswith(" retry")
-            base = label[:-len(" retry")].rstrip() if retried else label
-            if retried:
+        # Retries and escalations exactly as run-report counts them, per
+        # launch (_transcripts.escalations).
+        entries = [a["entry"] for a in launch["agents"]]
+        for a, earlier in zip(launch["agents"], _transcripts.escalations(entries)):
+            if a["entry"]["retried"]:
                 out.append(_slowdown("retry", a, a["start"], a["end"], "measured"))
-            model = _model(a["entry"])
-            prev = last_model.get(base)
-            if prev is not None and model != UNAVAILABLE and prev != UNAVAILABLE \
-                    and _transcripts.model_tier(model) != _transcripts.model_tier(prev):
+            if earlier is not None:
                 out.append(_slowdown("escalation", a, a["start"], a["end"], "measured"))
-            last_model[base] = model
     for launch in run["launches"][:-1]:
         out.append(_slowdown("relaunch", None, launch["start"], launch["end"], "measured"))
     for launch in run["launches"]:
@@ -973,6 +1088,34 @@ _SEGMENT_SPLIT = re.compile(r"[;&|()\n]+")
 _INTERPRETER = re.compile(r"^(python[0-9.]*|py|bash|sh)(\.exe)?$", re.I)
 _PREFIX_WORDS = ("env", "exec", "time", "nohup", "command")
 _ARG_FLAGS = ("-X", "-W")
+# timeout's options that take a value (timeout -k 5 600 cmd).
+_TIMEOUT_ARG_FLAGS = ("-k", "-s", "--kill-after", "--signal")
+
+
+def _shell_tokens(command, punctuation):
+    """Shell words of a command line, with runs of the punctuation
+    characters as their own tokens. A '#' starts a comment only at the start
+    of a word (as in the shell), up to the next newline; a '#' inside a word
+    (http://x/#a) is kept. Raises ValueError when the quoting does not
+    parse."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=punctuation)
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = []
+    comment = False
+    for token in lexer:
+        is_punctuation = bool(token) and all(c in punctuation for c in token)
+        if comment:
+            if is_punctuation and "\n" in token:
+                comment = False
+                tokens.append(token)
+            continue
+        if token.startswith("#"):
+            comment = True
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def _segments(command):
@@ -980,10 +1123,7 @@ def _segments(command):
     ; & | ( ) and newlines, or, when the quoting does not parse, plain
     whitespace words of each piece between those characters."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SEPARATORS)
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        tokens = list(lexer)
+        tokens = _shell_tokens(command, _SEPARATORS)
     except ValueError:
         return _plain_segments(command)
     out = [[]]
@@ -1004,13 +1144,29 @@ def _plain_segments(command):
     return out
 
 
+def _skip_prefixes(words):
+    """The index of a simple command's program word: past NAME=value
+    assignments, prefix words (env, exec, time, nohup, command) and
+    'timeout [OPTION]... DURATION'."""
+    i = 0
+    while i < len(words):
+        if words[i] in _PREFIX_WORDS or _ASSIGNMENT.match(words[i]):
+            i += 1
+        elif words[i] == "timeout":
+            i += 1
+            while i < len(words) and words[i].startswith("-"):
+                i += 2 if words[i] in _TIMEOUT_ARG_FLAGS else 1
+            i += 1
+        else:
+            break
+    return i
+
+
 def _run_checks_args(words):
     """The words after run-checks when a simple command runs it (as the
     program, or as the script of an interpreter such as python or bash),
     else None."""
-    i = 0
-    while i < len(words) and (words[i] in _PREFIX_WORDS or _ASSIGNMENT.match(words[i])):
-        i += 1
+    i = _skip_prefixes(words)
     if i >= len(words):
         return None
     if _basename(words[i]) == RUN_CHECKS:
@@ -1052,8 +1208,9 @@ def match_check(command, checks):
     """(name, full_suite) when a Bash command line runs a check, else None.
 
     A line with a simple command that runs run-checks (as the program, or as
-    an interpreter's script) is a run-checks call: name 'run-checks', and a
-    full-suite run when it passes '--cmd test'. Otherwise name is the
+    an interpreter's script, after prefixes such as env or timeout DURATION)
+    is a run-checks call: name 'run-checks', and a full-suite run when any
+    of its run-checks commands passes '--cmd test'. Otherwise name is the
     longest of checks' commands the line holds (whitespace-normalised),
     first in checks' order on a tie, and full_suite is True when the line
     holds a full-suite entry anywhere (see _full_suite_in), so a chained
@@ -1064,11 +1221,10 @@ def match_check(command, checks):
     # shlex drops the backslashes of an unquoted Windows path.
     passes = [_segments(command)] + ([_plain_segments(command)] if "\\" in command else [])
     for segments in passes:
-        for words in segments:
-            args = _run_checks_args(words)
-            if args is not None:
-                full = any(w == "--cmd" and args[i + 1:i + 2] == ["test"] for i, w in enumerate(args))
-                return RUN_CHECKS, full
+        found = [args for args in (_run_checks_args(words) for words in segments) if args is not None]
+        if found:
+            return RUN_CHECKS, any(w == "--cmd" and args[i + 1:i + 2] == ["test"]
+                                   for args in found for i, w in enumerate(args))
     line = _squash(command)
     best = None
     for name, full in checks:
@@ -1084,7 +1240,7 @@ def _execution_end(agent, call):
     at the first later event naming its ID; a call with no such event, or
     without a result, is bound by the agent's last event."""
     background = call["input"].get("run_in_background") is True \
-        or (call["end"] is not None and _marker("background_check", call["text"]) is not None)
+        or notice("background_check", call) is not None
     if call["end"] is None:
         return background, agent["end"], "bound"
     if background:
@@ -1170,17 +1326,34 @@ def unclean_suggestion(run_folder, done):
             "slowdowns": []}
 
 
+def stake(slowdowns):
+    """The time a group of slowdowns stands for: per agent (and once for
+    the run-wide ones), the length of the union of the spans the slowdowns
+    with a known cost cover, summed. Slowdowns that overlap in time (three
+    parallel Edits failing together) count their shared time once. None
+    when no cost is known."""
+    known = [s for s in slowdowns if s["_cost"] is not None]
+    if not known:
+        return None
+    spans = {}
+    for s in known:
+        for owner, start, end in s["_covers"]:
+            spans.setdefault(None if owner is None else id(owner), []).append((start, end))
+    return sum(union_length(v) for v in spans.values())
+
+
 def suggestions_section(slowdowns, unclean):
-    """One suggestion per kind with a slowdown, ranked by stake_s (the sum of
-    its slowdowns' known costs; unavailable when none is known)."""
+    """One suggestion per kind with a slowdown, ranked by stake_s (stake():
+    the union of its slowdowns' known spans per agent; unavailable when no
+    cost is known)."""
     out = []
     for kind in KINDS:
         indexes = [i for i, s in enumerate(slowdowns) if s["kind"] == kind]
         if not indexes:
             continue
-        costs = [slowdowns[i]["_cost"] for i in indexes if slowdowns[i]["_cost"] is not None]
+        at_stake = stake([slowdowns[i] for i in indexes])
         out.append({"kind": kind, "text": SUGGESTIONS[kind],
-                    "stake_s": seconds(sum(costs)) if costs else UNAVAILABLE,
+                    "stake_s": UNAVAILABLE if at_stake is None else seconds(at_stake),
                     "count": len(indexes), "slowdowns": indexes})
     if unclean is not None:
         out.append(unclean)
@@ -1218,7 +1391,7 @@ def unexplained_section(run, slowdowns):
     for a in _timed(_all_agents(run)):
         covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
                          if owner is None or owner is a])
-        times = sorted(set(e["ts"] for e in a["events"]))
+        times = sorted(set([a["start"]] + [e["ts"] for e in a["events"]]))
         for start, end in zip(times, times[1:]):
             for s, e in _uncovered(start, end, covers):
                 if e - s > IDLE_GAP_S:
@@ -1456,9 +1629,10 @@ def _timeline(a):
             if start is None or end is None:
                 out.append(label + "(time unavailable)")
                 continue
-            start, end = max(start, axis_start), min(max(end, start), axis_end)
-            out.append("%s|%s|  span %s, busy %s" % (label, _bar(start, end, axis_start, axis_end),
-                                                    _secs(seconds(end - start)),
+            # Only the bar is clamped to the axis; the span is the lane's own.
+            bar_start, bar_end = max(start, axis_start), min(max(end, start), axis_end)
+            out.append("%s|%s|  span %s, busy %s" % (label, _bar(bar_start, bar_end, axis_start, axis_end),
+                                                    _secs(seconds(max(end, start) - start)),
                                                     _secs(x["busy_s"])))
     out.append("```")
     return out
@@ -1511,7 +1685,7 @@ def _md_slowdowns(a):
     else:
         lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
                        [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
-                         _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"])])
+                         _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"], 1)])
     missing = [k for k, v in a["detectors"].items() if v != "ok"]
     if missing:
         lines += ["", "Detectors without data (they add no slowdowns): %s." % ", ".join(missing)]
@@ -1552,8 +1726,11 @@ def _md_suggestions(a):
         return ["None."]
     lines = []
     for i, g in enumerate(a["suggestions"], 1):
-        lines.append("%d. %s (stake %s, %s): %s" % (i, g["kind"], _secs(g["stake_s"]),
-                                                    _count_word(g["count"], "time"), g["text"]))
+        rows = g["slowdowns"] if isinstance(g.get("slowdowns"), list) else []
+        where = "; slowdown %s %s" % ("row" if len(rows) == 1 else "rows",
+                                      ", ".join("#%d" % (r + 1) for r in rows)) if rows else ""
+        lines.append("%d. %s (stake %s, %s%s): %s" % (i, g["kind"], _secs(g["stake_s"]),
+                                                      _count_word(g["count"], "time"), where, g["text"]))
     return lines
 
 
@@ -1605,8 +1782,10 @@ def render_summary(analysis, md_path):
         "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
     tot = a["tokens"]["totals"]
     if a["tokens"]["partial"]:
-        lines.append("tokens: at least %s output (a minimum: some usage is missing or unreadable)"
-                     % _tokens(tot["output_tokens_min"]))
+        lines.append("tokens (minimums: some usage is missing or unreadable): >= %s input, >= %s output, "
+                     ">= %s cache read, >= %s cache creation" % (
+                         _tokens(tot["input_tokens"]), _tokens(tot["output_tokens_min"]),
+                         _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
     else:
         lines.append("tokens: %s input, %s output, %s cache read, %s cache creation" % (
             _tokens(tot["input_tokens"]), _tokens(tot["output_tokens"]),

@@ -1,11 +1,11 @@
 // scripts/run-checks: the started, ended and duration_s fields of each result.
 // Every test runs the real script against a real git repo with two --cmd
-// entries, one of them sleeping 0.3 s through node -e.
+// entries, one of them printing a line and sleeping 0.3 s through node -e.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { tempDir } from './platform.mjs';
@@ -20,7 +20,7 @@ const GIT_ENV = {
 };
 const STAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 const FAST = 'node -e "process.exit(0)"';
-const SLOW = 'node -e "setTimeout(() => process.exit(3), 300)"';
+const SLOW = 'node -e "console.log(\'slow-out\'); setTimeout(() => process.exit(3), 300)"';
 
 function git(dir, ...args) {
   const res = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
@@ -61,9 +61,14 @@ test('each result records when it started and ended and how long it took', () =>
 test('the results keep their order and other fields', () => {
   const out = runBoth();
   assert.deepEqual(out.results.map((r) => [r.group, r.command, r.exit]), [['lint', FAST, 0], ['test', SLOW, 3]]);
-  for (const r of out.results) {
+  out.results.forEach((r, i) => {
+    // Each command's own log, N.log in run-checks' new temporary directory.
     assert.equal(typeof r.log, 'string');
-    assert.equal(r.tail, '');
-  }
+    assert.ok(r.log.replace(/\\/g, '/').endsWith(`/${i + 1}.log`), r.log);
+    assert.ok(existsSync(r.log), r.log);
+  });
+  // The tail is the command's real output.
+  assert.deepEqual(out.results.map((r) => r.tail), ['', 'slow-out']);
+  assert.ok(readFileSync(out.results[1].log, 'utf8').includes('slow-out'));
   assert.equal(out.ok, false);
 });

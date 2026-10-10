@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { SKILL_DIR } from './harness.mjs';
-import { BASH, tempDir } from './platform.mjs';
+import { BASH, IS_WINDOWS, tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'doctor');
 const TMP = tempDir('pl-doctor-');
@@ -415,6 +415,15 @@ test('low memory and low disk warn', () => {
   assert.equal(r.status, 'ok', JSON.stringify(r));
   assert.match(named(r.warnings, 'memory').detail, /3\.0 GB/);
   assert.match(named(r.warnings, 'disk').detail, /4\.0 GB/);
+  // The path it names uses '/', and on Windows a Git Bash worktree root
+  // (/c/x) is read on its own drive.
+  assert.ok(!named(r.warnings, 'disk').detail.includes('\\'), named(r.warnings, 'disk').detail);
+  if (IS_WINDOWS) {
+    const msysRoot = join(f.dir, 'wt').replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_m, d) => `/${d.toLowerCase()}`);
+    const msys = fakeDoctor(f.manifest({ worktree_root: msysRoot }), { fakes: { disk_free: 4 * GB } });
+    const detail = named(msys.warnings, 'disk').detail;
+    assert.ok(detail.toLowerCase().includes(`on the drive of ${f.dir.replace(/\\/g, '/').toLowerCase()} `), detail);
+  }
 
   // Plenty of both: no warning.
   const quiet = fakeDoctor(f.manifest());

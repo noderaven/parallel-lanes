@@ -50,7 +50,9 @@ cannot be removed safely is kept and named with the reason:
    condition, leaving the checkout and the branch as they are:
    - the main checkout is on repo.branch and clean;
    - base_ref is a local branch with an upstream;
-   - git fetch <remote> <upstream branch> succeeds;
+   - git fetch <remote> <upstream branch> succeeds within 120 s (with
+     GCM_INTERACTIVE=never and no terminal prompt; on a timeout its process
+     tree is killed);
    - repo.branch is an ancestor of the fetched tip (the PR is merged);
    - base_ref is an ancestor of the fetched tip (a fast-forward).
    Then git switch <base_ref>, git merge --ff-only <fetched tip>,
@@ -93,6 +95,7 @@ import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _doctor  # noqa: E402
 import _history  # noqa: E402
 import _shell  # noqa: E402
 
@@ -103,6 +106,8 @@ GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 # git fetch must fail rather than wait for a password nobody types.
 ENV["GIT_TERMINAL_PROMPT"] = "0"
+# How long git fetch may take before cleanup keeps the feature branch.
+FETCH_TIMEOUT_S = 120
 STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NOT_OWNED = "not owned by this run"
 
@@ -128,7 +133,11 @@ def same_place(a, b):
 
 def load_manifest(path):
     try:
-        with open(path, encoding="utf-8") as f:
+        native = _shell.native_path(path)
+    except _shell.BashNotFound as e:
+        raise Failure(2, str(e))
+    try:
+        with open(native, encoding="utf-8") as f:
             m = json.load(f)
     except (OSError, UnicodeDecodeError, ValueError) as e:
         raise Failure(2, "cannot read manifest " + path + ": " + str(e))
@@ -215,7 +224,14 @@ def ensure_archived(m, hdir):
     if entry is None or not isinstance(entry.get("folder"), str) or not entry["folder"]:
         raise Failure(3, "run " + run_id + " is not archived in " + hdir
                       + " (no index.json entry); run archive-run first")
-    folder = hdir.rstrip("/") + "/" + slash(entry["folder"]).strip("/")
+    # The index is data: a folder name that leaves the history dir ('..',
+    # an absolute or a drive path) would put the restore point elsewhere.
+    name = slash(entry["folder"])
+    folder = hdir.rstrip("/") + "/" + name.strip("/")
+    if (name.startswith("/") or re.match(r"^[A-Za-z]:", name) or ".." in name.split("/")
+            or not _history.inside(folder, hdir) or same_place(folder, hdir)):
+        raise Failure(2, "the index entry of run " + run_id + " in " + hdir + " has a bad folder: "
+                      + json.dumps(entry["folder"]))
     if not os.path.isdir(folder):
         raise Failure(3, "run " + run_id + " is not archived: its folder " + folder + " is missing")
     return folder
@@ -452,6 +468,29 @@ def is_ancestor(repo, older, newer):
     return {0: True, 1: False}.get(code)
 
 
+def fetch(repo, remote, merge):
+    """git fetch <remote> <merge>, bounded by FETCH_TIMEOUT_S: the completed
+    process, or None when it timed out (its whole process tree is killed,
+    as doctor's _command does, so a transport git started cannot keep it
+    waiting). It never waits for a credential prompt."""
+    env = dict(ENV)
+    env["GCM_INTERACTIVE"] = "never"
+    tree = sys.platform != "win32"
+    argv = ["git", *repo.prefix, "fetch", remote, merge]
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="surrogateescape", env=env,
+                                start_new_session=tree)
+    except OSError as e:
+        return subprocess.CompletedProcess(argv, 127, "", str(e))
+    try:
+        out, err = proc.communicate(timeout=FETCH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _doctor._kill_tree(proc)
+        return None
+    return subprocess.CompletedProcess(argv, proc.returncode, out or "", err or "")
+
+
 def remove_feature(repo, m):
     """Switch the main checkout to the base, fast-forward it to the fetched
     upstream tip and delete the feature branch: (removed, reason). Stops at
@@ -461,7 +500,10 @@ def remove_feature(repo, m):
     if reason is not None:
         return False, reason
     fetched = "the fetched " + remote + " " + merge
-    res = repo.git("fetch", remote, merge)
+    res = fetch(repo, remote, merge)
+    if res is None:
+        return False, ("git fetch " + remote + " " + merge + " timed out after " + str(FETCH_TIMEOUT_S)
+                       + " s (a stalled network, or a credential prompt nobody answers)")
     if res.returncode != 0:
         return False, "git fetch " + remote + " " + merge + " failed: " + git_error(res)
     tip = repo.sha("FETCH_HEAD")

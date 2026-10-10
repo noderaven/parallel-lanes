@@ -85,12 +85,14 @@ def _home(env):
 
 
 def norm_path(p):
-    """p as the index stores it: drive paths (C:\\x, c:/x, /c/x) in the C:/
-    form, other backslashes as '/', no trailing '/'. A '/'-rooted path from
-    another system is kept as written."""
+    """p as the index stores it: drive paths (C:\\x, c:/x, and on Windows
+    the Git Bash form /c/x) in the C:/ form, other backslashes as '/', no
+    trailing '/'. A '/'-rooted path from another system is kept as written."""
     if not isinstance(p, str) or not p:
         return p
-    out = _shell._drive_form(p)
+    # /c/x is a Git Bash drive path only on Windows; elsewhere a '/'-rooted
+    # path is a real path of that machine.
+    out = None if p.startswith("/") and not _shell._is_windows(sys.platform) else _shell._drive_form(p)
     if out is None:
         out = p if p.startswith("/") else p.replace("\\", "/")
     stripped = out.rstrip("/")
@@ -209,15 +211,43 @@ def _read_lock(path):
         return ""
 
 
+def _put_back(moved, path):
+    """Return a lock moved away by mistake to path, only while path is free
+    (os.link never replaces a file; neither does os.rename on Windows)."""
+    try:
+        os.link(moved, path)
+    except OSError:
+        if not _shell._is_windows(sys.platform):
+            return
+        with contextlib.suppress(OSError):
+            os.rename(moved, path)
+        return
+    with contextlib.suppress(OSError):
+        os.remove(moved)
+
+
 def _take_over(path, age, stale_s):
     """Move a stale lock out of the way; whether the lock path is free now.
 
     The rename is atomic, so of several processes taking over the same stale
-    lock only one moves it."""
+    lock only one moves it. The staleness was judged before the rename: if
+    the stale lock was released and a fresh one created in between, the
+    moved file is fresh, so it is put back (while the lock path is still
+    free) and the lock counts as held. A gap remains: when a third process
+    creates a lock in the moment between the rename and the put-back, the
+    fresh lock cannot go back, and its holder and the next one may both
+    hold the lock."""
     moved = path + ".stale-" + uuid.uuid4().hex
     try:
         os.rename(path, moved)
     except OSError:
+        return False
+    try:
+        fresh = time.time() - os.stat(moved).st_mtime <= stale_s
+    except OSError:
+        fresh = False
+    if fresh:
+        _put_back(moved, path)
         return False
     holder = _read_lock(moved)
     with contextlib.suppress(OSError):
@@ -239,7 +269,9 @@ def index_lock(hdir, wait_s=30, stale_s=600):
     process holds it, the lock is retried every 0.2 s for up to wait_s
     seconds, then HistoryError is raised. A lock file whose mtime is more
     than stale_s seconds old is left over from a crash: it is taken over,
-    with a notice on stderr.
+    with a notice on stderr. The first time the lock is found held, a
+    notice that it waits goes to stderr. A history dir that refuses the
+    lock file (PermissionError outside Windows) raises HistoryError at once.
     """
     os.makedirs(hdir, exist_ok=True)
     path = os.path.join(hdir, LOCK)
@@ -247,14 +279,19 @@ def index_lock(hdir, wait_s=30, stale_s=600):
     content = json.dumps({"pid": os.getpid(), "time": _utc_now(), "host": socket.gethostname(),
                           "token": token})
     deadline = time.monotonic() + wait_s
+    waiting = False
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             break
-        except (FileExistsError, PermissionError):
-            # Windows refuses (PermissionError) to create a file while
-            # another process is still deleting it: treat it as held.
+        except FileExistsError:
             pass
+        except PermissionError as e:
+            # Windows refuses (PermissionError) to create a file while
+            # another process is still deleting it: treat it as held there.
+            # Elsewhere it means the dir cannot be written.
+            if not _shell._is_windows(sys.platform):
+                raise HistoryError("cannot create " + path + ": " + str(e))
         try:
             age = time.time() - os.stat(path).st_mtime
         except OSError:
@@ -269,6 +306,10 @@ def index_lock(hdir, wait_s=30, stale_s=600):
                 + "); waited " + str(wait_s) + " s. If no archive-run or reindex is running,"
                 " remove " + path + "."
             )
+        if not waiting:
+            waiting = True
+            sys.stderr.write("parallel-lanes: waiting for " + path + ", held by another process\n")
+            sys.stderr.flush()
         time.sleep(_RETRY_S)
     try:
         with os.fdopen(fd, "wb") as f:

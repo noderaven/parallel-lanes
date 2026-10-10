@@ -224,10 +224,62 @@ def blank_bucket():
     return b
 
 
-def build_report(transcript_dir, manifest):
+def is_output_incomplete(entry):
+    """An agent with usage whose output count is incomplete."""
+    return entry["input_tokens"] != UNAVAILABLE and entry["output_tokens"] == UNAVAILABLE
+
+
+def token_buckets(entries, key):
+    """{key(entry): bucket} of agent entries (an entry whose key is None is
+    left out), in first-seen order: blank_bucket's fields with agents counted
+    and only known values summed. A bucket holding an output-incomplete
+    agent has output_tokens UNAVAILABLE (output_tokens_min still sums)."""
+    out = {}
+    for e in entries:
+        k = key(e)
+        if k is None:
+            continue
+        b = out.setdefault(k, blank_bucket())
+        b["agents"] += 1
+        if e["input_tokens"] == UNAVAILABLE:
+            continue
+        for field in TOKEN_FIELDS + ("output_tokens_min",):
+            if e[field] != UNAVAILABLE:
+                b[field] += e[field]
+    for e in entries:
+        k = key(e)
+        if k is not None and is_output_incomplete(e):
+            out[k]["output_tokens"] = UNAVAILABLE
+    return out
+
+
+def agent_model(entry):
+    """The model an agent ran: resolved, else requested (maybe UNAVAILABLE)."""
+    return entry["resolved_model"] if entry["resolved_model"] != UNAVAILABLE else entry["requested_model"]
+
+
+def escalations(entries):
+    """[earlier tier or None] per agent entry of one launch, in order: an
+    escalation is the same label (without ' retry') running again at
+    another model tier than its latest run; it names that run's tier."""
+    out = []
+    last_model = {}  # stripped label -> (tier, model) of its latest run
+    for a in entries:
+        model = agent_model(a)
+        prev = last_model.get(a["base_label"])
+        escalated = prev is not None and model != UNAVAILABLE and prev[1] != UNAVAILABLE \
+            and model_tier(model) != model_tier(prev[1])
+        out.append(prev[0] if escalated else None)
+        last_model[a["base_label"]] = (a["tier"], model)
+    return out
+
+
+def agent_entries(transcript_dir, manifest):
+    """[(meta path, entry)] for every agent-*.meta.json of a transcript dir,
+    in start_key order. entry is build_report's agent entry plus base_label
+    (the label without ' retry') and retried; build_report drops those two."""
     ids = manifest_task_ids(manifest)
-    result = workflow_result(transcript_dir)
-    efforts = agent_efforts(result)
+    efforts = agent_efforts(workflow_result(transcript_dir))
     metas = sorted(glob.glob(os.path.join(transcript_dir, "agent-*.meta.json")), key=start_key)
     agents = []
     for meta_path in metas:
@@ -260,56 +312,36 @@ def build_report(transcript_dir, manifest):
         entry["output_tokens_min"] = sums["output_tokens"] if sums is not None else UNAVAILABLE
         if sums is not None and not complete:
             entry["output_tokens"] = UNAVAILABLE
-        entry["_base"] = base_label
-        entry["_retried"] = retried
-        agents.append(entry)
+        entry["base_label"] = base_label
+        entry["retried"] = retried
+        agents.append((meta_path, entry))
+    return agents
 
-    tiers = {}
-    totals = blank_bucket()
-    unavailable = 0
-    output_incomplete = 0
-    unreadable_lines = 0
+
+def build_report(transcript_dir, manifest):
+    result = workflow_result(transcript_dir)
+    agents = [entry for _meta, entry in agent_entries(transcript_dir, manifest)]
+    tiers = token_buckets(agents, lambda a: a["tier"])
+    for bucket in tiers.values():
+        bucket["escalations"] = 0
+        bucket["fix_rounds"] = 0
+    totals = token_buckets(agents, lambda a: "all").get("all", blank_bucket())
+    unavailable = sum(1 for a in agents if a["input_tokens"] == UNAVAILABLE)
+    output_incomplete = sum(1 for a in agents if is_output_incomplete(a))
+    unreadable_lines = sum(a["unreadable_lines"] for a in agents)
     models = {}
-    retries = 0
-    last_model = {}  # stripped label -> (tier, model) of its latest run
-    for a in agents:
-        tier = a["tier"]
-        bucket = tiers.setdefault(tier, blank_bucket())
-        bucket["escalations"] = bucket.get("escalations", 0)
-        bucket["fix_rounds"] = bucket.get("fix_rounds", 0)
-        bucket["agents"] += 1
-        totals["agents"] += 1
-        unreadable_lines += a["unreadable_lines"]
+    retries = sum(1 for a in agents if a["retried"])
+    for a, earlier in zip(agents, escalations(agents)):
         for m in a["resolved_models"]:
             models[m] = models.get(m, 0) + 1
-        if a["input_tokens"] == UNAVAILABLE:
-            unavailable += 1
-        else:
-            if a["output_tokens"] == UNAVAILABLE:
-                output_incomplete += 1
-            for k in TOKEN_FIELDS + ("output_tokens_min",):
-                if a[k] != UNAVAILABLE:
-                    bucket[k] += a[k]
-                    totals[k] += a[k]
-        if a["_retried"]:
-            retries += 1
         if a["task"] is not None and re.match(r"^fix \d+$", a["role"]):
-            bucket["fix_rounds"] += 1
-        # An escalation: the same label running again at a different model;
-        # counted under the earlier tier.
-        model = a["resolved_model"] if a["resolved_model"] != UNAVAILABLE else a["requested_model"]
-        prev = last_model.get(a["_base"])
-        if prev is not None and model != UNAVAILABLE and prev[1] != UNAVAILABLE \
-                and model_tier(model) != model_tier(prev[1]):
-            tiers[prev[0]]["escalations"] += 1
-        last_model[a["_base"]] = (tier, model)
-
+            tiers[a["tier"]]["fix_rounds"] += 1
+        # An escalation counts under the earlier tier.
+        if earlier is not None:
+            tiers[earlier]["escalations"] += 1
     for a in agents:
-        if a["output_tokens"] == UNAVAILABLE and a["input_tokens"] != UNAVAILABLE:
-            tiers[a["tier"]]["output_tokens"] = UNAVAILABLE
-            totals["output_tokens"] = UNAVAILABLE
-        del a["_base"]
-        del a["_retried"]
+        del a["base_label"]
+        del a["retried"]
     return {
         "engine_version": engine_version(result),
         "agents": agents,

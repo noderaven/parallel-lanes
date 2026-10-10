@@ -101,7 +101,7 @@ test('done lists each task and the acceptance', () => {
     'autopsy_version', 'inputs_fingerprint', 'run_id', 'engine_version', 'launches', 'done', 'time',
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained',
   ]);
-  assert.equal(A.autopsy_version, 1);
+  assert.equal(A.autopsy_version, 2);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -248,6 +248,43 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.deepEqual(D.launches, [
     { wf: 'wf_1', start: T('07:00:05'), end: T('07:09:50'), wall_s: 585, status: 'unavailable' },
   ]);
+  // B1 implement may have run in what looks like a gap (its 07:01:00 to
+  // 07:04:00 holds no other agent), so no gap is listed and the detector
+  // has no data.
+  assert.deepEqual(D.time.idle_gaps, []);
+  assert.equal(D.detectors.idle_gap, 'not_available');
+  assert.ok(!D.slowdowns.some((s) => s.kind === 'idle_gap'));
+});
+
+test('a phase with an untimed agent has no wall time', () => {
+  const dir = copyRun();
+  // A1 review's lines lose their timestamps; A1 implement is still timed.
+  editLines(join(dir, 'wf_1', 'agent-a2.jsonl'), (lines) => lines.map((l) => {
+    const o = JSON.parse(l);
+    delete o.timestamp;
+    return JSON.stringify(o);
+  }));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const laneA = res.json.time.phases.find((p) => p.phase === 'Lane a');
+  assert.deepEqual([laneA.start, laneA.end, laneA.wall_s, laneA.agents],
+    [T('07:00:05'), T('07:03:00'), 'unavailable', 2]);
+  const lane = res.json.time.lanes.find((l) => l.lane === 'a');
+  assert.deepEqual([lane.busy_s, lane.idle_s], ['unavailable', 'unavailable']);
+});
+
+test('an agent starts at its prompt line', () => {
+  const dir = copyRun();
+  // A1 implement's prompt comes 5 s before its first model turn.
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => {
+    lines[0] = lines[0].replace(T('07:00:05'), T('07:00:00'));
+    return lines;
+  });
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const a1 = agentOf(res.json, 'A1 implement');
+  assert.deepEqual([a1.start, a1.wall_s], [T('07:00:00'), 180]);
+  assert.equal(res.json.time.phases.find((p) => p.phase === 'Lane a').wall_s, 360);
 });
 
 test('the fingerprint changes when an input changes', () => {
@@ -358,7 +395,8 @@ test('each detector finds its slowdown with its cost', () => {
   assert.deepEqual(costs, [...costs].sort((x, y) => y - x));
   assert.deepEqual(byKind.background_check.evidence,
     { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node' });
-  assert.deepEqual(byKind.timeout.evidence, { tool: 'Bash', exit: null, marker: 'timed out', program: 'npm' });
+  assert.deepEqual(byKind.timeout.evidence,
+    { tool: 'Bash', exit: null, marker: 'Command timed out after', program: 'npm' });
   assert.deepEqual(byKind.repeated_failure.evidence, { tool: 'Bash', exit: 6, marker: null, program: 'curl' });
   assert.deepEqual(byKind.heredoc_failure.evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'cat' });
   assert.deepEqual(byKind.edit_retry.evidence,
@@ -452,6 +490,102 @@ test('evidence holds structured fields only', () => {
   assert.equal(program('"C:/Program Files/nodejs/node.exe" a.js'), 'node.exe');
   assert.equal(program('user:pw@host ls'), null);
   assert.equal(program('A=1 B=2'), null);
+  // The program is the first one the line runs: not cd DIR, not a loop
+  // header, and not a heredoc body line.
+  assert.equal(program("cd '/w/lane-a' && API_KEY=x node a.js"), 'node');
+  assert.equal(program('cd /w; for f in a b; do pytest $f; done'), 'pytest');
+  assert.equal(program("cd /w && cat > f <<'EOF'\ncurl x\nEOF"), 'cat');
+  assert.equal(program('cd /w'), null);
+  assert.equal(program('export PATH=/x:$PATH; timeout 600 npm test'), 'npm');
+});
+
+// ---- detector cases on synthetic events (tool_slowdowns) ----
+
+// Events of one agent, labelled X: use() is a tool call, res() its result;
+// times are seconds.
+const use = (ts, id, name, input) => ({ ts, kind: 'tool_use', name, id, is_error: false, text: '', input });
+const res = (ts, id, name, text, isError = false) => (
+  { ts, kind: 'tool_result', name, id, is_error: isError, text, input: null });
+function detect(events, notes = []) {
+  return python([
+    'import _autopsy',
+    `agent = {"entry": {"label": "X"}, "events": json.loads(${JSON.stringify(JSON.stringify(events))}),`
+      + ` "notes": json.loads(${JSON.stringify(JSON.stringify(notes))})}`,
+    '_autopsy.span_agent(agent)',
+    'found = _autopsy.tool_slowdowns(agent, [])',
+    'calls = _autopsy._calls(agent)',
+    'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in found],',
+    '                  "suggestions": _autopsy.suggestions_section(found, None),',
+    '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls]}))',
+  ]);
+}
+const at = (ts) => new Date(ts * 1000).toISOString();
+const brief = (out) => out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.cost_kind, s.evidence.marker]);
+
+test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
+  const moved = 'Command did not complete within its 600s timeout and was moved to the background '
+    + '(ID: b14yf1jq4). Output is being written to: /tmp/x/b14yf1jq4.output';
+  const out = detect([
+    // A file read and a passing test run that only mention the words.
+    use(0, 'r1', 'Read', { file_path: 'src/api.js' }),
+    res(1, 'r1', 'Read', '12  return [504, "Timed out"];\n13  // Command running in background with ID: zz'),
+    use(10, 'g1', 'Grep', { pattern: 'timed out' }),
+    res(11, 'g1', 'Grep', "src/a.js: throw new Error('timed out')"),
+    use(20, 'b1', 'Bash', { command: 'npm test' }),
+    res(25, 'b1', 'Bash', 'Error: Test timed out in 5000ms\n 1 failed, 9 passed'),
+    // A real timeout: moved to the background, then read back with BashOutput.
+    use(100, 'b2', 'Bash', { command: 'cd /w && npm run e2e' }),
+    res(700, 'b2', 'Bash', moved),
+    use(760, 'o1', 'BashOutput', { bash_id: 'b14yf1jq4' }),
+    res(761, 'o1', 'BashOutput', 'done'),
+  ]);
+  assert.deepEqual(brief(out), [
+    ['timeout', at(100), 600, 'measured', 'Command did not complete within its'],
+    ['background_check', at(700), 60, 'bound', 'was moved to the background'],
+  ]);
+  assert.equal(out.slowdowns[0].evidence.program, 'npm');
+  // As a check execution the call runs until its ID is next named.
+  assert.deepEqual(out.ends[3], [true, 760, 'measured']);
+  assert.deepEqual(out.ends[2], [false, 25, 'measured']);
+});
+
+test('a heredoc failure is a failing file write, ended by the next write that works', () => {
+  const out = detect([
+    // A failing inline script is not a quoting failure.
+    use(0, 'p1', 'Bash', { command: "cd /w && python3 - <<'EOF'\nassert False\nEOF" }),
+    res(2, 'p1', 'Bash', 'Exit code 1\nAssertionError', true),
+    use(10, 'h1', 'Bash', { command: "cat > a.txt <<'EOF'\nit's\nEOF" }),
+    res(12, 'h1', 'Bash', 'Exit code 2\nunexpected EOF', true),
+    // A corrected Bash write ends the span, not the later Edit.
+    use(20, 'h2', 'Bash', { command: "cat > a.txt <<'EOF'\nfixed\nEOF" }),
+    res(21, 'h2', 'Bash', ''),
+    use(300, 'e1', 'Edit', { file_path: 'a.txt' }),
+    res(301, 'e1', 'Edit', 'The file a.txt has been updated.'),
+    // Output that names an exit code is not a failure.
+    use(400, 'm1', 'Bash', { command: 'make' }),
+    res(401, 'm1', 'Bash', 'ok\nProcess finished with exit code 1'),
+    use(402, 'm2', 'Bash', { command: 'make' }),
+    res(403, 'm2', 'Bash', 'ok\nProcess finished with exit code 1'),
+  ]);
+  assert.deepEqual(brief(out), [['heredoc_failure', at(10), 11, 'bound', '<<']]);
+  assert.equal(out.slowdowns[0].evidence.exit, 2);
+});
+
+test('slowdowns that overlap in time are counted once in the stake', () => {
+  // Three Edits sent together while a long Bash call runs; all three fail
+  // as unread when the Bash call returns.
+  const events = [use(0, 'b1', 'Bash', { command: 'npm run build' })];
+  for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }));
+  for (const f of ['a', 'b', 'c']) {
+    events.push(res(124, `e${f}`, 'Edit', '<tool_use_error>File has not been read yet.</tool_use_error>', true));
+  }
+  events.push(res(126, 'b1', 'Bash', 'built'));
+  const out = detect(events);
+  const retries = out.slowdowns.filter((s) => s.kind === 'edit_retry');
+  assert.deepEqual(retries.map((s) => s.cost_s), [124, 124, 124]);
+  const g = out.suggestions.find((s) => s.kind === 'edit_retry');
+  assert.deepEqual([g.count, g.stake_s], [3, 124]);
+  assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 126);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {
@@ -567,6 +701,15 @@ test('a check command never appears in raw form', () => {
     ['run-checks', true]);
   assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), ['run-checks', false]);
   assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), ['run-checks', true]);
+  // A '#' inside a word starts no comment; a word that starts with '#' does.
+  assert.deepEqual(match('curl http://x/#a && python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
+  assert.equal(match('echo hi # python3 scripts/run-checks . --cmd test t'), null);
+  // Any run-checks command of the line with the test group counts, and
+  // timeout DURATION is a prefix.
+  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint l && python3 scripts/run-checks . --cmd test t'),
+    ['run-checks', true]);
+  assert.deepEqual(match('timeout 600 python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
+  assert.deepEqual(match('timeout -k 5 600 scripts/run-checks . --cmd lint l'), ['run-checks', false]);
   // A full-suite run counts wherever the test command sits in the line, even
   // when a longer configured string names the execution; a lane override
   // that only contains it does not.
@@ -636,8 +779,24 @@ test('autopsy.md has every section in order', () => {
   // One open-questions line per unexplained entry.
   const open = md.split('## Open questions')[1].split('\n').filter((l) => l.startsWith('- '));
   assert.equal(open.length, 1);
+  // Slowdown rows are numbered from 1, and each suggestion names its rows.
+  assert.match(md, /^\| 1 \| relaunch \|/m);
+  assert.ok(!/^\| 0 \|/m.test(md));
+  assert.match(md, /^1\. relaunch \(stake 300\.0 s, 1 time; slowdown row #1\):/m);
   // Paths are relative to the run folder.
   assert.ok(!md.includes(TMP));
+});
+
+test('a lane outside the launch axis keeps its own span in the timeline', () => {
+  const dir = copyRun();
+  // wf_1.json says the launch took 5 minutes; lane a runs to 07:06:00.
+  const wfPath = join(dir, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  wf.durationMs = 300000;
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.md, /^lane a +wf_1 +\|[.#]{40}\| {2}span 355\.0 s, busy 255\.0 s$/m);
 });
 
 test('the summary is at most 15 lines and names the essentials', () => {
@@ -685,6 +844,13 @@ test('partial tokens are called minimums', () => {
   const res = runCli(dir);
   assert.equal(res.code, 0, res.stderr);
   assert.match(res.stdout, /minimum/);
+  // The summary still gives every token figure, each as a minimum.
+  const tot = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).tokens.totals;
+  const line = res.stdout.split('\n').find((l) => l.startsWith('tokens'));
+  for (const [n, what] of [[tot.input_tokens, 'input'], [tot.output_tokens_min, 'output'],
+    [tot.cache_read_input_tokens, 'cache read'], [tot.cache_creation_input_tokens, 'cache creation']]) {
+    assert.ok(line.includes(`>= ${n} ${what}`), `${what}: ${line}`);
+  }
   const tokens = res.md.split('## Tokens')[1].split('\n## ')[0];
   assert.match(tokens, /minimum/);
   assert.match(tokens, /unreadable lines: 1/);

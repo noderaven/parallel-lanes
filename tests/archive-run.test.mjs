@@ -275,6 +275,35 @@ test('usage errors and unreadable inputs exit 2', () => {
   assert.ok(!existsSync(join(r.hist, '2026-10-10-x1')));
 });
 
+test('a plan and spec that would share a name are refused', () => {
+  const r = makeRun();
+  // The spec in another directory, with the plan's file name.
+  const other = join(r.root, 'other');
+  mkdirSync(other);
+  const spec = join(other, 'p.md');
+  writeFileSync(spec, '# Another spec\n');
+  editManifest(r.manifest, (m) => { m.spec = spec; });
+  const res = archive(r.manifest, [r.wf1], r.hist);
+  assert.equal(res.code, 2, res.stderr);
+  assert.match(res.stderr, /two files would be archived as p\.md/);
+  assert.ok(!existsSync(join(r.hist, '2026-10-10-x1')), 'nothing is written');
+  // A spec named like the manifest is refused too.
+  const named = join(other, 'P.lanes.json');
+  writeFileSync(named, '{}');
+  editManifest(r.manifest, (m) => { m.spec = named; });
+  assert.equal(archive(r.manifest, [r.wf1], r.hist).code, 2);
+  // The same file as plan and spec is archived once.
+  editManifest(r.manifest, (m) => { m.spec = m.plan; });
+  const out = archiveOk(r.manifest, [r.wf1], r.hist);
+  assert.equal(out.added.filter((rel) => rel === 'p.md').length, 1);
+});
+
+function editManifest(path, edit) {
+  const m = JSON.parse(readFileSync(path, 'utf8'));
+  edit(m);
+  writeJson(path, m);
+}
+
 // --- --reindex ---------------------------------------------------------------
 
 function reindex(hist) {
@@ -378,6 +407,20 @@ test('reindex keeps the machine and platform of an old entry', () => {
   assert.equal(by.l131.platform, 'unavailable');
 });
 
+test('reindex keeps the launch dates of an old entry when no launch has a time', () => {
+  const hist = importedHistory();
+  writeJson(join(hist, 'index.json'), {
+    version: 1,
+    runs: [{
+      run_id: 'l131', folder: 'l131', ledger_dir: '/home/u/proj/.ledger/l131',
+      first_launch: '2026-10-01T07:00:00Z', last_launch: '2026-10-02T07:00:00Z',
+    }],
+  });
+  reindexOk(hist);
+  const l131 = readIndex(hist).runs.find((e) => e.folder === 'l131');
+  assert.deepEqual([l131.first_launch, l131.last_launch], ['2026-10-01T07:00:00Z', '2026-10-02T07:00:00Z']);
+});
+
 test('reindex skips folders without a manifest and says why', () => {
   const hist = importedHistory();
   mkdirSync(join(hist, 'misc'));
@@ -457,9 +500,15 @@ test('reindex keeps a run archived while it waited for the lock', async () => {
     child.on('error', reject);
     child.on('close', resolve);
   });
-  // Give reindex time to start and wait on the lock, then do what an
-  // archive-run holding the lock does: add a run folder and its entry.
-  await new Promise((resolve) => setTimeout(resolve, 2000));
+  // Wait until reindex says it waits on the lock (index_lock's notice), then
+  // do what an archive-run holding the lock does: add a run folder and its
+  // entry. A reindex that listed the folders before taking the lock would
+  // miss it, however slowly Python starts.
+  const deadline = Date.now() + 60000;
+  while (!stderr.includes('waiting for') && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.match(stderr, /waiting for .*index\.lock/);
   const late = importedFolder(hist, 'late', {
     report: 'p.late.report.json',
     reportBody: { engine_version: '1.5.0', agents: [] },

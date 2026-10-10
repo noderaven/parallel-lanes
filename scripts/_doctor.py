@@ -262,7 +262,8 @@ class Probes:
             reads = {}
             if res is not None and res.code == 0:
                 try:
-                    parsed = json.loads(res.out.strip().lstrip("﻿"))
+                    # PowerShell may start its output with a byte order mark.
+                    parsed = json.loads(res.out.strip().lstrip(chr(0xFEFF)))
                 except ValueError:
                     parsed = None
                 if isinstance(parsed, dict):
@@ -540,16 +541,23 @@ def check_base_not_current(manifest, probes, prefix, report):
         report.fail(check, detail, _base_fix(detail, name, remote, merge))
 
 
-def check_python(manifest, probes, report):
-    check = "python"
-    fix = ("set the manifest's python to a Python 3.8 or newer (scripts/find-python "
-           "prints one), shell-quoted.")
+def _python_argv(manifest):
+    """(text, argv): the manifest's python command (python3 when unset or
+    blank) and its shell words ([] when its quoting does not parse)."""
     python = manifest.get("python")
     python = python if isinstance(python, str) and python.strip() else "python3"
     try:
         argv = shlex.split(python)
     except ValueError:
         argv = []
+    return python, argv
+
+
+def check_python(manifest, probes, report):
+    check = "python"
+    fix = ("set the manifest's python to a Python 3.8 or newer (scripts/find-python "
+           "prints one), shell-quoted.")
+    python, argv = _python_argv(manifest)
     if not argv:
         report.fail(check, "python is not a shell-quoted command", fix)
         return
@@ -692,12 +700,15 @@ def check_disk(manifest, probes, report):
     if root is None:
         report.skip(check, "no_worktree_root")
         return
+    if probes.platform == "win32":
+        # A Git Bash root (/c/x) is C:/x, as check_defender reads it.
+        root = _shell._drive_form(root) or root
     existing = _nearest_existing(root)
     free = _amount(_read(probes.disk_free, existing)) if existing else None
     if free is None:
         report.warn(check, "unknown")
     elif free < MIN_DISK:
-        report.warn(check, _gb(free) + " free on the drive of " + existing + " (under 5 GB)")
+        report.warn(check, _gb(free) + " free on the drive of " + existing.replace("\\", "/") + " (under 5 GB)")
 
 
 def check_python_alias(manifest, probes, report):
@@ -705,12 +716,7 @@ def check_python_alias(manifest, probes, report):
     if probes.platform != "win32":
         report.skip(check, "not_applicable")
         return
-    python = manifest.get("python")
-    python = python if isinstance(python, str) and python.strip() else "python3"
-    try:
-        argv = shlex.split(python)
-    except ValueError:
-        argv = []
+    python, argv = _python_argv(manifest)
     program = argv[0] if argv else python
     if "/" not in program and "\\" not in program:
         program = _read(probes.which, program) or program

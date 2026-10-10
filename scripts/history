@@ -51,8 +51,10 @@ history.json:
   shows them as '>= N'.
 - top_slowdown: {kind, cost_s} of the autopsy's largest slowdown, or null.
 - recurring: one entry per slowdown kind found in any selected run, ranked
-  by total_s (the sum of the runs' known costs). A run's cost_s is the sum
-  of its known costs of that kind ("unavailable" when none is known).
+  by total_s (the sum of the runs' known costs). A run's cost_s is the
+  stake_s of its suggestion for that kind: the time its slowdowns of that
+  kind cover, overlapping ones counted once ("unavailable" when none is
+  known).
 - token_trends: runs and partial_runs list run ids; tokens_per_task is the
   sum of tokens_total over the sum of tasks of the runs that have both;
   by_role is {<role>: {tokens, agents}} summed over the runs. A group with
@@ -109,7 +111,7 @@ def parse_args(args):
         a = args[i]
         if a not in _OPTIONS:
             raise UsageError("unknown argument " + a)
-        if i + 1 >= len(args) or not args[i + 1]:
+        if i + 1 >= len(args) or not args[i + 1] or args[i + 1] in _OPTIONS:
             raise UsageError(a + " needs a value")
         opts[a] = args[i + 1]
         i += 2
@@ -347,8 +349,13 @@ def recurring_section(runs):
             costs = [s.get("cost_s") for s in slowdowns if isinstance(s, dict) and s.get("kind") == kind] \
                 if isinstance(slowdowns, list) else []
             if costs:
+                # The kind's stake_s: overlapping slowdowns count their
+                # shared time once, unlike a sum of cost_s.
+                suggestions = analysis.get("suggestions")
+                stakes = [g.get("stake_s") for g in suggestions
+                          if isinstance(g, dict) and g.get("kind") == kind] if isinstance(suggestions, list) else []
                 found.append({"run_id": row["run_id"], "engine_version": row["engine_version"],
-                              "cost_s": _total(costs)})
+                              "cost_s": stakes[0] if stakes else _total(costs)})
         if found:
             recurring.append({"kind": kind, "total_s": _total(r["cost_s"] for r in found), "runs": found})
     recurring.sort(key=lambda r: _rank(r, "total_s"))

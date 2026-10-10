@@ -762,10 +762,10 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
 
 | Kind | Detects |
 |---|---|
-| `background_check` | a command went to the background |
-| `timeout` | a tool call hit its timeout |
+| `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background |
+| `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
-| `heredoc_failure` | a failing Bash command holding a heredoc |
+| `heredoc_failure` | a failing Bash command whose heredoc feeds a file write (`>`, `>>` or `tee`; not an inline script such as `python3 - <<EOF`) |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
 | `extra_review_round` | a task's fix and re-review rounds |
 | `escalation` | an agent re-run at another model tier |
@@ -776,11 +776,14 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
 | `check_rerun` | a check run again with no edit or commit between |
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
-exit code when known, the matched marker string, and the program name (the first word of a
-command that is not a `NAME=value` assignment or `env`, as a basename; null when it still holds
-`=`, `@` or `:`). No command text, tool output or prompt text reaches `autopsy.json`,
-`autopsy.md`, history or the chat summary; `checks` names the configured command, never the
-command line.
+exit code when known, the matched marker string, and the program name (in the first simple
+command that is not `cd DIR`, `export ...`, a loop header or a closing keyword, the first word
+that is not a `NAME=value` assignment or a prefix such as `env` or `timeout DURATION`, as a
+basename; null when it still holds `=`, `@` or `:`). Markers in command output, files read or
+other tools' results never count. A suggestion's `stake_s` counts time that overlapping
+slowdowns of its kind share once. No command text, tool output or prompt text reaches
+`autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names the configured
+command, never the command line.
 
 **Unavailable data:**
 - A figure that cannot be read or derived is `unavailable`, never 0.
@@ -808,9 +811,9 @@ trends per task and role by engine version, suggestions ranked by total stake, a
 whose data is too old for a section (left out of that section's totals). There is no automatic
 "regressed after its fix" flag.
 
-Exit codes: `autopsy` exits 0 on success, 2 on a usage error or a folder without a
-`*.lanes.json` or a `wf_*` dir, and 3 when a path needs converting on Windows and no Git Bash
-is found (that is: exit 0, exit 2, exit 3). `scripts/history` ends with exit 0 on success, or
+Exit codes: `autopsy` ends with exit 0 on success, exit 2 on a usage error or a folder without
+a `*.lanes.json` or a `wf_*` dir, and exit 3 when a path needs converting on Windows and no Git
+Bash is found. `scripts/history` ends with exit 0 on success, or
 exit 2 on a usage error, an unreadable history dir or `index.json`, or outputs it cannot write.
 
 ## Doctor

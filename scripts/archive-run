@@ -18,6 +18,9 @@ The run goes to <history dir>/<folder>/, which holds:
   wf_<id>/ and wf_<id>.json        each TRANSCRIPT_DIR and its workflow result
                                    file (found as run-report finds it,
                                    _shell.result_paths), when present.
+Two different files that would get one name (the plan and spec with one
+file name, or one named like the manifest or the report; compared without
+case) are refused with exit 2 before anything is written.
 <plan-name> is the manifest file name minus .lanes.json (minus its extension
 when it does not end in .lanes.json). Every TRANSCRIPT_DIR must be a
 directory named wf_<id>, as the Workflow tool names them.
@@ -69,10 +72,11 @@ _history.index_lock. Every folder that holds a *.lanes.json is one run, read
 as archive-run reads its own folders: the report is the first of
 *.report.json, *.run-report.json and report.json; launches and dates come
 from the wf_<id> dirs and their wf_<id>.json startTime values. A value that
-cannot be read is "unavailable", and so are first_launch and last_launch when
-no launch has a time (the date is never made up). A folder keeps its name; an
-old index entry of the folder lends its machine, platform and an earlier
-first_launch, and without one machine and platform are "unavailable" (the
+cannot be read is "unavailable". When no launch has a time, first_launch and
+last_launch are the old index entry's, else "unavailable" (the date is never
+made up). A folder keeps its name; an old index entry of the folder lends its
+machine, platform and an earlier first_launch, and without one machine and
+platform are "unavailable" (the
 machine running reindex need not be the one that ran the run). The folders
 are listed again under the lock, so a run archived meanwhile is kept.
 Entries of folders that are gone are dropped, and an index that cannot be
@@ -313,7 +317,8 @@ def stored(p):
 
 def build_entry(old, folder, name, manifest, report_name, reindex=False):
     """The index entry of the run in folder. archive-run dates a run without
-    any launch time now; reindex says "unavailable" instead."""
+    any launch time now; reindex keeps the old entry's first_launch and
+    last_launch then, and says "unavailable" when it has none."""
     run_id, ledger_dir = _history.run_key(manifest)
     launches = launches_in(folder)
     times = [t for t, _ in launches if t is not None]
@@ -321,6 +326,12 @@ def build_entry(old, folder, name, manifest, report_name, reindex=False):
     if times or not reindex:
         first = iso(min(times)) if times else iso(now)
         last = iso(max(times)) if times else iso(now)
+    elif isinstance(old.get("first_launch"), str) and old["first_launch"] \
+            and old["first_launch"] != UNAVAILABLE:
+        # No launch time in the folder: what the old entry knew stays.
+        first = old["first_launch"]
+        last = old["last_launch"] if isinstance(old.get("last_launch"), str) and old["last_launch"] \
+            and old["last_launch"] != UNAVAILABLE else first
     else:
         first = last = UNAVAILABLE
     if first != UNAVAILABLE:
@@ -437,6 +448,18 @@ def archive(manifest_path, manifest, dirs, hdir):
             p = _shell.native_path(p)
             if os.path.isfile(p):
                 sources.append((p, os.path.basename(p)))
+    # Two sources with one name would leave only the second in the folder.
+    names = {}
+    for src, rel in sources:
+        other = names.get(rel.lower())
+        if other is None:
+            names[rel.lower()] = src
+        elif not os.path.samefile(other, src):
+            raise ArchiveError("two files would be archived as " + rel + ": " + other + " and " + src
+                               + "; give the plan and spec names that differ from each other and from"
+                               " the manifest and report")
+    sources = [(src, rel) for i, (src, rel) in enumerate(sources)
+               if all(r.lower() != rel.lower() for _s, r in sources[:i])]
     results = [result_file(d) for d in dirs]
 
     with _history.index_lock(hdir):

@@ -6,7 +6,9 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { BASH, IS_WINDOWS, lf, mergeEnv, tempDir } from './platform.mjs';
@@ -182,6 +184,39 @@ test('the index lock excludes a second holder and recovers a stale one', () => {
   assert.deepEqual(stale.out, { ok: true });
   assert.match(stale.stderr, /stale/);
   assert.ok(!existsSync(lock), 'the taken-over lock is removed on exit');
+});
+
+test('a fresh lock found at a stale takeover is put back, not taken', () => {
+  const hdir = freshDir('fresh takeover');
+  const lock = join(hdir, 'index.lock');
+  writeFileSync(lock, '{"pid": 2, "token": "fresh"}');
+  // As if the lock was judged stale just before a new holder replaced it.
+  const { out } = py("print(json.dumps(_history._take_over(os.path.join(sys.argv[1], 'index.lock'), 9999, 600)))",
+    { args: [hdir] });
+  assert.equal(out, false);
+  assert.equal(readFileSync(lock, 'utf8'), '{"pid": 2, "token": "fresh"}');
+});
+
+test('a history dir that refuses the lock file fails at once', {
+  skip: IS_WINDOWS || (process.getuid && process.getuid() === 0),
+}, () => {
+  const hdir = freshDir('read only');
+  chmodSync(hdir, 0o555);
+  try {
+    const start = Date.now();
+    const { out } = py('print(json.dumps(attempt(lambda: _history.index_lock(sys.argv[1], wait_s=20).__enter__())))',
+      { args: [hdir] });
+    assert.equal(out.error, 'HistoryError', JSON.stringify(out));
+    assert.match(out.message, /cannot create .*index\.lock/);
+    assert.ok(Date.now() - start < 10000, 'it did not wait for the lock');
+  } finally {
+    chmodSync(hdir, 0o755);
+  }
+});
+
+test('norm_path reads /c/x as a drive only on Windows', () => {
+  const { out } = py("print(json.dumps([_history.norm_path(p) for p in ['/a/r1.ledger', 'c:\\\\x\\\\y', 'D:/z/']]))");
+  assert.deepEqual(out, [IS_WINDOWS ? 'A:/r1.ledger' : '/a/r1.ledger', 'C:/x/y', 'D:/z']);
 });
 
 test('pl_history_dir in _paths.sh matches history_dir', () => {

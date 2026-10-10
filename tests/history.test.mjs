@@ -268,6 +268,10 @@ test('--since and --project filter runs', () => {
     const res = history(hist, ...args);
     assert.equal(res.code, 2, `${args.join(' ')}: ${res.stdout}`);
   }
+  // An option is never taken as another option's value.
+  const swallowed = history(hist, '--project', '--since', '2026-10-11');
+  assert.equal(swallowed.code, 2);
+  assert.match(swallowed.stderr, /--project needs a value/);
   writeFileSync(join(hist, 'index.json'), '{not json');
   const res = history(hist);
   assert.equal(res.code, 2);
