@@ -3,6 +3,7 @@
 
 usage:
   python3 archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]
+  python3 archive-run --reindex [--history-dir DIR]
 
 The history dir is _history.history_dir(DIR): --history-dir, else
 PL_HISTORY_DIR, else <CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/history.
@@ -61,6 +62,23 @@ with paths relative to the folder, '/'-separated.
 Exit 0 on success; 2 on a usage error, an unreadable manifest, transcript
 dir, ledger dir or index, a failed copy, or the lock not acquired; 3 when
 the history dir is inside the project (nothing written).
+
+--reindex rebuilds index.json from the folders already in the history dir
+(runs archived by hand, imported, or by an older release), under
+_history.index_lock. Every folder that holds a *.lanes.json is one run, read
+as archive-run reads its own folders: the report is the first of
+*.report.json, *.run-report.json and report.json; launches and dates come
+from the wf_<id> dirs and their wf_<id>.json startTime values. A value that
+cannot be read is "unavailable", and so are first_launch and last_launch when
+no launch has a time (the date is never made up). A folder keeps its name; an
+old index entry of the folder lends its machine, platform and an earlier
+first_launch. Entries of folders that are gone are dropped, and an index that
+cannot be read is replaced. It writes only index.json: no folder or file is
+renamed, changed or removed. Prints
+  {"runs": N, "skipped": [{"folder": "<name>", "reason": "<why>"}]}
+for the folders it did not index (those with no readable manifest). Exit 0,
+or 2 when the history dir is not a readable directory or the lock is not
+acquired.
 """
 import calendar
 import filecmp
@@ -80,7 +98,10 @@ import _history  # noqa: E402
 import _shell  # noqa: E402
 
 UNAVAILABLE = "unavailable"
-USAGE = "usage: archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]"
+USAGE = ("usage: archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]\n"
+         "       archive-run --reindex [--history-dir DIR]")
+# The report names a run folder may hold, in the order reindex tries them.
+_REPORT_PATTERNS = ("*.report.json", "*.run-report.json", "report.json")
 # A run_id names the run folder, so it must be one plain file name.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ISO = re.compile(
@@ -278,7 +299,7 @@ def result_values(result_path):
 
 
 def engine_version(report_path):
-    data = read_json(report_path) or {}
+    data = (read_json(report_path) if report_path else None) or {}
     version = data.get("engine_version")
     return version if isinstance(version, str) and version else UNAVAILABLE
 
@@ -287,17 +308,23 @@ def stored(p):
     return _history.norm_path(p) if isinstance(p, str) and p else UNAVAILABLE
 
 
-def build_entry(old, folder, name, manifest, report_name):
+def build_entry(old, folder, name, manifest, report_name, reindex=False):
+    """The index entry of the run in folder. archive-run dates a run without
+    any launch time now; reindex says "unavailable" instead."""
     run_id, ledger_dir = _history.run_key(manifest)
     launches = launches_in(folder)
     times = [t for t, _ in launches if t is not None]
     now = time.time()
-    first = iso(min(times)) if times else iso(now)
-    last = iso(max(times)) if times else iso(now)
-    if isinstance(old.get("first_launch"), str) and old["first_launch"] and old["first_launch"] < first:
-        first = old["first_launch"]
-    if last < first:
-        last = first
+    if times or not reindex:
+        first = iso(min(times)) if times else iso(now)
+        last = iso(max(times)) if times else iso(now)
+    else:
+        first = last = UNAVAILABLE
+    if first != UNAVAILABLE:
+        if isinstance(old.get("first_launch"), str) and old["first_launch"] and old["first_launch"] < first:
+            first = old["first_launch"]
+        if last < first:
+            last = first
     status = acceptance = UNAVAILABLE
     if launches:
         latest = max(launches, key=lambda x: (x[0] if x[0] is not None else float("-inf"), x[1]))
@@ -309,7 +336,7 @@ def build_entry(old, folder, name, manifest, report_name):
         "ledger_dir": ledger_dir,
         "project": stored(manifest["repo"].get("root")),
         "plan": stored(manifest.get("plan")),
-        "engine_version": engine_version(os.path.join(folder, report_name)),
+        "engine_version": engine_version(os.path.join(folder, report_name) if report_name else None),
         "machine": socket.gethostname(),
         "platform": sys.platform,
         "first_launch": first,
@@ -322,11 +349,15 @@ def build_entry(old, folder, name, manifest, report_name):
 
 
 def parse_args(args):
-    """(positional args, --history-dir value or None)."""
-    pos, hdir = [], None
+    """(positional args, --history-dir value or None, --reindex given)."""
+    pos, hdir, reindex = [], None, False
     i = 0
     while i < len(args):
         a = args[i]
+        if a == "--reindex":
+            reindex = True
+            i += 1
+            continue
         if a == "--history-dir":
             if i + 1 >= len(args) or not args[i + 1]:
                 raise ArchiveError("--history-dir needs a directory")
@@ -337,9 +368,12 @@ def parse_args(args):
             raise ArchiveError("unknown option " + a)
         pos.append(a)
         i += 1
-    if len(pos) < 2:
+    if reindex:
+        if pos:
+            raise ArchiveError("--reindex takes no manifest or transcript dir")
+    elif len(pos) < 2:
         raise ArchiveError("a manifest and at least one transcript dir are needed")
-    return pos, hdir
+    return pos, hdir, reindex
 
 
 def load_manifest(path):
@@ -434,14 +468,86 @@ def archive(manifest_path, manifest, dirs, hdir):
     return {"folder": hdir.rstrip("/\\") + "/" + name, "added": added, "updated": updated}
 
 
+def first_match(folder, patterns):
+    """The first file name in folder matching the patterns, tried in order
+    (sorted within one pattern); None."""
+    for pattern in patterns:
+        names = sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), pattern)))
+        for name in names:
+            if os.path.isfile(os.path.join(folder, name)):
+                return name
+    return None
+
+
+def reindex_folder(hdir, name, old_index):
+    """(entry, None) for the run in hdir/name, or (None, reason)."""
+    folder = os.path.join(hdir, name)
+    manifests = sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), "*.lanes.json")))
+    manifests = [m for m in manifests if os.path.isfile(os.path.join(folder, m))]
+    if not manifests:
+        return None, "no *.lanes.json manifest"
+    manifest = read_json(os.path.join(folder, manifests[0]))
+    if manifest is None:
+        return None, "cannot read " + manifests[0] + " (unreadable or not a JSON object)"
+    try:
+        run_id, ledger_dir = _history.run_key(manifest)
+    except _history.HistoryError as e:
+        return None, manifests[0] + ": " + str(e)
+    if not isinstance(run_id, str) or not run_id or not isinstance(manifest["repo"], dict):
+        return None, manifests[0] + " has no usable run_id or repo"
+    old = {}
+    for entry in old_index.get("runs", []):
+        if entry.get("folder") == name and _history.find_run({"runs": [entry]}, run_id, ledger_dir) is not None:
+            old = entry
+            break
+    entry = build_entry(old, folder, name, manifest, first_match(folder, _REPORT_PATTERNS), reindex=True)
+    for key in ("machine", "platform"):
+        if isinstance(old.get(key), str) and old[key]:
+            entry[key] = old[key]
+    return entry, None
+
+
+def reindex(hdir):
+    """Rebuild index.json from the folders of hdir; the output object."""
+    try:
+        names = sorted(n for n in os.listdir(hdir) if os.path.isdir(os.path.join(hdir, n)))
+    except OSError as e:
+        raise ArchiveError("cannot read the history dir " + hdir + ": " + str(e))
+    runs, skipped = [], []
+    with _history.index_lock(hdir):
+        try:
+            old_index = _history.read_index(hdir)
+        except _history.HistoryError:
+            old_index = {}  # reindex is the repair for an unreadable index
+        for name in names:
+            entry, reason = reindex_folder(hdir, name, old_index)
+            if entry is None:
+                skipped.append({"folder": name, "reason": reason})
+            else:
+                runs.append(entry)
+        _history.write_index(hdir, {"version": _history.VERSION, "runs": runs})
+    return {"runs": len(runs), "skipped": skipped}
+
+
 def main(argv):
     _shell.setup_io()
     try:
-        pos, override = parse_args(argv[1:])
+        pos, override, do_reindex = parse_args(argv[1:])
     except ArchiveError as e:
         print("archive-run: " + str(e), file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
+    if do_reindex:
+        try:
+            out = reindex(_history.history_dir(override))
+        except (ArchiveError, _history.HistoryError, _shell.BashNotFound) as e:
+            print("archive-run: " + str(e), file=sys.stderr)
+            return 2
+        except OSError as e:
+            print("archive-run: cannot reindex: " + str(e), file=sys.stderr)
+            return 2
+        sys.stdout.write(json.dumps(out) + "\n")
+        return 0
     try:
         manifest_path = os.path.abspath(_shell.native_path(pos[0]))
         dirs = transcript_dirs([_shell.native_path(p) for p in pos[1:]])

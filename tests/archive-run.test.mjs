@@ -7,6 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { mergeEnv, tempDir } from './platform.mjs';
@@ -272,4 +273,128 @@ test('usage errors and unreadable inputs exit 2', () => {
   assert.match(res.stderr, /index\.json/);
   assert.equal(readFileSync(join(r.hist, 'index.json'), 'utf8'), '{not json');
   assert.ok(!existsSync(join(r.hist, '2026-10-10-x1')));
+});
+
+// --- --reindex ---------------------------------------------------------------
+
+function reindex(hist) {
+  const res = spawnSync('python3', [SCRIPT, '--reindex', '--history-dir', hist], { encoding: 'utf8', env: cleanEnv() });
+  return { code: res.status, out: res.status === 0 ? JSON.parse(res.stdout) : null, stderr: res.stderr };
+}
+
+function reindexOk(hist) {
+  const res = reindex(hist);
+  assert.equal(res.code, 0, res.stderr);
+  return res.out;
+}
+
+// A history folder as an earlier release or an import left it.
+function importedFolder(hist, name, { runId, report, reportBody, manifest }) {
+  const folder = join(hist, name);
+  mkdirSync(folder, { recursive: true });
+  writeJson(join(folder, 'p.lanes.json'), manifest);
+  if (report) writeJson(join(folder, report), reportBody);
+  return folder;
+}
+
+function hashes(dir) {
+  const out = {};
+  for (const rel of filesUnder(dir)) out[rel] = createHash('sha256').update(readFileSync(join(dir, rel))).digest('hex');
+  return out;
+}
+
+function importedHistory() {
+  const hist = join(freshDir('hist'), 'history');
+  mkdirSync(hist, { recursive: true });
+  const p140 = importedFolder(hist, 'r140', {
+    report: 'p.r140.report.json',
+    reportBody: { engine_version: '1.4.0', agents: [] },
+    manifest: { version: 1, run_id: 'r140', plan: 'C:\\work\\p.md', repo: { mode: 'git', root: 'C:\\work\\proj', ledger_dir: 'C:\\work\\run\\p.r140.ledger' } },
+  });
+  addLaunch(p140, '', 'wf_a', DAY1);
+  const add1 = importedFolder(hist, 'addendum-1', {
+    report: 'p.addendum-1.run-report.json',
+    reportBody: { engine_version: '1.4.2', agents: [] },
+    manifest: { version: 1, run_id: 'add1', plan: 'C:/work/p.md', repo: { mode: 'git', root: 'C:/work/proj', ledger_dir: 'C:/work/run/p.add1.ledger' } },
+  });
+  addLaunch(add1, '', 'wf_b', DAY1, { status: 'stopped', acceptance: 'rejected' });
+  addLaunch(add1, '', 'wf_c', DAY2);
+  const l131 = importedFolder(hist, 'l131', {
+    report: 'report.json',
+    reportBody: { agents: [] },
+    manifest: { version: 1, run_id: 'l131', plan: '/home/u/proj/docs/plan.md', repo: { mode: 'git', root: '/home/u/proj', ledger_dir: '/home/u/proj/.ledger/l131' } },
+  });
+  mkdirSync(join(l131, 'wf_old'), { recursive: true });
+  return hist;
+}
+
+test('reindex reads the imported layouts', () => {
+  const hist = importedHistory();
+  const out = reindexOk(hist);
+  assert.equal(out.runs, 3);
+  assert.deepEqual(out.skipped, []);
+  const index = readIndex(hist);
+  assert.equal(index.version, 1);
+  assert.deepEqual(index.runs.map((e) => e.folder).sort(), ['addendum-1', 'l131', 'r140']);
+  const by = Object.fromEntries(index.runs.map((e) => [e.folder, e]));
+  assert.equal(by.r140.run_id, 'r140');
+  assert.equal(by.r140.engine_version, '1.4.0');
+  assert.equal(by.r140.launches, 1);
+  assert.equal(by.r140.ledger_dir, 'C:/work/run/p.r140.ledger');
+  assert.equal(by.r140.plan, 'C:/work/p.md');
+  assert.ok(by.r140.first_launch.startsWith('2026-10-10T07:00:00'), by.r140.first_launch);
+  assert.equal(by['addendum-1'].engine_version, '1.4.2');
+  assert.equal(by['addendum-1'].launches, 2);
+  assert.ok(by['addendum-1'].first_launch.startsWith('2026-10-10T07:00:00'));
+  assert.ok(by['addendum-1'].last_launch.startsWith('2026-10-11T07:00:00'));
+  assert.equal(by['addendum-1'].status, 'complete');
+  assert.equal(by['addendum-1'].acceptance, 'accepted');
+  assert.equal(by.l131.engine_version, 'unavailable');
+  assert.equal(by.l131.plan, '/home/u/proj/docs/plan.md');
+  assert.equal(by.l131.project, '/home/u/proj');
+  assert.equal(by.l131.ledger_dir, '/home/u/proj/.ledger/l131');
+  assert.equal(by.l131.launches, 1);
+  assert.equal(by.l131.first_launch, 'unavailable');
+  assert.equal(by.l131.status, 'unavailable');
+  assert.ok(!existsSync(join(hist, 'index.lock')));
+});
+
+test('reindex skips folders without a manifest and says why', () => {
+  const hist = importedHistory();
+  mkdirSync(join(hist, 'misc'));
+  writeFileSync(join(hist, 'misc', 'notes.txt'), 'hello\n');
+  const out = reindexOk(hist);
+  assert.equal(out.runs, 3);
+  assert.equal(out.skipped.length, 1);
+  assert.equal(out.skipped[0].folder, 'misc');
+  assert.match(out.skipped[0].reason, /lanes\.json/);
+  assert.ok(!readIndex(hist).runs.some((e) => e.folder === 'misc'));
+});
+
+test('reindex changes no file but index.json', () => {
+  const hist = importedHistory();
+  mkdirSync(join(hist, 'misc'));
+  writeFileSync(join(hist, 'misc', 'notes.txt'), 'hello\n');
+  const before = hashes(hist);
+  reindexOk(hist);
+  const mid = hashes(hist);
+  assert.ok('index.json' in mid);
+  delete mid['index.json'];
+  assert.deepEqual(mid, before);
+  // A second run over an existing index changes only index.json again.
+  reindexOk(hist);
+  const after = hashes(hist);
+  delete after['index.json'];
+  assert.deepEqual(after, before);
+  assert.deepEqual(readdirSync(hist).sort(), ['addendum-1', 'index.json', 'l131', 'misc', 'r140']);
+});
+
+test('reindex rebuilds from the folders and exits 2 on a missing dir', () => {
+  const hist = importedHistory();
+  writeFileSync(join(hist, 'index.json'), '{not json');
+  assert.equal(reindexOk(hist).runs, 3);
+  assert.equal(readIndex(hist).runs.length, 3);
+  const res = reindex(join(hist, 'nope'));
+  assert.equal(res.code, 2);
+  assert.ok(!existsSync(join(hist, 'nope')));
 });
