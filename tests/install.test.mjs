@@ -9,6 +9,10 @@ import { BASH, IS_WINDOWS, SYMLINKS, samePath, tempDir, mergeEnv, nativeWhich, p
 
 const INSTALL = join(SKILL_DIR, 'install.sh');
 const HAS_JQ = spawnSync(BASH, ['-c', 'command -v jq'], { encoding: 'utf8' }).status === 0;
+// The shell Claude Code runs hook commands with: Git Bash on Windows (sh is
+// not on PATH when the suite starts from PowerShell or cmd), sh elsewhere
+// (dash on Ubuntu, so the stored commands are checked against a strict POSIX shell).
+const HOOK_SHELL = IS_WINDOWS ? BASH : 'sh';
 const SKIP = HAS_JQ ? false : 'jq is not on PATH';
 // toolPath links the real tools into a fresh PATH directory.
 const NO_SYMLINKS = !SYMLINKS && 'symlinks unavailable';
@@ -121,11 +125,11 @@ test('install.sh registers hook commands that run from a config dir with spaces,
   install(dir);
   const s = settings(dir);
   const env = { ...process.env, CLAUDE_CONFIG_DIR: dir, PL_ACTIVE_DIR: join(dir, 'no markers') };
-  const start = spawnSync('sh', ['-c', commands(s.hooks.SessionStart)[0]], { input: '{}', encoding: 'utf8', env });
+  const start = spawnSync(HOOK_SHELL, ['-c', commands(s.hooks.SessionStart)[0]], { input: '{}', encoding: 'utf8', env });
   assert.equal(start.status, 0, start.stderr);
   assert.equal(JSON.parse(start.stdout).hookSpecificOutput.hookEventName, 'SessionStart');
   const event = JSON.stringify({ tool_name: 'Skill', tool_input: { skill: 'parallel-lanes' } });
-  const notice = spawnSync('sh', ['-c', commands(s.hooks.PostToolUse)[0]], { input: event, encoding: 'utf8', env });
+  const notice = spawnSync(HOOK_SHELL, ['-c', commands(s.hooks.PostToolUse)[0]], { input: event, encoding: 'utf8', env });
   assert.equal(notice.status, 0, notice.stderr);
   assert.match(JSON.parse(notice.stdout).systemMessage, /^parallel-lanes (v[0-9.]+ )?invoked$/);
 });
