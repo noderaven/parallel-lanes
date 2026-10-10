@@ -287,7 +287,12 @@ function parityAgent(label) {
     return { status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] };
   }
   if (label === 'final re-review') return { head: H('f1'), results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
-  if (label === 'verify') return { head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };
+  if (label === 'verify') {
+    return {
+      head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true,
+      tracked_before: [], tracked_after: [],
+    };
+  }
   if (label === 'e2e recheck') return { head: H('f1'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
   if (label === 'post-integrate recheck') return { status: 'done', head: H('f1'), notes: 'ok' };
   const implement = /^(\S+) implement$/.exec(label);

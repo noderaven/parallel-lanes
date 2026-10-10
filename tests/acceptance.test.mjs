@@ -14,7 +14,10 @@ const passing = () => ({
   tasks: { T1: { status: 'done', notes: '' } },
   final: { open: [], missing_lenses: [], cannot_verify: [] },
   e2e: null,
-  verify: { head: SHA, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true },
+  verify: {
+    head: SHA, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true,
+    tracked_before: [], tracked_after: [],
+  },
   post: null,
   delivered_sha: SHA,
   fix_unreviewed: false,
@@ -81,6 +84,68 @@ test('a verify result that does not say whether the checkout is clean is a warni
   const a = acceptanceOf({ ...input, verify: rest });
   assert.equal(a.status, 'accepted');
   assert.deepEqual(a.warnings, [`the project checks did not report whether the checkout was clean at ${SHA}`]);
+});
+
+// ---- Checks on uncommitted tracked changes (1.4.0, F1) ----
+
+const unclean = (a) => a.reasons.find((r) => r.kind === 'checks_unclean');
+
+test('checks run on uncommitted tracked changes are not accepted', () => {
+  const input = passing();
+  input.verify = { ...input.verify, tracked_before: [' M value.txt'], tracked_after: [' M value.txt'] };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.ok(unclean(a).detail.includes('value.txt'), unclean(a).detail);
+});
+
+test('a staged change before the checks is not accepted', () => {
+  const input = passing();
+  input.verify = { ...input.verify, tracked_before: ['M  value.txt'], tracked_after: [] };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.ok(unclean(a).detail.includes('value.txt'), unclean(a).detail);
+});
+
+test('checks that change a tracked file are not accepted', () => {
+  const input = passing();
+  input.verify = { ...input.verify, tracked_before: [], tracked_after: [' M package-lock.json'] };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.ok(unclean(a).detail.includes('package-lock.json'), unclean(a).detail);
+});
+
+test('a verify result without the tracked lists is not accepted', () => {
+  const input = passing();
+  const { tracked_before: before, tracked_after: after, ...rest } = input.verify;
+  void before;
+  void after;
+  const a = acceptanceOf({ ...input, verify: rest });
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.match(unclean(a).detail, /did not report/);
+  assert.match(unclean(a).detail, /tracked/);
+});
+
+test('failing checks on a dirty checkout are rejected, not just unverified', () => {
+  const input = passing();
+  input.verify = {
+    ...input.verify, ok: false, results: [{ group: 'test', command: 'npm test', exit: 1 }], tracked_before: [' M value.txt'],
+  };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'rejected');
+  assert.ok(a.reasons.some((r) => r.kind === 'checks_failed'), JSON.stringify(a.reasons));
+});
+
+test('untracked build output stays a warning', () => {
+  const input = passing();
+  input.verify = { ...input.verify, clean: false, tracked_before: [], tracked_after: [] };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'accepted');
+  assert.deepEqual(a.warnings, [`the project checks left uncommitted changes in the checkout at ${SHA}`
+    + ' (git status was not clean afterwards)']);
 });
 
 test('a final fix nobody re-reviewed at the delivered revision is missing evidence', () => {

@@ -88,7 +88,9 @@ async function run(m, script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 // The run-checks JSON the verify agent returns for these manifests' commands.
-const verified = (sha) => ({ head: sha, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true });
+const verified = (sha) => ({
+  head: sha, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true, tracked_before: [], tracked_after: [],
+});
 const LITE = ['T1', 'T2', 'T3', 'T4'];
 
 test('lite: no setup, pre-flight, integrate or post-integrate agent; one combined final reviewer', async () => {

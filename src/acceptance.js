@@ -80,6 +80,22 @@ function expectedChecks(m) {
   return out;
 }
 
+// Why a verify result at sha does not cover the commit itself, or null when
+// git status showed no tracked or staged change before and after the checks
+// (run-checks' tracked_before and tracked_after, porcelain lines). A result
+// without the lists cannot show that, so it does not cover the commit either.
+function uncleanChecksDetail(verify, sha) {
+  const parts = [];
+  for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
+    const lines = verify[field];
+    if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
+    else if (lines.length > 0) {
+      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
+    }
+  }
+  return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
+}
+
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
 // verify (run-checks JSON|null), post ({status, checked_sha}|null),
 // delivered_sha, fix_unreviewed}. Returns {status 'accepted'|'unverified'|
@@ -117,10 +133,14 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
+  // Checks that ran on uncommitted tracked or staged changes, or changed a
+  // tracked file, tested something other than the delivered commit.
+  const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
+  if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
-  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+  if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
     warnings.push(verify.clean === false
       ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
       : `the project checks did not report whether the checkout was clean at ${sha}`);

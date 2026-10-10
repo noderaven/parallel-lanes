@@ -1696,8 +1696,10 @@ function verifySchema() {
       },
       ok: { type: 'boolean' },
       clean: { type: 'boolean' },
+      tracked_before: { type: 'array', items: { type: 'string' } },
+      tracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
   };
 }
 
@@ -2218,20 +2220,29 @@ function verifyPrompt(m, sha) {
     '',
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
-    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
+    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
+    'tracked_after.',
   ].join('\n');
 }
 
 // What the project checks found, for an agent that would otherwise rerun
 // them at the same commit: one line, or '' for null (or a result naming no
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
-// per-command results (integrate's). Passed means ok and every exit 0.
+// per-command results (integrate's). Passed means ok and every exit 0, on a
+// checkout with no tracked change before or after the commands; checks that
+// passed on uncommitted tracked changes do not cover head. A missing tracked
+// list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
   const results = Array.isArray(checks.results) ? checks.results : [];
   const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
-    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  const tracked = new Set([checks.tracked_before, checks.tracked_after]
+    .flatMap((l) => (Array.isArray(l) ? l : []))
+    .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
+  const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
+    : tracked.size > 0 ? `ran on uncommitted tracked changes (${tracked.size} file${tracked.size === 1 ? '' : 's'}),`
+      + ` so they do not cover ${checks.head}`
+      : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
 
@@ -3126,6 +3137,22 @@ function expectedChecks(m) {
   return out;
 }
 
+// Why a verify result at sha does not cover the commit itself, or null when
+// git status showed no tracked or staged change before and after the checks
+// (run-checks' tracked_before and tracked_after, porcelain lines). A result
+// without the lists cannot show that, so it does not cover the commit either.
+function uncleanChecksDetail(verify, sha) {
+  const parts = [];
+  for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
+    const lines = verify[field];
+    if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
+    else if (lines.length > 0) {
+      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
+    }
+  }
+  return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
+}
+
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
 // verify (run-checks JSON|null), post ({status, checked_sha}|null),
 // delivered_sha, fix_unreviewed}. Returns {status 'accepted'|'unverified'|
@@ -3163,10 +3190,14 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
+  // Checks that ran on uncommitted tracked or staged changes, or changed a
+  // tracked file, tested something other than the delivered commit.
+  const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
+  if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
-  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+  if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
     warnings.push(verify.clean === false
       ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
       : `the project checks did not report whether the checkout was clean at ${sha}`);

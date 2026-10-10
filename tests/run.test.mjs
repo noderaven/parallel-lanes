@@ -51,7 +51,7 @@ function manifest(overrides = {}) {
 // The run-checks JSON the verify agent returns for manifest()'s commands at sha.
 const verified = (sha, exit = 0) => ({
   checkout: '/work/repo', branch: 'pl/run-1', head: sha,
-  results: [{ group: 'test', command: 'npm test', exit }], ok: exit === 0, clean: true,
+  results: [{ group: 'test', command: 'npm test', exit }], ok: exit === 0, clean: true, tracked_before: [], tracked_after: [],
 });
 
 const done = (base, head) => ({ status: 'done', base, head, tests: 'npm test: pass', notes: '' });
@@ -1964,6 +1964,14 @@ test('acceptance: checks run at another revision, or not all of them, are missin
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_missing']);
 });
 
+test('a passing verify on an uncommitted edit does not accept the run', async () => {
+  const result = await acceptanceOf({ verify: [{ ...verified(H('f1')), tracked_before: [' M value.txt'] }] });
+  assert.equal(result.status, 'complete', 'the run executed to the end');
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_unclean']);
+  assert.ok(result.acceptance.reasons[0].detail.includes('value.txt'), result.acceptance.reasons[0].detail);
+});
+
 test('acceptance: a final fix makes the earlier e2e evidence stale, so e2e reruns at the delivered revision', async () => {
   const { result, calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   const order = labels(calls);
@@ -2191,6 +2199,15 @@ test('checksResultText: one line per result, empty for null', async () => {
     `The project checks already ran at ${H('f2')}: FAILED: npm test (exit 1), make (exit 2). Do not rerun them.`);
   assert.equal(checksResultText({ head: H('I1'), ok: true }), `The project checks already ran at ${H('I1')}: passed. Do not rerun them.`);
   assert.equal(checksResultText({ head: H('I1'), ok: false }), `The project checks already ran at ${H('I1')}: FAILED. Do not rerun them.`);
+});
+
+test('checksResultText: checks on uncommitted tracked changes do not cover the head', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  const dirty = { ...verified(H('f1')), tracked_before: [' M value.txt', 'M  b.txt'], tracked_after: [' M value.txt', ' M c.txt'] };
+  assert.equal(checksResultText(dirty), `The project checks already ran at ${H('f1')}: ran on uncommitted tracked changes`
+    + ` (3 files), so they do not cover ${H('f1')}. Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(H('f1')), tracked_after: [' M x.txt'] }), `The project checks already ran at`
+    + ` ${H('f1')}: ran on uncommitted tracked changes (1 file), so they do not cover ${H('f1')}. Do not rerun them.`);
 });
 
 // ---- Task minors to the final review, exact-line combining (1.3.1) ----

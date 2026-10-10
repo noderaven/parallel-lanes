@@ -351,7 +351,7 @@ function cleanScript() {
     'final review sp': [{ findings: [], cannot_verify: [] }],
     'final review security': [{ findings: [], cannot_verify: [] }],
     'final review correctness': [{ findings: [], cannot_verify: [] }],
-    verify: [{ head: H('T5-h'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }],
+    verify: [{ head: H('T5-h'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true, tracked_before: [], tracked_after: [] }],
   };
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) {
     script[`${id} implement`] = [done(`${id}-b`, H(`${id}-h`))];
@@ -477,7 +477,7 @@ test('the project checks run at the final fix head even when the budget refused 
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
   script['final fix'] = [{ status: 'done', head: H('FX'), tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
-  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true }];
+  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true, tracked_before: [], tracked_after: [] }];
   const { result, calls } = await run(m, script);
   assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
   assert.ok(calls.at(-1).prompt.includes(`rev-parse HEAD must print ${H('FX')}`), calls.at(-1).prompt);
@@ -502,7 +502,7 @@ test('a refused final re-review stops the run for budget instead of throwing', a
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
   script['final fix'] = [{ status: 'done', head: H('FX'), tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
-  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }];
+  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true, tracked_before: [], tracked_after: [] }];
   const { result, calls } = await run(m, script);
   assert.equal(calls.length, 17);
   assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
