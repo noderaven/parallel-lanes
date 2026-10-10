@@ -192,7 +192,13 @@ def check(data, ledger_dir):
         return invalid(why, path)
 
     start = data.get("startTime")
-    if type(start) not in (int, float) or not math.isfinite(start):
+    if type(start) not in (int, float):
+        return invalid("startTime is absent or not a number", path)
+    try:
+        finite = math.isfinite(start)
+    except OverflowError:  # an integer too large for a float
+        finite = False
+    if not finite:
         return invalid("startTime is absent or not a number", path)
     if mtime_ms < start:
         return {"status": "stale", "reason": "verify_evidence_stale", "path": path}

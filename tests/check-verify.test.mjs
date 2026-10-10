@@ -71,7 +71,7 @@ function check(opts = {}) {
   };
   const startTime = has('startTime') ? opts.startTime : Date.now() - 60000;
   if (startTime !== undefined) file.startTime = startTime;
-  writeFileSync(join(dir, 'wf_x.json'), JSON.stringify(file));
+  writeFileSync(join(dir, 'wf_x.json'), JSON.stringify(file).replace('"@@BIG@@"', '1' + '0'.repeat(400)));
   const ledger = join(dir, 'ledger');
   writeFileSync(join(dir, 'm.json'), JSON.stringify({ repo: { ledger_dir: ledger } }));
   const ev = has('evidence') ? opts.evidence : evidence();
@@ -224,6 +224,10 @@ test('evidence older than the launch is stale', () => {
     expectStatus(res, 'invalid', 'verify_invalid', 1);
     assert.match(res.out.detail, /startTime/);
   }
+  // An integer too large for a float: written as raw text, JSON.stringify cannot make it.
+  res = check({ startTime: '@@BIG@@' });
+  expectStatus(res, 'invalid', 'verify_invalid', 1);
+  assert.match(res.out.detail, /startTime/);
 });
 
 test('no evidence file is missing evidence', () => {

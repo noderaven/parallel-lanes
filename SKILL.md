@@ -193,7 +193,8 @@ this. Say the table is the one required check, show it, and wait.
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
 5. Record each launch's spend (reference.md "Budgets"), a relaunch included, never a dry run:
    `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned>
-   <rulings_spent>` (`<status>`: the run status, `unaccepted` for complete but not accepted).
+   <rulings_spent>` (`<status>`: the run status, `unaccepted` for a complete run that is not accepted or whose
+   hand-back gate (check-verify) fails).
    After a launch that a transient relaunch follows, record only the spend (keep the lock
    through the relaunch). At the end, record the spend and release the lock in one command
    line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)

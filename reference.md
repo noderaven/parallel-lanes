@@ -267,7 +267,8 @@ raised it).
 - Spend across launches: after every launch returns (a relaunch included, never a dry run),
   record what it spent:
   `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned> <rulings_spent>`
-  (`status`: the run status, or `unaccepted` for complete but not accepted). It appends the
+  (`status`: the run status, or `unaccepted` for a complete run that is not accepted or whose
+  hand-back gate (check-verify) fails). It appends the
   `run_ended` event to `<ledger_dir>/_run.jsonl` and refuses (exit 2, nothing recorded) a
   count that is not an integer of 0 or more, or an empty status. At the end of a run it goes in
   one command line with the lock release (SKILL.md Launch step 5). `ledger status`
@@ -335,8 +336,7 @@ stop, a budget cap, and a failed relaunch.
 
 `<python> <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
 workflow transcript directory printed at launch (`agent-*.meta.json` and `agent-*.jsonl`).
-`<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
-arguments (see "Verify evidence"). Output: `agents` (per agent: label, phase, task, role, requested and resolved model,
+Output: `agents` (per agent: label, phase, task, role, requested and resolved model,
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
@@ -356,6 +356,9 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
+`<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
+arguments and prints one status JSON line (see "Verify evidence").
+
 Acceptance: `status: complete` only says the run executed to the end. `acceptance`
 (`{status, delivered_sha, reasons, warnings}`) says whether the delivered revision
 (`delivered_sha`: the feature head after the final fix) meets the gates, decided in code
@@ -368,9 +371,10 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `review_unbound` (the final lenses did not all
 review one commit; `final.review_problem` is its detail), `checks_unclean` (see below), `fix_unreviewed`, `final_fix_unreviewed` (the
-final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`. Four more reasons are session-side: `verify_evidence_missing`,
-`verify_evidence_stale`, `verify_mismatch` and `verify_invalid` are set by `scripts/check-verify` at
-hand-back (see "Verify evidence"), not by the workflow, and are never in `result.acceptance`.
+final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`. Four
+more reasons are session-side: `verify_evidence_missing`, `verify_evidence_stale`,
+`verify_mismatch` and `verify_invalid` are set by `scripts/check-verify` at hand-back (see
+"Verify evidence"), not by the workflow, and are never in `result.acceptance`.
 `run-checks` also reports `tracked_before` and `tracked_after`: the lines `git status --porcelain
 --untracked-files=no` printed before the first command and after the last (`[]` when clean;
 `ok`, `clean` and the exit code are unchanged). Acceptance gives `checks_unclean` (class
@@ -380,7 +384,8 @@ Warnings (open minor findings, cannot-verify entries with a source, checks that 
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): the session
-compares that report with the saved JSON at hand-back (see "Verify evidence"). `run-checks` keeps the commands' output out of its own stdout and
+compares that report with the saved JSON at hand-back; it does not re-run the checks (see
+"Verify evidence"). `run-checks` keeps the commands' output out of its own stdout and
 stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`,
 or a new temporary directory without `--out`, which the caller removes once it has read the logs:
 agents are told to), and each result carries `log` (its path) and `tail` (its last 20 lines, kept
