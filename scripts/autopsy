@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Analyse one archived run: what got done, where the time went, and tokens.
+
+usage:
+  python3 autopsy RUN_FOLDER
+
+RUN_FOLDER is a history run folder (archive-run's layout): a *.lanes.json
+manifest, wf_<id>/ transcript dirs each with its wf_<id>.json result file,
+the *.ledger dir and the run report (the first of *.report.json,
+*.run-report.json and report.json). autopsy reads only that folder, never a
+live path from the manifest, so imported runs and runs from another OS work.
+It writes RUN_FOLDER/autopsy.json and prints its path.
+
+autopsy.json:
+
+  {autopsy_version, inputs_fingerprint, run_id, engine_version,
+   launches: [{wf, start, end, wall_s, status}],
+   done, time, tokens, checks, slowdowns, detectors, suggestions,
+   unexplained}
+
+inputs_fingerprint: sha256 over the sorted [relative path, size, sha256] of
+every file autopsy reads (the manifest, report, wf_*.json, wf_*/* and the
+ledger files); it changes when any input changes.
+
+launches: one per wf_* dir, in startTime order. start and end come from the
+result file's startTime and durationMs; without them, from the launch's
+agents' first and last events. status is the result's status.
+
+done (from the last launch's result): tasks {<id>: {status, commits,
+rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
+warnings: <count>}, final {fixed, declined, open} (counts) and e2e
+(pass, fail or none). Free text (notes, reason details, warnings,
+findings, evidence) is never copied.
+
+time: wall_s (the launches' sum), phases [{phase, launch, start, end,
+wall_s, agents}], lanes [{lane, launch, start, end, busy_s, idle_s}],
+agents [{label, launch, phase, task, role, start, end, wall_s, tool_s,
+other_s}], critical_path {estimate: true, labels} and idle_gaps [{start,
+end, s}].
+- An agent's span is its first to last transcript event (assistant
+  message, tool call or tool result). tool_s is the union of its tool call
+  spans (tool_use to tool_result), so overlapping calls count once;
+  other_s is the rest (model time, transport and scheduling).
+- Phases come from each agent's workflowPhase, per launch. A lane is a phase
+  named as a manifest lane's name, or 'Lane <id>'; busy_s is the union of
+  its agents' spans and idle_s the rest of its span.
+- The critical path is a timing-based estimate: from the last-ending agent,
+  walk back to the latest-ending agent that ended before it started.
+- An idle gap is a span over 60 s inside a launch where no agent of that
+  launch runs.
+
+tokens: totals, by_phase, by_role, by_tier and per_task buckets in
+run-report's token-field shape (input_tokens, output_tokens,
+cache_read_input_tokens, cache_creation_input_tokens, output_tokens_min,
+agents) and rules; top_agents (the five largest by input + cache creation +
+output, output_tokens_min when output is incomplete); unreadable_lines (as
+run-report counts them); partial: true when any agent is output-incomplete,
+has unreadable lines or has no usage at all, so the totals are lower bounds.
+
+checks, slowdowns, detectors, suggestions and unexplained are {} or [] for
+now.
+
+Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
+0.1. Anything that cannot be read or derived is "unavailable", never 0.
+
+Exit 0 on success; 2 on a usage error or when RUN_FOLDER has no *.lanes.json
+or no wf_* dir; 3 when a path needs converting on Windows and no Git Bash or
+cygpath is found.
+"""
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _autopsy  # noqa: E402
+import _shell  # noqa: E402
+
+
+def main(argv):
+    _shell.setup_io()
+    args = argv[1:]
+    if len(args) != 1:
+        print("usage: autopsy RUN_FOLDER", file=sys.stderr)
+        return 2
+    try:
+        folder = _shell.native_path(args[0])
+    except _shell.BashNotFound as e:
+        print(f"autopsy: {e}", file=sys.stderr)
+        return 3
+    if not os.path.isdir(folder):
+        print(f"autopsy: not a directory: {folder}", file=sys.stderr)
+        return 2
+    if _autopsy.find_manifest(folder) is None:
+        print(f"autopsy: no *.lanes.json manifest in {folder}", file=sys.stderr)
+        return 2
+    if not _autopsy.wf_dirs(folder):
+        print(f"autopsy: no wf_* transcript dir in {folder}", file=sys.stderr)
+        return 2
+    analysis = _autopsy.analyze(folder)
+    out = os.path.join(folder, "autopsy.json")
+    _shell.write_text(out, json.dumps(analysis, indent=2) + "\n")
+    print(out.replace("\\", "/"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

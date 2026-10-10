@@ -1,0 +1,43 @@
+{
+  "runId": "wf_1",
+  "workflowName": "parallel-lanes",
+  "status": "completed",
+  "startTime": 1791615600000,
+  "durationMs": 600000,
+  "result": {
+    "status": "complete",
+    "run_id": "f1",
+    "version": "1.5.0",
+    "tasks": {
+      "A1": {"status": "done", "rounds": 1, "tier_used": "standard",
+             "commits": ["1111111111111111111111111111111111111111"], "notes": "NOTES-TEXT-1"},
+      "B1": {"status": "done", "rounds": 0, "tier_used": "standard",
+             "commits": ["2222222222222222222222222222222222222222", "3333333333333333333333333333333333333333"],
+             "notes": "NOTES-TEXT-2"}
+    },
+    "final": {
+      "findings": [{"severity": "minor", "file": "src/a.js", "line": 1, "issue": "FINDING-TEXT-1", "id": "F1"}],
+      "fixed": [{"severity": "minor", "file": "src/a.js", "line": 1, "issue": "FINDING-TEXT-1", "id": "F1"}],
+      "declined": [],
+      "open": [],
+      "cannot_verify": []
+    },
+    "e2e": {"items": [{"item": "smoke", "result": "PASS", "evidence": "E2E-EVIDENCE-1"}],
+            "checked_sha": "3333333333333333333333333333333333333333"},
+    "verify": {"head": "3333333333333333333333333333333333333333",
+               "results": [{"group": "test", "command": "node tests/run-tests.mjs", "exit": 0}], "ok": true},
+    "delivered_sha": "3333333333333333333333333333333333333333",
+    "acceptance": {
+      "status": "unverified",
+      "delivered_sha": "3333333333333333333333333333333333333333",
+      "reasons": [{"kind": "checks_stale", "class": "missing", "detail": "REASON-DETAIL-1"}],
+      "warnings": ["WARNING-TEXT-1"]
+    },
+    "agent_settings": [
+      {"label": "A1 implement", "model": "sonnet", "effort": "medium"},
+      {"label": "B1 implement", "model": "opus", "effort": "high"},
+      {"label": "A1 review", "model": "sonnet", "effort": "medium"},
+      {"label": "verify", "model": "sonnet", "effort": "low"}
+    ]
+  }
+}
