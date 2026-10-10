@@ -691,9 +691,10 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// once, whenever a test, lint or build command exists: after the final fix
-// and before the final re-review (which gets its result), or after the
-// lenses when they found nothing; it is listed in that place; e2e_recheck and
+// once, whenever a project or lane test, lint or build command exists
+// (finalChecks): after the final fix and before the final re-review (which
+// gets its result), or after the lenses when they found nothing; it is
+// listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -731,7 +732,7 @@ function planAgents(m) {
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
-  if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  if (finalChecks(m).length > 0) add('Verify', null, null, 'verify', sonnetHigh);
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
@@ -885,19 +886,53 @@ function commandList(m, laneId, name) {
   return list.length > 0 ? list.join(' && ') : '(none)';
 }
 
-// The scripts/run-checks call that runs every test, lint and build command
-// of a ledger lane in dir, each separately, and exits non-zero when any one
-// fails (the setup group is not a check). out (optional) is the evidence file
-// it writes under the ledger dir. null when there is no check command.
-function checksCommand(m, laneId, dir, out = null) {
-  const parts = [];
-  for (const name of ['test', 'lint', 'build']) {
-    for (const cmd of commandGroup(m, laneId, name)) parts.push('--cmd', shellQuote(name), shellQuote(cmd));
+// The final check inventory (spec F3): the project test, lint and build
+// commands in group order, then for each lane in manifest order the ones its
+// lane_commands overrides add, in group order, as [{group, command}]. A
+// {group, command} already listed is not repeated: the same command in the
+// same feature checkout is the same check.
+function finalChecks(m) {
+  const out = [];
+  for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
+  for (const lane of m.lanes || []) {
+    for (const group of ['test', 'lint', 'build']) {
+      for (const command of commandGroup(m, lane.id, group)) {
+        if (!out.some((c) => c.group === group && c.command === command)) out.push({ group, command });
+      }
+    }
   }
-  if (parts.length === 0) return null;
+  return out;
+}
+
+// The setup commands the final checks need: the project's, then each lane's
+// setup override commands not already listed, in manifest order.
+function finalSetup(m) {
+  const out = [...commandGroup(m, null, 'setup')];
+  for (const lane of m.lanes || []) {
+    for (const command of commandGroup(m, lane.id, 'setup')) if (!out.includes(command)) out.push(command);
+  }
+  return out;
+}
+
+// The scripts/run-checks call that runs each check of a [{group, command}]
+// list in dir, separately, and exits non-zero when any one fails. out
+// (optional) is the evidence file it writes under the ledger dir. null for
+// an empty list.
+function runChecksCommand(m, dir, checks, out = null) {
+  if (checks.length === 0) return null;
+  const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
+}
+
+// The scripts/run-checks call for every test, lint and build command of a
+// ledger lane in dir (the setup group is not a check). null when there is no
+// check command.
+function checksCommand(m, laneId, dir, out = null) {
+  const checks = ['test', 'lint', 'build']
+    .flatMap((group) => commandGroup(m, laneId, group).map((command) => ({ group, command })));
+  return runChecksCommand(m, dir, checks, out);
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
@@ -2208,17 +2243,19 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
   ].join('\n');
 }
 
-// The verify step: every project check at the delivered revision, through
-// scripts/run-checks, whose JSON the agent returns as it printed it.
+// The verify step: every check of the final inventory (project and lane
+// commands, finalChecks) at the delivered revision, through one
+// scripts/run-checks call, whose JSON the agent returns as it printed it.
 function verifyPrompt(m, sha) {
   const dir = featureDir(m);
-  const cmd = checksCommand(m, null, dir, `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
     `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
-    `2. Run the project's setup commands first: ${commandList(m, null, 'setup')}`,
+    `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     `3. Run, as one call: ${cmd}`,
     '',
     keepFilesRule(),
@@ -3140,11 +3177,9 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
 }
 
 // The test, lint and build commands the verify step must have run, in order
-// ({group, command}).
+// ({group, command}): the final inventory, lane checks included.
 function expectedChecks(m) {
-  const out = [];
-  for (const group of ['test', 'lint', 'build']) for (const command of m.commands[group] || []) out.push({ group, command });
-  return out;
+  return finalChecks(m);
 }
 
 // Why a verify result at sha does not cover the commit itself, or null when
@@ -3571,7 +3606,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  const hasChecks = finalChecks(m).length > 0;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.

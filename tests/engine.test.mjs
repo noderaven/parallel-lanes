@@ -6,12 +6,12 @@ const {
   runTask, runLane, runLanes,
   implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
   implementSchema, implementResultText, finalFixSchema, reviewSettings,
-  finalFixPrompt, agentRules, adjudicatorPrompt,
+  finalFixPrompt, agentRules, adjudicatorPrompt, finalChecks, finalSetup,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
   'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
   'implementSchema', 'implementResultText', 'finalFixSchema', 'reviewSettings',
-  'finalFixPrompt', 'agentRules', 'adjudicatorPrompt',
+  'finalFixPrompt', 'agentRules', 'adjudicatorPrompt', 'finalChecks', 'finalSetup',
 ]);
 
 function task(id, extra = {}) {
@@ -501,6 +501,44 @@ test('lane_commands override the project commands for that lane', () => {
   assert.ok(text.includes('uv run pytest -q'));
   assert.ok(!text.includes('npm test'));
   assert.ok(text.includes('npm ci'));
+});
+
+// ---- The final check inventory (1.4.0, F3) ----
+
+const twoLanes = (extra = {}) => manifest({
+  lanes: [{ id: 'a', name: 'Lane a', tasks: [task('T2')] }, { id: 'b', name: 'Lane b', tasks: [task('T3')] }],
+  ...extra,
+});
+
+test('finalChecks lists global then lane-only checks once', () => {
+  const m = twoLanes({
+    commands: { setup: [], test: ['npm test'], lint: [], build: [] },
+    lane_commands: { a: { test: ['npm test', 'pytest -q'] }, b: { lint: ['ruff check .'] } },
+  });
+  assert.deepEqual(finalChecks(m), [
+    { group: 'test', command: 'npm test' },
+    { group: 'test', command: 'pytest -q' },
+    { group: 'lint', command: 'ruff check .' },
+  ]);
+  // Lanes in manifest order, each in group order; the same command in
+  // another group is another check.
+  m.lane_commands = { a: { build: ['make'] }, b: { lint: ['make'], test: ['npm test', 'go test ./...'] } };
+  assert.deepEqual(finalChecks(m), [
+    { group: 'test', command: 'npm test' },
+    { group: 'build', command: 'make' },
+    { group: 'test', command: 'go test ./...' },
+    { group: 'lint', command: 'make' },
+  ]);
+  assert.deepEqual(finalChecks(twoLanes({ commands: { setup: ['npm ci'], test: [], lint: [], build: [] } })), []);
+});
+
+test('finalSetup lists the global setup, then lane setup overrides not already listed', () => {
+  const m = twoLanes({
+    commands: { setup: ['npm ci'], test: ['npm test'], lint: [], build: [] },
+    lane_commands: { a: { setup: ['npm ci', 'uv sync'] }, b: { setup: ['uv sync'], test: ['pytest -q'] } },
+  });
+  assert.deepEqual(finalSetup(m), ['npm ci', 'uv sync']);
+  assert.deepEqual(finalSetup(twoLanes({ commands: { setup: [], test: [], lint: [], build: [] } })), []);
 });
 
 test('the script owns the task base: an implementer-reported base is ignored', async () => {

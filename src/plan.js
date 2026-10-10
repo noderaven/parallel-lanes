@@ -77,9 +77,10 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// once, whenever a test, lint or build command exists: after the final fix
-// and before the final re-review (which gets its result), or after the
-// lenses when they found nothing; it is listed in that place; e2e_recheck and
+// once, whenever a project or lane test, lint or build command exists
+// (finalChecks): after the final fix and before the final re-review (which
+// gets its result), or after the lenses when they found nothing; it is
+// listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -117,7 +118,7 @@ function planAgents(m) {
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
-  if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  if (finalChecks(m).length > 0) add('Verify', null, null, 'verify', sonnetHigh);
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);

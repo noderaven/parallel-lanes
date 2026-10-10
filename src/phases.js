@@ -312,7 +312,7 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
+  const hasChecks = finalChecks(m).length > 0;
 
   // Run rulings come from this run's pre-flight only, never from the
   // manifest file.

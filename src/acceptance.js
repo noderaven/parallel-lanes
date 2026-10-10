@@ -77,11 +77,9 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
 }
 
 // The test, lint and build commands the verify step must have run, in order
-// ({group, command}).
+// ({group, command}): the final inventory, lane checks included.
 function expectedChecks(m) {
-  const out = [];
-  for (const group of ['test', 'lint', 'build']) for (const command of m.commands[group] || []) out.push({ group, command });
-  return out;
+  return finalChecks(m);
 }
 
 // Why a verify result at sha does not cover the commit itself, or null when

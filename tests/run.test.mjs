@@ -2040,6 +2040,37 @@ test('a passing verify on an uncommitted edit does not accept the run', async ()
   assert.ok(result.acceptance.reasons[0].detail.includes('value.txt'), result.acceptance.reasons[0].detail);
 });
 
+// ---- Lane checks in the final verify (1.4.0, F3) ----
+
+const laneChecked = (sha, results) => ({ ...verified(sha), results, ok: results.every((r) => r.exit === 0) });
+
+test('a lane-only check runs at the delivered revision', async () => {
+  const m = manifest({
+    commands: { setup: ['npm ci'], test: [], lint: [], build: [] },
+    lane_commands: { alpha: { setup: ['npm ci', 'uv sync'], test: ['node --test'] } },
+  });
+  const verify = [laneChecked(H('f1'), [{ group: 'test', command: 'node --test', exit: 0 }])];
+  const { result, calls } = await run(m, { ...phaseScript({ verify }), ...taskScript(ALL) });
+  const prompts = calls.filter((c) => c.label === 'verify').map((c) => c.prompt);
+  assert.equal(prompts.length, 1, labels(calls).join(', '));
+  assert.ok(prompts[0].includes("--cmd 'test' 'node --test'"), prompts[0]);
+  assert.ok(prompts[0].includes('npm ci && uv sync'), 'the lane setup override runs once, after the global setup');
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('a final fix that breaks a lane check is not accepted', async () => {
+  const m = manifest({ lane_commands: { beta: { test: ['node --test'] } } });
+  const verify = [laneChecked(H('f1'), [
+    { group: 'test', command: 'npm test', exit: 0 }, { group: 'test', command: 'node --test', exit: 1 },
+  ])];
+  const { result, calls } = await run(m, { ...phaseScript({ verify }), ...taskScript(ALL) });
+  const prompt = calls.find((c) => c.label === 'verify').prompt;
+  assert.ok(prompt.includes("--cmd 'test' 'npm test' --cmd 'test' 'node --test'"), prompt);
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_failed']);
+  assert.match(result.acceptance.reasons[0].detail, /node --test \(exit 1\)/);
+});
+
 test('acceptance: a final fix makes the earlier e2e evidence stale, so e2e reruns at the delivered revision', async () => {
   const { result, calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   const order = labels(calls);

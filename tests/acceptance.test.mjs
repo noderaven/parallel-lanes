@@ -86,6 +86,35 @@ test('a verify result that does not say whether the checkout is clean is a warni
   assert.deepEqual(a.warnings, [`the project checks did not report whether the checkout was clean at ${SHA}`]);
 });
 
+// ---- Lane checks in the final inventory (1.4.0, F3) ----
+
+const withLaneCheck = () => {
+  const input = passing();
+  input.m = { ...input.m, lanes: [{ id: 'a', tasks: [] }], lane_commands: { a: { test: ['node --test'] } } };
+  return input;
+};
+
+test('a verify result missing the lane check is incomplete evidence', () => {
+  const a = acceptanceOf(withLaneCheck());
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_incomplete', 'missing']]);
+});
+
+test('a verify result with the global and the lane check is accepted', () => {
+  const input = withLaneCheck();
+  input.verify = { ...input.verify, results: [...input.verify.results, { group: 'test', command: 'node --test', exit: 0 }] };
+  const a = acceptanceOf(input);
+  assert.deepEqual([a.status, a.reasons, a.warnings], ['accepted', [], []]);
+});
+
+test('a lane check alone keeps the no-check warning away', () => {
+  const input = withLaneCheck();
+  input.m.commands = { test: [], lint: [], build: [] };
+  input.verify = { ...input.verify, results: [{ group: 'test', command: 'node --test', exit: 0 }] };
+  const a = acceptanceOf(input);
+  assert.deepEqual([a.status, a.reasons, a.warnings], ['accepted', [], []]);
+});
+
 // ---- Checks on uncommitted tracked changes (1.4.0, F1) ----
 
 const unclean = (a) => a.reasons.find((r) => r.kind === 'checks_unclean');

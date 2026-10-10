@@ -699,17 +699,19 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
   ].join('\n');
 }
 
-// The verify step: every project check at the delivered revision, through
-// scripts/run-checks, whose JSON the agent returns as it printed it.
+// The verify step: every check of the final inventory (project and lane
+// commands, finalChecks) at the delivered revision, through one
+// scripts/run-checks call, whose JSON the agent returns as it printed it.
 function verifyPrompt(m, sha) {
   const dir = featureDir(m);
-  const cmd = checksCommand(m, null, dir, `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
     `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
-    `2. Run the project's setup commands first: ${commandList(m, null, 'setup')}`,
+    `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     `3. Run, as one call: ${cmd}`,
     '',
     keepFilesRule(),

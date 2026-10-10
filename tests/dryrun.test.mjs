@@ -180,6 +180,16 @@ test('no verify agent when the project has no test, lint or build command', () =
   assert.deepEqual(planAgents(m).filter((a) => a.phase === 'Verify'), []);
 });
 
+test('a lite manifest whose only check is a lane override lists a verify agent', async () => {
+  const m = liteManifest({
+    commands: { setup: [], test: [], lint: [], build: [] },
+    lane_commands: { alpha: { test: ['node --test'] } },
+  });
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.agents.filter((a) => a.role === 'verify').map((a) => [a.phase, a.model]), [['Verify', 'sonnet']]);
+});
+
 test('lite plan: no pre-flight, integrate or post-integrate; one combined final reviewer', () => {
   const agents = planAgents(liteManifest({ hooks: { e2e: 'run e2e' } }));
   const rows = agents.map((a) => [a.phase, a.lane, a.task, a.role, a.model]);
