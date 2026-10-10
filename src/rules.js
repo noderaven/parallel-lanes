@@ -35,6 +35,17 @@ function agentRules() {
     'Do not invoke parallel-lanes or any plan-execution skill.',
     'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
       "previous one's output: every separate call costs a full turn.",
+    'When your role requires running project checks or tests: ask for a 600000 ms (10 minute) timeout on each ' +
+      'such command, and read the tool result to see whether the command finished, moved to the background, or ' +
+      'was stopped by the timeout. A command running in the background has finished only when its completion ' +
+      'notice or exit status says so, never when a line of its output appears (a failing run may never print ' +
+      "that line). Before you start a check again, read the earlier run's result, or stop that run and confirm " +
+      'it has ended. Do not finish your work while a check you were asked to run is still running or its ' +
+      'result is unread.',
+    'Change file contents with your file-editing tools (Edit, Write). Text written through shell heredocs, ' +
+      'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
+      "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
+      'formatters, codemods, and other maintenance commands.',
   ].join('\n');
 }
 
