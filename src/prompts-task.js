@@ -134,14 +134,14 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
-// One line per finding; a finding merged from several reports
-// (dedupeFindings) also lists the other reports' issue text.
+// One line per finding; a finding that shares its location with other
+// findings (dedupeFindings, linkSameLocation) also names their ids.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
     + ` - ${f.issue} (suggested fix: ${f.fix})`
-    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
-      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+    + (Array.isArray(f.same_location) && f.same_location.length > 0
+      ? ` Same line as: ${f.same_location.join(', ')}` : '')).join('\n');
 }
 
 // One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec

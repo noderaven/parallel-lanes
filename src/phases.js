@@ -54,10 +54,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   });
   const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
     .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
-  const findings = withFindingIds(dedupeFindings([
+  const findings = linkSameLocation(withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
-  ]));
+  ])));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);

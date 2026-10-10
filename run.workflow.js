@@ -1007,14 +1007,14 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
-// One line per finding; a finding merged from several reports
-// (dedupeFindings) also lists the other reports' issue text.
+// One line per finding; a finding that shares its location with other
+// findings (dedupeFindings, linkSameLocation) also names their ids.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
     + ` - ${f.issue} (suggested fix: ${f.fix})`
-    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
-      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+    + (Array.isArray(f.same_location) && f.same_location.length > 0
+      ? ` Same line as: ${f.same_location.join(', ')}` : '')).join('\n');
 }
 
 // One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
@@ -2379,12 +2379,19 @@ function findingKey(f) {
   return null;
 }
 
-// Merge the lenses' findings (spec 1.3.1): findings on the same file and
-// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// A finding's issue text as findings merge on it: trimmed, with every run
+// of whitespace collapsed to one space.
+function issueKey(f) {
+  return String(f.issue == null ? '' : f.issue).replace(/\s+/g, ' ').trim();
+}
+
+// Merge the lenses' findings (spec 1.3.1): findings at the same location
+// (findingKey) with the same issue text (issueKey) become one entry listing
 // every lens that reported it, keeping the issue text, severity and fix of
-// its most severe report (the first of those on a tie), and the other
-// reports' distinct issue texts as also_reported, so the issue text always
-// matches its severity. Every other finding stays separate.
+// its most severe report (the first of those on a tie). Findings at one
+// location with different issue texts stay separate entries, each its own
+// obligation; linkSameLocation lists the others' ids once ids are assigned.
+// also_reported stays on every entry, always [], so the shape is unchanged.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -2392,30 +2399,39 @@ function dedupeFindings(reports) {
   const byKey = new Map();
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
-      const key = findingKey(f);
+      const location = findingKey(f);
+      const key = location === null ? null : JSON.stringify([location, issueKey(f)]);
       const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens], also_reported: [] };
+        const entry = { ...f, lenses: [lens], also_reported: [], same_location: [] };
         if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
-        // The more severe report becomes the primary text; the earlier one
-        // moves to also_reported.
-        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
         seen.issue = f.issue;
-        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
-        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
-      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
-        seen.also_reported.push(f.issue);
       }
     }
   }
   return merged;
+}
+
+// Fill each finding's same_location with the ids of the other findings at
+// its location (findingKey), in order; a finding with no location key gets
+// []. findings: dedupeFindings output with ids (withFindingIds).
+function linkSameLocation(findings) {
+  const idsAt = new Map();
+  for (const f of findings) {
+    const key = findingKey(f);
+    if (key !== null) idsAt.set(key, [...(idsAt.get(key) || []), f.id]);
+  }
+  return findings.map((f) => {
+    const key = findingKey(f);
+    return { ...f, same_location: key === null ? [] : idsAt.get(key).filter((id) => id !== f.id) };
+  });
 }
 
 // Adjudicator: rulings that let a blocked task continue instead of stopping its lane.
@@ -3439,10 +3455,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   });
   const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
     .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
-  const findings = withFindingIds(dedupeFindings([
+  const findings = linkSameLocation(withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
-  ]));
+  ])));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
