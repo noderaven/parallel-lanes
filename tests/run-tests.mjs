@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs every *.test.mjs in this directory with node --test, naming each file,
-// so each runs in its own process and a few run at once. The default is 2 at
+// so each runs in its own process and a few run at once. The default is 4 at
 // a time; PL_TEST_CONCURRENCY or --concurrency N changes it. Other arguments
 // go to node --test unchanged (e.g. --test-name-pattern=...). Exits with
 // node's exit code; 2 on a usage error.
@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const TESTS = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(TESTS);
-const DEFAULT_CONCURRENCY = '2';
+const DEFAULT_CONCURRENCY = '4';
 
 function usage(message) {
   console.error(`run-tests: ${message}`);

@@ -74,11 +74,11 @@ test('run-tests runs every *.test.mjs beside it, each in its own process, and no
   assert.equal(existsSync(join(TMP, 'helper-ran')), false, 'a file not named *.test.mjs was run');
 });
 
-test('run-tests runs two test files at a time by default', () => {
-  const p = project({ a: { ms: 1000 }, b: { ms: 1000 }, c: { ms: 1000 } });
+test('run-tests runs four test files at a time by default', () => {
+  const p = project({ a: { ms: 1500 }, b: { ms: 1500 }, c: { ms: 1500 }, d: { ms: 1500 }, e: { ms: 1500 } });
   const res = runner(p);
   assert.equal(res.code, 0, res.stdout + res.stderr);
-  assert.equal(maxOverlap(records(p)), 2, JSON.stringify(records(p)));
+  assert.equal(maxOverlap(records(p)), 4, JSON.stringify(records(p)));
 });
 
 test('PL_TEST_CONCURRENCY sets how many files run at once, and --concurrency overrides it', () => {

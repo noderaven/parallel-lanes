@@ -335,7 +335,7 @@ Other things to know:
 | `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `agents/` | The `parallel-lanes-worker` agent definition |
-| `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, two files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |
+| `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, four files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |
 
 ## License
 
