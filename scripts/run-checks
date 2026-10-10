@@ -9,13 +9,17 @@ one runs even after a failure: one group's failure never hides another's.
 Nothing from the commands reaches run-checks' own stdout or stderr (an
 agent's shell call captures both whole): the Nth command's stdout and stderr
 go together to one log file, <FILE stem>.N.log beside FILE with --out, else
-N.log in a new temporary directory. stdout is one JSON line, also written to
-FILE with --out (FILE must resolve inside ROOT with --root, the run's ledger
-directory):
+N.log in a new temporary directory that run-checks leaves for the caller to
+read and then remove (the directory each result's log names). stdout is one
+JSON line, also written to FILE with --out (with --root, the run's ledger
+directory, FILE and its logs must resolve inside ROOT; --root does nothing
+without --out):
   {"checkout": DIR, "branch": <abbrev-ref>, "head": <full sha checked>,
    "results": [{"group": GROUP, "command": COMMAND, "exit": <code>,
                 "log": <absolute path of its log>,
-                "tail": <its last 20 lines, joined with \\n>}],
+                "tail": <its last 20 lines, joined with \\n; at most the
+                         last 4096 characters of them, starting with
+                         "[truncated] " when cut>}],
    "ok": <true when every exit is 0>, "clean": <true when git status
    --porcelain printed nothing after the commands>}
 
@@ -36,7 +40,7 @@ symlink), or no bash can be found
 (the message names CLAUDE_CODE_GIT_BASH_PATH; no command runs).
 """
 
-import collections
+import io
 import json
 import os
 import subprocess
@@ -51,6 +55,9 @@ GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 TAIL_LINES = 20
+TAIL_CHARS = 4096
+TAIL_WINDOW = 65536  # bytes read from the end of a log for its tail
+TRUNCATED = "[truncated] "
 USAGE = "usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]"
 
 
@@ -118,10 +125,22 @@ def log_paths(out, count):
 
 
 def tail_of(path):
-    """The last TAIL_LINES lines of the file at path, joined with \\n."""
-    with open(path, encoding="utf-8", errors="replace", newline="") as f:
-        last = collections.deque(f, maxlen=TAIL_LINES)
-    return "\n".join(line.rstrip("\r\n") for line in last)
+    """The last TAIL_LINES lines of the file at path, joined with \\n, kept to
+    the last TAIL_CHARS characters: a command that prints one long line must
+    not put it all back on stdout. Only the last TAIL_WINDOW bytes are read;
+    a tail cut by either limit starts with TRUNCATED."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        start = max(0, f.tell() - TAIL_WINDOW)
+        f.seek(start)
+        data = f.read()
+    lines = list(io.StringIO(data.decode("utf-8", errors="replace"), newline=""))
+    # With start > 0 the first line may be a fragment of a longer one.
+    cut = start > 0 and len(lines) <= TAIL_LINES
+    tail = "\n".join(line.rstrip("\r\n") for line in lines[-TAIL_LINES:])
+    if len(tail) > TAIL_CHARS:
+        tail, cut = tail[-TAIL_CHARS:], True
+    return TRUNCATED + tail if cut else tail
 
 
 def main(argv):
@@ -141,7 +160,8 @@ def run(directory, out, root, cmds):
     head = head_of(directory)
     branch = git(directory, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     logs = log_paths(out, len(cmds))
-    if root is not None:
+    if out is not None and root is not None:
+        # Beside FILE; without --out they are in a new temporary directory.
         for log in logs:
             if os.path.islink(log) or not contained(log, root):
                 fail(3, f"log path {log!r} is outside {root!r}")

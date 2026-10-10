@@ -204,17 +204,21 @@ the manifest file. The user's answers (`notes`) keep their own label, and an adj
 ## Fix commits
 
 The plan's commit message applies to a task's first commit. Since the commit rules forbid
-amending, every fix commit carries a message of its own, in the form the commit rules use (for
-example their prefix style):
+amending, every later commit (a fix, or more work on a task) carries a message of its own, in
+the form the commit rules use (for example their prefix style):
 
 - a task fix round: `fix: address review findings for Task <id>` (a batch: `fix: address
   review findings for Batch <first>-<last>`);
 - the final fix: `fix: address the final review findings`;
-- the post-integration fix: `fix: make the post-integration check pass`.
+- the post-integration fix: `fix: make the post-integration check pass`;
+- an implement attempt (a retry or escalation) that adds to a task's first commit: the task fix
+  round message when review findings are behind it, else `chore: continue Task <id>` (no
+  review raised anything for it to fix).
 
-Every reviewer, re-reviewer, and final lens is told the same, and that neither the plan's
-message on a first commit nor a fix message on a fix commit is a commit-rule finding (before
-1.3.1 each fix round repeated the task's message, and reviewers raised it).
+Every reviewer, re-reviewer, and final lens is told the same, and that none of the plan's
+message on a first commit, a fix message on a fix commit, and the continuation message is a
+commit-rule finding (before 1.3.1 each fix round repeated the task's message, and reviewers
+raised it).
 
 ## Budgets
 
@@ -301,7 +305,9 @@ Output: `agents` (per agent: label, phase, task, role, requested and resolved mo
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
 that cannot be read is the string `unavailable`, never a guess. Effort comes from the
-workflow result file `<transcript_dir>.json` beside the directory: its `agent_settings`
+workflow result file, which the Workflow tool writes to `<session>/workflows/wf_<id>.json` for
+a transcript directory `<session>/subagents/workflows/wf_<id>/` (`<transcript_dir>.json`
+beside the directory is the fallback): its `agent_settings`
 (`[{label, model, effort}]`, one per agent started, in start order) gives every agent's
 effort, not only the implementers'; without that file an agent's effort is `unavailable`.
 Transcripts often keep only
@@ -332,8 +338,10 @@ checkout dirty or did not say) never block. The checks evidence is the
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
 it is not caught by the run. `run-checks` keeps the commands' output out of its own stdout and
 stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`,
-or a temporary directory without `--out`), and each result carries `log` (its path) and `tail`
-(its last 20 lines). Verify runs once at the delivered revision, after the final fix and
+or a new temporary directory without `--out`, which the caller removes once it has read the logs:
+agents are told to), and each result carries `log` (its path) and `tail` (its last 20 lines, kept
+to the last 4096 characters and starting with `[truncated] ` when cut, so one long line stays
+out too). `--root` checks the JSON and its logs only with `--out`. Verify runs once at the delivered revision, after the final fix and
 before the final re-review, which gets its result and does not rerun the checks; the E2E and
 post-integrate rechecks are told the project checks already ran at that commit and run only
 what their hook adds. Show the
@@ -344,7 +352,7 @@ and shown as accepted by the user, never folded into `accepted`.
 Each task result's `commits` is its range `[base, head]` (the base before its first commit and
 its last head), not a list of commits; the ledger's `committed` events list every commit.
 
-`cannot_verify`, in every review, re-review, and final lens result, is
+`cannot_verify`, in every task review and re-review and every final lens result, is
 `[{requirement, source, why, check_by}]`: a requirement the agent needed to check and could
 not, with `source` citing the plan task step or spec section it comes from. Things it
 verified, verdicts or decisions, limits the plan already accepts, the instruction not to
@@ -356,12 +364,17 @@ before 1.3.1) is kept in the report as a note, not a warning.
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
 Findings two lenses report at the same `file` and `line` (when `line` > 0), or on the same
-`commit <sha>` file, are merged: the merged finding keeps the most severe severity, every
-lens, the first issue text, and the other texts as `also_reported`; every other finding
+`commit <sha>` file, are merged: the merged finding keeps every lens and the issue text,
+severity, and fix of its most severe report (the first of those on a tie), so the text
+matches the severity, and the other texts as `also_reported`; every other finding
 stays separate. Every minor finding of an approved task review gets an id `T<task>-<n>` and
 goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
 finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
-them in the report, so minors from task reviews are not lost.
+them in the report, so minors from task reviews are not lost. Task minors are not stored in
+the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
+so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
+`cannot_verify` entry with `source: "run"` naming those tasks (check them in the earlier
+launch's report).
 The fixer gives each id a disposition with its evidence; the re-review names the revision it
 judged (`head`). A disposition without evidence, a re-review of another revision than the fix
 head, or two different dispositions or results for one id leave the finding open (the new

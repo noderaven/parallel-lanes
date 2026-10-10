@@ -646,6 +646,19 @@ async function runAll(manifest, io) {
     final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
       why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
   }
+  // Task minors live only in this launch's task results: the tasks an
+  // earlier launch committed and reviewed are not re-run, so their approved
+  // reviews' minor findings never reached the final lenses.
+  const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
+    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+  if (earlier.length > 0) {
+    final.cannot_verify.push({
+      requirement: `the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`,
+      source: 'run',
+      why: 'a resumed run does not carry task minors from an earlier launch to the final lenses or task_minors_open',
+      check_by: "read those tasks' approved reviews in the earlier launch's report",
+    });
+  }
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.

@@ -409,6 +409,15 @@ function pythonPrompts(m) {
 // The lines of a prompt that start a Python helper of the skill.
 const helperLines = (text) => text.split('\n').filter((l) => /scripts\/(ledger|task-brief|start-task|finish-task|run-checks)' /.test(l));
 
+test('agents handed the every-check run-checks call are told where its logs go and to remove them', () => {
+  const texts = Object.entries(allPrompts(manifest())).filter(([, t]) => t.includes('- every check at once'));
+  assert.ok(texts.length > 0);
+  for (const [name, text] of texts) {
+    assert.ok(text.includes('in a new\n  temporary directory each call'), name);
+    assert.ok(text.includes("remove that directory\n  (the log's parent)"), name);
+  }
+});
+
 test('every Python command uses the manifest python', () => {
   const m = manifest({ python: '/opt/py/bin/python3' });
   for (const [name, text] of Object.entries(pythonPrompts(m))) {
@@ -1439,6 +1448,21 @@ test('fix rounds commit with the fix message, and reviewers are told it is expec
     assert.ok(text.includes(TASK_FIX_MESSAGE), `${name}: the task fix message`);
     assert.ok(text.includes(FINAL_FIX_MESSAGE), `${name}: the final fix message`);
   }
+});
+
+test('an implement retry uses the fix message only when review findings are behind it', () => {
+  const m = manifest();
+  const later = (p) => p.split('\n').slice(p.split('\n').findIndex((l) => l.includes("holds the task's first commit")))
+    .slice(0, 2).join(' ');
+  const blocked = implementPrompt(m, task('T2'), WHERE, 'b0', { reason: 'T2 implement blocked: x', findings: null });
+  assert.ok(later(blocked).includes('chore: continue Task T2'), blocked);
+  assert.ok(!blocked.includes(`${TASK_FIX_MESSAGE} T2`), blocked);
+  assert.ok(later(implementPrompt(m, task('T2'), WHERE, 'b0')).includes('chore: continue Task T2'));
+  const reviewed = implementPrompt(m, task('T2'), WHERE, 'b0',
+    { reason: 'review requested changes', findings: [finding('the bug')] });
+  assert.ok(later(reviewed).includes(`${TASK_FIX_MESSAGE} T2`), reviewed);
+  assert.ok(reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1').includes('chore: continue Task <id>'),
+    'reviewers are told the continuation message');
 });
 
 test('the final fix and the post-integrate fix use their own messages', async () => {

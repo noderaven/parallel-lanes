@@ -893,7 +893,10 @@ function commandsText(m, laneId, dir = null) {
   const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`);
+    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
+      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+      '  (the log\'s parent) once you have read what you need.');
   }
   return lines.join('\n');
 }
@@ -974,6 +977,14 @@ function fixCommitMessage(task) {
   return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
 }
 
+// The message an implement attempt commits further work with once HEAD holds
+// the task's first commit and no review findings are behind the attempt (a
+// retry after a blocked or escalated attempt, a reopened task): 'chore:
+// continue Task <id>', so history shows no fix of findings no review raised.
+function continueCommitMessage(task) {
+  return `chore: continue Task ${task.id}`;
+}
+
 // What every reviewer, re-reviewer and final lens is told about fix commits:
 // each fix message, and that neither the plan's message on a task's first
 // commit nor a fix message on a fix commit is a commit-rule finding.
@@ -982,8 +993,10 @@ function fixMessagesLines() {
     'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
     '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
     `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
-    "The plan's message applies to a task's first commit; a fix commit carries its fix message; neither is a",
-    'commit-rule finding.',
+    'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
+    'with `chore: continue Task <id>`.',
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
+    'continuation commit its continuation message; none of them is a commit-rule finding.',
   ];
 }
 
@@ -1296,9 +1309,12 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
     // A batch's commits are one per task, each with its brief's message.
+    // The fix message only when review findings are behind this attempt.
     ...(batch ? [] : [
       'When HEAD already holds the task\'s first commit, commit further changes with the message',
-      `\`${fixCommitMessage(task)}\`, in the form the commit rules use (for example their prefix style).`,
+      `\`${retry && Array.isArray(retry.findings) && retry.findings.length > 0
+        ? fixCommitMessage(task) : continueCommitMessage(task)}\`, in the form the commit rules use (for example`,
+      'their prefix style).',
     ]),
   ].join('\n'));
   if (retry) {
@@ -2232,9 +2248,10 @@ function findingKey(f) {
 
 // Merge the lenses' findings (spec 1.3.1): findings on the same file and
 // line (line > 0), or on the same 'commit <sha>', become one entry listing
-// every lens that reported it, keeping the most severe severity (and that
-// report's fix), the first issue text, and the other reports' distinct
-// issue texts as also_reported. Every other finding stays separate.
+// every lens that reported it, keeping the issue text, severity and fix of
+// its most severe report (the first of those on a tie), and the other
+// reports' distinct issue texts as also_reported, so the issue text always
+// matches its severity. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -2251,10 +2268,17 @@ function dedupeFindings(reports) {
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
-      if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) seen.also_reported.push(f.issue);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
+        // The more severe report becomes the primary text; the earlier one
+        // moves to also_reported.
+        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
+        seen.issue = f.issue;
+        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
+        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
+      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
+        seen.also_reported.push(f.issue);
       }
     }
   }
@@ -3826,6 +3850,19 @@ async function runAll(manifest, io) {
   if (fixUnreviewed) {
     final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
       why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
+  // Task minors live only in this launch's task results: the tasks an
+  // earlier launch committed and reviewed are not re-run, so their approved
+  // reviews' minor findings never reached the final lenses.
+  const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
+    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+  if (earlier.length > 0) {
+    final.cannot_verify.push({
+      requirement: `the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`,
+      source: 'run',
+      why: 'a resumed run does not carry task minors from an earlier launch to the final lenses or task_minors_open',
+      check_by: "read those tasks' approved reviews in the earlier launch's report",
+    });
   }
   delivered = final.head;
 

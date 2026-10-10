@@ -244,6 +244,29 @@ test('totals say unavailable when an agent\'s output count is incomplete', () =>
   assert.equal(out.tiers.sonnet.output_tokens_min, 12);
 });
 
+test('effort comes from the result file where the Workflow tool writes it', () => {
+  // Transcripts in <session>/subagents/workflows/wf_<id>/, result in
+  // <session>/workflows/wf_<id>.json; nothing beside the transcript dir.
+  const session = join(TMP, 'session');
+  const dir = join(session, 'subagents', 'workflows', 'wf_abc-123');
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(session, 'workflows'), { recursive: true });
+  writeAgent(dir, 'g1', 'T1 implement', 'sonnet', [usageLine('m1', 'claude-sonnet-x', 1, 'end_turn', '2026-10-02T10:00:00.000Z')]);
+  writeAgent(dir, 'g2', 'T1 review', 'opus', [usageLine('m2', 'claude-opus-x', 1, 'end_turn', '2026-10-02T10:01:00.000Z')]);
+  writeFileSync(join(session, 'workflows', 'wf_abc-123.json'), JSON.stringify({ runId: 'wf_abc-123', args: {}, result: { agent_settings: [
+    { label: 'T1 implement', model: 'sonnet', effort: 'high' },
+    { label: 'T1 review', model: 'opus', effort: 'xhigh' },
+  ] } }));
+  for (const arg of [dir, `${dir}/`]) {
+    const r = run([arg, MANIFEST]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).agents.map((a) => [a.label, a.effort]), [
+      ['T1 implement', 'high'],
+      ['T1 review', 'xhigh'],
+    ]);
+  }
+});
+
 test('effort comes from the workflow result when it is there', () => {
   const dir = join(TMP, 'effort');
   mkdirSync(dir, { recursive: true });

@@ -174,6 +174,26 @@ test('run-checks keeps a large output out of its streams', () => {
   assert.equal(realpathSync(dirname(dirname(result.log))), TMP, 'a new temporary directory');
 });
 
+test('run-checks caps a tail by characters: one long line does not reach its stdout', () => {
+  const r = repo();
+  // One line of 3,000,000 characters and no newline, then a short run.
+  const res = py('run-checks', [r, '--cmd', 'test', "head -c 3000000 /dev/zero | tr '\\0' x",
+    '--cmd', 'lint', 'echo short']);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.length < 10000, `stdout is ${res.stdout.length} bytes`);
+  const [long, short] = JSON.parse(res.stdout).results;
+  assert.equal(long.tail, `[truncated] ${'x'.repeat(4096)}`);
+  assert.equal(short.tail, 'short', 'a short tail is not marked');
+  assert.equal(readFileSync(long.log, 'utf8').length, 3000000, 'the log keeps it all');
+});
+
+test('run-checks ignores --root without --out: the logs are in a temporary directory', () => {
+  const r = repo();
+  const res = py('run-checks', [r, '--root', join(dirname(r), 'ledger'), '--cmd', 'test', 'true']);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).ok, true);
+});
+
 test('run-checks puts each command\'s log beside --out', () => {
   const r = repo();
   const dir = join(dirname(r), 'ledger');

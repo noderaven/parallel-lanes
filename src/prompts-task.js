@@ -92,7 +92,10 @@ function commandsText(m, laneId, dir = null) {
   const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`);
+    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
+      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+      '  (the log\'s parent) once you have read what you need.');
   }
   return lines.join('\n');
 }
@@ -173,6 +176,14 @@ function fixCommitMessage(task) {
   return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
 }
 
+// The message an implement attempt commits further work with once HEAD holds
+// the task's first commit and no review findings are behind the attempt (a
+// retry after a blocked or escalated attempt, a reopened task): 'chore:
+// continue Task <id>', so history shows no fix of findings no review raised.
+function continueCommitMessage(task) {
+  return `chore: continue Task ${task.id}`;
+}
+
 // What every reviewer, re-reviewer and final lens is told about fix commits:
 // each fix message, and that neither the plan's message on a task's first
 // commit nor a fix message on a fix commit is a commit-rule finding.
@@ -181,8 +192,10 @@ function fixMessagesLines() {
     'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
     '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
     `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
-    "The plan's message applies to a task's first commit; a fix commit carries its fix message; neither is a",
-    'commit-rule finding.',
+    'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
+    'with `chore: continue Task <id>`.',
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
+    'continuation commit its continuation message; none of them is a commit-rule finding.',
   ];
 }
 
@@ -495,9 +508,12 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
     // A batch's commits are one per task, each with its brief's message.
+    // The fix message only when review findings are behind this attempt.
     ...(batch ? [] : [
       'When HEAD already holds the task\'s first commit, commit further changes with the message',
-      `\`${fixCommitMessage(task)}\`, in the form the commit rules use (for example their prefix style).`,
+      `\`${retry && Array.isArray(retry.findings) && retry.findings.length > 0
+        ? fixCommitMessage(task) : continueCommitMessage(task)}\`, in the form the commit rules use (for example`,
+      'their prefix style).',
     ]),
   ].join('\n'));
   if (retry) {

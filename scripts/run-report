@@ -16,12 +16,14 @@ writes it to FILE):
 Anything that cannot be read or derived is the string "unavailable", never a
 guess; totals sum only known values.
 
-Effort: the workflow result file <TRANSCRIPT_DIR>.json (beside the directory)
-lists result.agent_settings: [{label, model, effort}], one per agent started,
-in start order. Each agent takes the effort of the next unused entry with its
+Effort: the workflow result file lists result.agent_settings: [{label,
+model, effort}], one per agent started, in start order. Each agent takes the effort of the next unused entry with its
 label (agents in start order), so a label run twice gets its two entries in
 turn. Without that file, or with no matching entry or a non-string effort, an
 agent's effort is "unavailable": nothing is derived from the manifest or meta.
+The Workflow tool writes the transcripts to <session>/subagents/workflows/wf_<id>/
+and the result to <session>/workflows/wf_<id>.json; the result file is looked
+for there first, then at <TRANSCRIPT_DIR>.json beside the directory.
 
 Output tokens: a transcript line written mid-stream carries
 "stop_reason": null and the output count from the start of the stream, not
@@ -77,11 +79,29 @@ def manifest_task_ids(manifest):
     return {i for i in ids if isinstance(i, str)}
 
 
+def result_paths(transcript_dir):
+    """Where the workflow result file may be, in the order they are tried:
+    <session>/workflows/<name>.json for a transcript dir at
+    <session>/subagents/workflows/<name>, then <transcript_dir>.json."""
+    base = os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir)
+    parent = os.path.dirname(base)
+    paths = []
+    if os.path.basename(parent) == "workflows" and os.path.basename(os.path.dirname(parent)) == "subagents":
+        session = os.path.dirname(os.path.dirname(parent))
+        paths.append(os.path.join(session, "workflows", os.path.basename(base) + ".json"))
+    paths.append(base + ".json")
+    return paths
+
+
 def agent_efforts(transcript_dir):
-    """{label: [effort, ...]} from <transcript_dir>.json's result.agent_settings,
-    in start order; {} when the file is missing or unreadable."""
-    path = transcript_dir.rstrip("/\\") + ".json"
-    result = read_json(path).get("result")
+    """{label: [effort, ...]} from the workflow result file's
+    result.agent_settings (see result_paths), in start order; {} when no
+    readable result file is found."""
+    result = None
+    for path in result_paths(transcript_dir):
+        if os.path.isfile(path):
+            result = read_json(path).get("result")
+            break
     settings = result.get("agent_settings") if isinstance(result, dict) else None
     efforts = {}
     for s in settings if isinstance(settings, list) else []:

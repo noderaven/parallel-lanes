@@ -403,6 +403,11 @@ test('resume with only lane tasks done and reviewed: lanes skipped, empty lanes 
   assert.equal(result.status, 'complete');
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
   assert.ok(labels(calls).includes('integrate'));
+  // Their task minors are not carried from the earlier launch: the run says so.
+  const gap = result.final.cannot_verify.filter((c) => c.source === 'run' && /task reviews an earlier launch/.test(c.requirement));
+  assert.equal(gap.length, 1, JSON.stringify(result.final.cannot_verify));
+  assert.ok(gap[0].requirement.includes('(T2, T3, T4)'), gap[0].requirement);
+  assert.ok(result.acceptance.warnings.length > 0, 'a sourced gap note warns');
 });
 
 test('a done but unreviewed task is reviewed from the previous head before the lane continues', async () => {
@@ -568,6 +573,18 @@ test('final review dedupe merges identical findings from two lenses', () => {
   assert.deepEqual(merged[0].lenses, ['superpowers', 'security']);
   assert.equal(merged[0].severity, 'critical', 'keeps the most severe');
   assert.deepEqual(merged[1].lenses, ['security']);
+});
+
+test('a merged finding takes the issue text of its most severe report', () => {
+  const at = (severity, issue, fix) => ({ severity, file: 'src/a.js', line: 3, issue, fix });
+  const [m] = dedupeFindings([
+    { lens: 'superpowers', findings: [at('minor', 'minor text', 'minor fix')] },
+    { lens: 'security', findings: [at('critical', 'critical text', 'critical fix')] },
+    { lens: 'correctness', findings: [at('important', 'important text', 'important fix')] },
+  ]);
+  assert.deepEqual([m.severity, m.issue, m.fix], ['critical', 'critical text', 'critical fix']);
+  assert.deepEqual(m.also_reported, ['minor text', 'important text']);
+  assert.deepEqual(m.lenses, ['superpowers', 'security', 'correctness']);
 });
 
 test('final fix gets the deduped findings once, by id; a decline the re-review accepts is declined', async () => {
@@ -2197,11 +2214,12 @@ test('findings on the same file and line merge across lenses; others stay apart'
   const fix = (await run(manifest(), {
     ...phaseScript({
       'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: 'T5-h' }],
-      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: 'T5-h' }],
+      'final review security': [{ findings: [f('y-only-in-security', 7)], cannot_verify: [], head: 'T5-h' }],
     }),
     ...taskScript(ALL),
   })).calls.find((c) => c.label === 'final fix').prompt;
-  assert.ok(fix.includes('[F1]') && fix.includes('y'), fix);
+  assert.ok(fix.includes('[F1]'), fix);
+  assert.ok(fix.includes('Also reported here: y-only-in-security'), fix);
 });
 
 test('commit findings on the same sha merge', () => {

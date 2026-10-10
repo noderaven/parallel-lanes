@@ -754,9 +754,10 @@ function findingKey(f) {
 
 // Merge the lenses' findings (spec 1.3.1): findings on the same file and
 // line (line > 0), or on the same 'commit <sha>', become one entry listing
-// every lens that reported it, keeping the most severe severity (and that
-// report's fix), the first issue text, and the other reports' distinct
-// issue texts as also_reported. Every other finding stays separate.
+// every lens that reported it, keeping the issue text, severity and fix of
+// its most severe report (the first of those on a tie), and the other
+// reports' distinct issue texts as also_reported, so the issue text always
+// matches its severity. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -773,10 +774,17 @@ function dedupeFindings(reports) {
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
-      if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) seen.also_reported.push(f.issue);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
+        // The more severe report becomes the primary text; the earlier one
+        // moves to also_reported.
+        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
+        seen.issue = f.issue;
+        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
+        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
+      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
+        seen.also_reported.push(f.issue);
       }
     }
   }
