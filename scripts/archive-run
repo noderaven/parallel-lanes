@@ -72,7 +72,9 @@ from the wf_<id> dirs and their wf_<id>.json startTime values. A value that
 cannot be read is "unavailable", and so are first_launch and last_launch when
 no launch has a time (the date is never made up). A folder keeps its name; an
 old index entry of the folder lends its machine, platform and an earlier
-first_launch. Entries of folders that are gone are dropped, and an index that
+first_launch, and without one machine and platform are "unavailable" (the
+machine running reindex need not be the one that ran the run). The folders
+are listed again under the lock, so a run archived meanwhile is kept. Entries of folders that are gone are dropped, and an index that
 cannot be read is replaced. It writes only index.json: no folder or file is
 renamed, changed or removed. Prints
   {"runs": N, "skipped": [{"folder": "<name>", "reason": "<why>"}]}
@@ -501,20 +503,29 @@ def reindex_folder(hdir, name, old_index):
             old = entry
             break
     entry = build_entry(old, folder, name, manifest, first_match(folder, _REPORT_PATTERNS), reindex=True)
+    # The machine running reindex is not the one that ran the run.
     for key in ("machine", "platform"):
-        if isinstance(old.get(key), str) and old[key]:
-            entry[key] = old[key]
+        entry[key] = old[key] if isinstance(old.get(key), str) and old[key] else UNAVAILABLE
     return entry, None
+
+
+def folders(hdir):
+    """The sorted names of the folders in hdir."""
+    try:
+        return sorted(n for n in os.listdir(hdir) if os.path.isdir(os.path.join(hdir, n)))
+    except OSError as e:
+        raise ArchiveError("cannot read the history dir " + hdir + ": " + str(e))
 
 
 def reindex(hdir):
     """Rebuild index.json from the folders of hdir; the output object."""
-    try:
-        names = sorted(n for n in os.listdir(hdir) if os.path.isdir(os.path.join(hdir, n)))
-    except OSError as e:
-        raise ArchiveError("cannot read the history dir " + hdir + ": " + str(e))
+    # Checked before the lock, which would create a missing dir.
+    folders(hdir)
     runs, skipped = [], []
     with _history.index_lock(hdir):
+        # Listed again under the lock: an archive-run that held it may have
+        # added a folder since.
+        names = folders(hdir)
         try:
             old_index = _history.read_index(hdir)
         except _history.HistoryError:

@@ -356,7 +356,26 @@ test('reindex reads the imported layouts', () => {
   assert.equal(by.l131.launches, 1);
   assert.equal(by.l131.first_launch, 'unavailable');
   assert.equal(by.l131.status, 'unavailable');
+  // No old index entry: the machine running reindex is not the run's.
+  for (const e of index.runs) {
+    assert.equal(e.machine, 'unavailable', e.folder);
+    assert.equal(e.platform, 'unavailable', e.folder);
+  }
   assert.ok(!existsSync(join(hist, 'index.lock')));
+});
+
+test('reindex keeps the machine and platform of an old entry', () => {
+  const hist = importedHistory();
+  writeJson(join(hist, 'index.json'), {
+    version: 1,
+    runs: [{ run_id: 'r140', folder: 'r140', ledger_dir: 'C:/work/run/p.r140.ledger', machine: 'box1', platform: 'linux' }],
+  });
+  reindexOk(hist);
+  const by = Object.fromEntries(readIndex(hist).runs.map((e) => [e.folder, e]));
+  assert.equal(by.r140.machine, 'box1');
+  assert.equal(by.r140.platform, 'linux');
+  assert.equal(by.l131.machine, 'unavailable');
+  assert.equal(by.l131.platform, 'unavailable');
 });
 
 test('reindex skips folders without a manifest and says why', () => {
@@ -397,4 +416,66 @@ test('reindex rebuilds from the folders and exits 2 on a missing dir', () => {
   const res = reindex(join(hist, 'nope'));
   assert.equal(res.code, 2);
   assert.ok(!existsSync(join(hist, 'nope')));
+});
+
+// A lock held by someone else, as index_lock writes it (fresh, so not stale).
+function holdLock(hist) {
+  writeJson(join(hist, 'index.lock'), { pid: 1, time: new Date().toISOString(), host: 'other', token: 'held' });
+}
+
+test('reindex exits 2 when the lock is not acquired', () => {
+  const hist = importedHistory();
+  holdLock(hist);
+  // archive-run's main with index_lock waiting 0.5 s instead of 30 s.
+  const code = [
+    'import importlib.machinery, importlib.util, sys',
+    'sys.dont_write_bytecode = True',
+    "loader = importlib.machinery.SourceFileLoader('archive_run', sys.argv[1])",
+    'mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))',
+    'loader.exec_module(mod)',
+    'held = mod._history.index_lock',
+    'mod._history.index_lock = lambda hdir: held(hdir, wait_s=0.5)',
+    "sys.exit(mod.main(['archive-run', '--reindex', '--history-dir', sys.argv[2]]))",
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, SCRIPT, hist], { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(res.status, 2, res.stderr);
+  assert.match(res.stderr, /index\.lock is held/);
+  assert.equal(res.stdout, '');
+  assert.ok(!existsSync(join(hist, 'index.json')), 'no index is written');
+  assert.ok(existsSync(join(hist, 'index.lock')), 'the other lock is left alone');
+});
+
+test('reindex keeps a run archived while it waited for the lock', async () => {
+  const hist = importedHistory();
+  holdLock(hist);
+  const child = spawn('python3', [SCRIPT, '--reindex', '--history-dir', hist], { env: cleanEnv() });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const done = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  // Give reindex time to start and wait on the lock, then do what an
+  // archive-run holding the lock does: add a run folder and its entry.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  const late = importedFolder(hist, 'late', {
+    report: 'p.late.report.json',
+    reportBody: { engine_version: '1.5.0', agents: [] },
+    manifest: { version: 1, run_id: 'late', plan: 'C:/work/p.md', repo: { mode: 'git', root: 'C:/work/proj', ledger_dir: 'C:/work/run/p.late.ledger' } },
+  });
+  addLaunch(late, '', 'wf_l', DAY2);
+  writeJson(join(hist, 'index.json'), {
+    version: 1,
+    runs: [{ run_id: 'late', folder: 'late', ledger_dir: 'C:/work/run/p.late.ledger', machine: 'box2', platform: 'linux' }],
+  });
+  rmSync(join(hist, 'index.lock'));
+  const code = await done;
+  assert.equal(code, 0, stderr);
+  assert.equal(JSON.parse(stdout).runs, 4);
+  const late1 = readIndex(hist).runs.find((e) => e.folder === 'late');
+  assert.ok(late1, 'the late run is indexed');
+  assert.equal(late1.machine, 'box2');
+  assert.ok(!existsSync(join(hist, 'index.lock')));
 });
