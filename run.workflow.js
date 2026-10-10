@@ -1294,11 +1294,14 @@ function finishCommand(m, task, where, from, settled = null) {
 // head of the range under review): the hash of the task's section of the plan
 // comes from the file, not from the reviewer (scripts/ledger reviewed). The
 // reviewer fills <blocking> with its count of critical and important
-// findings; the command records nothing unless it is 0.
+// findings; the command records nothing unless it is 0. The last argument is
+// the spec path, which the ledger hashes so a changed spec makes the approval
+// stale; "-" when the run has no spec.
 function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
+  const spec = typeof m.spec === 'string' && m.spec !== '' ? shellQuote(m.spec) : '-';
   return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
-    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking> ${spec}`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.

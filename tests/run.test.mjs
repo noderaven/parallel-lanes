@@ -250,6 +250,20 @@ test('happy path: complete, phases in order, report filled in', async () => {
   for (const id of ALL) assert.deepEqual(result.tasks[id].commits.length, 2);
 });
 
+test('the review approval command passes the spec', async () => {
+  const reviewed = async (spec) => {
+    const m = manifest({ spec });
+    const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+    return calls.find((c) => c.label === 'T2 review').prompt;
+  };
+  const head = `'/work/wt/lane-alpha' '${H('T2-h')}' <blocking>`;
+  const withSpec = await reviewed('/work/spec.md');
+  assert.ok(withSpec.includes(`${head} '/work/spec.md'`), withSpec);
+  const noSpec = await reviewed(null);
+  assert.ok(noSpec.includes(`${head} -`), noSpec);
+  assert.ok(!noSpec.includes(`${head} '`), 'no spec path without a spec');
+});
+
 test('mechanical phases start on sonnet high; everything else runs opus high and all carry the commit rules', async () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
