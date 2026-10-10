@@ -30,9 +30,10 @@ Prints one JSON line: {"status", "reason"?, "path"?, "differences"?,
                                          string, ok and clean booleans,
                                          results a list of {group, command:
                                          strings, exit: an integer, never a
-                                         boolean}, tracked_before and
-                                         tracked_after (when present) lists
-                                         of strings
+                                         boolean}, tracked_before,
+                                         tracked_after, untracked_before and
+                                         untracked_after (each when present)
+                                         lists of strings
   invalid       verify_invalid           the sha is not 40 or 64 lowercase
                                          hex digits (no path is built)
   missing       verify_evidence_missing  no evidence file
@@ -43,9 +44,10 @@ Prints one JSON line: {"status", "reason"?, "path"?, "differences"?,
   stale         verify_evidence_stale    the evidence file was last written
                                          before startTime
   mismatch      verify_mismatch          head, ok, clean, tracked_before,
-                                         tracked_after or a result's {group,
-                                         command, exit} (compared position by
-                                         position) differ
+                                         tracked_after, untracked_before,
+                                         untracked_after or a result's
+                                         {group, command, exit} (compared
+                                         position by position) differ
   match         -                        report and fresh evidence agree
                                          (exit 0)
 
@@ -72,7 +74,8 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _shell  # noqa: E402
 
 USAGE = "usage: check-verify TRANSCRIPT_DIR MANIFEST"
-COMPARED = ("head", "ok", "clean", "tracked_before", "tracked_after")
+LISTS = ("tracked_before", "tracked_after", "untracked_before", "untracked_after")
+COMPARED = ("head", "ok", "clean") + LISTS
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
@@ -112,7 +115,7 @@ def malformed(run, name):
                 return f"{where}.{key} is not a string"
         if type(r.get("exit")) is not int:
             return f"{where}.exit is not an integer"
-    for key in ("tracked_before", "tracked_after"):
+    for key in LISTS:
         if key in run:
             lines = run[key]
             if type(lines) is not list or any(type(line) is not str for line in lines):
