@@ -20,6 +20,8 @@ native_path() gives the one path form passed between components on Windows,
 C:/... (what cygpath -m prints); elsewhere it returns its argument unchanged.
 
 setup_io() and write_text() keep output LF and UTF-8 on every platform.
+
+result_paths() lists where a launch's workflow result file may be.
 """
 
 import os
@@ -260,3 +262,17 @@ def write_text(path, text):
     """Write text to path as UTF-8 with LF line endings."""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
+
+
+def result_paths(transcript_dir):
+    """Where the workflow result file may be, in the order they are tried:
+    <session>/workflows/<name>.json for a transcript dir at
+    <session>/subagents/workflows/<name>, then <transcript_dir>.json."""
+    base = os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir)
+    parent = os.path.dirname(base)
+    paths = []
+    if os.path.basename(parent) == "workflows" and os.path.basename(os.path.dirname(parent)) == "subagents":
+        session = os.path.dirname(os.path.dirname(parent))
+        paths.append(os.path.join(session, "workflows", os.path.basename(base) + ".json"))
+    paths.append(base + ".json")
+    return paths

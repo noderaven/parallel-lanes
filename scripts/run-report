@@ -79,26 +79,12 @@ def manifest_task_ids(manifest):
     return {i for i in ids if isinstance(i, str)}
 
 
-def result_paths(transcript_dir):
-    """Where the workflow result file may be, in the order they are tried:
-    <session>/workflows/<name>.json for a transcript dir at
-    <session>/subagents/workflows/<name>, then <transcript_dir>.json."""
-    base = os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir)
-    parent = os.path.dirname(base)
-    paths = []
-    if os.path.basename(parent) == "workflows" and os.path.basename(os.path.dirname(parent)) == "subagents":
-        session = os.path.dirname(os.path.dirname(parent))
-        paths.append(os.path.join(session, "workflows", os.path.basename(base) + ".json"))
-    paths.append(base + ".json")
-    return paths
-
-
 def agent_efforts(transcript_dir):
     """{label: [effort, ...]} from the workflow result file's
-    result.agent_settings (see result_paths), in start order; {} when no
-    readable result file is found."""
+    result.agent_settings (see _shell.result_paths), in start order; {} when
+    no readable result file is found."""
     result = None
-    for path in result_paths(transcript_dir):
+    for path in _shell.result_paths(transcript_dir):
         if os.path.isfile(path):
             result = read_json(path).get("result")
             break
