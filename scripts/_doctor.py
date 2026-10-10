@@ -42,6 +42,7 @@ Hard failures (they block a launch):
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -97,14 +98,28 @@ class Probes:
         env["GIT_NO_LAZY_FETCH"] = "1"
         return env
 
-    def _command(self, argv, env, timeout=None):
+    def _command(self, argv, env, timeout=None, stderr=subprocess.PIPE):
+        # subprocess.run's timeout is not a bound: on TimeoutExpired it kills
+        # only argv's own process and then waits until every handle to the
+        # pipes closes. A child that inherited them (git ls-remote starts
+        # git-remote-https or ssh) keeps that wait going until it ends by
+        # itself, which on a stalled network can be never. So on a timeout
+        # the whole process tree is killed and the pipes are not waited on.
+        # With a timeout on POSIX, the command gets its own session so that
+        # os.killpg reaches every process it started.
+        tree = timeout is not None and sys.platform != "win32"
         try:
-            res = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                                 errors="replace", env=env, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired):
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=stderr, text=True, encoding="utf-8",
+                                    errors="replace", env=env, start_new_session=tree)
+        except OSError:
             return None
-        return Result(res.returncode, res.stdout, res.stderr)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            return None
+        return Result(proc.returncode, out or "", err or "")
 
     def _git(self, args):
         res = self._command(["git"] + list(args), self._git_env())
@@ -115,11 +130,37 @@ class Probes:
         # Never wait for a password prompt: an unanswered remote is a warning.
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GCM_INTERACTIVE"] = "never"
+        # The check never reads stderr. Sending it to DEVNULL means the
+        # transport git starts (git-remote-https, ssh), which inherits git's
+        # stderr, holds no pipe of ours; _command still kills the whole tree
+        # on a timeout, so the 15 s bound holds either way.
         return self._command(["git"] + list(prefix) + ["ls-remote", remote, ref], env,
-                             timeout=LS_REMOTE_TIMEOUT_S)
+                             timeout=LS_REMOTE_TIMEOUT_S, stderr=subprocess.DEVNULL)
 
     def _run(self, argv, timeout):
         return self._command(argv, self.env, timeout=timeout)
+
+
+def _kill_tree(proc):
+    """Kill proc and every process it started, without waiting on its pipes."""
+    try:
+        if sys.platform == "win32":
+            # /T kills the tree by parent pid, so it runs before proc dies.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def default_probes():
@@ -364,8 +405,10 @@ def _dirty_paths(porcelain):
         if len(entry) < 4:
             continue
         paths.append(entry[3:])
-        if entry[0] in "RC":
-            i += 1  # the rename's source path
+        # A rename or copy, in the index (X) or the work tree (Y, as for an
+        # intent-to-add file), is followed by its source path.
+        if entry[0] in "RC" or entry[1] in "RC":
+            i += 1
     return paths
 
 
@@ -381,7 +424,9 @@ def check_dirty_checkout(manifest, probes, prefix, report):
                     "point repo.root at the project's git checkout, or use shadow mode for "
                     "a folder that is not a git repo.")
         return
-    res = probes.git(list(prefix) + ["status", "--porcelain", "-z"])
+    # --untracked-files is explicit: without it git follows the user's
+    # status.showUntrackedFiles, and =no would hide untracked files.
+    res = probes.git(list(prefix) + ["status", "--porcelain", "-z", "--untracked-files=normal"])
     if res.code != 0:
         report.fail(check, "git status failed in " + root, DIRTY_FIX)
         return

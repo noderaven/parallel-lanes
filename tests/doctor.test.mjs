@@ -234,6 +234,52 @@ test('a dirty checkout fails and the fix never says to ignore everything', () =>
   assert.equal(named(clean.out.failures, 'dirty_checkout'), undefined, JSON.stringify(clean.out));
 });
 
+test('an untracked file is dirty even when status.showUntrackedFiles is no', () => {
+  const f = fixture();
+  git(f.root, 'config', 'status.showUntrackedFiles', 'no');
+  writeFileSync(join(f.root, 'hidden.txt'), 'new\n');
+  const r = doctor(f.manifest());
+  assert.equal(r.code, 3, r.stderr);
+  assert.match(named(r.out.failures, 'dirty_checkout').detail, /hidden\.txt/);
+});
+
+test('a work-tree rename is named once, by its new path', () => {
+  // git add -N on a moved file shows R in the work-tree (Y) column,
+  // followed by the source path.
+  const f = fixture();
+  writeFileSync(join(f.root, 'b.txt'), readFileSync(join(f.root, 'a.txt')));
+  rmSync(join(f.root, 'a.txt'));
+  git(f.root, 'add', '-N', 'b.txt');
+  const status = git(f.root, 'status', '--porcelain', '-z', '--untracked-files=normal');
+  assert.equal(status, ' R b.txt\0a.txt\0');
+  const r = doctor(f.manifest());
+  assert.equal(r.code, 3, r.stderr);
+  assert.equal(named(r.out.failures, 'dirty_checkout').detail, '1 uncommitted or untracked path(s): b.txt');
+});
+
+test('a command timeout kills the processes it started and does not wait for them', () => {
+  // A grandchild that inherits the pipes keeps them open after its parent
+  // is killed, as git-remote-https or ssh does under git ls-remote.
+  const code = [
+    'import sys, time',
+    'sys.dont_write_bytecode = True',
+    'sys.path.insert(0, sys.argv[1])',
+    'import _doctor',
+    'p = _doctor.Probes()',
+    'child = ("import subprocess, sys, time; "',
+    '         "subprocess.Popen([sys.executable, \'-c\', \'import time; time.sleep(15)\']); "',
+    '         "time.sleep(15)")',
+    'start = time.monotonic()',
+    'res = p._command([sys.executable, "-c", child], p.env, timeout=1)',
+    'print(res is None, time.monotonic() - start)',
+  ].join('\n');
+  const r = spawnSync('python3', ['-c', code, join(SKILL_DIR, 'scripts')], { encoding: 'utf8', env: ENV });
+  assert.equal(r.status, 0, r.stderr);
+  const [timedOut, elapsed] = r.stdout.trim().split(' ');
+  assert.equal(timedOut, 'True');
+  assert.ok(Number(elapsed) < 8, `the timeout took ${elapsed} s`);
+});
+
 test('a missing shadow repo fails in shadow mode', () => {
   const f = fixture();
   const plain = join(f.dir, 'plain');
