@@ -367,8 +367,9 @@ Findings two lenses report at the same `file` and `line` (when `line` > 0), or o
 `commit <sha>` file, are merged: the merged finding keeps every lens and the issue text,
 severity, and fix of its most severe report (the first of those on a tie), so the text
 matches the severity, and the other texts as `also_reported`; every other finding
-stays separate. Every minor finding of an approved task review gets an id `T<task>-<n>` and
-goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
+stays separate. Every minor finding of an approved task review gets an id `<task>-<n>`, with
+`T` put in front of a task id that starts with a digit (task 3 gives `T3-1`, task T2 gives
+`T2-1`), and goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
 finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
 them in the report, so minors from task reviews are not lost. Task minors are not stored in
 the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
@@ -459,6 +460,13 @@ h="$(printf '%s' "$p" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/shadow/$h"
 test -f "$d/pl-baseline" && echo "existing shadow: $d"
 ```
+
+The shadow repo's config sets `core.autocrlf=false`, so lane worktrees hold the project's
+exact bytes whatever the user's git settings. A shadow made before 1.3.1 lacked that setting:
+on a machine with `core.autocrlf=true`, the first setup after the upgrade sees every text file
+in its lane worktrees as modified (they were checked out with CRLF), lists them as discarded
+edits, saves a preserved ref, and checks them out again. That happens once and loses nothing
+a task committed.
 
 (`PL_SHADOW_BASE` replaces the base directory when set.) `shadow init` on an existing shadow
 prints it and keeps its old baseline, which is right only for resuming that run. For a new
