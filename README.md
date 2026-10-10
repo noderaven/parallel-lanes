@@ -10,6 +10,28 @@ review. It's built to pair with the [Superpowers](https://github.com/obra/superp
 plugin: Superpowers handles brainstorming, specs, and plans, and parallel-lanes takes over
 when it's time to execute the plan.
 
+## Why it works
+
+- **Safe parallelism.** Lanes are derived from the plan's file lists and dependencies: tasks
+  that share files stay in one lane or run first as shared groundwork, and each lane works in
+  its own git worktree. Integration merges the lanes and reruns every check.
+- **Review at every step.** Each task is reviewed independently before the next task in its
+  lane builds on it, and a final review then looks at the whole branch through three lenses.
+- **Evidence, not claims.** `accepted` requires the project's checks to pass at the delivered
+  commit, the final findings to be settled, and the agent's verify report to match the saved
+  check evidence. A failure is reported as `rejected`; missing or mismatched evidence as
+  `unverified`.
+- **Recoverable.** A ledger records commits and approvals, so an interrupted run resumes where
+  it stopped, and an approval whose plan section or spec changed is reviewed again.
+- **Built on Superpowers.** Superpowers turns an idea into a spec and a structured plan;
+  parallel-lanes executes that plan with Superpowers' own implementer and reviewer prompts
+  (built-in prompts when Superpowers is not installed), adding parallel lanes, integration and
+  verification.
+- **What it costs.** It uses more agents, and so more tokens, than a single-agent mode: about
+  two per task (implement and review) plus about eight per run, before any fix rounds. The
+  dry-run table shows the exact count before anything starts. There is no measured speedup
+  claim against sequential execution yet.
+
 ---
 
 ## 1. Prerequisites
