@@ -6,7 +6,7 @@ import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
 const {
   validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern, agentTypePattern,
-  effectiveAutonomy, effectiveLimits, planAgents, tierSettings,
+  effectiveAutonomy, effectiveLimits, planAgents, tierSettings, codeDepMet, reservedName,
 } = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
@@ -17,6 +17,8 @@ const {
   'effectiveLimits',
   'planAgents',
   'tierSettings',
+  'codeDepMet',
+  'reservedName',
 ]);
 
 function task(id, files, extra = {}) {
@@ -120,6 +122,60 @@ test('a task id that is not a safe file name is reported', () => {
   }
 });
 
+// Lane ids name ledger files and worktrees; renaming one keeps the
+// setup_result worktrees in step so only the id rule under test fails.
+function renameLane(m, index, id) {
+  const old = m.lanes[index].id;
+  m.lanes[index].id = id;
+  const worktrees = m.setup_result.worktrees;
+  worktrees[id] = worktrees[old];
+  delete worktrees[old];
+}
+
+test('task ids that differ only in letter case are reported', () => {
+  const m = validManifest();
+  m.prelude[0].id = 'T1';
+  m.join[0].id = 't1';
+  assertError(validateManifest(m), 'task t1', 'differs from T1 only in letter case');
+});
+
+test('lane ids that differ only in letter case are reported', () => {
+  const m = validManifest();
+  renameLane(m, 0, 'A');
+  renameLane(m, 1, 'a');
+  assertError(validateManifest(m), 'lane a', 'differs from A only in letter case');
+});
+
+test('ids that name a Windows device are reported', () => {
+  let m = validManifest();
+  m.prelude[0].id = 'CON';
+  assertError(validateManifest(m), 'CON', 'reserved device name on Windows');
+  m = validManifest();
+  m.join[0].id = 'nul.x';
+  assertError(validateManifest(m), 'nul.x', 'reserved device name on Windows');
+  m = validManifest();
+  renameLane(m, 0, 'Com1');
+  assertError(validateManifest(m), 'Com1', 'reserved device name on Windows');
+  m = validManifest();
+  m.run_id = 'aux';
+  assertError(validateManifest(m), 'run_id', 'aux', 'reserved device name on Windows');
+});
+
+test('ids that only start like a Windows device stay valid', () => {
+  const m = validManifest();
+  m.prelude[0].id = 'CONFIG';
+  m.join[0].id = 'T1.con';
+  renameLane(m, 0, 'lpt10');
+  m.run_id = 'com10';
+  assert.deepEqual(validateManifest(m), []);
+  for (const id of ['CON', 'prn', 'Aux', 'nul.x', 'COM1', 'com9.md', 'LPT1', 'lpt9']) {
+    assert.equal(reservedName(id), true, id);
+  }
+  for (const id of ['CONFIG', 'T1.con', 'lpt10', 'COM0', 'xnul', 'NUL_']) {
+    assert.equal(reservedName(id), false, id);
+  }
+});
+
 test('a file that is absolute or leaves the project is reported', () => {
   for (const f of ['/etc/passwd', '../outside.js', 'src/../../x.js']) {
     const m = validManifest();
@@ -217,6 +273,19 @@ test('depends_on: unknown ids, cycles, and code dependencies the run order canno
   m = validManifest();
   m.lanes[0].tasks[0].depends_on = [{ id: 'T1', kind: 'maybe' }];
   assertError(validateManifest(m), "depends_on must be a list of {id, kind: 'code' or 'contract'}");
+});
+
+test('codeDepMet: the run order meets a code dependency from the prelude, the same lane or join', () => {
+  const m = validManifest();
+  m.lanes[0].tasks.push(task('T5', ['src/a2.js']));
+  m.join.push(task('T6', ['CHANGELOG.md']));
+  assert.equal(codeDepMet(m, 'T2', 'T1'), true, 'prelude producer');
+  assert.equal(codeDepMet(m, 'T5', 'T2'), true, 'same lane, earlier');
+  assert.equal(codeDepMet(m, 'T2', 'T5'), false, 'same lane, later');
+  assert.equal(codeDepMet(m, 'T2', 'T3'), false, 'other lane');
+  assert.equal(codeDepMet(m, 'T4', 'T2'), true, 'join task, lane producer');
+  assert.equal(codeDepMet(m, 'T4', 'T6'), false, 'join task, later join producer');
+  assert.equal(codeDepMet(m, 'T1', 'T2'), false, 'prelude task, lane producer');
 });
 
 test('excluded, deferred and allow_deferral are checked', () => {

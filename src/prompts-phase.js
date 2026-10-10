@@ -51,25 +51,28 @@ function statusSchema() {
 }
 
 function preflightSchema() {
+  // undeclared and code_deps share the item shape {task, producer, what}.
+  const dependencies = () => ({
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        producer: { type: 'string' },
+        what: { type: 'string' },
+      },
+      required: ['task', 'producer', 'what'],
+    },
+  });
   return {
     type: 'object',
     properties: {
       conflicts: { type: 'array', items: { type: 'string' } },
       rulings: { type: 'array', items: { type: 'string' } },
-      undeclared: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            producer: { type: 'string' },
-            what: { type: 'string' },
-          },
-          required: ['task', 'producer', 'what'],
-        },
-      },
+      undeclared: dependencies(),
+      code_deps: dependencies(),
     },
-    required: ['conflicts', 'rulings', 'undeclared'],
+    required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
 }
 
@@ -193,8 +196,10 @@ function verifySchema() {
       },
       ok: { type: 'boolean' },
       clean: { type: 'boolean' },
+      tracked_before: { type: 'array', items: { type: 'string' } },
+      tracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
   };
 }
 
@@ -212,13 +217,14 @@ function preflightPrompt(m) {
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
     '   or cannot work as written).',
-    '3. Cross-lane code dependencies: a lane task that needs code another lane writes (beyond a contract the',
-    '   plan defines) must be in join.',
+    '3. Code dependencies: a lane task that needs real code another task produces (beyond a contract the',
+    '   plan defines). Report each in code_deps, not as a conflict: return it as {task, producer, what},',
+    '   what in one sentence. The run checks the schedule against these.',
     '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
-    'Report serious problems (implementers would build the wrong thing, or a check above fails) as conflicts,',
+    'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
     '',
@@ -697,17 +703,19 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
   ].join('\n');
 }
 
-// The verify step: every project check at the delivered revision, through
-// scripts/run-checks, whose JSON the agent returns as it printed it.
+// The verify step: every check of the final inventory (project and lane
+// commands, finalChecks) at the delivered revision, through one
+// scripts/run-checks call, whose JSON the agent returns as it printed it.
 function verifyPrompt(m, sha) {
   const dir = featureDir(m);
-  const cmd = checksCommand(m, null, dir, `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
     `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
-    `2. Run the project's setup commands first: ${commandList(m, null, 'setup')}`,
+    `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     `3. Run, as one call: ${cmd}`,
     '',
     keepFilesRule(),
@@ -715,20 +723,29 @@ function verifyPrompt(m, sha) {
     '',
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
-    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
+    'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
+    'tracked_after.',
   ].join('\n');
 }
 
 // What the project checks found, for an agent that would otherwise rerun
 // them at the same commit: one line, or '' for null (or a result naming no
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
-// per-command results (integrate's). Passed means ok and every exit 0.
+// per-command results (integrate's). Passed means ok and every exit 0, on a
+// checkout with no tracked change before or after the commands; checks that
+// passed on uncommitted tracked changes do not cover head. A missing tracked
+// list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
   const results = Array.isArray(checks.results) ? checks.results : [];
   const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
-    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  const tracked = new Set([checks.tracked_before, checks.tracked_after]
+    .flatMap((l) => (Array.isArray(l) ? l : []))
+    .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
+  const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
+    : tracked.size > 0 ? `ran on uncommitted tracked changes (${tracked.size} file${tracked.size === 1 ? '' : 's'}),`
+      + ` so they do not cover ${checks.head}`
+      : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
 

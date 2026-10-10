@@ -23,10 +23,12 @@ function withFindingIds(findings, prefix = 'F') {
 // no disposition, a re-review that says open or leaves the id out, or no
 // re-review at all). rr is the re-review result {head, results, new_findings},
 // or null when none ran (whyNot says why). New findings are open with ids N1...
-// Answers are checked across fields, not just for shape: a re-review of
-// another revision than delivered (the fix head) settles nothing (its new
-// findings are still kept, open), a disposition without evidence settles
-// nothing, and two different answers for one id leave it open.
+// Answers are checked across fields, not just for shape, in this order: a
+// re-review of another revision than delivered (the fix head) settles nothing
+// (its new findings are still kept, open); two different answers for one id
+// leave it open; so do a missing disposition, a disposition whose evidence is
+// empty or only whitespace, a missing or non-resolved re-review result, and a
+// re-review result whose evidence is empty or only whitespace.
 // reReviewProblem says why a re-review result settles nothing, or null.
 function reReviewProblem(rr, whyNot, delivered) {
   if (rr === null) return whyNot;
@@ -61,10 +63,12 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
     if (none !== null) open.push({ ...withNotes, reason: none });
     else if (verdict.get(f.id) === null) open.push({ ...withNotes, reason: 'the final re-review gave contradictory results for it' });
     else if (said.get(f.id) === null) open.push({ ...withNotes, reason: 'the final fix gave contradictory dispositions for it' });
-    else if (d && !present(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
+    else if (!d) open.push({ ...withNotes, reason: 'the final fix gave no disposition for it' });
+    else if (!hasText(d.evidence)) open.push({ ...withNotes, reason: 'the final fix gave no evidence for it' });
     else if (!v || v.status !== 'resolved') {
       open.push({ ...withNotes, reason: v ? 'still open after the final re-review' : 'the final re-review gave no result for it' });
-    } else if (d && d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
+    } else if (!hasText(v.evidence)) open.push({ ...withNotes, reason: 'the final re-review gave no evidence for it' });
+    else if (d.status === 'declined') declined.push({ ...withNotes, reason: d.reason });
     else fixed.push(withNotes);
   }
   const fresh = rr && Array.isArray(rr.new_findings) ? withFindingIds(rr.new_findings, 'N') : [];
@@ -73,11 +77,25 @@ function settleFinalFindings(findings, dispositions, rr, whyNot = 'not re-review
 }
 
 // The test, lint and build commands the verify step must have run, in order
-// ({group, command}).
+// ({group, command}): the final inventory, lane checks included.
 function expectedChecks(m) {
-  const out = [];
-  for (const group of ['test', 'lint', 'build']) for (const command of m.commands[group] || []) out.push({ group, command });
-  return out;
+  return finalChecks(m);
+}
+
+// Why a verify result at sha does not cover the commit itself, or null when
+// git status showed no tracked or staged change before and after the checks
+// (run-checks' tracked_before and tracked_after, porcelain lines). A result
+// without the lists cannot show that, so it does not cover the commit either.
+function uncleanChecksDetail(verify, sha) {
+  const parts = [];
+  for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
+    const lines = verify[field];
+    if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
+    else if (lines.length > 0) {
+      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
+    }
+  }
+  return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
 }
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
@@ -117,10 +135,14 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
+  // Checks that ran on uncommitted tracked or staged changes, or changed a
+  // tracked file, tested something other than the delivered commit.
+  const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
+  if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
-  if (want.length > 0 && verify && verify.head === sha && verify.clean !== true) {
+  if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
     warnings.push(verify.clean === false
       ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
       : `the project checks did not report whether the checkout was clean at ${sha}`);
@@ -148,6 +170,9 @@ function acceptanceOf(input) {
   if (final) {
     if (final.unreviewed_fix) add('final_fix_unreviewed', 'missing', final.unreviewed_fix);
     for (const lens of final.missing_lenses || []) add('review_missing', 'missing', `the ${lens} final review returned no result`);
+    // Lenses that did not all review one commit (F2): their findings are not
+    // bound to the delivered revision.
+    if (hasText(final.review_problem)) add('review_unbound', 'missing', final.review_problem);
     const open = final.open || [];
     const blocking = open.filter(isBlocking);
     if (blocking.length > 0) {

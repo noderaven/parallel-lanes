@@ -28,7 +28,8 @@
     },
     "run_id": {
       "type": "string",
-      "pattern": "^[a-z0-9-]+$"
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Part of branch names. Must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'."
     },
     "plan": {
       "$ref": "#/$defs/text"
@@ -126,6 +127,7 @@
         ],
         "properties": {
           "id": {
+            "description": "Names ledger files and worktrees: must differ from every other lane id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'.",
             "allOf": [
               {
                 "type": "string",
@@ -442,7 +444,7 @@
         "id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$",
-          "description": "Exactly as in the plan heading; a safe file name (it names brief, report and review files)."
+          "description": "Exactly as in the plan heading; a safe file name (it names brief, report and review files). Must differ from every other task id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'."
         },
         "title": {
           "$ref": "#/$defs/text"
