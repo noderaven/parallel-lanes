@@ -12,6 +12,10 @@ wf_<id>.json, and the *.ledger dir; never a live path from the manifest, so
 archived runs from another machine or OS work too. Anything that cannot be
 read or derived is "unavailable", never 0.
 
+render_markdown(analysis) returns the text of autopsy.md and
+render_summary(analysis, md_path) the chat summary (at most 15 lines); both
+use only the analysis object and write plain ASCII.
+
 Transcript text is used only inside this module (to match markers); it is
 never written out. Event "text", notes and tool inputs stay internal: a
 slowdown's evidence holds only the tool name, an exit code, a marker string
@@ -22,6 +26,7 @@ check execution's command is a configured string from the manifest or
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -1268,3 +1273,346 @@ def analyze(run_folder):
         "suggestions": suggestions_section(found, unclean_suggestion(run_folder, done)),
         "unexplained": unexplained_section(run, found),
     }
+
+
+# ---- autopsy.md and the chat summary ----
+
+BAR_COLUMNS = 40
+SUMMARY_MAX_LINES = 15
+_NON_PRINTABLE = re.compile(r"[^\x20-\x7e]")
+
+
+def _ascii(value):
+    """Plain ASCII on one line: anything else becomes '?'."""
+    return _NON_PRINTABLE.sub("?", str(value))
+
+
+def _cell(value):
+    return _ascii(value).replace("|", "/")
+
+
+def _is_num(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _secs(value):
+    return "%.1f s" % value if _is_num(value) else UNAVAILABLE
+
+
+def _tokens(value):
+    return "%d" % value if _is_num(value) else UNAVAILABLE
+
+
+def _when(value):
+    """2026-10-10T07:00:05.000Z as 2026-10-10 07:00:05Z."""
+    if parse_ts(value) is None:
+        return UNAVAILABLE
+    return value.replace("T", " ")[:19] + "Z"
+
+
+def _hms(value):
+    total = int(round(value))
+    return "%dm%02ds" % (total // 60, total % 60)
+
+
+def _wall(value):
+    return "%s (%s)" % (_secs(value), _hms(value)) if _is_num(value) else UNAVAILABLE
+
+
+def _count_word(n, word):
+    return "%d %s" % (n, word if n == 1 else word + ("es" if word.endswith("ch") else "s"))
+
+
+def _table(headers, rows):
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join(" --- " for _h in headers) + "|"]
+    for row in rows:
+        lines.append("| " + " | ".join(_cell(c) for c in row) + " |")
+    return lines
+
+
+def _launch_names(analysis):
+    launches = analysis.get("launches")
+    return launches if isinstance(launches, list) else []
+
+
+def _slowest_phase(analysis):
+    phases = analysis["time"]["phases"]
+    timed = [p for p in phases if _is_num(p.get("wall_s"))]
+    if not timed:
+        return None
+    best = timed[0]
+    for p in timed[1:]:
+        if p["wall_s"] > best["wall_s"]:
+            best = p
+    return best
+
+
+def _slowdown_cost(s):
+    cost = _secs(s["cost_s"])
+    if _is_num(s["cost_s"]) and s["cost_kind"] == "bound":
+        cost += " (upper bound)"
+    return cost
+
+
+def _evidence_text(evidence):
+    parts = []
+    if evidence.get("tool"):
+        parts.append("tool %s" % evidence["tool"])
+    if evidence.get("exit") is not None:
+        parts.append("exit %s" % evidence["exit"])
+    if evidence.get("marker"):
+        parts.append("marker '%s'" % evidence["marker"])
+    if evidence.get("program"):
+        parts.append("program %s" % evidence["program"])
+    return ", ".join(parts) if parts else "-"
+
+
+def _md_summary(a):
+    launches = _launch_names(a)
+    detail = ", ".join("%s %s" % (l["wf"], l["status"]) for l in launches) or "none"
+    acceptance = a["done"]["acceptance"]
+    lines = [
+        "- Run: %s (engine %s)" % (a["run_id"], a["engine_version"]),
+        "- Wall time: %s over %s: %s" % (_wall(a["time"]["wall_s"]), _count_word(len(launches), "launch"), detail),
+        "- Acceptance: %s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE),
+    ]
+    slowest = _slowest_phase(a)
+    if slowest is not None:
+        lines.append("- Slowest phase: %s (%s)" % (slowest["phase"], _secs(slowest["wall_s"])))
+    top = a["slowdowns"][0] if a["slowdowns"] else None
+    lines.append("- Slowdowns: %d found%s" % (len(a["slowdowns"]),
+                 "" if top is None else "; the largest is %s (%s)" % (top["kind"], _secs(top["cost_s"]))))
+    lines.append("- All values are in autopsy.json beside this file. Times are UTC; "
+                 "a value that cannot be derived says unavailable.")
+    return lines
+
+
+def _md_done(a):
+    done = a["done"]
+    lines = []
+    tasks = done["tasks"]
+    if isinstance(tasks, dict):
+        for tid, t in tasks.items():
+            commits = t["commits"]
+            lines.append("- %s: %s; %s; %s; tier %s" % (
+                tid, t["status"],
+                "commits unavailable" if commits == UNAVAILABLE else _count_word(len(commits), "commit"),
+                "rounds " + str(t["rounds"]), t["tier_used"]))
+        if not tasks:
+            lines.append("- No tasks listed.")
+    else:
+        lines.append("- Tasks: unavailable (the run's result file is missing or unreadable).")
+    acc = done["acceptance"]
+    if isinstance(acc, dict):
+        reasons = acc["reasons"]
+        why = "" if not isinstance(reasons, list) or not reasons else \
+            " (" + ", ".join("%s: %s" % (r["kind"], r["class"]) for r in reasons) + ")"
+        lines.append("- Acceptance: %s%s; warnings %s" % (acc["status"], why, acc["warnings"]))
+    else:
+        lines.append("- Acceptance: unavailable")
+    fin = done["final"]
+    if isinstance(fin, dict):
+        lines.append("- Final review: %s fixed, %s declined, %s open" % (fin["fixed"], fin["declined"], fin["open"]))
+    else:
+        lines.append("- Final review: unavailable")
+    lines.append("- End-to-end checks: %s" % done["e2e"])
+    return lines
+
+
+def _bar(start, end, axis_start, axis_end):
+    """A BAR_COLUMNS-wide row of '.' with '#' over [start, end]."""
+    span = axis_end - axis_start
+    if span <= 0:
+        return "#" * BAR_COLUMNS
+    first = int((start - axis_start) / span * BAR_COLUMNS)
+    last = int(math.ceil((end - axis_start) / span * BAR_COLUMNS))
+    first = max(0, min(BAR_COLUMNS - 1, first))
+    last = max(first + 1, min(BAR_COLUMNS, last))
+    return "." * first + "#" * (last - first) + "." * (BAR_COLUMNS - last)
+
+
+def _timeline(a):
+    """Code-fenced text: per launch, a header and one bar row per lane."""
+    lanes = a["time"]["lanes"]
+    launches = [l for l in _launch_names(a) if any(x["launch"] == l["wf"] for x in lanes)]
+    if not launches:
+        return []
+    width = max(len("lane " + x["lane"]) for x in lanes)
+    wf_width = max(len(l["wf"]) for l in launches)
+    out = ["```"]
+    for launch in launches:
+        rows = [x for x in lanes if x["launch"] == launch["wf"]]
+        spans = [(parse_ts(x["start"]), parse_ts(x["end"])) for x in rows]
+        known = [s for s in spans if s[0] is not None and s[1] is not None]
+        axis_start, axis_end = parse_ts(launch["start"]), parse_ts(launch["end"])
+        if (axis_start is None or axis_end is None) and known:
+            axis_start, axis_end = min(s[0] for s in known), max(s[1] for s in known)
+        if axis_start is None or axis_end is None:
+            out.append("%s: time unavailable" % launch["wf"])
+            continue
+        out.append("%s: %s to %s" % (launch["wf"], _when(iso(axis_start)), _when(iso(axis_end))))
+        for x, (start, end) in zip(rows, spans):
+            label = "%-*s  %-*s " % (width, _ascii("lane " + x["lane"]), wf_width, launch["wf"])
+            if start is None or end is None:
+                out.append(label + "(time unavailable)")
+                continue
+            start, end = max(start, axis_start), min(max(end, start), axis_end)
+            out.append("%s|%s|  span %s, busy %s" % (label, _bar(start, end, axis_start, axis_end),
+                                                    _secs(seconds(end - start)),
+                                                    _secs(x["busy_s"])))
+    out.append("```")
+    return out
+
+
+def _md_time(a):
+    t = a["time"]
+    lines = ["Wall time: %s." % _wall(t["wall_s"]), ""]
+    if t["phases"]:
+        lines += _table(["Phase", "Launch", "Start", "End", "Wall", "Agents"],
+                        [[p["phase"], p["launch"], _when(p["start"]), _when(p["end"]), _secs(p["wall_s"]),
+                          p["agents"]] for p in t["phases"]])
+    else:
+        lines.append("No phases found.")
+    timeline = _timeline(a)
+    if timeline:
+        lines += ["", "Timeline: one row per lane, each launch on its own axis of %d columns; "
+                  "# marks the lane's span." % BAR_COLUMNS, ""] + timeline
+    labels = t["critical_path"]["labels"]
+    lines += ["", "Critical path (an estimate from agent timings, not a measurement): %s" %
+              (_ascii(" -> ".join(labels)) if labels else UNAVAILABLE)]
+    gaps = t["idle_gaps"]
+    if gaps:
+        lines += ["", "Idle gaps (no agent running): %d, %s in all." % (len(gaps), _secs(sum(g["s"] for g in gaps)))]
+        lines += ["- %s to %s: %s" % (_when(g["start"]), _when(g["end"]), _secs(g["s"])) for g in gaps[:5]]
+    return lines
+
+
+def _md_checks(a):
+    checks = a["checks"]
+    if checks["executions"] == UNAVAILABLE:
+        return ["Check executions: unavailable (the run has no timed tool events)."]
+    executions = checks["executions"]
+    lines = ["%s; %d on the critical path; %d in the background." % (
+        _count_word(len(executions), "execution"), sum(1 for x in executions if x["on_critical_path"]),
+        sum(1 for x in executions if x["background"]))]
+    if executions:
+        lines += [""] + _table(["Command", "Runs", "Total"],
+                               [[c, v["runs"], _secs(v["total_s"])] for c, v in checks["by_command"].items()])
+    full = checks["full_suite_runs"]
+    lines += ["", "Full-suite runs: %s" % full["total"]]
+    if isinstance(full["by_role"], dict):
+        lines += ["- %s: %d" % (_ascii(r), n) for r, n in full["by_role"].items()]
+    return lines
+
+
+def _md_slowdowns(a):
+    if not a["slowdowns"]:
+        lines = ["No slowdowns found."]
+    else:
+        lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
+                       [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
+                         _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"])])
+    missing = [k for k, v in a["detectors"].items() if v != "ok"]
+    if missing:
+        lines += ["", "Detectors without data (they add no slowdowns): %s." % ", ".join(missing)]
+    return lines
+
+
+def _md_tokens(a):
+    t = a["tokens"]
+    tot = t["totals"]
+    lines = []
+    if t["partial"]:
+        lines.append("These totals are minimums: some agents have no usage data, incomplete output counts "
+                     "or unreadable lines, so the real totals are higher.")
+        lines.append("")
+    output = _tokens(tot["output_tokens"]) if _is_num(tot["output_tokens"]) else \
+        ">= %s" % _tokens(tot["output_tokens_min"])
+    lines.append("Totals over %s: input %s, output %s, cache read %s, cache creation %s." % (
+        _count_word(tot["agents"], "agent"), _tokens(tot["input_tokens"]), output,
+        _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
+    if t["unreadable_lines"] > 0:
+        lines.append("Damaged transcript lines were skipped; unreadable lines: %d." % t["unreadable_lines"])
+    if t["by_role"]:
+        def out_of(b):
+            return _tokens(b["output_tokens"]) if _is_num(b["output_tokens"]) else \
+                ">= %s" % _tokens(b["output_tokens_min"])
+        lines += ["", "By role:", ""] + _table(
+            ["Role", "Agents", "Input", "Output", "Cache read", "Cache creation"],
+            [[r, b["agents"], _tokens(b["input_tokens"]), out_of(b), _tokens(b["cache_read_input_tokens"]),
+              _tokens(b["cache_creation_input_tokens"])] for r, b in t["by_role"].items()])
+    if t["top_agents"]:
+        lines += ["", "Largest agents:", ""] + _table(
+            ["Agent", "Phase", "Tokens"], [[x["label"], x["phase"], x["tokens"]] for x in t["top_agents"]])
+    return lines
+
+
+def _md_suggestions(a):
+    if not a["suggestions"]:
+        return ["None."]
+    lines = []
+    for i, g in enumerate(a["suggestions"], 1):
+        lines.append("%d. %s (stake %s, %s): %s" % (i, g["kind"], _secs(g["stake_s"]),
+                                                    _count_word(g["count"], "time"), g["text"]))
+    return lines
+
+
+def _md_open(a):
+    gaps = a["unexplained"]
+    if not gaps:
+        return ["None."]
+    return ["- %s to %s, %s of %s: no slowdown above explains this time." % (
+        _when(g["start"]), _when(g["end"]), _secs(g["s"]), g["agent"]) for g in gaps]
+
+
+def render_markdown(analysis):
+    """autopsy.md: the sections in a fixed order, plain ASCII."""
+    a = analysis
+    parts = [
+        ["# Autopsy: %s" % a["run_id"]],
+        ["## Summary", ""] + _md_summary(a),
+        ["## What got done", ""] + _md_done(a),
+        ["## Where time went", ""] + _md_time(a),
+        ["## Checks", ""] + _md_checks(a),
+        ["## Slowdowns", ""] + _md_slowdowns(a),
+        ["## Tokens", ""] + _md_tokens(a),
+        ["## Suggestions", ""] + _md_suggestions(a),
+        ["## Open questions", ""] + _md_open(a),
+    ]
+    text = "\n\n".join("\n".join(p) for p in parts) + "\n"
+    return "\n".join(_ascii(line) for line in text.split("\n"))
+
+
+def render_summary(analysis, md_path):
+    """The chat summary: at most SUMMARY_MAX_LINES lines."""
+    a = analysis
+    lines = ["autopsy %s: wall %s over %s" % (a["run_id"], _wall(a["time"]["wall_s"]),
+                                              _count_word(len(_launch_names(a)), "launch"))]
+    slowest = _slowest_phase(a)
+    lines.append("slowest phase: %s" % ("unavailable" if slowest is None else
+                                        "%s (%s)" % (slowest["phase"], _secs(slowest["wall_s"]))))
+    slowdowns = a["slowdowns"]
+    if slowdowns:
+        lines.append("slowdowns (%d found), top %d:" % (len(slowdowns), min(3, len(slowdowns))))
+        for s in slowdowns[:3]:
+            where = s["agent"] if s["agent"] else "run-wide"
+            lines.append("  %s (%s): %s" % (s["kind"], where, _slowdown_cost(s)))
+    else:
+        lines.append("slowdowns: none found")
+    full = a["checks"]["full_suite_runs"]
+    by_role = full["by_role"]
+    lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
+        "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
+    tot = a["tokens"]["totals"]
+    if a["tokens"]["partial"]:
+        lines.append("tokens: at least %s output (a minimum: some usage is missing or unreadable)"
+                     % _tokens(tot["output_tokens_min"]))
+    else:
+        lines.append("tokens: %s input, %s output, %s cache read, %s cache creation" % (
+            _tokens(tot["input_tokens"]), _tokens(tot["output_tokens"]),
+            _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
+    top = a["suggestions"][0] if a["suggestions"] else None
+    lines.append("top suggestion: %s" % ("none" if top is None else "%s: %s" % (top["kind"], top["text"])))
+    lines = [_ascii(line) for line in lines[:SUMMARY_MAX_LINES - 1]]
+    lines.append("full report: %s" % md_path)
+    return "\n".join(lines) + "\n"

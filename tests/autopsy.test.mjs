@@ -44,6 +44,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { tempDir } from './platform.mjs';
@@ -600,4 +601,147 @@ test('checks without tool events are unavailable, not zero', () => {
     executions: 'unavailable', by_command: 'unavailable',
     full_suite_runs: { total: 'unavailable', by_role: 'unavailable' },
   });
+});
+
+// ---- autopsy.md and the chat summary ----
+
+function runCli(dir, ...extra) {
+  const r = spawnSync('python3', [SCRIPT, dir, ...extra], { encoding: 'utf8' });
+  const mdPath = join(dir, 'autopsy.md');
+  const md = r.status === 0 && existsSync(mdPath) ? readFileSync(mdPath, 'utf8') : null;
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, md };
+}
+
+const HEADINGS = [
+  'Summary', 'What got done', 'Where time went', 'Checks', 'Slowdowns', 'Tokens', 'Suggestions',
+  'Open questions',
+];
+
+test('autopsy.md has every section in order', () => {
+  for (const src of [RUN1, RUN2, RUN3]) {
+    const res = runCli(copyRun(src));
+    assert.equal(res.code, 0, res.stderr);
+    const lines = res.md.split('\n');
+    assert.match(lines[0], /^# Autopsy: \S/);
+    assert.deepEqual(lines.filter((l) => l.startsWith('## ')), HEADINGS.map((h) => `## ${h}`));
+  }
+  const md = runCli(copyRun(RUN2)).md;
+  // The phase table, a 40-column bar per lane and the estimate label.
+  assert.match(md, /\| Lane beta \| wf_2 \|/);
+  assert.match(md, /^lane a +wf_2 +\|[.#]{40}\|/m);
+  assert.match(md, /estimate/i);
+  // Checks: executions by command and full-suite runs by role.
+  assert.match(md, /node tests\/run-tests\.mjs \| 3 \| 160\.0/);
+  assert.match(md, /implement: 3/);
+  // One open-questions line per unexplained entry.
+  const open = md.split('## Open questions')[1].split('\n').filter((l) => l.startsWith('- '));
+  assert.equal(open.length, 1);
+  // Paths are relative to the run folder.
+  assert.ok(!md.includes(TMP));
+});
+
+test('the summary is at most 15 lines and names the essentials', () => {
+  const dir = copyRun(RUN2);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const lines = res.stdout.split('\n').filter((l) => l !== '');
+  assert.ok(lines.length <= 15, `${lines.length} lines`);
+  const A2 = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const slowest = A2.time.phases.reduce((a, b) => (b.wall_s > a.wall_s ? b : a));
+  assert.equal(slowest.phase, 'Lane a');
+  assert.match(res.stdout, /Lane a/);
+  assert.match(res.stdout, /1590\.0 s/);
+  // The top three slowdowns, largest first, with their cost_s.
+  const top = A2.slowdowns.slice(0, 3);
+  assert.deepEqual(top.map((s) => s.kind), ['relaunch', 'idle_gap', 'escalation']);
+  for (const s of top) assert.match(res.stdout, new RegExp(`${s.kind}.*${s.cost_s.toFixed(1)} s`));
+  assert.ok(!res.stdout.includes('extra_review_round'));
+  assert.match(res.stdout, /full-suite runs: 3/);
+  assert.match(res.stdout, /suggestion: relaunch/);
+  const mdPath = join(dir, 'autopsy.md').replaceAll('\\', '/');
+  assert.ok(res.stdout.includes(mdPath), res.stdout);
+  assert.ok(readFileSync(join(dir, 'autopsy.md'), 'utf8').length > 0);
+  // --quiet writes the files and prints nothing.
+  const quiet = runCli(copyRun(RUN2), '--quiet');
+  assert.equal(quiet.code, 0, quiet.stderr);
+  assert.equal(quiet.stdout, '');
+  assert.ok(quiet.md.startsWith('# Autopsy: '));
+});
+
+test('a run with no slowdowns still gets a short summary', () => {
+  const res = runCli(copyRun(RUN1));
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
+  assert.match(res.stdout, /full-suite runs: 2/);
+  assert.match(res.stdout, /autopsy\.md/);
+});
+
+test('partial tokens are called minimums', () => {
+  const dir = copyRun();
+  editLines(join(dir, 'wf_1', 'agent-a2.jsonl'), (lines) => {
+    lines[2] = lines[2].slice(0, 60);
+    return lines;
+  });
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /minimum/);
+  const tokens = res.md.split('## Tokens')[1].split('\n## ')[0];
+  assert.match(tokens, /minimum/);
+  assert.match(tokens, /unreadable lines: 1/);
+  // A complete run says neither.
+  const whole = runCli(copyRun());
+  assert.ok(!/minimum/.test(whole.stdout));
+  const wholeTokens = whole.md.split('## Tokens')[1].split('\n## ')[0];
+  assert.ok(!/minimum|unreadable/.test(wholeTokens));
+});
+
+test('the outputs are plain ASCII', () => {
+  const dir = copyRun(RUN2);
+  const manifestPath = join(dir, 'p.lanes.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  manifest.run_id = 'f2-\u00e9\u4e2d';
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.md, /^[\x00-\x7f]*$/);
+  assert.match(res.stdout, /^[\x00-\x7f]*$/);
+  assert.match(readFileSync(join(dir, 'autopsy.json'), 'utf8'), /^[\x00-\x7f]*$/);
+  assert.match(res.md.split('\n')[0], /^# Autopsy: f2-\?+$/);
+});
+
+test('rerunning autopsy overwrites only its own files', () => {
+  const dir = copyRun(RUN2);
+  const hashes = () => {
+    const out = {};
+    const walk = (rel) => {
+      for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+        const p = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(p);
+        else if (p !== 'autopsy.json' && p !== 'autopsy.md') {
+          out[p] = createHash('sha256').update(readFileSync(join(dir, p))).digest('hex');
+        }
+      }
+    };
+    walk('');
+    return out;
+  };
+  const before = hashes();
+  assert.ok(Object.keys(before).length > 5);
+  const first = runCli(dir, '--quiet');
+  const second = runCli(dir, '--quiet');
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(second.md, first.md);
+  assert.deepEqual(hashes(), before);
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith('autopsy')).sort(), ['autopsy.json', 'autopsy.md']);
+});
+
+test('render_markdown and render_summary work on an analysis alone', () => {
+  const out = python([
+    'import _autopsy',
+    `a = _autopsy.analyze(${JSON.stringify(RUN1)})`,
+    'md = _autopsy.render_markdown(a)',
+    'print(json.dumps([md.splitlines()[0], _autopsy.render_summary(a, "/x/autopsy.md").splitlines()[-1]]))',
+  ]);
+  assert.match(out[0], /^# Autopsy: f1$/);
+  assert.match(out[1], /\/x\/autopsy\.md$/);
 });

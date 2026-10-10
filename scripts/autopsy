@@ -2,14 +2,25 @@
 """Analyse one archived run: what got done, where the time went, and tokens.
 
 usage:
-  python3 autopsy RUN_FOLDER
+  python3 autopsy RUN_FOLDER [--quiet]
 
 RUN_FOLDER is a history run folder (archive-run's layout): a *.lanes.json
 manifest, wf_<id>/ transcript dirs each with its wf_<id>.json result file,
 the *.ledger dir and the run report (the first of *.report.json,
 *.run-report.json and report.json). autopsy reads only that folder, never a
 live path from the manifest, so imported runs and runs from another OS work.
-It writes RUN_FOLDER/autopsy.json and prints its path.
+It writes RUN_FOLDER/autopsy.json and RUN_FOLDER/autopsy.md (replacing only
+those two files) and prints a summary of at most 15 lines to stdout:
+the wall time and slowest phase, the top three slowdowns with their cost,
+the full-suite runs, the total tokens (a minimum when some usage is missing),
+the top suggestion and the absolute path of autopsy.md. --quiet prints
+nothing.
+
+autopsy.md is plain ASCII with these sections, in order: Summary, What got
+done, Where time went (a phase table, a 40-column text timeline per lane
+and the critical path, marked as an estimate), Checks, Slowdowns, Tokens,
+Suggestions and Open questions (one line per unexplained entry). It holds no
+free text from the transcripts.
 
 autopsy.json:
 
@@ -147,8 +158,10 @@ import _shell  # noqa: E402
 def main(argv):
     _shell.setup_io()
     args = argv[1:]
+    quiet = "--quiet" in args
+    args = [a for a in args if a != "--quiet"]
     if len(args) != 1:
-        print("usage: autopsy RUN_FOLDER", file=sys.stderr)
+        print("usage: autopsy RUN_FOLDER [--quiet]", file=sys.stderr)
         return 2
     try:
         folder = _shell.native_path(args[0])
@@ -166,8 +179,12 @@ def main(argv):
         return 2
     analysis = _autopsy.analyze(folder)
     out = os.path.join(folder, "autopsy.json")
+    md_path = os.path.join(folder, "autopsy.md")
     _shell.write_text(out, json.dumps(analysis, indent=2) + "\n")
-    print(out.replace("\\", "/"))
+    _shell.write_text(md_path, _autopsy.render_markdown(analysis))
+    if not quiet:
+        shown = os.path.abspath(md_path).replace("\\", "/")
+        sys.stdout.write(_autopsy.render_summary(analysis, shown))
     return 0
 
 
