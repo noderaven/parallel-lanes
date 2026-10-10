@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Check the machine and the project before a launch.
+
+usage:
+  python3 doctor MANIFEST [--json]
+
+Runs _doctor.run_checks on the run manifest with the machine's own probes.
+By default it prints text: each failure with its fix, then the warnings, then
+the skipped checks. With --json it prints run_checks' result:
+  {"status": "ok"|"blocked", "failures": [{"check", "detail", "fix"}],
+   "warnings": [{"check", "detail"}], "skipped": [{"check", "reason"}]}
+
+The hard failures (git_identity, base_not_current, python, dirty_checkout,
+shadow_repo) are described in _doctor.py.
+
+doctor is read-only: it never writes a file, changes a ref or a config value,
+or fetches (the upstream tip comes from git ls-remote, with a 15 s timeout).
+
+On Windows repo.root, repo.git_dir and repo.worktree_root may be in any form
+(C:\\x, /c/x, /tmp/x); they are used, and printed, in the C:/... form.
+
+Exit 0 when nothing failed; 3 when at least one check failed; 2 on a usage
+error or an unreadable or malformed manifest.
+"""
+
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _doctor  # noqa: E402
+import _shell  # noqa: E402
+
+USAGE = "usage: doctor MANIFEST [--json]"
+
+
+class UsageError(Exception):
+    """A usage error or an unreadable manifest; exit 2."""
+
+
+def _text(value):
+    return isinstance(value, str) and value != ""
+
+
+def load_manifest(path):
+    """The manifest at path, its repo paths in the native form; raises UsageError."""
+    try:
+        with open(_shell.native_path(path), encoding="utf-8") as f:
+            m = json.load(f)
+    except _shell.BashNotFound as e:
+        raise UsageError(str(e))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise UsageError("cannot read manifest " + path + ": " + str(e))
+    if not isinstance(m, dict):
+        raise UsageError("manifest must be a JSON object")
+    repo = m.get("repo")
+    if not isinstance(repo, dict) or repo.get("mode") not in ("git", "shadow"):
+        raise UsageError("manifest repo.mode must be git or shadow")
+    for key in ("root", "base_ref", "branch"):
+        if not _text(repo.get(key)):
+            raise UsageError("manifest repo." + key + " must be a non-empty string")
+    if repo["mode"] == "shadow" and not _text(repo.get("git_dir")):
+        raise UsageError("manifest repo.git_dir is required in shadow mode")
+    if repo["base_ref"].startswith("-"):
+        raise UsageError("manifest repo.base_ref must not start with '-'")
+    try:
+        for key in ("root", "git_dir", "worktree_root"):
+            if _text(repo.get(key)):
+                repo[key] = _shell.native_path(repo[key])
+    except _shell.BashNotFound as e:
+        raise UsageError(str(e))
+    return m
+
+
+def render_text(result):
+    lines = ["doctor: " + ("blocked" if result["status"] == "blocked" else "ok")]
+    for f in result["failures"]:
+        lines.append("FAIL " + f["check"] + ": " + f["detail"])
+        lines.append("  fix: " + f["fix"])
+    for w in result["warnings"]:
+        lines.append("WARN " + w["check"] + ": " + w["detail"])
+    for s in result["skipped"]:
+        lines.append("skipped " + s["check"] + ": " + s["reason"])
+    return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    _shell.setup_io()
+    args = argv[1:]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    if len(args) != 1 or args[0].startswith("-"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        manifest = load_manifest(args[0])
+    except UsageError as e:
+        print("doctor: " + str(e), file=sys.stderr)
+        return 2
+    result = _doctor.run_checks(manifest, _doctor.default_probes())
+    if as_json:
+        sys.stdout.write(json.dumps(result, indent=2) + "\n")
+    else:
+        sys.stdout.write(render_text(result))
+    return 3 if result["failures"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
