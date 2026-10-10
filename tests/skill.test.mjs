@@ -311,3 +311,35 @@ test('the docs describe the 1.4.0 lock owner, checkout lock, acceptance gates an
   assert.ok(readme.includes('is in use by run'), 'README lacks the checkout lock row');
   assert.ok(readme.includes('--owner <token>'), 'README lacks the release --owner row');
 });
+
+// These tests check instructions to the session, not enforced behaviour: the
+// session is the only thing that runs check-verify and obeys its result.
+test('SKILL.md gates accepted on check-verify and fails closed', () => {
+  const skillRaw = read(SKILL_MD).toString('utf8');
+  const skill = skillRaw.replace(/\s+/g, ' ');
+  for (const word of ['scripts/check-verify', 'match', 'not_required']) {
+    assert.ok(skill.includes(word), `SKILL.md lacks ${word}`);
+  }
+  const launch = section(skillRaw, 'Launch');
+  const release = launch.slice(launch.indexOf('`<release>` is'));
+  assert.ok(release.includes('`<release>` is') && release.includes('check-verify'),
+    `Launch step 5 does not tie <release> to check-verify: ${release}`);
+  const handBack = section(skillRaw, 'Hand-back');
+  const complete = handBack.slice(handBack.indexOf('- `complete`'));
+  assert.ok(complete.includes('check-verify'), complete);
+  assert.ok(/exit 1, 2 or 3/.test(complete) && complete.includes('check-verify error'), complete);
+  assert.ok(complete.includes('`unverified`') && complete.includes('keep the marker'), complete);
+  assert.ok(complete.includes('reference.md "Verify evidence"'), complete);
+});
+
+test('reference.md documents check-verify within its trust boundary', () => {
+  const raw = read(REFERENCE_MD).toString('utf8');
+  assert.ok(/^## Verify evidence$/m.test(raw), 'reference.md lacks a Verify evidence heading');
+  const text = raw.replace(/\s+/g, ' ');
+  for (const word of ['match', 'not_required', 'missing', 'stale', 'mismatch', 'invalid',
+    'verify_evidence_missing', 'verify_evidence_stale', 'verify_mismatch', 'verify_invalid',
+    'it does not re-run the checks', 'session-verify-', 'ledger accept']) {
+    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  }
+  assert.ok(!text.includes('is not caught by the run'), 'reference.md still says the run does not catch a misreport');
+});
