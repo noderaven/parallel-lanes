@@ -358,6 +358,14 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
+`unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
+lines that are not valid JSON, such as a truncated write. An agent with any unreadable line is
+incomplete exactly as a mid-stream count makes it (`output_tokens` is `unavailable`,
+`output_tokens_min` holds the lower bound, and it counts in `output_incomplete`), since the lost
+line may have held a later count. Report a non-zero total, because the figures are then
+minimums. An agent with unreadable lines and no usage line at all keeps both values
+`unavailable`.
+
 `<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
 arguments and prints one status JSON line (see "Verify evidence").
 
@@ -379,9 +387,23 @@ more reasons are session-side: `verify_evidence_missing`, `verify_evidence_stale
 "Verify evidence"), not by the workflow, and are never in `result.acceptance`.
 `run-checks` also reports `tracked_before` and `tracked_after`: the lines `git status --porcelain
 --untracked-files=no` printed before the first command and after the last (`[]` when clean;
-`ok`, `clean` and the exit code are unchanged). Acceptance gives `checks_unclean` (class
-`missing`) when the verify result at the delivered revision has a non-empty list or lacks one,
-because checks that ran on uncommitted tracked changes did not test the commit.
+`ok`, `clean` and the exit code are unchanged), and `untracked_before` and `untracked_after`:
+the `?? ` lines of `git status --porcelain --untracked-files=all` at the same two moments, so
+every untracked file that is not ignored (`[]` when none). Acceptance gives `checks_unclean`
+(class `missing`) when the verify result at the delivered revision has a non-empty
+`tracked_before`, `tracked_after` or `untracked_before`, or lacks one of those or
+`untracked_after`, because checks that ran on uncommitted tracked changes, or with an untracked
+file present that the commands could read, did not test the commit. A non-empty
+`untracked_after` alone (files the checks created) stays a warning that names the new files.
+
+The guarantee, in one paragraph: `accepted` means the configured checks passed at the delivered
+commit, with no tracked change and no untracked file present before them. Ignored files are not
+covered: `run-checks` does not list them, so a stale build output or cache that `.gitignore`
+hides can still change what the checks test. The verify prompt runs the project's setup
+commands before `run-checks`, so a setup command that creates a file that is not ignored (an
+uncommitted lockfile, for example) makes every run `unverified` with `checks_unclean`, where it
+once only warned; the user then re-verifies in the session (see "Verify evidence") or adds the
+file to `.gitignore`.
 Warnings (open minor findings, cannot-verify entries with a source, checks that left the
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
@@ -427,11 +449,15 @@ different commits, `final.review_problem` says so and acceptance gives `review_u
 
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
-Findings two lenses report at the same `file` and `line` (when `line` > 0), or on the same
-`commit <sha>` file, are merged: the merged finding keeps every lens and the issue text,
-severity, and fix of its most severe report (the first of those on a tie), so the text
-matches the severity, and the other texts as `also_reported`; every other finding
-stays separate. Every minor finding of an approved task review gets an id `<task>-<n>`, with
+Findings are merged only when they are the same finding: reported at the same `file` and
+`line` (when `line` > 0), or on the same `commit <sha>` file, with the same issue text (compared
+after trimming and collapsing whitespace). The merged finding keeps every lens and the issue
+text, severity, and fix of its most severe report (the first of those on a tie), so the text
+matches the severity. Distinct issues at one location stay separate findings, each its own
+obligation: a minor one cannot hide a critical one. Each finding carries `same_location`, the
+ids of the other findings at its location (`[]` when none, and always for a finding with no
+usable line); the agents that get the findings see it as "Same line as". `also_reported` is still
+present on every finding, always `[]`, so the shape is unchanged. Every minor finding of an approved task review gets an id `<task>-<n>`, with
 `T` put in front of a task id that starts with a digit (task 3 gives `T3-1`, task T2 gives
 `T2-1`), and goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
 finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
@@ -510,15 +536,16 @@ Rules, in order:
    The workflow never accepts a run that has final checks (a test, lint or build command) and no
    verify result, so an accepted run without one had no checks to run.
 4. Validate the report: `head` a string; `ok` and `clean` booleans; `results` a list of objects
-   with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before` and
-   `tracked_after`, when present, lists of strings. Else `invalid`, with `detail` naming the field.
+   with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before`,
+   `tracked_after`, `untracked_before` and `untracked_after`, when present, lists of strings. Else `invalid`, with `detail` naming the field.
 5. The sha is `result.delivered_sha` when not null, else `result.verify.head`. It must be 40 or 64
    lowercase hex digits; else `invalid`, and it is never put into a path.
-6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked lists may be absent, as
-   older run-checks wrote them): `invalid`.
+6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked and untracked lists may be
+   absent, as older run-checks wrote them): `invalid`.
 7. Freshness: the evidence file must not be older than the result file's `startTime` (epoch
    milliseconds; absent or not a number: `invalid`); an older file is `stale`.
-8. Compare `head`, `ok`, `clean`, `tracked_before`, `tracked_after`, then `results` position by
+8. Compare `head`, `ok`, `clean`, `tracked_before`, `tracked_after`, `untracked_before`,
+   `untracked_after`, then `results` position by
    position as `{group, command, exit}`. A field present on one side only differs. Any
    difference is `mismatch` (each is `{"field", "reported", "evidence"}`); none is `match`.
 
@@ -558,9 +585,18 @@ header.
 `ledger status --plan <plan> [--spec <spec>]` also checks approvals: a review recorded with
 `ledger reviewed` holds the hash of the task's section and the head of the range it approved
 (it refuses an approval that reports a critical or important finding; a fix agent records
-`reopened` when the engine acted on such an approval as changes); a changed
-section or head puts the task in `stale`, a review without a hash (older ledgers) in
-`unbound`, and both are left out of `reviewed` so the resume reviews them again. `inputs`
+`reopened` when the engine acted on such an approval as changes). Its usage is
+`ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]`: give SPEC, the spec
+file the review read (`-` when there is none), and the approval also records `spec_sha256`, the
+file's hash (`null` for `-`). A changed section or head puts the task in `stale`, and so do
+two spec reasons, checked when `--plan` is given: an approval that recorded `spec_sha256` is stale
+when it differs from the current spec's hash (`the spec changed since its review`; with `--plan`
+but no `--spec` the current spec counts as absent, so an approval that recorded a hash is
+stale and one that recorded `null` is not), and an approval that recorded none (older ledgers)
+is stale when the spec changed since the last launch (`the spec changed since the last launch
+and the review did not record it`). Pass `--spec` on a resume only when the run has a spec. A
+review without a hash (older ledgers) is `unbound`, and both are left out of `reviewed` so the
+resume reviews them again. `inputs`
 says whether the plan or spec changed since the last launch recorded their hashes. A stale
 task that is not the last done task of its list is reviewed against the current plan, but a
 fix for it lands after the later tasks' commits; tell the user, who may prefer rerunning it
@@ -653,3 +689,13 @@ with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" worktree remove`, then run `shadow remove` (it deletes the shadow
 repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir`).
+
+## Uninstall
+
+`bash install.sh --uninstall` backs up `~/.claude/settings.json`, then removes the two hooks from
+it, the agent file, and the skill directory. When `settings.json` cannot be edited (the edit
+fails, for example because the file is not valid JSON) it stops with `could not edit <file>;
+nothing removed`, deletes its temporary file, and removes neither the agent file nor the skill
+directory: fix the file and run it again. The update path likewise checks that `settings.json`
+is valid JSON before it replaces the installed skill, and stops without changing anything when
+it is not. The `.bak` backup written before the edit stays in either case.
