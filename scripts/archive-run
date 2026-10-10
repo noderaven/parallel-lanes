@@ -74,9 +74,10 @@ no launch has a time (the date is never made up). A folder keeps its name; an
 old index entry of the folder lends its machine, platform and an earlier
 first_launch, and without one machine and platform are "unavailable" (the
 machine running reindex need not be the one that ran the run). The folders
-are listed again under the lock, so a run archived meanwhile is kept. Entries of folders that are gone are dropped, and an index that
-cannot be read is replaced. It writes only index.json: no folder or file is
-renamed, changed or removed. Prints
+are listed again under the lock, so a run archived meanwhile is kept.
+Entries of folders that are gone are dropped, and an index that cannot be
+read is replaced. It writes only index.json: no folder or file is renamed,
+changed or removed. Prints
   {"runs": N, "skipped": [{"folder": "<name>", "reason": "<why>"}]}
 for the folders it did not index (those with no readable manifest). Exit 0,
 or 2 when the history dir is not a readable directory or the lock is not
