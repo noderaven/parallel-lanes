@@ -37,11 +37,32 @@ Hard failures (they block a launch):
 - shadow_repo (shadow mode): repo.git_dir is missing, is not a complete
   shadow (pl-baseline and pl-project), or git cannot read its baseline.
   Skipped as not_applicable in git mode.
+
+Warnings (they never block). A read that fails, or a probe that raises, is a
+warning with detail unknown; a check that does not apply to the platform is
+skipped as not_applicable.
+- memory: under 4 GB of physical memory available, or (Windows) available
+  commit under 10% of the commit limit.
+- disk: under 5 GB free on the drive of repo.worktree_root, or of its
+  nearest existing parent.
+- python_alias (Windows): the manifest's python is in a WindowsApps folder
+  (a bare name is looked up on PATH first).
+- heavy_processes: on Windows AppXSvc's working set over 1500 MB; elsewhere a
+  1-minute load average over the CPU count.
+- active_runs: active-run list has a locked run other than this run_id.
+- defender (Windows): repo.worktree_root is not under a Defender exclusion.
+  The detail is only "not covered" or "unknown"; the exclusion paths are
+  compared here and never printed or returned.
+- concurrency: CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS is unset, or lower
+  than min(limits.max_parallel_lanes, lane count).
 """
 
+import base64
+import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -63,6 +84,36 @@ DIRTY_FIX = (
     ".gitignore; never ignore a file a check reads. Then launch again."
 )
 
+GB = 1024 ** 3
+MB = 1024 ** 2
+MIN_MEMORY = 4 * GB
+MIN_COMMIT_SHARE = 0.10
+MIN_DISK = 5 * GB
+MAX_APPX_WORKING_SET = 1500 * MB
+POWERSHELL_TIMEOUT_S = 15
+READ_TIMEOUT_S = 15
+ACTIVE_RUN_TIMEOUT_S = 30
+CONCURRENCY_VARIABLE = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"
+_WINDOWS_APPS = re.compile(r"(^|[\\/])WindowsApps([\\/]|$)", re.IGNORECASE)
+
+# One PowerShell call reads both Windows values, each on its own so that one
+# failing (Get-MpPreference needs Defender, and elevation to see the list)
+# leaves the other. It prints {"appx": bytes|null, "exclusions": [...]|null}.
+_WINDOWS_READS = """
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$r = @{}
+try {
+  $s = Get-CimInstance Win32_Service -Filter "Name='AppXSvc'"
+  if ($s -and $s.ProcessId) { $r.appx = (Get-Process -Id $s.ProcessId).WorkingSet64 } else { $r.appx = 0 }
+} catch { $r.appx = $null }
+try {
+  $x = (Get-MpPreference).ExclusionPath
+  if ($null -eq $x) { $r.exclusions = @() } else { $r.exclusions = @($x) }
+} catch { $r.exclusions = $null }
+$r | ConvertTo-Json -Compress
+"""
+
 
 class Result:
     """A finished command: its exit code, stdout and stderr."""
@@ -81,16 +132,37 @@ class Probes:
         answer within LS_REMOTE_TIMEOUT_S seconds.
     run(argv, timeout) -> Result, or None when argv cannot be started or
         does not finish in time.
+    memory() -> {"available": bytes of physical memory available, and on
+        Windows "commit_limit" and "commit_available" in bytes}, or None.
+    disk_free(path) -> the free bytes on path's drive, or None.
+    load_average() -> (1-minute load average, CPU count), or None.
+    appx_working_set() -> AppXSvc's working set in bytes (0 when it has no
+        process), or None. Windows only.
+    defender_exclusions() -> Defender's exclusion paths, or None when they
+        cannot be read. Windows only.
+    active_runs() -> the entries active-run list prints, or None.
+    which(name) -> the file name resolves to on env's PATH, or None.
     env: the environment the commands run in.
     platform: sys.platform's value for the machine checked.
+    A probe may also raise; the check then treats the read as failed.
     """
 
-    def __init__(self, env=None, platform=None, git=None, ls_remote=None, run=None):
+    def __init__(self, env=None, platform=None, git=None, ls_remote=None, run=None,
+                 memory=None, disk_free=None, load_average=None, appx_working_set=None,
+                 defender_exclusions=None, active_runs=None, which=None):
         self.env = dict(os.environ) if env is None else env
         self.platform = sys.platform if platform is None else platform
         self.git = git or self._git
         self.ls_remote = ls_remote or self._ls_remote
         self.run = run or self._run
+        self.memory = memory or self._memory
+        self.disk_free = disk_free or self._disk_free
+        self.load_average = load_average or self._load_average
+        self.appx_working_set = appx_working_set or self._appx_working_set
+        self.defender_exclusions = defender_exclusions or self._defender_exclusions
+        self.active_runs = active_runs or self._active_runs
+        self.which = which or self._which
+        self._windows = None
 
     def _git_env(self):
         env = {k: v for k, v in self.env.items() if k not in GIT_REDIRECTS}
@@ -139,6 +211,111 @@ class Probes:
 
     def _run(self, argv, timeout):
         return self._command(argv, self.env, timeout=timeout)
+
+    def _memory(self):
+        if self.platform == "win32":
+            return _windows_memory()
+        if self.platform == "darwin":
+            return self._mac_memory()
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return {"available": int(line.split()[1]) * 1024}
+        return None
+
+    def _mac_memory(self):
+        """free + inactive + speculative pages from vm_stat, capped at hw.memsize."""
+        res = self.run(["vm_stat"], READ_TIMEOUT_S)
+        if res is None or res.code != 0:
+            return None
+        size = re.search(r"page size of (\d+) bytes", res.out)
+        pages = {}
+        for line in res.out.splitlines():
+            name, _, value = line.partition(":")
+            value = value.strip().rstrip(".")
+            if value.isdigit():
+                pages[name.strip()] = int(value)
+        if not size or "Pages free" not in pages:
+            return None
+        names = ("Pages free", "Pages inactive", "Pages speculative")
+        available = sum(pages.get(n, 0) for n in names) * int(size.group(1))
+        total = self.run(["sysctl", "-n", "hw.memsize"], READ_TIMEOUT_S)
+        if total is not None and total.code == 0 and total.out.strip().isdigit():
+            available = min(available, int(total.out.strip()))
+        return {"available": available}
+
+    def _disk_free(self, path):
+        return shutil.disk_usage(path).free
+
+    def _load_average(self):
+        cpus = os.cpu_count()
+        if not cpus:
+            return None
+        return (os.getloadavg()[0], cpus)
+
+    def _windows_reads(self):
+        """The one PowerShell call's result, made at most once per Probes."""
+        if self._windows is None:
+            script = base64.b64encode(_WINDOWS_READS.encode("utf-16-le")).decode("ascii")
+            res = self.run(["powershell", "-NoProfile", "-NonInteractive",
+                            "-EncodedCommand", script], POWERSHELL_TIMEOUT_S)
+            reads = {}
+            if res is not None and res.code == 0:
+                try:
+                    parsed = json.loads(res.out.strip().lstrip("﻿"))
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    reads = parsed
+            self._windows = reads
+        return self._windows
+
+    def _appx_working_set(self):
+        return self._windows_reads().get("appx")
+
+    def _defender_exclusions(self):
+        return self._windows_reads().get("exclusions")
+
+    def _active_runs(self):
+        here = os.path.dirname(os.path.realpath(__file__)).replace("\\", "/")
+        res = self.run(_shell.bash_argv(here + "/active-run", "list"), ACTIVE_RUN_TIMEOUT_S)
+        if res is None or res.code != 0:
+            return None
+        return json.loads(res.out)
+
+    def _which(self, name):
+        return shutil.which(name, path=_shell._getenv(self.env, "PATH"))
+
+
+def _windows_memory():
+    """GlobalMemoryStatusEx's available memory and commit, in bytes, or None."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    # ullTotalPageFile and ullAvailPageFile are the commit limit and the
+    # commit still available, despite their names.
+    return {
+        "available": status.ullAvailPhys,
+        "commit_limit": status.ullTotalPageFile,
+        "commit_available": status.ullAvailPageFile,
+    }
 
 
 def _kill_tree(proc):
@@ -455,6 +632,186 @@ def check_shadow_repo(manifest, probes, report):
                     "shadow remove first.")
 
 
+def _read(probe, *args):
+    """probe(*args), or None when it raises: a failed read is never a failure."""
+    try:
+        return probe(*args)
+    except Exception:
+        return None
+
+
+def _amount(value):
+    """value when it is a number of at least 0, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return value
+
+
+def _gb(n):
+    return "%.1f GB" % (n / float(GB))
+
+
+def _worktree_root(manifest):
+    return _text((manifest.get("repo") or {}).get("worktree_root"))
+
+
+def check_memory(probes, report):
+    check = "memory"
+    value = _read(probes.memory)
+    available = _amount(value.get("available")) if isinstance(value, dict) else None
+    if available is None:
+        report.warn(check, "unknown")
+        return
+    problems = []
+    if available < MIN_MEMORY:
+        problems.append(_gb(available) + " of physical memory available (under 4 GB)")
+    if probes.platform == "win32":
+        limit = _amount(value.get("commit_limit"))
+        free = _amount(value.get("commit_available"))
+        if limit and free is not None and free < limit * MIN_COMMIT_SHARE:
+            problems.append(_gb(free) + " of the " + _gb(limit) + " commit limit available "
+                            "(under 10%)")
+    if problems:
+        report.warn(check, "; ".join(problems))
+
+
+def _nearest_existing(path):
+    """path, or its nearest parent that is a directory; None when there is none."""
+    current = os.path.abspath(path)
+    while not os.path.isdir(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+    return current
+
+
+def check_disk(manifest, probes, report):
+    check = "disk"
+    root = _worktree_root(manifest)
+    if root is None:
+        report.skip(check, "no_worktree_root")
+        return
+    existing = _nearest_existing(root)
+    free = _amount(_read(probes.disk_free, existing)) if existing else None
+    if free is None:
+        report.warn(check, "unknown")
+    elif free < MIN_DISK:
+        report.warn(check, _gb(free) + " free on the drive of " + existing + " (under 5 GB)")
+
+
+def check_python_alias(manifest, probes, report):
+    check = "python_alias"
+    if probes.platform != "win32":
+        report.skip(check, "not_applicable")
+        return
+    python = manifest.get("python")
+    python = python if isinstance(python, str) and python.strip() else "python3"
+    try:
+        argv = shlex.split(python)
+    except ValueError:
+        argv = []
+    program = argv[0] if argv else python
+    if "/" not in program and "\\" not in program:
+        program = _read(probes.which, program) or program
+    # The unsplit text too: shlex drops the backslashes of an unquoted C:\... path.
+    for candidate in (program, python):
+        if isinstance(candidate, str) and _WINDOWS_APPS.search(candidate):
+            report.warn(check, "the manifest's python is the WindowsApps alias, which is "
+                        "slow to start: " + candidate)
+            return
+
+
+def check_heavy_processes(probes, report):
+    check = "heavy_processes"
+    if probes.platform == "win32":
+        working_set = _amount(_read(probes.appx_working_set))
+        if working_set is None:
+            report.warn(check, "unknown")
+        elif working_set > MAX_APPX_WORKING_SET:
+            report.warn(check, "AppXSvc's working set is %d MB (over 1500 MB)"
+                        % (working_set // MB))
+        return
+    value = _read(probes.load_average)
+    try:
+        load, cpus = value
+    except (TypeError, ValueError):
+        load = cpus = None
+    load, cpus = _amount(load), _amount(cpus)
+    if load is None or not cpus:
+        report.warn(check, "unknown")
+    elif load > cpus:
+        report.warn(check, "the 1-minute load average %.1f is over the CPU count %d"
+                    % (load, cpus))
+
+
+def check_active_runs(manifest, probes, report):
+    check = "active_runs"
+    runs = _read(probes.active_runs)
+    if not isinstance(runs, list):
+        report.warn(check, "unknown")
+        return
+    own = manifest.get("run_id")
+    others = sorted(set(
+        r["run_id"] for r in runs
+        if isinstance(r, dict) and r.get("locked") is True
+        and isinstance(r.get("run_id"), str) and r["run_id"] != own))
+    if others:
+        report.warn(check, "another run holds a launch lock: " + ", ".join(others))
+
+
+def _folded(path):
+    return _shell._fold(_shell._drive_form(path) or path)
+
+
+def _covers(exclusion, root):
+    excluded = _folded(exclusion)
+    return excluded != "" and (root == excluded or root.startswith(excluded + "/"))
+
+
+def check_defender(manifest, probes, report):
+    check = "defender"
+    if probes.platform != "win32":
+        report.skip(check, "not_applicable")
+        return
+    root = _worktree_root(manifest)
+    if root is None:
+        report.skip(check, "no_worktree_root")
+        return
+    exclusions = _read(probes.defender_exclusions)
+    # Without elevation Defender lists one "N/A: Must be an administrator..." entry.
+    if (not isinstance(exclusions, list)
+            or not all(isinstance(e, str) for e in exclusions)
+            or any(e.startswith("N/A") for e in exclusions)):
+        report.warn(check, "unknown")
+        return
+    folded = _folded(root)
+    if not any(_covers(e, folded) for e in exclusions):
+        report.warn(check, "not covered")
+
+
+def check_concurrency(manifest, probes, report):
+    check = "concurrency"
+    lanes = manifest.get("lanes")
+    count = len(lanes) if isinstance(lanes, list) else 0
+    limits = manifest.get("limits") if isinstance(manifest.get("limits"), dict) else {}
+    cap = limits.get("max_parallel_lanes")
+    at_once = min(cap, count) if isinstance(cap, int) and not isinstance(cap, bool) else count
+    value = _shell._getenv(probes.env, CONCURRENCY_VARIABLE)
+    if value is None or not value.strip():
+        report.warn(check, CONCURRENCY_VARIABLE + " is unset, so the Workflow tool's own cap "
+                    "applies; the run has " + str(at_once) + " lane(s) at once")
+        return
+    try:
+        agents = int(value.strip())
+    except ValueError:
+        report.warn(check, CONCURRENCY_VARIABLE + " is not a number")
+        return
+    if agents < at_once:
+        report.warn(check, CONCURRENCY_VARIABLE + " is " + str(agents) + ", lower than the "
+                    + str(at_once) + " lanes at once")
+
+
 def run_checks(manifest, probes):
     """Every doctor check against manifest, through probes; see the module doc."""
     report = _Report()
@@ -466,4 +823,11 @@ def run_checks(manifest, probes):
     check_python(manifest, probes, report)
     check_dirty_checkout(manifest, probes, prefix, report)
     check_shadow_repo(manifest, probes, report)
+    check_memory(probes, report)
+    check_disk(manifest, probes, report)
+    check_python_alias(manifest, probes, report)
+    check_heavy_processes(probes, report)
+    check_active_runs(manifest, probes, report)
+    check_defender(manifest, probes, report)
+    check_concurrency(manifest, probes, report)
     return report.result()

@@ -351,3 +351,190 @@ test('doctor changes nothing', () => {
   assert.deepEqual(snapshot(), before);
   assert.ok(!existsSync(join(f.root, '.git', 'FETCH_HEAD')), 'doctor fetched');
 });
+
+// Warnings: the platform reads are replaced by fakes through a Python snippet
+// that calls run_checks. The hard checks still run, against the fixture repo.
+
+const GB = 1024 ** 3;
+const WARNING_CHECKS = ['memory', 'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency'];
+// A fake that raises stands for a read that fails.
+const RAISE = 'raise';
+const QUIET = {
+  memory: { available: 16 * GB },
+  disk_free: 100 * GB,
+  load_average: [0.5, 8],
+  appx_working_set: 0,
+  defender_exclusions: [],
+  active_runs: [],
+};
+
+const FAKE_SNIPPET = [
+  'import json, os, sys',
+  'sys.dont_write_bytecode = True',
+  'sys.path.insert(0, sys.argv[1])',
+  'import _doctor',
+  'with open(sys.argv[2], encoding="utf-8") as f:',
+  '    manifest = json.load(f)',
+  'spec = json.loads(sys.argv[3])',
+  'called = []',
+  'def fake(name, value):',
+  '    def probe(*args):',
+  '        called.append(name)',
+  '        if value == "raise":',
+  '            raise OSError("the read failed")',
+  '        return value',
+  '    return probe',
+  'env = dict(os.environ)',
+  'for k, v in spec["env"].items():',
+  '    if v is None:',
+  '        env.pop(k, None)',
+  '    else:',
+  '        env[k] = v',
+  'fakes = dict((n, fake(n, v)) for n, v in spec["fakes"].items())',
+  'probes = _doctor.Probes(env=env, platform=spec["platform"], **fakes)',
+  'result = _doctor.run_checks(manifest, probes)',
+  'print(json.dumps({"result": result, "called": sorted(set(called))}))',
+].join('\n');
+
+function fakeDoctor(manifest, { fakes = {}, platform = process.platform, env = {} } = {}) {
+  const spec = {
+    platform,
+    fakes: { ...QUIET, ...fakes },
+    env: { CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: '16', ...env },
+  };
+  const r = spawnSync('python3', ['-c', FAKE_SNIPPET, join(SKILL_DIR, 'scripts'), manifest, JSON.stringify(spec)],
+    { encoding: 'utf8', env: ENV });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  return { ...out.result, called: out.called, stdout: r.stdout };
+}
+
+test('low memory and low disk warn', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest(), { fakes: { memory: { available: 3 * GB }, disk_free: 4 * GB } });
+  assert.equal(r.status, 'ok', JSON.stringify(r));
+  assert.match(named(r.warnings, 'memory').detail, /3\.0 GB/);
+  assert.match(named(r.warnings, 'disk').detail, /4\.0 GB/);
+
+  // Plenty of both: no warning.
+  const quiet = fakeDoctor(f.manifest());
+  assert.equal(named(quiet.warnings, 'memory'), undefined, JSON.stringify(quiet));
+  assert.equal(named(quiet.warnings, 'disk'), undefined, JSON.stringify(quiet));
+
+  // On Windows a commit charge near its limit warns too.
+  const commit = fakeDoctor(f.manifest(), {
+    platform: 'win32',
+    fakes: { memory: { available: 16 * GB, commit_limit: 40 * GB, commit_available: 2 * GB } },
+  });
+  assert.match(named(commit.warnings, 'memory').detail, /commit/);
+
+  // A read that fails is a warning with detail unknown, never a failure.
+  const failed = fakeDoctor(f.manifest(), { fakes: { memory: RAISE, disk_free: null } });
+  assert.equal(failed.status, 'ok', JSON.stringify(failed));
+  assert.equal(named(failed.warnings, 'memory').detail, 'unknown');
+  assert.equal(named(failed.warnings, 'disk').detail, 'unknown');
+});
+
+test('Windows-only checks are not_applicable elsewhere', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest(), { platform: 'linux', fakes: { load_average: [12.5, 4] } });
+  assert.deepEqual(named(r.skipped, 'python_alias'), { check: 'python_alias', reason: 'not_applicable' });
+  assert.deepEqual(named(r.skipped, 'defender'), { check: 'defender', reason: 'not_applicable' });
+  assert.match(named(r.warnings, 'heavy_processes').detail, /load average 12\.5/);
+  assert.ok(r.called.includes('load_average'), JSON.stringify(r.called));
+  assert.ok(!r.called.includes('appx_working_set') && !r.called.includes('defender_exclusions'), JSON.stringify(r.called));
+
+  // On Windows the heavy-process check reads AppXSvc instead.
+  const w = fakeDoctor(f.manifest(), { platform: 'win32', fakes: { appx_working_set: 2000 * 1024 * 1024 } });
+  assert.match(named(w.warnings, 'heavy_processes').detail, /AppXSvc/);
+  assert.ok(!w.called.includes('load_average'), JSON.stringify(w.called));
+  const calm = fakeDoctor(f.manifest(), { platform: 'win32', fakes: { appx_working_set: 400 * 1024 * 1024 } });
+  assert.equal(named(calm.warnings, 'heavy_processes'), undefined, JSON.stringify(calm));
+});
+
+test('the WindowsApps python warns', () => {
+  const f = fixture();
+  const alias = 'C:/Users/u/AppData/Local/Microsoft/WindowsApps/python3.exe';
+  const r = fakeDoctor(f.manifest({}, { python: `'${alias}'` }), { platform: 'win32' });
+  assert.match(named(r.warnings, 'python_alias').detail, /WindowsApps/);
+
+  const plain = fakeDoctor(f.manifest({}, { python: "'C:/Python312/python.exe'" }), { platform: 'win32' });
+  assert.equal(named(plain.warnings, 'python_alias'), undefined, JSON.stringify(plain));
+  assert.equal(named(plain.skipped, 'python_alias'), undefined, JSON.stringify(plain));
+});
+
+test('Defender never reveals the exclusion list', () => {
+  const f = fixture();
+  const manifest = f.manifest();
+  const r = fakeDoctor(manifest, { platform: 'win32', fakes: { defender_exclusions: ['C:/Secret/Path'] } });
+  assert.equal(named(r.warnings, 'defender').detail, 'not covered');
+  assert.doesNotMatch(r.stdout, /Secret/);
+
+  // An exclusion of a folder above the worktree root covers it.
+  const covered = fakeDoctor(manifest, { platform: 'win32', fakes: { defender_exclusions: ['C:/Secret/Path', f.dir] } });
+  assert.equal(named(covered.warnings, 'defender'), undefined, JSON.stringify(covered));
+  assert.doesNotMatch(covered.stdout, /Secret/);
+
+  for (const unreadable of [null, RAISE]) {
+    const u = fakeDoctor(manifest, { platform: 'win32', fakes: { defender_exclusions: unreadable } });
+    assert.equal(named(u.warnings, 'defender').detail, 'unknown');
+  }
+});
+
+test('another locked run warns', () => {
+  const f = fixture();
+  const markers = [
+    { run_id: 'm0a', manifest: '/x/m0a.json', started: '2026-10-10T00:00:00Z', status: 'running', locked: true },
+    { run_id: 'm0b', manifest: '/x/m0b.json', started: '2026-10-10T00:00:00Z', status: 'stopped' },
+    { run_id: 'd1', manifest: '/x/d1.json', started: '2026-10-10T00:00:00Z', status: 'running', locked: true },
+  ];
+  const r = fakeDoctor(f.manifest(), { fakes: { active_runs: markers } });
+  const warning = named(r.warnings, 'active_runs');
+  assert.match(warning.detail, /m0a/);
+  assert.doesNotMatch(warning.detail, /m0b|d1/);
+
+  // Only this run's own lock, or an unlocked marker: no warning.
+  const own = fakeDoctor(f.manifest(), { fakes: { active_runs: markers.slice(1) } });
+  assert.equal(named(own.warnings, 'active_runs'), undefined, JSON.stringify(own));
+  const unknown = fakeDoctor(f.manifest(), { fakes: { active_runs: null } });
+  assert.equal(named(unknown.warnings, 'active_runs').detail, 'unknown');
+});
+
+test('the concurrency cap warns when below lanes at once', () => {
+  const f = fixture();
+  const lanes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const manifest = f.manifest({}, { lanes, limits: { max_parallel_lanes: 5 } });
+  const VAR = 'CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS';
+  const unset = fakeDoctor(manifest, { env: { [VAR]: null } });
+  assert.match(named(unset.warnings, 'concurrency').detail, /unset/);
+  const enough = fakeDoctor(manifest, { env: { [VAR]: '8' } });
+  assert.equal(named(enough.warnings, 'concurrency'), undefined, JSON.stringify(enough));
+  const low = fakeDoctor(manifest, { env: { [VAR]: '2' } });
+  assert.match(named(low.warnings, 'concurrency').detail, /2.*3/);
+  // max_parallel_lanes caps the lanes at once.
+  const capped = fakeDoctor(f.manifest({}, { lanes, limits: { max_parallel_lanes: 2 } }), { env: { [VAR]: '2' } });
+  assert.equal(named(capped.warnings, 'concurrency'), undefined, JSON.stringify(capped));
+});
+
+test('real probes run on this platform without error', () => {
+  const f = fixture();
+  const active = join(f.dir, 'active');
+  const env = { ...ENV, PL_ACTIVE_DIR: active };
+  delete env.CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS;
+  const r = doctor(f.manifest(), { env });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  // The cap is unset here, so the warning checks did run.
+  assert.match(named(r.out.warnings, 'concurrency').detail, /unset/);
+  for (const check of WARNING_CHECKS) {
+    assert.equal(named(r.out.failures, check), undefined, JSON.stringify(r.out));
+    const entries = [...r.out.warnings, ...r.out.skipped].filter((x) => x.check === check);
+    assert.ok(entries.length <= 1, JSON.stringify(r.out));
+  }
+  if (process.platform !== 'win32') {
+    for (const check of ['python_alias', 'defender']) {
+      assert.deepEqual(named(r.out.skipped, check), { check, reason: 'not_applicable' });
+    }
+  }
+  // No other run is locked in the empty active dir.
+  assert.equal(named(r.out.warnings, 'active_runs'), undefined, JSON.stringify(r.out));
+});
