@@ -292,3 +292,22 @@ test('CI tests Node 22, not Node 18', () => {
   assert.ok(text.includes('node: 22'), 'CI has no Node 22 job');
   assert.ok(!text.includes('node: 18'), 'CI still has a Node 18 job');
 });
+
+test('the docs describe the 1.4.0 lock owner, checkout lock, acceptance gates and shadow bytes', () => {
+  const skill = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const reference = read(REFERENCE_MD).toString('utf8').replace(/\s+/g, ' ');
+  const readme = read(README_MD).toString('utf8').replace(/\s+/g, ' ');
+  for (const m of skill.matchAll(/active-run release[^`]*/g)) {
+    assert.ok(m[0].includes('--owner <token>'), `SKILL.md release lacks --owner: ${m[0]}`);
+  }
+  assert.ok(skill.includes('`preflight.schedule` is non-empty'), 'SKILL.md hand-back covers preflight.schedule');
+  assert.ok(skill.includes('the checkout ... is in use by run ...'), 'SKILL.md setup exit 4 covers the checkout lock');
+  assert.ok(!skill.includes('(plain ASCII)'), 'SKILL.md still says (plain ASCII)');
+  for (const word of ['checks_unclean', 'review_unbound', 'tracked_before', 'tracked_after', 'lens_heads',
+    'review_problem', 'code_deps', 'preflight.schedule', 'PL_MUTEX_WAIT', '--owner <token>', 'info/attributes',
+    'checkout-<st_dev>-<st_ino>.lock', 'differ only in letter case', 'Windows device name']) {
+    assert.ok(reference.includes(word), `reference.md lacks ${word}`);
+  }
+  assert.ok(readme.includes('is in use by run'), 'README lacks the checkout lock row');
+  assert.ok(readme.includes('--owner <token>'), 'README lacks the release --owner row');
+});

@@ -34,7 +34,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | Field | How to fill it |
 |---|---|
 | `version` | `1` |
-| `run_id` | Short, unique, `[a-z0-9-]` (it becomes part of branch names), e.g. `ri1`. Keep it when resuming. |
+| `run_id` | Short, unique, `[a-z0-9-]` (it becomes part of branch names), e.g. `ri1`. Keep it when resuming. Id rule below. |
 | `plan`, `spec` | Absolute paths. `spec` is the design doc the plan names, or `null`. |
 | `commit_rules` | One string: the user's and project's commit and file rules (memory, CLAUDE.md, plan conventions, CONTRIBUTING). If none exist: `Follow the repository's existing commit message style; one commit per task.` |
 | `repo.mode` | `git` or `shadow`. |
@@ -68,6 +68,12 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e`, `post-integrate`, and `post-integrate fix` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it (throws or returns no result) is retried once on the default type, and both attempts count toward `max_agents`. After the first such throw, or the second typed agent that returns no result while its retry succeeds, every later agent of the run uses the default type: the run log says so and the run result carries `agent_type_fallback: true`. |
 | `skill_dir` | `<skill_dir>`. |
 | `python` | The output of `bash <skill_dir>/scripts/find-python` (see Paths and Python). Optional for the validator (default `python3`); the skill always sets it. |
+
+Id rule (task ids, lane ids and `run_id`): ids name files, so two ids of one kind that differ only
+in letter case (tasks `T1` and `t1`, lanes `A` and `a`) are an error, and so is an id whose part
+before the first `.` is a Windows device name in any case (`CON`, `PRN`, `AUX`, `NUL`,
+`COM1`-`COM9`, `LPT1`-`LPT9`; `nul` and `con.txt` too): either would share or open another file
+on Windows or macOS. The dry run reports them.
 
 Plan task ids must have `#+ Task <ID>:` headings and be safe file names (derive-lanes and
 task-brief refuse others); agents extract briefs with `scripts/task-brief`, which fails on a
@@ -192,6 +198,17 @@ findings (`adjudicator_stop: security`), and `allow_deferral: false` refuses it 
 ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
 `preflight.rulings`.
 
+Pre-flight also returns `code_deps` (`[{task, producer, what}]`, required, may be empty): code a
+task needs from another task's work. An entry the run order already meets (the placement rule
+`validateManifest` applies to `depends_on` kind `code`: the producer is before the task and in
+the prelude, in the same lane, or the task is in join) only adds the producer to the task's
+briefs, like `undeclared`. An unmet one is a schedule problem no ruling can fix: the run stops
+with `preflight_conflicts` in both modes (the adjudicator is not called), and
+`preflight.schedule` lists each as `{task, producer, what, fix}`, `fix` being the move that meets
+it (`move T to join after P`, `move T after P in the prelude`, or `move T to join, or into P's
+lane after it`). `preflight.schedule` is always present on a full-profile run (`[]` when there
+is none) and is `[]` under lite, which has no pre-flight agent.
+
 Run rulings: pre-flight's own rulings, then the adjudicator's ruling on pre-flight conflicts,
 reach every task not yet done and every final reviewer as "Rulings already made for this run
 (binding)", in that order, each quoted as written, so no agent decides a settled point again.
@@ -284,10 +301,27 @@ with exit 4 when it exists: another session may still be running the run), write
 refuses unless the lock exists and `--owner <token>` matches it, so a second launch or
 resume cannot reset work in progress. Keep the lock through a transient relaunch; `remove`
 refuses a locked run unless `--takeover`. `--takeover` replaces a stale lock: use it only when the user confirms
-the session that held it has ended. `release <run_id> <status>` drops the lock and records
-the status; `release <run_id> --remove` drops both (only for an accepted run). `list` prints
+the session that held it has ended. `release <run_id> <status> --owner <token>` drops the lock and records
+the status; `release <run_id> --remove --owner <token>` drops both (only for an accepted run).
+`--owner` is required (exit 2 without it). A token that is not the lock's (a takeover replaced
+it) exits 4 and changes nothing, so a session that lost the run cannot release it; a run whose
+lock is already gone still gets its status recorded. `list` prints
 every marker with `locked`; the next session's bootstrap offers an unlocked one for a
 one-word resume and reports a locked one as possibly still running.
+
+Checkout lock (git mode): `scripts/setup` also takes `checkout-<st_dev>-<st_ino>.lock` in the
+same directory, holding `{"run_id", "checkout"}`. It is keyed by the main checkout's file
+identity, so another spelling or a symlink of the same checkout is the same lock, while separate
+worktrees of one repo are not; it stops two runs from switching one checkout to their feature
+branches. Setup exits 4 with `the checkout ... is in use by run ...` when that run's launch lock
+still exists; a checkout lock whose run has no launch lock is stale and is taken over, and a
+run's own lock is kept across a relaunch or resume. `release` and `remove` delete the run's
+checkout locks. Shadow mode has none (each run has its own feature worktree).
+
+`acquire`, `release` and `remove` work under a per-run mutex, the directory
+`<active dir>/.<run_id>.mutex`. A waiter retries for `PL_MUTEX_WAIT` seconds (default 10), then
+exits 3 with `active-run: <path> is held; if no active-run is running, remove it`: delete that
+directory only when no `active-run` is running.
 
 Transient vs real stops (SKILL.md "Transient stops"): only agent errors, missing results
 (`no result from ...`, `error: ...`), and setup-command retry exhaustion (`setup failed`) are
@@ -331,8 +365,14 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 `scripts/run-checks` result at `delivered_sha`), `e2e_failed`, `e2e_missing`, `e2e_stale`
 (`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
-`review_missing` (a final lens with no result), `fix_unreviewed`, `final_fix_unreviewed` (the
+`review_missing` (a final lens with no result), `review_unbound` (the final lenses did not all
+review one commit; `final.review_problem` is its detail), `checks_unclean` (see below), `fix_unreviewed`, `final_fix_unreviewed` (the
 final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`.
+`run-checks` also reports `tracked_before` and `tracked_after`: the lines `git status --porcelain
+--untracked-files=no` printed before the first command and after the last (`[]` when clean;
+`ok`, `clean` and the exit code are unchanged). Acceptance gives `checks_unclean` (class
+`missing`) when the verify result at the delivered revision has a non-empty list or lacks one,
+because checks that ran on uncommitted tracked changes did not test the commit.
 Warnings (open minor findings, cannot-verify entries with a source, checks that left the
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
@@ -362,6 +402,19 @@ entries with a non-empty `source`; the run's own gap notes ("the e2e check retur
 result") are entries with `source: "run"`, so they warn too. A plain string (an agent from
 before 1.3.1) is kept in the report as a note, not a warning.
 
+The verify step runs one check inventory (`finalChecks`): the project `test`, `lint` and `build`
+commands in that group order, then for each lane in manifest order the commands its
+`lane_commands` override adds (test, lint, build order), skipping a `group` and `command`
+already listed. Its setup is the project `setup` commands, then each lane's override `setup`
+commands not already listed. Acceptance expects exactly that list in that order
+(`checks_incomplete` otherwise).
+
+`final.lens_heads` is `[{lens, head}]`, the revision each final lens reported (`head` is the
+reported string, or `null` when the lens returned no result). When a lens that returned
+findings (an array, even an empty one) reported no commit sha, or the lenses reported
+different commits, `final.review_problem` says so and acceptance gives `review_unbound`
+(class `missing`) with that text; the key is absent when the heads agree.
+
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
 Findings two lenses report at the same `file` and `line` (when `line` > 0), or on the same
@@ -378,7 +431,8 @@ so their minors reach neither the final lenses nor `task_minors_open`; the run s
 `cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
 naming those tasks (check them in the earlier launch's report).
 The fixer gives each id a disposition with its evidence; the re-review names the revision it
-judged (`head`). A disposition without evidence, a re-review of another revision than the fix
+judged (`head`). A finding the fix gave no disposition for, a disposition or re-review result with blank
+evidence, a re-review of another revision than the fix
 head, or two different dispositions or results for one id leave the finding open (the new
 findings such a re-review reports are kept).
 `ledger status <ledger_dir> --manifest <manifest file>` lists under `undeclared` the files each
@@ -468,6 +522,16 @@ on a machine with `core.autocrlf=true`, the first setup after the upgrade sees e
 in its lane worktrees as modified (they were checked out with CRLF), lists them as discarded
 edits, saves a preserved ref, and checks them out again. That happens once and loses nothing
 a task committed.
+
+A new shadow also holds `<gitdir>/info/attributes` with `* -text -eol -filter -ident
+-working-tree-encoding`. It outranks the project's `.gitattributes` and the user's
+`core.attributesFile`, so the baseline, the lane worktrees and every commit keep the project's
+exact bytes (merge and diff attributes still apply). `preview` and `writeback` hash project
+files with the shadow's attributes (`git hash-object`, no `--no-filters`), so a file is a
+conflict only when its bytes differ. A shadow made before 1.4.0 keeps its old representation:
+it is not given the file, because its baseline was made with the project's attributes and
+adding it mid-run would make every normalised file look modified. Use it only to resume its
+run; a new run gets a new shadow (remove the old one first, see below).
 
 (`PL_SHADOW_BASE` replaces the base directory when set.) `shadow init` on an existing shadow
 prints it and keeps its old baseline, which is right only for resuming that run. For a new
