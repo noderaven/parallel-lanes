@@ -15,7 +15,8 @@ import _plan
 TASK_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
 # Ids that are JavaScript property names; the engine rejects them too. The
-# same list as RESERVED_IDS in src/validate.js.
+# same list as reservedIds() in src/validate.js (a function there, because
+# the test harness cannot read top-level const bindings); keep both in step.
 RESERVED_IDS = frozenset([
     "__proto__", "constructor", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
     "toLocaleString", "toString", "valueOf",

@@ -673,3 +673,27 @@ test('the plan parser rejects reserved ids', () => {
   assert.equal(res.status, 0, res.stderr + res.stdout);
   assert.match(res.stdout, /BriefError.*reserved/);
 });
+
+// Inherited properties never stand in for per-lane commands or for the
+// producers pre-flight added: only own entries count.
+test('commandGroup ignores inherited lane_commands entries', async () => {
+  const { commandGroup } = await loadHelpers(['commandGroup']);
+  const m = validManifest();
+  m.lane_commands = Object.create({ alpha: { test: ['inherited lane'] } });
+  assert.deepEqual(commandGroup(m, 'alpha', 'test'), ['npm test']);
+  m.lane_commands = { alpha: Object.create({ test: ['inherited group'] }) };
+  assert.deepEqual(commandGroup(m, 'alpha', 'test'), ['npm test']);
+  m.lane_commands = { alpha: { test: ['own lane'] } };
+  assert.deepEqual(commandGroup(m, 'alpha', 'test'), ['own lane']);
+});
+
+test('startCommand ignores inherited consumes_extra entries', async () => {
+  const { startCommand } = await loadHelpers(['startCommand']);
+  const m = validManifest();
+  const t2 = m.lanes[0].tasks[0];
+  const where = { dir: '/work/wt/lane-alpha', lane: 'alpha' };
+  m.consumes_extra = Object.create({ T2: ['producer.md'] });
+  assert.ok(!startCommand(m, t2, where).includes('--also'), 'an inherited entry adds nothing');
+  m.consumes_extra = { T2: ['producer.md'] };
+  assert.match(startCommand(m, t2, where), /--also 'T2' 'producer\.md'/);
+});

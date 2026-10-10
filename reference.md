@@ -361,8 +361,8 @@ and call out any agent whose `resolved_models` names a model other than the one 
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
 lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with invalid
 UTF-8 counts even when it still parses after the bad bytes are replaced (they may have been a
-key or a count), and what it holds is still read as far as it goes. An agent with any unreadable line is
-incomplete exactly as a mid-stream count makes it (`output_tokens` is `unavailable`,
+key or a count), and what it holds is still read as far as it goes. An agent with any
+unreadable line is incomplete exactly as a mid-stream count makes it (`output_tokens` is `unavailable`,
 `output_tokens_min` holds the lower bound, and it counts in `output_incomplete`), since the lost
 line may have held a later count. Report a non-zero total, because the figures are then
 minimums. An agent with unreadable lines and no usage line at all keeps both values
@@ -475,8 +475,8 @@ usable line); the agents that get the findings see it as "Same line as". `also_r
 still present on every finding, always `[]`, so the shape is unchanged. Every minor finding of
 an approved task review gets an id `<task>-<n>`, with `T` put in front of a task id that starts
 with a digit (task 3 gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a
-checklist: a lens raises one by putting its id in brackets in a finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
-them in the report, so minors from task reviews are not lost. Task minors are not stored in
+checklist: a lens raises one by putting its id in brackets in a finding's issue, or leaves it.
+`final.task_minors_open` lists the ones no lens raised: show them in the report, so minors from task reviews are not lost. Task minors are not stored in
 the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
 so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
 `cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
