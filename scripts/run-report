@@ -11,7 +11,7 @@ writes it to FILE):
 
   {engine_version: "x.y.z", agents: [...], tiers: {<tier>: {...}},
    totals: {...}, models: {...}, unavailable: N, output_incomplete: N,
-   escalations: N, fix_rounds: N, retries: N}
+   unreadable_lines: N, escalations: N, fix_rounds: N, retries: N}
 
 engine_version: the result.version of the workflow result file (the skill
 version run.workflow.js was built from, the one that ran); "unavailable"
@@ -38,6 +38,15 @@ bound). Lines with no stop_reason key are taken as final. When any agent
 counted in a tier (or in the run) is incomplete, that tier's (or totals')
 output_tokens is "unavailable" too, since the sum would be an undercount;
 output_tokens_min still sums every count there is.
+
+Unreadable lines: transcripts are read with errors="replace", so invalid
+UTF-8 never raises. A non-blank line that is not valid JSON (a truncated
+write) is counted in the agent's unreadable_lines (top level: the total). An
+agent with any unreadable line is incomplete exactly as a mid-stream message
+makes it: output_tokens "unavailable", output_tokens_min set, counted in
+output_incomplete, since the lost line may have held a later count. An agent
+with unreadable lines and no usage line keeps output_tokens and
+output_tokens_min "unavailable".
 
 Models: resolved_models maps every model that served the agent to its
 message count (a fallback model shows up here even when the workflow
@@ -143,23 +152,26 @@ def model_tier(model):
 
 
 def read_usage(path):
-    """Return (resolved_model, sums, models, complete), or (None, None, {}, True)
-    when there are no usage lines.
+    """Return (resolved_model, sums, models, complete, unreadable), or
+    (None, None, {}, True, unreadable) when there are no usage lines.
 
     A transcript writes one assistant message over several lines that share
     its message.id, each repeating that message's usage (output_tokens as a
     running value). Each message counts once, with the last usage seen for
     its id (and requestId when present); lines without an id count each.
     complete is False when a counted line has stop_reason null (its
-    output_tokens is a mid-stream value).
+    output_tokens is a mid-stream value) or when unreadable is above 0.
+    unreadable counts non-blank lines that are not valid JSON; the file is
+    read with errors="replace", so invalid UTF-8 never raises.
     """
     model = None
     models = {}
     counted = set()
     usages = {}
     anonymous = []
+    unreadable = 0
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -167,6 +179,7 @@ def read_usage(path):
                 try:
                     obj = json.loads(line)
                 except ValueError:
+                    unreadable += 1
                     continue
                 msg = obj.get("message") if isinstance(obj, dict) else None
                 if not isinstance(msg, dict):
@@ -190,24 +203,24 @@ def read_usage(path):
                 else:
                     anonymous.append((usage, final))
     except OSError:
-        return None, None, {}, True
+        return None, None, {}, True, 0
     if not usages and not anonymous:
-        return None, None, {}, True
+        return None, None, {}, True, unreadable
     sums = {k: 0 for k in TOKEN_FIELDS}
-    complete = True
+    complete = unreadable == 0
     for usage, final in list(usages.values()) + anonymous:
         complete = complete and final
         for k in TOKEN_FIELDS:
             v = usage.get(k)
             if isinstance(v, int) and not isinstance(v, bool):
                 sums[k] += v
-    return model, sums, models, complete
+    return model, sums, models, complete, unreadable
 
 
 def first_timestamp(path):
     """First timestamp field in a jsonl transcript, or None."""
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
                     obj = json.loads(line)
@@ -258,7 +271,7 @@ def build(transcript_dir, manifest):
                       if isinstance(meta.get(k), str)), None)
         task, role, retried, base_label = parse_label(label, ids)
         requested = meta.get("model") if isinstance(meta.get("model"), str) else None
-        resolved, sums, models, complete = read_usage(stem + ".jsonl")
+        resolved, sums, models, complete, unreadable = read_usage(stem + ".jsonl")
         tier = model_tier(resolved) or model_tier(requested) or UNAVAILABLE
         queue = efforts.get(label)
         effort = queue.pop(0) if queue else UNAVAILABLE
@@ -273,6 +286,7 @@ def build(transcript_dir, manifest):
             "effort": effort,
         }
         entry["resolved_models"] = models
+        entry["unreadable_lines"] = unreadable
         for k in TOKEN_FIELDS:
             entry[k] = sums[k] if sums is not None else UNAVAILABLE
         entry["output_tokens_min"] = sums["output_tokens"] if sums is not None else UNAVAILABLE
@@ -286,6 +300,7 @@ def build(transcript_dir, manifest):
     totals = blank_bucket()
     unavailable = 0
     output_incomplete = 0
+    unreadable_lines = 0
     models = {}
     retries = 0
     last_model = {}  # stripped label -> (tier, model) of its latest run
@@ -296,6 +311,7 @@ def build(transcript_dir, manifest):
         bucket["fix_rounds"] = bucket.get("fix_rounds", 0)
         bucket["agents"] += 1
         totals["agents"] += 1
+        unreadable_lines += a["unreadable_lines"]
         for m in a["resolved_models"]:
             models[m] = models.get(m, 0) + 1
         if a["input_tokens"] == UNAVAILABLE:
@@ -334,6 +350,7 @@ def build(transcript_dir, manifest):
         "models": models,
         "unavailable": unavailable,
         "output_incomplete": output_incomplete,
+        "unreadable_lines": unreadable_lines,
         "escalations": sum(b["escalations"] for b in tiers.values()),
         "fix_rounds": sum(b["fix_rounds"] for b in tiers.values()),
         "retries": retries,
