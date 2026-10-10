@@ -136,7 +136,8 @@ Fields: reference.md "Manifest fields". In order:
 ## Confirmation (every launch, no exceptions)
 
 Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file>`. Exit 3 stops the
-flow (show each failure and its fix, and wait); its warnings go in the table header.
+flow (show each failure and its fix, and wait); its warnings go in the table header. Each
+check and what it means: reference.md "Doctor".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
    `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
@@ -264,7 +265,8 @@ lens raised, `final.task_minors_open`), acceptance warnings,
 
 After the report, for every run that ends after a launch (never a dry run): `<python>
 <skill_dir>/scripts/archive-run <manifest file> <transcript dir>...`, then `<python>
-<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its summary.
+<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its
+summary. Details: reference.md "Run history" and "Autopsy".
 
 Then, for accepted work (or reasons the user accepted), offer the next step; act only on an
 explicit yes:
@@ -295,8 +297,8 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
    Record an answer in `notes` as `{"<task id>": "<answer>"}`; a plan fix needs
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
-6. `scripts/doctor` as in Confirmation, then Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
-   then, after the yes, Launch step 2 again (setup and `start_points`), the resume notice,
+6. `scripts/doctor` as in Confirmation, then Confirmation (same rules; `spent` lowers
+   `limits.max_rulings`: reference.md "Budgets"), then, after the yes, Launch step 2 again (setup and `start_points`), the resume notice,
    and launch.
 
 ## Red flags - stop
