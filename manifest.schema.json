@@ -127,7 +127,7 @@
         ],
         "properties": {
           "id": {
-            "description": "Names ledger files and worktrees: must differ from every other lane id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'.",
+            "description": "Names ledger files and worktrees: must differ from every other lane id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'. Must not be a JavaScript property name (__proto__, constructor, hasOwnProperty, isPrototypeOf, propertyIsEnumerable, toLocaleString, toString, valueOf, __defineGetter__, __defineSetter__, __lookupGetter__, __lookupSetter__).",
             "allOf": [
               {
                 "type": "string",
@@ -444,7 +444,7 @@
         "id": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$",
-          "description": "Exactly as in the plan heading; a safe file name (it names brief, report and review files). Must differ from every other task id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'."
+          "description": "Exactly as in the plan heading; a safe file name (it names brief, report and review files). Must differ from every other task id by more than letter case, and must not be a Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) before its first '.'. Must not be a JavaScript property name (__proto__, constructor, hasOwnProperty, isPrototypeOf, propertyIsEnumerable, toLocaleString, toString, valueOf, __defineGetter__, __defineSetter__, __lookupGetter__, __lookupSetter__)."
         },
         "title": {
           "$ref": "#/$defs/text"

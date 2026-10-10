@@ -2,8 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript, H } from './harness.mjs';
 
-const { planAgents, validateManifest, dedupeFindings, preflightPrompt, preflightSchema } = await loadHelpers([
-  'planAgents', 'validateManifest', 'dedupeFindings', 'preflightPrompt', 'preflightSchema',
+const {
+  planAgents, validateManifest, dedupeFindings, preflightPrompt, preflightSchema, withFindingIds, linkSameLocation,
+  settleFinalFindings,
+} = await loadHelpers([
+  'planAgents', 'validateManifest', 'dedupeFindings', 'preflightPrompt', 'preflightSchema', 'withFindingIds',
+  'linkSameLocation', 'settleFinalFindings',
 ]);
 
 function task(id, extra = {}) {
@@ -52,6 +56,7 @@ function manifest(overrides = {}) {
 const verified = (sha, exit = 0) => ({
   checkout: '/work/repo', branch: 'pl/run-1', head: sha,
   results: [{ group: 'test', command: 'npm test', exit }], ok: exit === 0, clean: true, tracked_before: [], tracked_after: [],
+  untracked_before: [], untracked_after: [],
 });
 
 const done = (base, head) => ({ status: 'done', base, head, tests: 'npm test: pass', notes: '' });
@@ -247,6 +252,20 @@ test('happy path: complete, phases in order, report filled in', async () => {
   assert.ok(review('T4').includes(`${H('T1-h')}..${H('T4-h')}`));
   assert.ok(review('T5').includes(`${H('P1')}..${H('T5-h')}`), 'join starts after post-integrate');
   for (const id of ALL) assert.deepEqual(result.tasks[id].commits.length, 2);
+});
+
+test('the review approval command passes the spec', async () => {
+  const reviewed = async (spec) => {
+    const m = manifest({ spec });
+    const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
+    return calls.find((c) => c.label === 'T2 review').prompt;
+  };
+  const head = `'/work/wt/lane-alpha' '${H('T2-h')}' <blocking>`;
+  const withSpec = await reviewed('/work/spec.md');
+  assert.ok(withSpec.includes(`${head} '/work/spec.md'`), withSpec);
+  const noSpec = await reviewed(null);
+  assert.ok(noSpec.includes(`${head} -`), noSpec);
+  assert.ok(!noSpec.includes(`${head} '`), 'no spec path without a spec');
 });
 
 test('mechanical phases start on sonnet high; everything else runs opus high and all carry the commit rules', async () => {
@@ -576,16 +595,74 @@ test('final review dedupe merges identical findings from two lenses', () => {
   assert.deepEqual(merged[1].lenses, ['security']);
 });
 
-test('a merged finding takes the issue text of its most severe report', () => {
+test('a merged finding takes the severity, text and fix of its most severe report', () => {
   const at = (severity, issue, fix) => ({ severity, file: 'src/a.js', line: 3, issue, fix });
-  const [m] = dedupeFindings([
-    { lens: 'superpowers', findings: [at('minor', 'minor text', 'minor fix')] },
-    { lens: 'security', findings: [at('critical', 'critical text', 'critical fix')] },
-    { lens: 'correctness', findings: [at('important', 'important text', 'important fix')] },
+  const merged = dedupeFindings([
+    { lens: 'superpowers', findings: [at('minor', 'same text', 'minor fix')] },
+    { lens: 'security', findings: [at('critical', 'same  text ', 'critical fix')] },
+    { lens: 'correctness', findings: [at('important', ' same text', 'important fix')] },
   ]);
-  assert.deepEqual([m.severity, m.issue, m.fix], ['critical', 'critical text', 'critical fix']);
-  assert.deepEqual(m.also_reported, ['minor text', 'important text']);
+  assert.equal(merged.length, 1);
+  const [m] = merged;
+  assert.deepEqual([m.severity, m.issue, m.fix], ['critical', 'same  text ', 'critical fix']);
+  assert.deepEqual(m.also_reported, []);
   assert.deepEqual(m.lenses, ['superpowers', 'security', 'correctness']);
+});
+
+// Final findings with ids and same_location filled, as the final review
+// builds them.
+const finalFindings = (reports) => linkSameLocation(withFindingIds(dedupeFindings(reports)));
+
+test('distinct issues on one line stay separate', () => {
+  const at = (severity, issue) => ({ severity, file: 'a.js', line: 2, issue, fix: `fix ${issue}` });
+  const got = finalFindings([
+    { lens: 'security', findings: [at('critical', 'missing authz check')] },
+    { lens: 'correctness', findings: [at('important', 'null dereference'), at('important', 'off-by-one')] },
+  ]);
+  assert.deepEqual(got.map((f) => [f.id, f.severity, f.issue, f.lenses, f.same_location, f.also_reported]), [
+    ['F1', 'critical', 'missing authz check', ['security'], ['F2', 'F3'], []],
+    ['F2', 'important', 'null dereference', ['correctness'], ['F1', 'F3'], []],
+    ['F3', 'important', 'off-by-one', ['correctness'], ['F1', 'F2'], []],
+  ]);
+});
+
+test('identical issue text from two lenses merges', () => {
+  const at = (issue) => ({ severity: 'important', file: 'a.js', line: 2, issue, fix: 'fix it' });
+  const got = finalFindings([
+    { lens: 'correctness', findings: [at('the  loop skips\nthe last item')] },
+    { lens: 'security', findings: [at(' the loop skips the last item ')] },
+  ]);
+  assert.equal(got.length, 1);
+  assert.deepEqual([got[0].id, got[0].lenses, got[0].same_location, got[0].also_reported],
+    ['F1', ['correctness', 'security'], [], []]);
+});
+
+test('fixing one of two same-line findings leaves the other open', () => {
+  const at = (severity, issue) => ({ severity, file: 'a.js', line: 2, issue, fix: 'fix it' });
+  const findings = finalFindings([
+    { lens: 'security', findings: [at('critical', 'missing authz check')] },
+    { lens: 'correctness', findings: [at('important', 'null dereference')] },
+  ]);
+  assert.deepEqual(findings.map((f) => f.id), ['F1', 'F2']);
+  const sha = H('fix');
+  const s = settleFinalFindings(findings, [{ id: 'F1', status: 'fixed', evidence: 'added the check' }],
+    { head: sha, results: [{ id: 'F1', status: 'resolved', evidence: 'checked line 2' }], new_findings: [] },
+    'not re-reviewed', sha);
+  assert.deepEqual(s.fixed.map((f) => f.id), ['F1']);
+  assert.deepEqual(s.declined, []);
+  assert.deepEqual(s.open.map((f) => [f.id, f.reason]), [['F2', 'the final fix gave no disposition for it']]);
+});
+
+test('commit-level findings follow the same rule', () => {
+  const c = (issue, line = 0) => ({ severity: 'minor', file: 'commit abc1234', line, issue, fix: 'none' });
+  const got = finalFindings([
+    { lens: 'superpowers', findings: [c('trailer')] },
+    { lens: 'security', findings: [c('non-ASCII subject', 1)] },
+  ]);
+  assert.deepEqual(got.map((f) => [f.id, f.issue, f.lenses, f.same_location]), [
+    ['F1', 'trailer', ['superpowers'], ['F2']],
+    ['F2', 'non-ASCII subject', ['security'], ['F1']],
+  ]);
 });
 
 test('final fix gets the deduped findings once, by id; a decline the re-review accepts is declined', async () => {
@@ -2128,6 +2205,24 @@ test('a passing verify on an uncommitted edit does not accept the run', async ()
   assert.ok(result.acceptance.reasons[0].detail.includes('value.txt'), result.acceptance.reasons[0].detail);
 });
 
+test('a passing verify with an untracked file present does not accept the run', async () => {
+  const result = await acceptanceOf({ verify: [{ ...verified(H('f1')), untracked_before: ['?? required.js'] }] });
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_unclean']);
+  assert.ok(result.acceptance.reasons[0].detail.includes('required.js'), result.acceptance.reasons[0].detail);
+});
+
+test('the verify schema requires the untracked lists and the verify prompt names them', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  const verify = calls.find((c) => c.label === 'verify');
+  for (const field of ['untracked_before', 'untracked_after']) {
+    assert.ok(verify.schema.required.includes(field), field);
+    assert.deepEqual(verify.schema.properties[field], { type: 'array', items: { type: 'string' } }, field);
+  }
+  assert.ok(verify.prompt.includes('Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean,'
+    + ' tracked_before,\ntracked_after, untracked_before, untracked_after.'), verify.prompt);
+});
+
 // ---- Lane checks in the final verify (1.4.0, F3) ----
 
 const laneChecked = (sha, results) => ({ ...verified(sha), results, ok: results.every((r) => r.exit === 0) });
@@ -2397,6 +2492,25 @@ test('checksResultText: checks on uncommitted tracked changes do not cover the h
     + ` ${H('f1')}: ran on uncommitted tracked changes (1 file), so they do not cover ${H('f1')}. Do not rerun them.`);
 });
 
+test('checksResultText: checks with an untracked file present do not cover the head', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  const h = H('f1');
+  assert.equal(checksResultText({ ...verified(h), untracked_before: ['?? out.txt', '?? cov/a.json'] }),
+    `The project checks already ran at ${h}: ran with untracked files present (2 files), so they do not cover ${h}.`
+    + ' Do not rerun them.');
+  assert.equal(checksResultText({ ...verified(h), tracked_before: [' M a.txt'], untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: ran on uncommitted tracked changes (1 file) and with untracked files`
+    + ` present (1 file), so they do not cover ${h}. Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h, 1), untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: FAILED: npm test (exit 1) (with untracked files present, 1 file,`
+    + ` so not at ${h}). Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h, 1), tracked_after: [' M a.txt'], untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: FAILED: npm test (exit 1) (on uncommitted tracked changes, 1 file,`
+    + ` and with untracked files present, 1 file, so not at ${h}). Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h), untracked_after: ['?? new.txt'] }),
+    `The project checks already ran at ${h}: passed. Do not rerun them.`, 'files the checks created leave head covered');
+});
+
 test('checksResultText: a failure on uncommitted tracked changes is not reported as a failure of head', async () => {
   const { checksResultText } = await loadHelpers(['checksResultText']);
   const failing = { head: H('f2'), ok: false, results: [{ group: 'test', command: 'npm test', exit: 1 }],
@@ -2460,25 +2574,27 @@ test('a task minor no final lens raised is listed in final.task_minors_open', as
   assert.deepEqual(none.result.final.task_minors_open, []);
 });
 
-test('findings on the same file and line merge across lenses; others stay apart', async () => {
+test('one issue on the same file and line merges across lenses; others stay apart', async () => {
   const f = (issue, line) => ({ severity: 'minor', file: 'a.js', line, issue, fix: 'fix it' });
   const script = {
     ...phaseScript({
       'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: H('T5-h') }],
-      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: H('T5-h') }],
+      'final review security': [{ findings: [f(' x', 7), f('y', 7)], cannot_verify: [], head: H('T5-h') }],
       'final review correctness': [{ findings: [f('x', 9), f('z', 0), f('z', 0)], cannot_verify: [], head: H('T5-h') }],
     }),
     ...taskScript(ALL),
   };
   const { result } = await run(manifest(), script);
-  const got = result.final.findings.map((x) => [x.id, x.file, x.line, x.issue, x.lenses, x.also_reported]);
+  const got = result.final.findings.map((x) => [x.id, x.file, x.line, x.issue, x.lenses, x.same_location, x.also_reported]);
   assert.deepEqual(got, [
-    ['F1', 'a.js', 7, 'x', ['superpowers', 'security'], ['y']],
-    ['F2', 'a.js', 9, 'x', ['correctness'], []],
-    ['F3', 'a.js', 0, 'z', ['correctness'], []],
-    ['F4', 'a.js', 0, 'z', ['correctness'], []],
+    ['F1', 'a.js', 7, 'x', ['superpowers', 'security'], ['F2'], []],
+    ['F2', 'a.js', 7, 'y', ['security'], ['F1'], []],
+    ['F3', 'a.js', 9, 'x', ['correctness'], [], []],
+    ['F4', 'a.js', 0, 'z', ['correctness'], [], []],
+    ['F5', 'a.js', 0, 'z', ['correctness'], [], []],
   ]);
-  // The fixer sees the merged-away report too.
+  // The fixer gets each finding on its own line, pointing at the other one
+  // on the same line.
   const fix = (await run(manifest(), {
     ...phaseScript({
       'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: H('T5-h') }],
@@ -2486,20 +2602,22 @@ test('findings on the same file and line merge across lenses; others stay apart'
     }),
     ...taskScript(ALL),
   })).calls.find((c) => c.label === 'final fix').prompt;
-  assert.ok(fix.includes('[F1]'), fix);
-  assert.ok(fix.includes('Also reported here: y-only-in-security'), fix);
+  assert.ok(fix.includes('[F1] [minor] a.js:7 - x (suggested fix: fix it) Same line as: F2'), fix);
+  assert.ok(fix.includes('[F2] [minor] a.js:7 - y-only-in-security (suggested fix: fix it) Same line as: F1'), fix);
+  assert.ok(!fix.includes('Also reported here'), fix);
 });
 
-test('commit findings on the same sha merge', () => {
+test('commit findings on the same sha merge only when the issue is the same', () => {
   const c = (issue, line = 0) => ({ severity: 'minor', file: 'commit abc1234', line, issue, fix: 'none' });
   const merged = dedupeFindings([
     { lens: 'superpowers', findings: [c('trailer')] },
-    { lens: 'security', findings: [c('non-ASCII subject')] },
+    { lens: 'security', findings: [c('trailer', 3), c('non-ASCII subject')] },
     { lens: 'correctness', findings: [{ ...c('other'), file: 'commit def5678' }] },
   ]);
-  assert.equal(merged.length, 2);
+  assert.equal(merged.length, 3);
   assert.deepEqual(merged[0].lenses, ['superpowers', 'security']);
   assert.equal(merged[0].issue, 'trailer');
-  assert.deepEqual(merged[0].also_reported, ['non-ASCII subject']);
-  assert.equal(merged[1].file, 'commit def5678');
+  assert.deepEqual(merged[0].also_reported, []);
+  assert.deepEqual([merged[1].issue, merged[1].lenses], ['non-ASCII subject', ['security']]);
+  assert.equal(merged[2].file, 'commit def5678');
 });

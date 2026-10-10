@@ -345,3 +345,19 @@ test('reference.md documents check-verify within its trust boundary', () => {
   }
   assert.ok(!text.includes('is not caught by the run'), 'reference.md still says the run does not catch a misreport');
 });
+
+// These tests check instructions to the session in reference.md (what it must
+// say about the 1.4.4 hardening), not behaviour the code enforces.
+test('reference.md documents the 1.4.4 hardening', () => {
+  const raw = read(REFERENCE_MD).toString('utf8');
+  const text = raw.replace(/\s+/g, ' ');
+  for (const word of ['untracked_before', 'untracked_after', 'spec_sha256', 'same_location', 'unreadable_lines']) {
+    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  }
+  assert.ok(/ignored files[^.]*run-checks|run-checks[^.]*ignored files/i.test(text),
+    'reference.md does not say run-checks does not cover ignored files');
+  assert.ok(text.includes('the spec changed since its review'), 'reference.md lacks the stale reason for a changed spec');
+  assert.ok(text.includes('ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]'),
+    'reference.md lacks the ledger reviewed usage');
+  assert.ok(!text.includes('and the other texts as `also_reported`'), 'reference.md still has the old merge rule');
+});

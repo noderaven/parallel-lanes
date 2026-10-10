@@ -358,6 +358,16 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
+`unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
+lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with
+invalid UTF-8 counts even when it still parses after the bad bytes are replaced (they may have
+been a key or a count), and what it holds is still read as far as it goes. An agent with any
+unreadable line is incomplete exactly as a mid-stream count makes it (`output_tokens` is
+`unavailable`, `output_tokens_min` holds the lower bound, and it counts in `output_incomplete`),
+since the lost line may have held a later count. Report a non-zero total, because the figures
+are then minimums. An agent with unreadable lines and no usage line at all keeps both values
+`unavailable`.
+
 `<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
 arguments and prints one status JSON line (see "Verify evidence").
 
@@ -379,9 +389,36 @@ more reasons are session-side: `verify_evidence_missing`, `verify_evidence_stale
 "Verify evidence"), not by the workflow, and are never in `result.acceptance`.
 `run-checks` also reports `tracked_before` and `tracked_after`: the lines `git status --porcelain
 --untracked-files=no` printed before the first command and after the last (`[]` when clean;
-`ok`, `clean` and the exit code are unchanged). Acceptance gives `checks_unclean` (class
-`missing`) when the verify result at the delivered revision has a non-empty list or lacks one,
-because checks that ran on uncommitted tracked changes did not test the commit.
+`ok`, `clean` and the exit code are unchanged), and `untracked_before` and `untracked_after`:
+the `?? ` lines of `git status --porcelain --untracked-files=all` at the same two moments, so
+every untracked file that is not ignored (`[]` when none). Acceptance gives `checks_unclean`
+(class `missing`) when the verify result at the delivered revision has a non-empty
+`tracked_before`, `tracked_after` or `untracked_before`, or lacks one of those, because checks
+that ran on uncommitted tracked changes, or with an untracked file present that the commands
+could read, did not test the commit. Verify runs in the feature checkout, and earlier steps of
+the run have already run the same project commands there: integrate (setup, then every
+command), the E2E and post-integrate hooks, the final fix agent, and in the `lite` profile the
+implementers. No agent may delete untracked files, so whatever those commands created that is
+not ignored (`test-results/`, coverage output, a generated file) is still in the checkout when
+verify starts, is listed in `untracked_before`, and makes the run `unverified` with
+`checks_unclean`; the fix is to add those files to `.gitignore`. A non-empty `untracked_after`
+alone (files the checks created) stays a warning that names the new files only when the checks
+run for the first time in a clean checkout, which in a run is rare. A missing `untracked_after`
+does not block either: it only affects that after-checks warning, which then falls back to the
+general text.
+
+The guarantee, in one paragraph: `accepted` means the configured checks passed at the delivered
+commit, with no tracked change and no untracked file present before them. Ignored files are not
+covered: `run-checks` does not list them, so a stale build output or cache that `.gitignore`
+hides can still change what the checks test. Any file that is not ignored and that the project's
+commands create is present when verify runs `run-checks`: one a setup command creates (the
+verify prompt runs setup first; an uncommitted lockfile, for example), and one the test, lint or
+build commands create when an earlier step of the run ran them (see above). Either makes every
+run `unverified` with `checks_unclean`, where it once only warned. The fix is a `.gitignore`
+entry for the file, or an explicit accept by the user that names it (see "Verify evidence"); a
+session re-verify alone does not clear it, because the session runs the same setup commands
+first in the same checkout. Running verify in an isolated worktree at the delivered sha, so
+that files earlier steps left cannot be present, is later work.
 Warnings (open minor findings, cannot-verify entries with a source, checks that left the
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
@@ -427,27 +464,31 @@ different commits, `final.review_problem` says so and acceptance gives `review_u
 
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
-Findings two lenses report at the same `file` and `line` (when `line` > 0), or on the same
-`commit <sha>` file, are merged: the merged finding keeps every lens and the issue text,
-severity, and fix of its most severe report (the first of those on a tie), so the text
-matches the severity, and the other texts as `also_reported`; every other finding
-stays separate. Every minor finding of an approved task review gets an id `<task>-<n>`, with
-`T` put in front of a task id that starts with a digit (task 3 gives `T3-1`, task T2 gives
-`T2-1`), and goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
-finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
-them in the report, so minors from task reviews are not lost. Task minors are not stored in
-the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
-so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
-`cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
-naming those tasks (check them in the earlier launch's report).
-The fixer gives each id a disposition with its evidence; the re-review names the revision it
-judged (`head`). A finding the fix gave no disposition for, a disposition or re-review result with blank
-evidence, a re-review of another revision than the fix
-head, or two different dispositions or results for one id leave the finding open (the new
-findings such a re-review reports are kept).
-`ledger status <ledger_dir> --manifest <manifest file>` lists under `undeclared` the files each
-task's recorded range changed outside its `files` (from git; a batch's files count for each of
-its tasks): list them in the report so the user can see work that went beyond the plan.
+Findings are merged only when they are the same finding: reported at the same `file` and `line`
+(when `line` > 0), or on the same `commit <sha>` file, with the same issue text (compared after
+trimming and collapsing whitespace). The merged finding keeps every lens and the issue text,
+severity, and fix of its most severe report (the first of those on a tie), so the text matches
+the severity. Distinct issues at one location stay separate findings, each its own obligation: a
+minor one cannot hide a critical one. Each finding carries `same_location`, the ids of the other
+findings at its location (`[]` when none, and always for a finding with no usable line); the
+agents that get the findings see it as "Same line as". `also_reported` is still present on every
+finding, always `[]`, so the shape is unchanged. Every minor finding of an approved task review
+gets an id `<task>-<n>`, with `T` put in front of a task id that starts with a digit (task 3
+gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a checklist: a lens raises
+one by putting its id in brackets in a finding's issue, or leaves it. `final.task_minors_open`
+lists the ones no lens raised: show them in the report, so minors from task reviews are not
+lost. Task minors are not stored in the ledger: after a resume, the tasks an earlier launch
+committed and reviewed are not re-run, so their minors reach neither the final lenses nor
+`task_minors_open`; the run says so in a `cannot_verify` note (a plain string, so not a warning,
+since every resume has such tasks) naming those tasks (check them in the earlier launch's
+report). The fixer gives each id a disposition with its evidence; the re-review names the
+revision it judged (`head`). A finding the fix gave no disposition for, a disposition or
+re-review result with blank evidence, a re-review of another revision than the fix head, or two
+different dispositions or results for one id leave the finding open (the new findings such a
+re-review reports are kept). `ledger status <ledger_dir> --manifest <manifest file>` lists under
+`undeclared` the files each task's recorded range changed outside its `files` (from git; a
+batch's files count for each of its tasks): list them in the report so the user can see work
+that went beyond the plan.
 
 The hand-back appends the report, saves it beside the manifest, and lists
 "Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
@@ -510,15 +551,17 @@ Rules, in order:
    The workflow never accepts a run that has final checks (a test, lint or build command) and no
    verify result, so an accepted run without one had no checks to run.
 4. Validate the report: `head` a string; `ok` and `clean` booleans; `results` a list of objects
-   with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before` and
-   `tracked_after`, when present, lists of strings. Else `invalid`, with `detail` naming the field.
+   with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before`,
+   `tracked_after`, `untracked_before` and `untracked_after`, when present, lists of strings.
+   Else `invalid`, with `detail` naming the field.
 5. The sha is `result.delivered_sha` when not null, else `result.verify.head`. It must be 40 or 64
    lowercase hex digits; else `invalid`, and it is never put into a path.
-6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked lists may be absent, as
-   older run-checks wrote them): `invalid`.
+6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked and untracked lists may be
+   absent, as older run-checks wrote them): `invalid`.
 7. Freshness: the evidence file must not be older than the result file's `startTime` (epoch
    milliseconds; absent or not a number: `invalid`); an older file is `stale`.
-8. Compare `head`, `ok`, `clean`, `tracked_before`, `tracked_after`, then `results` position by
+8. Compare `head`, `ok`, `clean`, `tracked_before`, `tracked_after`, `untracked_before`,
+   `untracked_after`, then `results` position by
    position as `{group, command, exit}`. A field present on one side only differs. Any
    difference is `mismatch` (each is `{"field", "reported", "evidence"}`); none is `match`.
 
@@ -534,9 +577,15 @@ Recovery. Resuming a complete run does not run verify again, so resuming alone c
 - `missing`, `stale`, `mismatch`, `invalid`: the session runs the final checks itself at the
   delivered revision in the feature checkout: the setup commands, then the same run-checks command
   the verify prompt gives, with `--out <ledger_dir>/checks/session-verify-<sha>.json --root
-  <ledger_dir>`. Show the result. When every exit is 0, `ok` is true, both tracked lists are
-  empty and `head` is the delivered sha, the user may accept the run explicitly; record that with
+  <ledger_dir>`. Show the result. When every exit is 0, `ok` is true, both tracked lists and
+  `untracked_before` are empty and `head` is the delivered sha, the user may accept the run
+  explicitly; record that with
   `ledger accept <ledger_dir> <repo root> <sha> "session re-verified: <path>; replaces <reason>"`.
+  When `untracked_before` is not empty (or missing), the re-verify does not show that the checks
+  tested the commit: name those files to the user. Record an explicit accept only when the user
+  confirms that none of them is an input to the checks, and name them in the note (`...; replaces
+  <reason>; untracked before the checks, confirmed not inputs: <files>`); the lasting fix is a
+  `.gitignore` entry for them.
   That is an explicit override recorded in the ledger (an `accepted` event), not a match:
   check-verify still reports its original status for that launch. Otherwise the run stays
   unverified; the user fixes the cause and resumes, as for any other reason.
@@ -558,9 +607,20 @@ header.
 `ledger status --plan <plan> [--spec <spec>]` also checks approvals: a review recorded with
 `ledger reviewed` holds the hash of the task's section and the head of the range it approved
 (it refuses an approval that reports a critical or important finding; a fix agent records
-`reopened` when the engine acted on such an approval as changes); a changed
-section or head puts the task in `stale`, a review without a hash (older ledgers) in
-`unbound`, and both are left out of `reviewed` so the resume reviews them again. `inputs`
+`reopened` when the engine acted on such an approval as changes). Its usage is
+`ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]`: give SPEC, the spec
+file the review read (`-` when there is none), and the approval also records `spec_sha256`, the
+file's hash (`null` for `-`). A changed section or head puts the task in `stale`, and so do
+two spec reasons, checked when `--plan` is given: an approval that recorded `spec_sha256` is stale
+when it differs from the current spec's hash (`the spec changed since its review`; with `--plan`
+but no `--spec` the current spec counts as absent, so an approval that recorded a hash is
+stale and one that recorded `null` is not), and an approval that recorded none (from before
+1.4.4) is stale whenever the run has a spec: `--spec` is given, or any launch's setup recorded
+one (`the review recorded no spec (it predates 1.4.4) and this run has one`). That holds after
+later setup records too, so an interrupted resume cannot revive it; a fresh approval that
+records the spec settles it. Pass `--spec` on a resume only when the run has a spec. A
+review without a hash (older ledgers) is `unbound`, and both are left out of `reviewed` so the
+resume reviews them again. `inputs`
 says whether the plan or spec changed since the last launch recorded their hashes. A stale
 task that is not the last done task of its list is reviewed against the current plan, but a
 fix for it lands after the later tasks' commits; tell the user, who may prefer rerunning it
@@ -653,3 +713,14 @@ with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" worktree remove`, then run `shadow remove` (it deletes the shadow
 repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir`).
+
+## Uninstall
+
+`bash install.sh --uninstall` backs up `~/.claude/settings.json`, then removes the two hooks from
+it, the agent file, and the skill directory. Both uninstall and the update path first check that
+an existing `settings.json` holds exactly one JSON object (an empty file, two documents, or an
+array is refused, as is invalid JSON): otherwise they stop with `<file> is not a single JSON
+object (or not valid JSON); fix it and rerun` and change nothing. When the edit itself fails
+anyway, uninstall stops with `could not edit <file>; nothing removed`, deletes its temporary
+file, and removes neither the agent file nor the skill directory: fix the file and run it
+again. On uninstall, the `.bak` backup written before the edit stays.

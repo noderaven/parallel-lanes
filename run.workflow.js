@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.4.3: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.4.4: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -115,6 +115,19 @@ function laneIdPattern() {
 // derive-lanes enforce it too; manifest.schema.json repeats it.
 function taskIdPattern() {
   return laneIdPattern();
+}
+
+// Ids that are also JavaScript property names: the engine keeps per-id state
+// in plain objects, where these would hit inherited members (or, for
+// __proto__, the prototype itself). A function, not a const, so the test
+// harness can load it (this is the plan's RESERVED_IDS); scripts/_brief.py keeps
+// the same list in RESERVED_IDS; manifest.schema.json documents it.
+function reservedIds() {
+  return [
+    '__proto__', 'constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable',
+    'toLocaleString', 'toString', 'valueOf',
+    '__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__',
+  ];
 }
 
 // True when id names a Windows device (CON, PRN, AUX, NUL, COM1-COM9,
@@ -299,6 +312,7 @@ function validateManifest(m) {
       taskIds.add(t.id);
       caseClash('task', taskSpelling, t.id);
       if (reservedName(t.id)) err(`${where}: id ${t.id} is a reserved device name on Windows`);
+      if (reservedIds().includes(t.id)) err(`${where}: id "${t.id}" is reserved (a JavaScript property name)`);
     }
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
@@ -387,6 +401,7 @@ function validateManifest(m) {
           laneIds.add(lane.id);
           caseClash('lane', laneSpelling, lane.id);
           if (reservedName(lane.id)) err(`${where}: id ${lane.id} is a reserved device name on Windows`);
+          if (reservedIds().includes(lane.id)) err(`${where}: id "${lane.id}" is reserved (a JavaScript property name)`);
         }
         if (!isText(lane.name)) err(`${where}.name: must be a non-empty string`);
         if ('setup_note' in lane && !isText(lane.setup_note)) err(`${where}.setup_note: must be a non-empty string`);
@@ -580,7 +595,7 @@ function validateManifest(m) {
     }
     if (isTextList(m.done) && isTextList(m.reviewed)) {
       for (const id of m.done) {
-        if (!(id in backfill)) err(`backfill: missing an entry for task ${id} (done)`);
+        if (!Object.prototype.hasOwnProperty.call(backfill, id)) err(`backfill: missing an entry for task ${id} (done)`);
       }
     }
   }
@@ -933,8 +948,9 @@ function ledgerCommand(m, laneId, entry, dir) {
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
-  const own = (laneId !== null && m.lane_commands && m.lane_commands[laneId]) || {};
-  return own[name] || m.commands[name] || [];
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const own = (laneId !== null && m.lane_commands && has(m.lane_commands, laneId) && m.lane_commands[laneId]) || {};
+  return (has(own, name) && own[name]) || m.commands[name] || [];
 }
 
 // One command group as a shell line: joined with &&, so a failing command
@@ -1007,14 +1023,14 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
-// One line per finding; a finding merged from several reports
-// (dedupeFindings) also lists the other reports' issue text.
+// One line per finding; a finding that shares its location with other
+// findings (dedupeFindings, linkSameLocation) also names their ids.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
     + ` - ${f.issue} (suggested fix: ${f.fix})`
-    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
-      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+    + (Array.isArray(f.same_location) && f.same_location.length > 0
+      ? ` Same line as: ${f.same_location.join(', ')}` : '')).join('\n');
 }
 
 // One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
@@ -1242,7 +1258,8 @@ function startCommand(m, task, where, opts = {}) {
   const extra = m.consumes_extra || {};
   for (const t of unitTasks(task)) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
-    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+    const own = Object.prototype.hasOwnProperty.call(extra, t.id) ? extra[t.id] : [];
+    for (const p of own) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
@@ -1294,11 +1311,14 @@ function finishCommand(m, task, where, from, settled = null) {
 // head of the range under review): the hash of the task's section of the plan
 // comes from the file, not from the reviewer (scripts/ledger reviewed). The
 // reviewer fills <blocking> with its count of critical and important
-// findings; the command records nothing unless it is 0.
+// findings; the command records nothing unless it is 0. The last argument is
+// the spec path, which the ledger hashes so a changed spec makes the approval
+// stale; "-" when the run has no spec.
 function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
+  const spec = typeof m.spec === 'string' && m.spec !== '' ? shellQuote(m.spec) : '-';
   return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
-    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking> ${spec}`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.
@@ -1800,8 +1820,10 @@ function verifySchema() {
       clean: { type: 'boolean' },
       tracked_before: { type: 'array', items: { type: 'string' } },
       tracked_after: { type: 'array', items: { type: 'string' } },
+      untracked_before: { type: 'array', items: { type: 'string' } },
+      untracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
 }
 
@@ -2326,7 +2348,7 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after.',
+    'tracked_after, untracked_before, untracked_after.',
   ].join('\n');
 }
 
@@ -2334,22 +2356,33 @@ function verifyPrompt(m, sha) {
 // them at the same commit: one line, or '' for null (or a result naming no
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
 // per-command results (integrate's). Passed means ok and every exit 0, on a
-// checkout with no tracked change before or after the commands; checks that
-// passed on uncommitted tracked changes do not cover head, and a failure on
-// them may come from the uncommitted edit, so it is not reported as head's. A missing tracked
+// checkout with no tracked change before or after the commands and no
+// untracked file before them (untracked_before, as acceptance's
+// checks_unclean rule reads it); checks that passed on uncommitted tracked
+// changes or with an untracked file present do not cover head, and a failure
+// there may come from that file, so it is not reported as head's. A missing
 // list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
   const results = Array.isArray(checks.results) ? checks.results : [];
   const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-  const tracked = new Set([checks.tracked_before, checks.tracked_after]
+  const paths = (lists) => new Set(lists
     .flatMap((l) => (Array.isArray(l) ? l : []))
     .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
-  const files = `${tracked.size} file${tracked.size === 1 ? '' : 's'}`;
+  const tracked = paths([checks.tracked_before, checks.tracked_after]);
+  const untracked = paths([checks.untracked_before]);
+  const count = (n) => `${n} file${n === 1 ? '' : 's'}`;
+  const failedOn = [
+    ...(tracked.size > 0 ? [`on uncommitted tracked changes, ${count(tracked.size)}`] : []),
+    ...(untracked.size > 0 ? [`with untracked files present, ${count(untracked.size)}`] : []),
+  ];
+  const ranOn = [
+    ...(tracked.size > 0 ? [`on uncommitted tracked changes (${count(tracked.size)})`] : []),
+    ...(untracked.size > 0 ? [`with untracked files present (${count(untracked.size)})`] : []),
+  ];
   const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
-      + (tracked.size > 0 ? ` (on uncommitted tracked changes, ${files}, so not at ${checks.head})` : '')
-    : tracked.size > 0 ? `ran on uncommitted tracked changes (${files}),`
-      + ` so they do not cover ${checks.head}`
+      + (failedOn.length > 0 ? ` (${failedOn.join(', and ')}, so not at ${checks.head})` : '')
+    : ranOn.length > 0 ? `ran ${ranOn.join(' and ')}, so they do not cover ${checks.head}`
       : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
@@ -2374,12 +2407,19 @@ function findingKey(f) {
   return null;
 }
 
-// Merge the lenses' findings (spec 1.3.1): findings on the same file and
-// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// A finding's issue text as findings merge on it: trimmed, with every run
+// of whitespace collapsed to one space.
+function issueKey(f) {
+  return String(f.issue == null ? '' : f.issue).replace(/\s+/g, ' ').trim();
+}
+
+// Merge the lenses' findings (spec 1.3.1): findings at the same location
+// (findingKey) with the same issue text (issueKey) become one entry listing
 // every lens that reported it, keeping the issue text, severity and fix of
-// its most severe report (the first of those on a tie), and the other
-// reports' distinct issue texts as also_reported, so the issue text always
-// matches its severity. Every other finding stays separate.
+// its most severe report (the first of those on a tie). Findings at one
+// location with different issue texts stay separate entries, each its own
+// obligation; linkSameLocation lists the others' ids once ids are assigned.
+// also_reported stays on every entry, always [], so the shape is unchanged.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -2387,30 +2427,39 @@ function dedupeFindings(reports) {
   const byKey = new Map();
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
-      const key = findingKey(f);
+      const location = findingKey(f);
+      const key = location === null ? null : JSON.stringify([location, issueKey(f)]);
       const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens], also_reported: [] };
+        const entry = { ...f, lenses: [lens], also_reported: [], same_location: [] };
         if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
-        // The more severe report becomes the primary text; the earlier one
-        // moves to also_reported.
-        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
         seen.issue = f.issue;
-        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
-        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
-      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
-        seen.also_reported.push(f.issue);
       }
     }
   }
   return merged;
+}
+
+// Fill each finding's same_location with the ids of the other findings at
+// its location (findingKey), in order; a finding with no location key gets
+// []. findings: dedupeFindings output with ids (withFindingIds).
+function linkSameLocation(findings) {
+  const idsAt = new Map();
+  for (const f of findings) {
+    const key = findingKey(f);
+    if (key !== null) idsAt.set(key, [...(idsAt.get(key) || []), f.id]);
+  }
+  return findings.map((f) => {
+    const key = findingKey(f);
+    return { ...f, same_location: key === null ? [] : idsAt.get(key).filter((id) => id !== f.id) };
+  });
 }
 
 // Adjudicator: rulings that let a blocked task continue instead of stopping its lane.
@@ -3247,20 +3296,42 @@ function expectedChecks(m) {
   return finalChecks(m);
 }
 
+// Porcelain lines as a list of JSON-quoted strings.
+function quotedLines(lines) {
+  return lines.map((l) => JSON.stringify(l)).join(', ');
+}
+
 // Why a verify result at sha does not cover the commit itself, or null when
 // git status showed no tracked or staged change before and after the checks
-// (run-checks' tracked_before and tracked_after, porcelain lines). A result
-// without the lists cannot show that, so it does not cover the commit either.
+// (run-checks' tracked_before and tracked_after, porcelain lines) and no
+// untracked file before them (untracked_before): an untracked file the
+// commands could read is not part of the commit. Setup requires a clean
+// checkout, so any untracked file counts. A result without the lists cannot
+// show that, so it does not cover the commit either.
 function uncleanChecksDetail(verify, sha) {
   const parts = [];
   for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
     const lines = verify[field];
     if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
-    else if (lines.length > 0) {
-      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
-    }
+    else if (lines.length > 0) parts.push(`uncommitted tracked changes ${when} the commands: ${quotedLines(lines)}`);
   }
+  const untracked = verify.untracked_before;
+  if (!Array.isArray(untracked)) parts.push('they did not report untracked files before the commands (untracked_before)');
+  else if (untracked.length > 0) parts.push(`untracked files before the commands: ${quotedLines(untracked)}`);
   return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
+}
+
+// The warning for checks that left the checkout not clean afterwards (called
+// only when they ran clean): the untracked files they created (untracked_after
+// minus untracked_before) when there are any, otherwise the general text.
+function afterChecksWarning(verify, sha) {
+  if (verify.clean !== false) return `the project checks did not report whether the checkout was clean at ${sha}`;
+  const before = verify.untracked_before;
+  const after = verify.untracked_after;
+  const created = Array.isArray(before) && Array.isArray(after) ? after.filter((l) => !before.includes(l)) : [];
+  return created.length > 0
+    ? `the project checks left new untracked files in the checkout at ${sha}: ${quotedLines(created)}`
+    : `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`;
 }
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
@@ -3300,17 +3371,16 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
-  // Checks that ran on uncommitted tracked or staged changes, or changed a
-  // tracked file, tested something other than the delivered commit.
+  // Checks that ran on uncommitted tracked or staged changes or with an
+  // untracked file present, or changed a tracked file, tested something
+  // other than the delivered commit.
   const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
   if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
   if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
-    warnings.push(verify.clean === false
-      ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
-      : `the project checks did not report whether the checkout was clean at ${sha}`);
+    warnings.push(afterChecksWarning(verify, sha));
   }
 
   if (m.hooks.e2e) {
@@ -3413,10 +3483,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   });
   const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
     .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
-  const findings = withFindingIds(dedupeFindings([
+  const findings = linkSameLocation(withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
-  ]));
+  ])));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
@@ -3691,7 +3761,9 @@ async function runAll(manifest, io) {
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    const range = taskState(m, t.id) === 'skip' ? (m.backfill || {})[t.id] : null;
+    const given = m.backfill || {};
+    const range = taskState(m, t.id) === 'skip' && Object.prototype.hasOwnProperty.call(given, t.id)
+      ? given[t.id] : null;
     tasks[t.id] = {
       status: taskState(m, t.id) === 'skip' ? (deferredBefore.has(t.id) ? 'deferred' : 'skipped') : 'not_run',
       rounds: null,
@@ -4133,7 +4205,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.4.3';
+const VERSION = '1.4.4';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

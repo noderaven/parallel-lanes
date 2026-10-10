@@ -308,3 +308,94 @@ test('effort comes from the workflow result when it is there', () => {
     ], 'matched by label, in start order; an agent with no entry is unavailable');
   }
 });
+
+test('a truncated line makes the agent incomplete and is counted', () => {
+  const dir = join(TMP, 'truncated');
+  mkdirSync(dir, { recursive: true });
+  writeAgent(dir, 'u1', 'T1 implement', 'opus', [
+    usageLine('m1', 'claude-opus-x', 30, 'end_turn'),
+    '{"message": {"usage": {"input_tokens": 5',
+  ]);
+  writeAgent(dir, 'u2', 'T1 review', 'sonnet', [usageLine('m2', 'claude-sonnet-x', 12, 'end_turn')]);
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  const a = out.agents.find((x) => x.label === 'T1 implement');
+  assert.equal(a.unreadable_lines, 1);
+  assert.equal(a.output_tokens, 'unavailable');
+  assert.equal(a.output_tokens_min, 30);
+  assert.equal(out.agents.find((x) => x.label === 'T1 review').unreadable_lines, 0);
+  assert.equal(out.unreadable_lines, 1);
+  assert.equal(out.output_incomplete, 1);
+  assert.equal(out.tiers.opus.output_tokens, 'unavailable');
+  assert.equal(out.totals.output_tokens, 'unavailable');
+  assert.equal(out.totals.output_tokens_min, 42);
+});
+
+// A line with invalid UTF-8 is damaged even when it still parses after
+// replacement: the bytes may have been a key, so the totals are partial.
+test('invalid UTF-8 does not crash the report and counts as unreadable', () => {
+  const dir = join(TMP, 'badutf8');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent-b1.meta.json'),
+    JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
+  const good = Buffer.from(usageLine('m1', 'claude-opus-x', 9, 'end_turn'));
+  const bad = Buffer.concat([
+    Buffer.from('{"type":"user","text":"'), Buffer.from([0xff, 0xfe]), Buffer.from('"}\n'),
+  ]);
+  writeFileSync(join(dir, 'agent-b1.jsonl'), Buffer.concat([bad, good]));
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const a = JSON.parse(r.stdout).agents[0];
+  assert.equal(a.unreadable_lines, 1);
+  assert.equal(a.output_tokens, 'unavailable');
+  assert.equal(a.output_tokens_min, 9);
+});
+
+test('an invalid byte inside a usage key makes the totals partial, not complete', () => {
+  const dir = join(TMP, 'badkey');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent-k1.meta.json'),
+    JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
+  const good = Buffer.from(usageLine('m1', 'claude-opus-x', 5, 'end_turn'));
+  // The second message's output count sits under a key with an invalid byte:
+  // after replacement it parses, but the count is lost.
+  const [head, tail] = usageLine('m2', 'claude-opus-x', 9, 'end_turn').split('output_tokens');
+  const bad = Buffer.concat([Buffer.from(`${head}output_tok`), Buffer.from([0xff]), Buffer.from(`ens${tail}`)]);
+  writeFileSync(join(dir, 'agent-k1.jsonl'), Buffer.concat([good, bad]));
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const report = JSON.parse(r.stdout);
+  const a = report.agents[0];
+  assert.equal(a.unreadable_lines, 1);
+  assert.equal(a.output_tokens, 'unavailable', 'a lost count is never shown as a complete total');
+  assert.equal(report.output_incomplete, 1);
+  assert.equal(report.unreadable_lines, 1);
+});
+
+test('a line containing U+2028 inside a string is read whole', () => {
+  const dir = join(TMP, 'u2028');
+  mkdirSync(dir, { recursive: true });
+  const LS = String.fromCharCode(0x2028); // the line separator, built so the source stays ASCII
+  const line = JSON.stringify({
+    type: 'assistant', requestId: 'req-m1', note: `a${LS}b`,
+    message: { id: 'm1', model: 'claude-opus-x', stop_reason: 'end_turn', usage: {
+      input_tokens: 1, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    } },
+  }) + '\n';
+  assert.ok(line.includes(LS), 'the raw separator is in the written line');
+  writeFileSync(join(dir, 'agent-s1.meta.json'),
+    JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
+  writeFileSync(join(dir, 'agent-s1.jsonl'), line);
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.agents[0].unreadable_lines, 0);
+  assert.equal(out.agents[0].output_tokens, 8);
+  assert.equal(out.unreadable_lines, 0);
+});
+
+test('the fixture report is unchanged apart from the new counts', () => {
+  assert.equal(report.unreadable_lines, 0);
+  for (const a of report.agents) assert.equal(a.unreadable_lines, 0, a.label);
+});

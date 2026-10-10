@@ -60,8 +60,9 @@ function ledgerCommand(m, laneId, entry, dir) {
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
-  const own = (laneId !== null && m.lane_commands && m.lane_commands[laneId]) || {};
-  return own[name] || m.commands[name] || [];
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const own = (laneId !== null && m.lane_commands && has(m.lane_commands, laneId) && m.lane_commands[laneId]) || {};
+  return (has(own, name) && own[name]) || m.commands[name] || [];
 }
 
 // One command group as a shell line: joined with &&, so a failing command
@@ -134,14 +135,14 @@ function commandsText(m, laneId, dir = null) {
   return lines.join('\n');
 }
 
-// One line per finding; a finding merged from several reports
-// (dedupeFindings) also lists the other reports' issue text.
+// One line per finding; a finding that shares its location with other
+// findings (dedupeFindings, linkSameLocation) also names their ids.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
     + ` - ${f.issue} (suggested fix: ${f.fix})`
-    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
-      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+    + (Array.isArray(f.same_location) && f.same_location.length > 0
+      ? ` Same line as: ${f.same_location.join(', ')}` : '')).join('\n');
 }
 
 // One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
@@ -369,7 +370,8 @@ function startCommand(m, task, where, opts = {}) {
   const extra = m.consumes_extra || {};
   for (const t of unitTasks(task)) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
-    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+    const own = Object.prototype.hasOwnProperty.call(extra, t.id) ? extra[t.id] : [];
+    for (const p of own) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
@@ -421,11 +423,14 @@ function finishCommand(m, task, where, from, settled = null) {
 // head of the range under review): the hash of the task's section of the plan
 // comes from the file, not from the reviewer (scripts/ledger reviewed). The
 // reviewer fills <blocking> with its count of critical and important
-// findings; the command records nothing unless it is 0.
+// findings; the command records nothing unless it is 0. The last argument is
+// the spec path, which the ledger hashes so a changed spec makes the approval
+// stale; "-" when the run has no spec.
 function reviewedCommand(m, laneId, taskId, rounds, dir, head) {
+  const spec = typeof m.spec === 'string' && m.spec !== '' ? shellQuote(m.spec) : '-';
   return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} reviewed ` +
     `${shellQuote(m.repo.ledger_dir)} ${shellQuote(laneId)} ${shellQuote(taskId)} ${rounds} ` +
-    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking>`;
+    `${shellQuote(m.plan)} ${shellQuote(dir)} ${shellQuote(head)} <blocking> ${spec}`;
 }
 
 // The structured result an implement, fix, or final-fix agent returns.

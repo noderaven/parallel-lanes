@@ -24,7 +24,8 @@ const LINT = { group: 'lint', command: 'npm run lint', exit: 0 };
 
 // The verify agent's report, as run-checks prints it minus the ignored fields.
 const report = (over = {}) => ({
-  head: SHA, results: [{ ...RESULT }], ok: true, clean: true, tracked_before: [], tracked_after: [], ...over,
+  head: SHA, results: [{ ...RESULT }], ok: true, clean: true, tracked_before: [], tracked_after: [],
+  untracked_before: [], untracked_after: [], ...over,
 });
 // What run-checks saved: the report plus checkout, branch, and log and tail per result.
 const withLogs = (results) => results.map((r, i) => ({ ...r, log: `/ledger/checks/v.${i + 1}.log`, tail: 'ok' }));
@@ -166,6 +167,40 @@ test('evidence from an older run-checks without the tracked lists is a mismatch'
     { field: 'tracked_before', reported: present([]), evidence: ABSENT },
     { field: 'tracked_after', reported: present([]), evidence: ABSENT },
   ]);
+});
+
+test('untracked lists are compared', () => {
+  for (const field of ['untracked_before', 'untracked_after']) {
+    const res = check({ verify: report({ [field]: ['?? extra.js'] }), evidence: evidence({ [field]: [] }) });
+    expectStatus(res, 'mismatch', 'verify_mismatch', 1);
+    assert.deepEqual(res.out.differences, [{ field, reported: present(['?? extra.js']), evidence: present([]) }], field);
+  }
+});
+
+test('evidence without the untracked lists mismatches a report with them', () => {
+  const saved = evidence();
+  delete saved.untracked_before;
+  delete saved.untracked_after;
+  const res = check({ evidence: saved });
+  expectStatus(res, 'mismatch', 'verify_mismatch', 1);
+  assert.deepEqual(res.out.differences, [
+    { field: 'untracked_before', reported: present([]), evidence: ABSENT },
+    { field: 'untracked_after', reported: present([]), evidence: ABSENT },
+  ]);
+});
+
+test('an untracked list that is not a list of strings is invalid', () => {
+  const cases = [
+    [{ verify: report({ untracked_after: 'x' }) }, /verify\.untracked_after/],
+    [{ verify: report({ untracked_before: [1] }) }, /verify\.untracked_before/],
+    [{ verify: report({ untracked_after: null }) }, /verify\.untracked_after/],
+    [{ evidence: evidence({ untracked_after: 'x' }) }, /evidence\.untracked_after/],
+  ];
+  for (const [opts, detail] of cases) {
+    const res = check(opts);
+    expectStatus(res, 'invalid', 'verify_invalid', 1);
+    assert.match(res.out.detail, detail);
+  }
 });
 
 test('booleans and integers are not interchangeable', () => {
@@ -352,6 +387,7 @@ test('the documented recovery works', () => {
   assert.equal(saved.ok, true);
   assert.ok(saved.results.length > 0 && saved.results.every((r) => r.exit === 0), JSON.stringify(saved.results));
   assert.deepEqual([saved.tracked_before, saved.tracked_after], [[], []]);
+  assert.deepEqual([saved.untracked_before, saved.untracked_after], [[], []]);
 
   const text = `session re-verified: ${out}; replaces verify_mismatch`;
   const accept = helper('ledger', ['accept', ledger, repo, head, text]);
