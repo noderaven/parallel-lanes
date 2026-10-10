@@ -391,10 +391,11 @@ more reasons are session-side: `verify_evidence_missing`, `verify_evidence_stale
 the `?? ` lines of `git status --porcelain --untracked-files=all` at the same two moments, so
 every untracked file that is not ignored (`[]` when none). Acceptance gives `checks_unclean`
 (class `missing`) when the verify result at the delivered revision has a non-empty
-`tracked_before`, `tracked_after` or `untracked_before`, or lacks one of those or
-`untracked_after`, because checks that ran on uncommitted tracked changes, or with an untracked
-file present that the commands could read, did not test the commit. A non-empty
-`untracked_after` alone (files the checks created) stays a warning that names the new files.
+`tracked_before`, `tracked_after` or `untracked_before`, or lacks one of those, because checks
+that ran on uncommitted tracked changes, or with an untracked file present that the commands
+could read, did not test the commit. A non-empty `untracked_after` alone (files the checks
+created) stays a warning that names the new files. A missing `untracked_after` does not block
+either: it only affects that after-checks warning, which then falls back to the general text.
 
 The guarantee, in one paragraph: `accepted` means the configured checks passed at the delivered
 commit, with no tracked change and no untracked file present before them. Ignored files are not
@@ -698,4 +699,4 @@ fails, for example because the file is not valid JSON) it stops with `could not 
 nothing removed`, deletes its temporary file, and removes neither the agent file nor the skill
 directory: fix the file and run it again. The update path likewise checks that `settings.json`
 is valid JSON before it replaces the installed skill, and stops without changing anything when
-it is not. The `.bak` backup written before the edit stays in either case.
+it is not. On uninstall, the `.bak` backup written before the edit stays.
