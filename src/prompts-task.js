@@ -507,9 +507,11 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
-    // A batch's commits are one per task, each with its brief's message.
-    // The fix message only when review findings are behind this attempt.
-    ...(batch ? [] : [
+    // A batch's commits are one per task, each with its brief's message. A
+    // first attempt has no first commit to add to, so only a retry or a
+    // reopened task gets the line; the fix message only when review findings
+    // are behind this attempt.
+    ...(batch || (!retry && !reopen) ? [] : [
       'When HEAD already holds the task\'s first commit, commit further changes with the message',
       `\`${retry && Array.isArray(retry.findings) && retry.findings.length > 0
         ? fixCommitMessage(task) : continueCommitMessage(task)}\`, in the form the commit rules use (for example`,

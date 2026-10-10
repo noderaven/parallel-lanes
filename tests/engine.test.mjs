@@ -1466,7 +1466,12 @@ test('an implement retry uses the fix message only when review findings are behi
   const blocked = implementPrompt(m, task('T2'), WHERE, H('b0'), { reason: 'T2 implement blocked: x', findings: null });
   assert.ok(later(blocked).includes('chore: continue Task T2'), blocked);
   assert.ok(!blocked.includes(`${TASK_FIX_MESSAGE} T2`), blocked);
-  assert.ok(later(implementPrompt(m, task('T2'), WHERE, H('b0'))).includes('chore: continue Task T2'));
+  // A first attempt has no first commit to add to: no continuation line.
+  const first = implementPrompt(m, task('T2'), WHERE, H('b0'));
+  assert.ok(!first.includes("holds the task's first commit"), first);
+  assert.ok(!first.includes('chore: continue Task'), first);
+  // A reopened task continues its earlier commits.
+  assert.ok(later(implementPrompt(m, task('T2'), WHERE, H('b0'), null, null, true)).includes('chore: continue Task T2'));
   const reviewed = implementPrompt(m, task('T2'), WHERE, H('b0'),
     { reason: 'review requested changes', findings: [finding('the bug')] });
   assert.ok(later(reviewed).includes(`${TASK_FIX_MESSAGE} T2`), reviewed);

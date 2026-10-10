@@ -211,9 +211,10 @@ the form the commit rules use (for example their prefix style):
   review findings for Batch <first>-<last>`);
 - the final fix: `fix: address the final review findings`;
 - the post-integration fix: `fix: make the post-integration check pass`;
-- an implement attempt (a retry or escalation) that adds to a task's first commit: the task fix
-  round message when review findings are behind it, else `chore: continue Task <id>` (no
-  review raised anything for it to fix).
+- an implement attempt that adds to a task's first commit (a retry, an escalation, or a
+  reopened task; a first attempt is not told this): the task fix round message when review
+  findings are behind it, else `chore: continue Task <id>` (no review raised anything for it
+  to fix).
 
 Every reviewer, re-reviewer, and final lens is told the same, and that none of the plan's
 message on a first commit, a fix message on a fix commit, and the continuation message is a
