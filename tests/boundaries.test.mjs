@@ -228,6 +228,49 @@ test('run-checks fails a command that moves HEAD: a check must not change what i
   assert.notEqual(report.head_after, report.head);
 });
 
+function repoWithValue(text) {
+  const r = repo();
+  write(join(r, 'value.txt'), text);
+  git(r, 'add', 'value.txt');
+  git(r, 'commit', '-q', '-m', 'value');
+  return r;
+}
+
+test('run-checks reports an uncommitted tracked edit before the checks', () => {
+  const r = repoWithValue('bad\n');
+  write(join(r, 'value.txt'), 'good\n');
+  const res = py('run-checks', [r, '--cmd', 'test', 'grep -q good value.txt']);
+  assert.equal(res.code, 0, res.stderr);
+  const report = JSON.parse(res.stdout);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.tracked_before, [' M value.txt']);
+  assert.deepEqual(report.tracked_after, [' M value.txt']);
+});
+
+test('run-checks reports a staged edit', () => {
+  const r = repoWithValue('bad\n');
+  write(join(r, 'value.txt'), 'good\n');
+  git(r, 'add', 'value.txt');
+  const report = JSON.parse(py('run-checks', [r, '--cmd', 'test', 'true']).stdout);
+  assert.equal(report.tracked_before.length, 1);
+  assert.match(report.tracked_before[0], /^M/);
+});
+
+test('run-checks reports a check that changes a tracked file', () => {
+  const r = repoWithValue('bad\n');
+  const report = JSON.parse(py('run-checks', [r, '--cmd', 'test', 'echo x >> value.txt']).stdout);
+  assert.deepEqual(report.tracked_before, []);
+  assert.deepEqual(report.tracked_after, [' M value.txt']);
+});
+
+test('run-checks: untracked output is not a tracked change', () => {
+  const r = repoWithValue('bad\n');
+  const report = JSON.parse(py('run-checks', [r, '--cmd', 'test', 'echo x > out.log']).stdout);
+  assert.deepEqual(report.tracked_before, []);
+  assert.deepEqual(report.tracked_after, []);
+  assert.equal(report.clean, false);
+});
+
 const REAL_BASH = spawnSync(BASH, ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
 const REAL_PYTHON = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim();
 // A directory holding a fake bash that logs its arguments to calls, then runs the real bash.
