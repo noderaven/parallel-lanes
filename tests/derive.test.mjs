@@ -327,6 +327,40 @@ test('derive-lanes still splits clauses on a ";" outside parentheses', () => {
   assert.deepEqual(t['1'].files, ['a.js', 'a.test.js']);
 });
 
+test('derive-lanes splits a bulleted Files line on a ";" outside parentheses', () => {
+  const plan = planFile(
+    ['# Plan', '', '## Task 1: Pair', '', '**Files:**', '- Modify: `a.js`; Test: `a.test.js`', ''].join('\n'),
+  );
+  const t = byId(deriveJson(plan).out);
+  assert.deepEqual(t['1'].files, ['a.js', 'a.test.js']);
+});
+
+test('derive-lanes falls back to a plain ";" split, with a warning, when a stray backtick is unbalanced', () => {
+  const plan = planFile(
+    [
+      '# Plan',
+      '',
+      '## Task 1: Stray',
+      '',
+      '**Files:**',
+      '- Modify: `a.js` (note with a stray ` tick; more), `b.js`; Test: `c.js`',
+      '',
+    ].join('\n'),
+  );
+  const { out, stderr } = deriveJson(plan);
+  assert.deepEqual(byId(out)['1'].files, ['a.js', 'c.js']);
+  assert.match(stderr, /task 1: .*unbalanced/);
+});
+
+test('derive-lanes falls back to a plain ";" split, with a warning, when a parenthesis is not closed', () => {
+  const plan = planFile(
+    ['# Plan', '', '## Task 1: Open', '', '**Files:**', '- Modify: `a.js` (note; Test: `c.js`', ''].join('\n'),
+  );
+  const { out, stderr } = deriveJson(plan);
+  assert.deepEqual(byId(out)['1'].files, ['a.js', 'c.js']);
+  assert.match(stderr, /task 1: .*unbalanced/);
+});
+
 test('derive-lanes treats a Task heading without the colon form as a boundary, not a task', () => {
   const plan = planFile(
     [
