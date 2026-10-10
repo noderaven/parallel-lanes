@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""Compare the archived runs: per-run figures, recurring slowdowns, token
+trends by engine version, and suggestions ranked across runs.
+
+usage:
+  python3 history [--history-dir DIR] [--since YYYY-MM-DD] [--project NAME]
+
+The history dir is _history.history_dir(DIR): --history-dir, else
+PL_HISTORY_DIR, else <CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/history.
+history reads its index.json and each selected run's autopsy.json.
+
+Selection: every index entry, in index order. --since keeps the runs whose
+date is that day or later; a run's date is the UTC day of its first_launch,
+else the YYYY-MM-DD its folder name starts with, else unavailable (left out
+by --since). --project keeps the runs whose project path equals NAME (as
+_history.norm_path writes paths; Windows paths case-insensitively) or whose
+last path component is NAME.
+
+Before reading, it (re)runs autopsy, writing autopsy.json and autopsy.md in
+the run folder, for every selected run whose autopsy.json is missing or
+unreadable, has an autopsy_version lower than _autopsy.AUTOPSY_VERSION or an
+inputs_fingerprint other than the folder's current one, or whose autopsy.md
+is missing. A run whose folder is missing, lies outside the history dir, or
+has no *.lanes.json or no wf_* dir gets no autopsy: its figures are
+unavailable and it is listed under insufficient_data["autopsy"].
+
+It writes <history dir>/history.json and <history dir>/history.md (replacing
+only those two files) and prints a summary of at most 15 lines: the run
+count, the top three recurring slowdowns, tokens per task by engine version,
+the top suggestion, the insufficient data and the path of history.md.
+
+history.json:
+
+  {"runs": [{run_id, folder, date, engine_version, tasks, agents, wall_s,
+             slowest_phase, tokens_total, tokens_per_task, tokens_partial,
+             full_suite_runs, acceptance, top_slowdown}],
+   "recurring": [{kind, total_s, runs: [{run_id, engine_version, cost_s}]}],
+   "token_trends": {<engine_version>: {runs, tokens_per_task, by_role,
+                                       partial_runs}},
+   "suggestions": [{kind, text, total_s, runs}],
+   "insufficient_data": {<section>: [run_id, ...]}}
+
+- engine_version: the index entry's, else the autopsy's; a run known by
+  neither is grouped under "unavailable".
+- tasks: the tasks in the last launch's result; agents: the agents in the
+  transcripts; slowest_phase: the name of the longest phase entry.
+- tokens_total: input + cache creation + output tokens (output_tokens_min
+  when the output count is incomplete; cache reads are not counted), as
+  autopsy ranks its largest agents. tokens_per_task: tokens_total / tasks,
+  rounded. When tokens_partial is true both are lower bounds: history.md
+  shows them as '>= N'.
+- top_slowdown: {kind, cost_s} of the autopsy's largest slowdown, or null.
+- recurring: one entry per slowdown kind found in any selected run, ranked
+  by total_s (the sum of the runs' known costs). A run's cost_s is the sum
+  of its known costs of that kind ("unavailable" when none is known).
+- token_trends: runs and partial_runs list run ids; tokens_per_task is the
+  sum of tokens_total over the sum of tasks of the runs that have both;
+  by_role is {<role>: {tokens, agents}} summed over the runs. A group with
+  partial runs holds lower bounds.
+- suggestions: one per suggestion kind of any run, ranked by total_s (the
+  sum of the runs' known stake_s); text is the kind's generic wording.
+- insufficient_data: for each slowdown kind, the runs whose detector for it
+  is not "ok" (not_available, or missing from an older autopsy): they are
+  not counted in that kind's totals. "autopsy" lists the runs with no
+  autopsy. Sections with no run are left out.
+
+history.md is plain ASCII: the per-run table, recurring slowdowns, token
+trends, suggestions and the insufficient-data list. Neither file holds
+command, output or prompt text.
+
+Exit 0 on success; 2 on a usage error, a history dir or index.json that
+cannot be read, or history.json and history.md that cannot be written.
+"""
+import json
+import os
+import re
+import sys
+import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _autopsy  # noqa: E402
+import _history  # noqa: E402
+import _shell  # noqa: E402
+
+UNAVAILABLE = _autopsy.UNAVAILABLE
+USAGE = "usage: history [--history-dir DIR] [--since YYYY-MM-DD] [--project NAME]"
+SUMMARY_MAX_LINES = 15
+TOP_RECURRING = 3
+_DAY = re.compile(r"^(\d{4}-\d\d-\d\d)")
+_OPTIONS = ("--history-dir", "--since", "--project")
+UNCLEAN_TEXT = ("The checks likely ran on uncommitted changes or with untracked files in the checkout. "
+                + _autopsy.UNCLEAN_TEXT)
+
+_num = _autopsy._is_num
+_ascii = _autopsy._ascii
+
+
+class UsageError(Exception):
+    """Bad arguments; the message says why (exit 2)."""
+
+
+def parse_args(args):
+    """{option: value} for --history-dir, --since and --project (None when
+    absent). --since must be a real calendar day."""
+    opts = dict.fromkeys(_OPTIONS)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a not in _OPTIONS:
+            raise UsageError("unknown argument " + a)
+        if i + 1 >= len(args) or not args[i + 1]:
+            raise UsageError(a + " needs a value")
+        opts[a] = args[i + 1]
+        i += 2
+    since = opts["--since"]
+    if since is not None:
+        try:
+            ok = re.match(r"^\d{4}-\d\d-\d\d$", since) and time.strptime(since, "%Y-%m-%d")
+        except ValueError:
+            ok = False
+        if not ok:
+            raise UsageError("--since needs a date as YYYY-MM-DD, not " + since)
+    return opts
+
+
+# ---- selecting runs ----
+
+def run_date(entry):
+    """The UTC day (YYYY-MM-DD) of the entry's first launch, else the day its
+    folder name starts with, else UNAVAILABLE."""
+    ts = _autopsy.parse_ts(entry.get("first_launch"))
+    if ts is not None:
+        return time.strftime("%Y-%m-%d", time.gmtime(ts))
+    folder = entry.get("folder")
+    m = _DAY.match(folder) if isinstance(folder, str) else None
+    if m:
+        try:
+            time.strptime(m.group(1), "%Y-%m-%d")
+            return m.group(1)
+        except ValueError:
+            pass
+    return UNAVAILABLE
+
+
+def _windows_form(p):
+    return p[1:3] == ":/" or p.startswith("//")
+
+
+def matches_project(entry, name):
+    """Whether the entry's project path is name, or ends in the component
+    name."""
+    project = entry.get("project")
+    if not isinstance(project, str) or not project or project == UNAVAILABLE:
+        return False
+    key = _history._key_form(project)
+    if key == _history._key_form(name):
+        return True
+    last = key.rstrip("/").rsplit("/", 1)[-1]
+    return last == (name.lower() if _windows_form(key) else name)
+
+
+def select(entries, since, project):
+    out = []
+    for entry in entries:
+        if since is not None:
+            date = run_date(entry)
+            if date == UNAVAILABLE or date < since:
+                continue
+        if project is not None and not matches_project(entry, project):
+            continue
+        out.append(entry)
+    return out
+
+
+def run_folder(hdir, entry):
+    """The entry's folder as an absolute path inside hdir; None when it has
+    no usable folder name or the name leads outside hdir."""
+    folder = entry.get("folder")
+    if not isinstance(folder, str) or not folder or os.path.isabs(folder) or _shell._drive_form(folder):
+        return None
+    path = os.path.normpath(os.path.join(hdir, folder))
+    if os.path.normcase(path) == os.path.normcase(os.path.normpath(hdir)) or not _history.inside(path, hdir):
+        return None
+    return path
+
+
+# ---- autopsies ----
+
+def _read_json(path):
+    try:
+        with open(path, "rb") as f:
+            return json.loads(f.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def current_autopsy(folder):
+    """The folder's autopsy.json when it is current (see the usage text),
+    else None."""
+    data = _read_json(os.path.join(folder, "autopsy.json"))
+    if not isinstance(data, dict):
+        return None
+    version = data.get("autopsy_version")
+    if not _num(version) or version < _autopsy.AUTOPSY_VERSION:
+        return None
+    if not os.path.isfile(os.path.join(folder, "autopsy.md")):
+        return None
+    if data.get("inputs_fingerprint") != _autopsy.fingerprint(folder):
+        return None
+    return data
+
+
+def autopsy(folder):
+    """(analysis or None, redone, error or None) for one run folder; a stale
+    or missing autopsy is redone and written, as scripts/autopsy writes it."""
+    if folder is None or not os.path.isdir(folder):
+        return None, False, "no run folder"
+    if _autopsy.find_manifest(folder) is None or not _autopsy.wf_dirs(folder):
+        return None, False, "no *.lanes.json manifest or wf_* dir"
+    data = current_autopsy(folder)
+    if data is not None:
+        return data, False, None
+    try:
+        data = _autopsy.analyze(folder)
+        _shell.write_text(os.path.join(folder, "autopsy.json"), json.dumps(data, indent=2) + "\n")
+        _shell.write_text(os.path.join(folder, "autopsy.md"), _autopsy.render_markdown(data))
+    except Exception as e:  # one damaged run must not stop the comparison
+        return None, False, "%s: %s" % (type(e).__name__, e)
+    return data, True, None
+
+
+# ---- figures of one run ----
+
+def _dig(value, *keys):
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return UNAVAILABLE
+        value = value[key]
+    return value
+
+
+def bucket_tokens(bucket):
+    """input + cache creation + output (output_tokens_min when the output is
+    incomplete) of a token bucket; UNAVAILABLE when a figure is missing."""
+    if not isinstance(bucket, dict):
+        return UNAVAILABLE
+    out = bucket.get("output_tokens")
+    if not _num(out):
+        out = bucket.get("output_tokens_min")
+    parts = [bucket.get("input_tokens"), bucket.get("cache_creation_input_tokens"), out]
+    if not all(_num(p) for p in parts):
+        return UNAVAILABLE
+    return sum(parts)
+
+
+def slowest_phase(analysis):
+    best = None
+    phases = _dig(analysis, "time", "phases")
+    for p in phases if isinstance(phases, list) else []:
+        if isinstance(p, dict) and _num(p.get("wall_s")) and (best is None or p["wall_s"] > best["wall_s"]):
+            best = p
+    return best["phase"] if best is not None and isinstance(best.get("phase"), str) else UNAVAILABLE
+
+
+def _known(value):
+    return isinstance(value, str) and value and value != UNAVAILABLE
+
+
+def build_row(entry, analysis):
+    run_id = entry.get("run_id") if _known(entry.get("run_id")) else UNAVAILABLE
+    version = entry.get("engine_version")
+    if not _known(version):
+        version = _dig(analysis, "engine_version")
+        version = version if _known(version) else UNAVAILABLE
+    row = {
+        "run_id": run_id,
+        "folder": entry.get("folder") if isinstance(entry.get("folder"), str) else UNAVAILABLE,
+        "date": run_date(entry),
+        "engine_version": version,
+    }
+    tasks = _dig(analysis, "done", "tasks")
+    tasks = len(tasks) if isinstance(tasks, dict) else UNAVAILABLE
+    agents = _dig(analysis, "time", "agents")
+    total = bucket_tokens(_dig(analysis, "tokens", "totals"))
+    partial = _dig(analysis, "tokens", "partial")
+    acceptance = _dig(analysis, "done", "acceptance", "status")
+    if not _known(acceptance):
+        acceptance = entry.get("acceptance") if _known(entry.get("acceptance")) else UNAVAILABLE
+    slowdowns = _dig(analysis, "slowdowns")
+    top = slowdowns[0] if isinstance(slowdowns, list) and slowdowns and isinstance(slowdowns[0], dict) else None
+    full = _dig(analysis, "checks", "full_suite_runs", "total")
+    row.update({
+        "tasks": tasks,
+        "agents": len(agents) if isinstance(agents, list) else UNAVAILABLE,
+        "wall_s": _dig(analysis, "time", "wall_s") if _num(_dig(analysis, "time", "wall_s")) else UNAVAILABLE,
+        "slowest_phase": slowest_phase(analysis),
+        "tokens_total": total,
+        "tokens_per_task": int(round(total / tasks)) if _num(total) and _num(tasks) and tasks > 0 else UNAVAILABLE,
+        "tokens_partial": partial if isinstance(partial, bool) else UNAVAILABLE,
+        "full_suite_runs": full if _num(full) else UNAVAILABLE,
+        "acceptance": acceptance,
+        "top_slowdown": None if top is None else {"kind": top.get("kind"), "cost_s": top.get("cost_s")},
+    })
+    return row
+
+
+# ---- across runs ----
+
+def _kind_order(kind):
+    return _autopsy.KINDS.index(kind) if kind in _autopsy.KINDS else len(_autopsy.KINDS)
+
+
+def _kinds(runs, field):
+    """Every kind named in the runs' field list (plus KINDS), in KINDS order."""
+    kinds = list(_autopsy.KINDS)
+    for _row, analysis in runs:
+        items = analysis.get(field)
+        for item in items if isinstance(items, (list, dict)) else []:
+            kind = item.get("kind") if isinstance(item, dict) else item
+            if isinstance(kind, str) and kind not in kinds:
+                kinds.append(kind)
+    return kinds
+
+
+def _total(values):
+    known = [v for v in values if _num(v)]
+    return _autopsy.seconds(sum(known)) if known else UNAVAILABLE
+
+
+def _rank(item, key):
+    total = item[key]
+    return (not _num(total), -(total if _num(total) else 0), -len(item["runs"]), _kind_order(item["kind"]))
+
+
+def recurring_section(runs):
+    """(recurring, {kind: [run ids without its detector]})."""
+    recurring, missing = [], {}
+    for kind in _kinds(runs, "detectors"):
+        found = []
+        for row, analysis in runs:
+            detectors = analysis.get("detectors")
+            if not isinstance(detectors, dict) or detectors.get(kind) != "ok":
+                missing.setdefault(kind, []).append(row["run_id"])
+                continue
+            slowdowns = analysis.get("slowdowns")
+            costs = [s.get("cost_s") for s in slowdowns if isinstance(s, dict) and s.get("kind") == kind] \
+                if isinstance(slowdowns, list) else []
+            if costs:
+                found.append({"run_id": row["run_id"], "engine_version": row["engine_version"],
+                              "cost_s": _total(costs)})
+        if found:
+            recurring.append({"kind": kind, "total_s": _total(r["cost_s"] for r in found), "runs": found})
+    recurring.sort(key=lambda r: _rank(r, "total_s"))
+    return recurring, missing
+
+
+def _version_key(version):
+    if version == UNAVAILABLE:
+        return (1, [], version)
+    parts = re.split(r"[.\-+]", version)
+    return (0, [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in parts], version)
+
+
+def token_trends(runs):
+    groups = {}
+    for row, analysis in runs:
+        groups.setdefault(row["engine_version"], []).append((row, analysis))
+    out = {}
+    for version in sorted(groups, key=_version_key):
+        members = groups[version]
+        counted = [r for r, _a in members if _num(r["tokens_total"]) and _num(r["tasks"]) and r["tasks"] > 0]
+        tasks = sum(r["tasks"] for r in counted)
+        by_role = {}
+        for _row, analysis in members:
+            roles = _dig(analysis, "tokens", "by_role")
+            for role, bucket in roles.items() if isinstance(roles, dict) else []:
+                tokens = bucket_tokens(bucket)
+                if not _num(tokens):
+                    continue
+                agg = by_role.setdefault(role, {"tokens": 0, "agents": 0})
+                agg["tokens"] += tokens
+                agg["agents"] += bucket.get("agents") if _num(bucket.get("agents")) else 0
+        out[version] = {
+            "runs": [r["run_id"] for r, _a in members],
+            "tokens_per_task": int(round(sum(r["tokens_total"] for r in counted) / tasks)) if tasks else UNAVAILABLE,
+            "by_role": by_role,
+            "partial_runs": [r["run_id"] for r, _a in members if r["tokens_partial"] is True],
+        }
+    return out
+
+
+def suggestions_section(runs):
+    found = {}
+    for row, analysis in runs:
+        suggestions = analysis.get("suggestions")
+        for g in suggestions if isinstance(suggestions, list) else []:
+            kind = g.get("kind") if isinstance(g, dict) else None
+            if not isinstance(kind, str):
+                continue
+            item = found.setdefault(kind, {"stakes": [], "runs": []})
+            item["stakes"].append(g.get("stake_s"))
+            if row["run_id"] not in item["runs"]:
+                item["runs"].append(row["run_id"])
+    out = []
+    for kind, item in found.items():
+        if kind in _autopsy.SUGGESTIONS:
+            text = _autopsy.SUGGESTIONS[kind]
+        elif kind == "unclean_checks":
+            text = UNCLEAN_TEXT
+        else:
+            text = "See the autopsy.md of these runs for the %s suggestion." % kind
+        out.append({"kind": kind, "text": text, "total_s": _total(item["stakes"]), "runs": item["runs"]})
+    out.sort(key=lambda g: _rank(g, "total_s"))
+    return out
+
+
+def compare(selected, analyses):
+    """The history.json object; analyses[i] is selected[i]'s analysis or
+    None."""
+    rows = [build_row(e, a) for e, a in zip(selected, analyses)]
+    runs = [(r, a) for r, a in zip(rows, analyses) if a is not None]
+    recurring, missing = recurring_section(runs)
+    insufficient = {k: missing[k] for k in _kinds(runs, "detectors") if k in missing}
+    no_autopsy = [r["run_id"] for r, a in zip(rows, analyses) if a is None]
+    if no_autopsy:
+        insufficient["autopsy"] = no_autopsy
+    return {
+        "runs": rows,
+        "recurring": recurring,
+        "token_trends": token_trends(runs),
+        "suggestions": suggestions_section(runs),
+        "insufficient_data": insufficient,
+    }
+
+
+# ---- history.md and the summary ----
+
+def _tokens(value, partial):
+    if not _num(value):
+        return UNAVAILABLE
+    return (">= %d" if partial else "%d") % value
+
+
+def _top_slowdown(top):
+    if not isinstance(top, dict):
+        return "none"
+    return "%s (%s)" % (top.get("kind"), _autopsy._secs(top.get("cost_s")))
+
+
+def _versions(runs):
+    seen = []
+    for r in runs:
+        if r["engine_version"] not in seen:
+            seen.append(r["engine_version"])
+    return ", ".join(seen)
+
+
+def _filters(opts):
+    parts = []
+    if opts["--since"] is not None:
+        parts.append("since " + opts["--since"])
+    if opts["--project"] is not None:
+        parts.append("project " + opts["--project"])
+    return parts
+
+
+def render_markdown(history, hdir, opts):
+    h = history
+    lines = ["# Run history", ""]
+    filters = _filters(opts)
+    lines.append("%s from %s%s." % (_autopsy._count_word(len(h["runs"]), "run"), hdir,
+                                    " (" + ", ".join(filters) + ")" if filters else ""))
+    lines.append("Token figures marked >= are lower bounds: some usage was missing or unreadable.")
+    lines += ["", "## Runs", ""]
+    if h["runs"]:
+        lines += _autopsy._table(
+            ["Run", "Date", "Engine", "Tasks", "Agents", "Wall", "Slowest phase", "Tokens", "Tokens/task",
+             "Full-suite runs", "Acceptance", "Top slowdown"],
+            [[r["run_id"], r["date"], r["engine_version"], r["tasks"], r["agents"], _autopsy._secs(r["wall_s"]),
+              r["slowest_phase"], _tokens(r["tokens_total"], r["tokens_partial"] is True),
+              _tokens(r["tokens_per_task"], r["tokens_partial"] is True), r["full_suite_runs"], r["acceptance"],
+              _top_slowdown(r["top_slowdown"])] for r in h["runs"]])
+    else:
+        lines.append("No runs.")
+    lines += ["", "## Recurring slowdowns", ""]
+    if h["recurring"]:
+        lines += _autopsy._table(
+            ["Kind", "Total lost", "Runs", "Engine versions", "Per run"],
+            [[g["kind"], _autopsy._secs(g["total_s"]), len(g["runs"]), _versions(g["runs"]),
+              "; ".join("%s (%s) %s" % (r["run_id"], r["engine_version"], _autopsy._secs(r["cost_s"]))
+                        for r in g["runs"])] for g in h["recurring"]])
+    else:
+        lines.append("None found.")
+    lines += ["", "## Token trends", ""]
+    trends = h["token_trends"]
+    if trends:
+        lines += _autopsy._table(
+            ["Engine", "Runs", "Tokens per task", "Partial runs"],
+            [[v, len(t["runs"]), _tokens(t["tokens_per_task"], bool(t["partial_runs"])),
+              ", ".join(t["partial_runs"]) or "none"] for v, t in trends.items()])
+        role_rows = []
+        for v, t in trends.items():
+            for role, b in t["by_role"].items():
+                per_agent = b["tokens"] / b["agents"] if b["agents"] else None
+                role_rows.append([v, role, b["agents"], _tokens(b["tokens"], bool(t["partial_runs"])),
+                                  _tokens(per_agent, bool(t["partial_runs"]))])
+        if role_rows:
+            lines += ["", "By role:", ""] + _autopsy._table(
+                ["Engine", "Role", "Agents", "Tokens", "Tokens per agent"], role_rows)
+    else:
+        lines.append("No token data.")
+    lines += ["", "## Suggestions", ""]
+    if h["suggestions"]:
+        for i, g in enumerate(h["suggestions"], 1):
+            lines.append("%d. %s (%s, %s at stake): %s" % (
+                i, g["kind"], _autopsy._count_word(len(g["runs"]), "run"), _autopsy._secs(g["total_s"]), g["text"]))
+    else:
+        lines.append("None.")
+    lines += ["", "## Insufficient data", ""]
+    if h["insufficient_data"]:
+        lines.append("These runs lack the data a detector needs (or have no autopsy), so they are left out "
+                     "of that section's totals.")
+        lines.append("")
+        for section, ids in h["insufficient_data"].items():
+            lines.append("- %s: %s" % (section, ", ".join(ids)))
+    else:
+        lines.append("None.")
+    return "\n".join(_ascii(line) for line in lines) + "\n"
+
+
+def render_summary(history, hdir, redone, md_path, opts):
+    h = history
+    filters = _filters(opts)
+    lines = ["history: %s in %s%s; autopsy redone for %d" % (
+        _autopsy._count_word(len(h["runs"]), "run"), hdir, " (" + ", ".join(filters) + ")" if filters else "",
+        redone)]
+    if h["recurring"]:
+        lines.append("top recurring slowdowns:")
+        for g in h["recurring"][:TOP_RECURRING]:
+            lines.append("  %s: %s over %s (versions %s)" % (
+                g["kind"], _autopsy._secs(g["total_s"]), _autopsy._count_word(len(g["runs"]), "run"),
+                _versions(g["runs"])))
+    else:
+        lines.append("recurring slowdowns: none found")
+    if h["token_trends"]:
+        lines.append("tokens per task by engine version: " + ", ".join(
+            "%s %s" % (v, _tokens(t["tokens_per_task"], bool(t["partial_runs"])))
+            for v, t in h["token_trends"].items()))
+    top = h["suggestions"][0] if h["suggestions"] else None
+    lines.append("top suggestion: %s" % ("none" if top is None else "%s: %s" % (top["kind"], top["text"])))
+    if h["insufficient_data"]:
+        lines.append("insufficient data: " + ", ".join(
+            "%s (%s)" % (k, _autopsy._count_word(len(v), "run")) for k, v in h["insufficient_data"].items()))
+    lines = [_ascii(line) for line in lines[:SUMMARY_MAX_LINES - 1]]
+    lines.append("full report: %s" % _ascii(md_path))
+    return "\n".join(lines) + "\n"
+
+
+def main(argv):
+    _shell.setup_io()
+    try:
+        opts = parse_args(argv[1:])
+        hdir = _history.history_dir(opts["--history-dir"])
+    except (UsageError, _shell.BashNotFound) as e:
+        print("history: " + str(e), file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    if not os.path.isdir(hdir):
+        print("history: the history dir %s does not exist" % hdir, file=sys.stderr)
+        return 2
+    try:
+        index = _history.read_index(hdir)
+    except _history.HistoryError as e:
+        print("history: " + str(e), file=sys.stderr)
+        return 2
+    selected = select(index["runs"], opts["--since"], opts["--project"])
+    analyses = []
+    redone = 0
+    for entry in selected:
+        analysis, did, error = autopsy(run_folder(hdir, entry))
+        if error is not None:
+            print("history: no autopsy for %s: %s" % (_ascii(entry.get("folder")), _ascii(error)), file=sys.stderr)
+        redone += 1 if did else 0
+        analyses.append(analysis)
+    history = compare(selected, analyses)
+    md_path = os.path.join(hdir, "history.md")
+    try:
+        _shell.write_text(os.path.join(hdir, "history.json"), json.dumps(history, indent=2) + "\n")
+        _shell.write_text(md_path, render_markdown(history, hdir, opts))
+    except OSError as e:
+        print("history: cannot write history.json and history.md: " + str(e), file=sys.stderr)
+        return 2
+    sys.stdout.write(render_summary(history, hdir, redone, md_path.replace("\\", "/"), opts))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
