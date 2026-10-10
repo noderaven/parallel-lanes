@@ -332,7 +332,9 @@ async function runAll(manifest, io) {
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    const range = taskState(m, t.id) === 'skip' ? (m.backfill || {})[t.id] : null;
+    const given = m.backfill || {};
+    const range = taskState(m, t.id) === 'skip' && Object.prototype.hasOwnProperty.call(given, t.id)
+      ? given[t.id] : null;
     tasks[t.id] = {
       status: taskState(m, t.id) === 'skip' ? (deferredBefore.has(t.id) ? 'deferred' : 'skipped') : 'not_run',
       rounds: null,

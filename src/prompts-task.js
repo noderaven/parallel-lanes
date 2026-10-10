@@ -60,8 +60,9 @@ function ledgerCommand(m, laneId, entry, dir) {
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
-  const own = (laneId !== null && m.lane_commands && m.lane_commands[laneId]) || {};
-  return own[name] || m.commands[name] || [];
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const own = (laneId !== null && m.lane_commands && has(m.lane_commands, laneId) && m.lane_commands[laneId]) || {};
+  return (has(own, name) && own[name]) || m.commands[name] || [];
 }
 
 // One command group as a shell line: joined with &&, so a failing command
@@ -369,7 +370,8 @@ function startCommand(m, task, where, opts = {}) {
   const extra = m.consumes_extra || {};
   for (const t of unitTasks(task)) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
-    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+    const own = Object.prototype.hasOwnProperty.call(extra, t.id) ? extra[t.id] : [];
+    for (const p of own) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {

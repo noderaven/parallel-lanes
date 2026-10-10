@@ -117,6 +117,19 @@ function taskIdPattern() {
   return laneIdPattern();
 }
 
+// Ids that are also JavaScript property names: the engine keeps per-id state
+// in plain objects, where these would hit inherited members (or, for
+// __proto__, the prototype itself). A function, not a const, so the test
+// harness can load it (this is the plan's RESERVED_IDS); scripts/_brief.py keeps
+// the same list in RESERVED_IDS; manifest.schema.json documents it.
+function reservedIds() {
+  return [
+    '__proto__', 'constructor', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable',
+    'toLocaleString', 'toString', 'valueOf',
+    '__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__',
+  ];
+}
+
 // True when id names a Windows device (CON, PRN, AUX, NUL, COM1-COM9,
 // LPT1-LPT9, any case) before its first '.': such a file name opens the
 // device instead of a file on Windows 10 (Windows 11 accepts it).
@@ -299,6 +312,7 @@ function validateManifest(m) {
       taskIds.add(t.id);
       caseClash('task', taskSpelling, t.id);
       if (reservedName(t.id)) err(`${where}: id ${t.id} is a reserved device name on Windows`);
+      if (reservedIds().includes(t.id)) err(`${where}: id "${t.id}" is reserved (a JavaScript property name)`);
     }
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
@@ -387,6 +401,7 @@ function validateManifest(m) {
           laneIds.add(lane.id);
           caseClash('lane', laneSpelling, lane.id);
           if (reservedName(lane.id)) err(`${where}: id ${lane.id} is a reserved device name on Windows`);
+          if (reservedIds().includes(lane.id)) err(`${where}: id "${lane.id}" is reserved (a JavaScript property name)`);
         }
         if (!isText(lane.name)) err(`${where}.name: must be a non-empty string`);
         if ('setup_note' in lane && !isText(lane.setup_note)) err(`${where}.setup_note: must be a non-empty string`);
@@ -580,7 +595,7 @@ function validateManifest(m) {
     }
     if (isTextList(m.done) && isTextList(m.reviewed)) {
       for (const id of m.done) {
-        if (!(id in backfill)) err(`backfill: missing an entry for task ${id} (done)`);
+        if (!Object.prototype.hasOwnProperty.call(backfill, id)) err(`backfill: missing an entry for task ${id} (done)`);
       }
     }
   }
@@ -933,8 +948,9 @@ function ledgerCommand(m, laneId, entry, dir) {
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
-  const own = (laneId !== null && m.lane_commands && m.lane_commands[laneId]) || {};
-  return own[name] || m.commands[name] || [];
+  const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const own = (laneId !== null && m.lane_commands && has(m.lane_commands, laneId) && m.lane_commands[laneId]) || {};
+  return (has(own, name) && own[name]) || m.commands[name] || [];
 }
 
 // One command group as a shell line: joined with &&, so a failing command
@@ -1242,7 +1258,8 @@ function startCommand(m, task, where, opts = {}) {
   const extra = m.consumes_extra || {};
   for (const t of unitTasks(task)) {
     parts.push('--brief', shellQuote(t.id), shellQuote(taskFiles(m, t).brief));
-    for (const p of extra[t.id] || []) parts.push('--also', shellQuote(t.id), shellQuote(p));
+    const own = Object.prototype.hasOwnProperty.call(extra, t.id) ? extra[t.id] : [];
+    for (const p of own) parts.push('--also', shellQuote(t.id), shellQuote(p));
   }
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
@@ -3733,7 +3750,9 @@ async function runAll(manifest, io) {
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    const range = taskState(m, t.id) === 'skip' ? (m.backfill || {})[t.id] : null;
+    const given = m.backfill || {};
+    const range = taskState(m, t.id) === 'skip' && Object.prototype.hasOwnProperty.call(given, t.id)
+      ? given[t.id] : null;
     tasks[t.id] = {
       status: taskState(m, t.id) === 'skip' ? (deferredBefore.has(t.id) ? 'deferred' : 'skipped') : 'not_run',
       rounds: null,
