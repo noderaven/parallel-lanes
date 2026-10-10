@@ -1252,6 +1252,34 @@ test('every agent gets the combine-commands rule', () => {
   assert.ok(agentRules().includes('Combine independent shell commands into one call'));
 });
 
+test('every agent gets the check-execution rule', () => {
+  const r = agentRules();
+  for (const phrase of [
+    'When your role requires running project checks or tests',
+    'ask for a 600000 ms (10 minute)',
+    'never when a line of its output appears',
+    'stop that run and confirm it has ended',
+    'Do not finish your work while a check you were asked to run is still running',
+  ]) {
+    assert.ok(r.includes(phrase), phrase);
+  }
+});
+
+test('every agent gets the file-editing rule', () => {
+  const r = agentRules();
+  for (const phrase of [
+    'Change file contents with your file-editing tools (Edit, Write).',
+    'can be corrupted by shell quoting',
+    'generators (for example scripts/build), formatters, codemods',
+  ]) {
+    assert.ok(r.includes(phrase), phrase);
+  }
+});
+
+test('the agent rules are plain ASCII', () => {
+  assert.match(agentRules(), /^[\x00-\x7f]*$/);
+});
+
 test('autonomous: a park or unblock without commits gives the adjudicator settled commands at base', async () => {
   const m = manifest();
   const s = stub({

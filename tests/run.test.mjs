@@ -1083,6 +1083,9 @@ test('every prompt carries the history rule, the skill rule, and the checkout ru
       assert.match(c.prompt, /every shell command starts with cd '[^']+' &&/i, `${where}: cd rule`);
       assert.match(c.prompt, /every project file path you read or write is absolute under /, `${where}: path rule`);
       assert.match(c.prompt, /rev-parse --abbrev-ref HEAD/, `${where}: branch check`);
+      assert.ok(c.prompt.includes('ask for a 600000 ms (10 minute)'), `${where}: check rule`);
+      assert.ok(c.prompt.includes('Change file contents with your file-editing tools (Edit, Write).'),
+        `${where}: edit rule`);
     }
   }
 });

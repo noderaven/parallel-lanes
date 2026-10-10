@@ -115,6 +115,18 @@ test('a lane check alone keeps the no-check warning away', () => {
   assert.deepEqual([a.status, a.reasons, a.warnings], ['accepted', [], []]);
 });
 
+// check-verify reads a missing verify result as not required only for an
+// accepted run: this is the one accepted run without one (with a configured
+// check, tests/run.test.mjs pins checks_missing).
+test('no command and no verify result is accepted with the no-commands warning', () => {
+  const input = passing();
+  input.m.commands = { test: [], lint: [], build: [] };
+  input.verify = null;
+  const a = acceptanceOf(input);
+  assert.deepEqual([a.status, a.reasons], ['accepted', []]);
+  assert.ok(a.warnings.some((w) => w.includes('no test, lint or build command is configured')), a.warnings.join('; '));
+});
+
 // ---- Checks on uncommitted tracked changes (1.4.0, F1) ----
 
 const unclean = (a) => a.reasons.find((r) => r.kind === 'checks_unclean');

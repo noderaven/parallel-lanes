@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Compare the verify agent's report with the check evidence saved for it.
+
+usage:
+  python3 check-verify TRANSCRIPT_DIR MANIFEST
+
+TRANSCRIPT_DIR is the launch's transcript directory (as given to run-report);
+the workflow result file is found from it as run-report finds it
+(_shell.result_paths). MANIFEST is the run's manifest; its repo.ledger_dir
+holds the evidence. The report is result.verify, the run-checks JSON the
+verify agent returned; the evidence is the run-checks JSON saved at
+<ledger_dir>/checks/verify-<sha>.json, where sha is result.delivered_sha, or
+result.verify.head when that is null.
+
+Trust boundary: the session compares the agent's report with the saved check
+evidence; it does not re-run the checks. It does not catch an agent that
+writes or alters both copies consistently, or execution details both copies
+agree on but that are wrong (checkout, branch, log and tail are not compared).
+
+Prints one JSON line: {"status", "reason"?, "path"?, "differences"?,
+"detail"?}. Statuses, in the order the rules are applied:
+
+  invalid       verify_invalid           result.acceptance is not an object
+                                         with a string status
+  not_required  -                        no verify result, and acceptance
+                                         status is accepted (exit 0)
+  missing       verify_evidence_missing  no verify result, and the run was
+                                         not accepted
+  invalid       verify_invalid           the report is malformed: head a
+                                         string, ok and clean booleans,
+                                         results a list of {group, command:
+                                         strings, exit: an integer, never a
+                                         boolean}, tracked_before and
+                                         tracked_after (when present) lists
+                                         of strings
+  invalid       verify_invalid           the sha is not 40 or 64 lowercase
+                                         hex digits (no path is built)
+  missing       verify_evidence_missing  no evidence file
+  invalid       verify_invalid           the evidence is not JSON or fails
+                                         the same checks as the report
+  invalid       verify_invalid           the result file's startTime (epoch
+                                         ms) is absent or not a number
+  stale         verify_evidence_stale    the evidence file was last written
+                                         before startTime
+  mismatch      verify_mismatch          head, ok, clean, tracked_before,
+                                         tracked_after or a result's {group,
+                                         command, exit} (compared position by
+                                         position) differ
+  match         -                        report and fresh evidence agree
+                                         (exit 0)
+
+detail names the malformed field for invalid. path is the evidence file once
+the sha is known. A difference is {"field": <name> or "results[<i>]",
+"reported": SIDE, "evidence": SIDE}, SIDE {"present": true, "value": V} or
+{"present": false}: a field absent on one side and present (even as null) on
+the other differs.
+
+Exit 0 for match and not_required; 1 for missing, stale, mismatch and
+invalid; 2 on a usage error, an unreadable MANIFEST (or one without a string
+repo.ledger_dir), or no readable result file with a result object (message on
+stderr); 3 when a path needs converting on Windows and no Git Bash or cygpath
+is found.
+"""
+import json
+import math
+import os
+import re
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
+
+USAGE = "usage: check-verify TRANSCRIPT_DIR MANIFEST"
+COMPARED = ("head", "ok", "clean", "tracked_before", "tracked_after")
+SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+class Usage(Exception):
+    """An input check-verify cannot read: exit 2."""
+
+
+def read_object(path, what):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Usage(f"cannot read {what} {path}: {e}")
+    if not isinstance(data, dict):
+        raise Usage(f"{what} {path} is not a JSON object")
+    return data
+
+
+def malformed(run, name):
+    """Why run (a report or saved evidence) is malformed, or None."""
+    if not isinstance(run, dict):
+        return f"{name} is not an object"
+    if type(run.get("head")) is not str:
+        return f"{name}.head is not a string"
+    for key in ("ok", "clean"):
+        if type(run.get(key)) is not bool:
+            return f"{name}.{key} is not a boolean"
+    results = run.get("results")
+    if type(results) is not list:
+        return f"{name}.results is not a list"
+    for i, r in enumerate(results):
+        where = f"{name}.results[{i}]"
+        if not isinstance(r, dict):
+            return f"{where} is not an object"
+        for key in ("group", "command"):
+            if type(r.get(key)) is not str:
+                return f"{where}.{key} is not a string"
+        if type(r.get("exit")) is not int:
+            return f"{where}.exit is not an integer"
+    for key in ("tracked_before", "tracked_after"):
+        if key in run:
+            lines = run[key]
+            if type(lines) is not list or any(type(line) is not str for line in lines):
+                return f"{name}.{key} is not a list of strings"
+    return None
+
+
+def side(obj, key):
+    return {"present": True, "value": obj[key]} if key in obj else {"present": False}
+
+
+def result_side(results, i):
+    if i >= len(results):
+        return {"present": False}
+    r = results[i]
+    return {"present": True, "value": {"group": r["group"], "command": r["command"], "exit": r["exit"]}}
+
+
+def same(a, b):
+    # JSON text, so true and 1 never compare equal.
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def differences(report, evidence):
+    found = []
+    for key in COMPARED:
+        reported, saved = side(report, key), side(evidence, key)
+        if not same(reported, saved):
+            found.append({"field": key, "reported": reported, "evidence": saved})
+    for i in range(max(len(report["results"]), len(evidence["results"]))):
+        reported, saved = result_side(report["results"], i), result_side(evidence["results"], i)
+        if not same(reported, saved):
+            found.append({"field": f"results[{i}]", "reported": reported, "evidence": saved})
+    return found
+
+
+def invalid(detail, path=None):
+    out = {"status": "invalid", "reason": "verify_invalid"}
+    if path is not None:
+        out["path"] = path
+    out["detail"] = detail
+    return out
+
+
+def check(data, ledger_dir):
+    """The outcome for a result file's data, as the JSON object to print."""
+    result = data["result"]
+    acceptance = result.get("acceptance")
+    if not isinstance(acceptance, dict) or type(acceptance.get("status")) is not str:
+        return invalid("result.acceptance is not an object with a string status")
+    report = result.get("verify")
+    if report is None:
+        if acceptance["status"] == "accepted":
+            return {"status": "not_required"}
+        return {"status": "missing", "reason": "verify_evidence_missing",
+                "detail": f"no verify result, and the run is {acceptance['status']}, not accepted"}
+    why = malformed(report, "verify")
+    if why:
+        return invalid(why)
+
+    delivered = result.get("delivered_sha")
+    name, sha = ("delivered_sha", delivered) if delivered is not None else ("verify.head", report["head"])
+    if type(sha) is not str or not SHA.fullmatch(sha):
+        return invalid(f"{name} is not a sha of 40 or 64 lowercase hex digits")
+    path = _shell.native_path(os.path.join(ledger_dir, "checks", f"verify-{sha}.json"))
+
+    if not os.path.isfile(path):
+        return {"status": "missing", "reason": "verify_evidence_missing", "path": path}
+    try:
+        with open(path, encoding="utf-8") as f:
+            evidence = json.load(f)
+        mtime_ms = os.stat(path).st_mtime * 1000
+    except (OSError, ValueError) as e:
+        return invalid(f"evidence is not readable JSON: {e}", path)
+    why = malformed(evidence, "evidence")
+    if why:
+        return invalid(why, path)
+
+    start = data.get("startTime")
+    if type(start) not in (int, float):
+        return invalid("startTime is absent or not a number", path)
+    try:
+        finite = math.isfinite(start)
+    except OverflowError:  # an integer too large for a float
+        finite = False
+    if not finite:
+        return invalid("startTime is absent or not a number", path)
+    if mtime_ms < start:
+        return {"status": "stale", "reason": "verify_evidence_stale", "path": path}
+
+    found = differences(report, evidence)
+    if found:
+        return {"status": "mismatch", "reason": "verify_mismatch", "path": path, "differences": found}
+    return {"status": "match", "path": path}
+
+
+def main(argv):
+    _shell.setup_io()
+    args = argv[1:]
+    if len(args) != 2:
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        transcript_dir, manifest_path = (_shell.native_path(a) for a in args)
+        manifest = read_object(manifest_path, "manifest")
+        repo = manifest.get("repo")
+        ledger_dir = repo.get("ledger_dir") if isinstance(repo, dict) else None
+        if type(ledger_dir) is not str or not ledger_dir:
+            raise Usage(f"manifest {manifest_path} has no string repo.ledger_dir")
+        ledger_dir = _shell.native_path(ledger_dir)
+        found = next((p for p in _shell.result_paths(transcript_dir) if os.path.isfile(p)), None)
+        if found is None:
+            raise Usage("no workflow result file at " + " or ".join(_shell.result_paths(transcript_dir)))
+        data = read_object(found, "result file")
+        if not isinstance(data.get("result"), dict):
+            raise Usage(f"result file {found} has no result object")
+        out = check(data, ledger_dir)
+    except Usage as e:
+        print(f"check-verify: {e}", file=sys.stderr)
+        return 2
+    except _shell.BashNotFound as e:
+        print(f"check-verify: {e}", file=sys.stderr)
+        return 3
+    sys.stdout.write(json.dumps(out) + "\n")
+    return 0 if out["status"] in ("match", "not_required") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

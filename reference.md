@@ -267,7 +267,8 @@ raised it).
 - Spend across launches: after every launch returns (a relaunch included, never a dry run),
   record what it spent:
   `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned> <rulings_spent>`
-  (`status`: the run status, or `unaccepted` for complete but not accepted). It appends the
+  (`status`: the run status, or `unaccepted` for a complete run that is not accepted or whose
+  hand-back gate (check-verify) fails). It appends the
   `run_ended` event to `<ledger_dir>/_run.jsonl` and refuses (exit 2, nothing recorded) a
   count that is not an integer of 0 or more, or an empty status. At the end of a run it goes in
   one command line with the lock release (SKILL.md Launch step 5). `ledger status`
@@ -355,6 +356,9 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
+`<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
+arguments and prints one status JSON line (see "Verify evidence").
+
 Acceptance: `status: complete` only says the run executed to the end. `acceptance`
 (`{status, delivered_sha, reasons, warnings}`) says whether the delivered revision
 (`delivered_sha`: the feature head after the final fix) meets the gates, decided in code
@@ -367,7 +371,10 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `review_unbound` (the final lenses did not all
 review one commit; `final.review_problem` is its detail), `checks_unclean` (see below), `fix_unreviewed`, `final_fix_unreviewed` (the
-final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`.
+final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`. Four
+more reasons are session-side: `verify_evidence_missing`, `verify_evidence_stale`,
+`verify_mismatch` and `verify_invalid` are set by `scripts/check-verify` at hand-back (see
+"Verify evidence"), not by the workflow, and are never in `result.acceptance`.
 `run-checks` also reports `tracked_before` and `tracked_after`: the lines `git status --porcelain
 --untracked-files=no` printed before the first command and after the last (`[]` when clean;
 `ok`, `clean` and the exit code are unchanged). Acceptance gives `checks_unclean` (class
@@ -376,8 +383,9 @@ because checks that ran on uncommitted tracked changes did not test the commit.
 Warnings (open minor findings, cannot-verify entries with a source, checks that left the
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
-JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
-it is not caught by the run. `run-checks` keeps the commands' output out of its own stdout and
+JSON is saved under `<ledger_dir>/checks/` for the user to compare): the session
+compares that report with the saved JSON at hand-back; it does not re-run the checks (see
+"Verify evidence"). `run-checks` keeps the commands' output out of its own stdout and
 stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`,
 or a new temporary directory without `--out`, which the caller removes once it has read the logs:
 agents are told to), and each result carries `log` (its path) and `tail` (its last 20 lines, kept
@@ -453,6 +461,83 @@ unknown producer, or a task equal to its producer; a task done and reviewed is d
 partway through (see `agent_type` under Manifest fields). The run result's `agent_settings`
 lists the model and effort of every agent started, in start order (what `run-report` reads
 for effort).
+
+## Verify evidence
+
+`<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` compares the verify agent's
+report (`result.verify` in the workflow result file, found from the transcript directory as
+`run-report` finds it) with the `scripts/run-checks` JSON saved at
+`<ledger_dir>/checks/verify-<sha>.json` during the same launch (`ledger_dir` is `repo.ledger_dir`
+in the manifest). It catches an agent that reports something other than what run-checks wrote (for
+example passing checks that failed), a verify step that left no evidence, and evidence left over
+from an earlier launch.
+
+Trust boundary: the session compares the agent's report with the saved check evidence; it does
+not re-run the checks. It does not establish that verification happened correctly. It does not
+catch an agent that writes or alters both copies consistently, execution details both copies agree
+on but that are wrong (`checkout`, `branch`, `log` and `tail` are not compared), or a session that
+skips the checker or misreports its result. It is not an independent execution guarantee.
+
+Output: one JSON line on stdout, `{"status", "reason"?, "path"?, "differences"?, "detail"?}`.
+
+| status | reason | exit | meaning |
+|---|---|---|---|
+| `match` | - | 0 | report and evidence agree; the evidence was written during this launch |
+| `not_required` | - | 0 | no verify result, and the workflow accepted the run (rule 3) |
+| `missing` | `verify_evidence_missing` | 1 | no evidence file, or no verify result although the run was not accepted |
+| `stale` | `verify_evidence_stale` | 1 | the evidence file was last written before this launch started |
+| `mismatch` | `verify_mismatch` | 1 | report and evidence differ |
+| `invalid` | `verify_invalid` | 1 | the report, the evidence, the sha, the start time or the acceptance is malformed (`detail` says which) |
+
+Exit 2: usage error, or the result file or the manifest cannot be found or read (message on
+stderr). Exit 3: a Windows path cannot be converted (no Git Bash or cygpath, as the other helpers).
+
+The gate: the hand-back may say `accepted`, and Launch step 5 may release with `--remove`, only
+when `result.acceptance.status` is `accepted` AND check-verify exited 0 AND its stdout parsed as
+one JSON object with status `match` or `not_required`. Every other outcome (exit 1, 2 or 3, a
+crash, no output, unparseable output, an interrupted run) makes the hand-back `unverified` and
+keeps the marker (released with `unaccepted`). Name the cause: the status and reason, or
+"check-verify error" with its exit code and stderr.
+
+Rules, in order:
+
+1. Read the manifest (exit 2 if unreadable or `repo.ledger_dir` is not a string) and the result
+   file (exit 2 if none is readable or it has no `result` object).
+2. `result.acceptance` must be an object with a string `status`; else `invalid`.
+3. `result.verify` null or absent: `not_required` when acceptance is `accepted`, else `missing`.
+   The workflow never accepts a run that has final checks (a test, lint or build command) and no
+   verify result, so an accepted run without one had no checks to run.
+4. Validate the report: `head` a string; `ok` and `clean` booleans; `results` a list of objects
+   with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before` and
+   `tracked_after`, when present, lists of strings. Else `invalid`, with `detail` naming the field.
+5. The sha is `result.delivered_sha` when not null, else `result.verify.head`. It must be 40 or 64
+   lowercase hex digits; else `invalid`, and it is never put into a path.
+6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked lists may be absent, as
+   older run-checks wrote them): `invalid`.
+7. Freshness: the evidence file must not be older than the result file's `startTime` (epoch
+   milliseconds; absent or not a number: `invalid`); an older file is `stale`.
+8. Compare `head`, `ok`, `clean`, `tracked_before`, `tracked_after`, then `results` position by
+   position as `{group, command, exit}`. A field present on one side only differs. Any
+   difference is `mismatch` (each is `{"field", "reported", "evidence"}`); none is `match`.
+
+Limitation: each attempt overwrites `verify-<sha>.json` through run-checks `--out`; unique
+per-attempt records are later work. So evidence from an earlier verify at the same sha is told
+apart only by its modification time.
+
+Recovery. Resuming a complete run does not run verify again, so resuming alone cannot clear
+`verify_evidence_missing`, `verify_evidence_stale`, `verify_mismatch` or `verify_invalid`.
+
+- Checker error (exit 2 or 3, a crash, bad output): fix the cause (path, manifest, missing Git
+  Bash) and run check-verify again.
+- `missing`, `stale`, `mismatch`, `invalid`: the session runs the final checks itself at the
+  delivered revision in the feature checkout: the setup commands, then the same run-checks command
+  the verify prompt gives, with `--out <ledger_dir>/checks/session-verify-<sha>.json --root
+  <ledger_dir>`. Show the result. When every exit is 0, `ok` is true, both tracked lists are
+  empty and `head` is the delivered sha, the user may accept the run explicitly; record that with
+  `ledger accept <ledger_dir> <repo root> <sha> "session re-verified: <path>; replaces <reason>"`.
+  That is an explicit override recorded in the ledger (an `accepted` event), not a match:
+  check-verify still reports its original status for that launch. Otherwise the run stays
+  unverified; the user fixes the cause and resumes, as for any other reason.
 
 ## Backfill
 
