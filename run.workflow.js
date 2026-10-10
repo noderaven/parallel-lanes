@@ -3874,16 +3874,14 @@ async function runAll(manifest, io) {
   }
   // Task minors live only in this launch's task results: the tasks an
   // earlier launch committed and reviewed are not re-run, so their approved
-  // reviews' minor findings never reached the final lenses.
+  // reviews' minor findings never reached the final lenses. Every resume
+  // has such tasks, so this is a note (no source), not a warning.
   const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
     .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
   if (earlier.length > 0) {
-    final.cannot_verify.push({
-      requirement: `the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`,
-      source: 'run',
-      why: 'a resumed run does not carry task minors from an earlier launch to the final lenses or task_minors_open',
-      check_by: "read those tasks' approved reviews in the earlier launch's report",
-    });
+    final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
+      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + " tasks' approved reviews in the earlier launch's report");
   }
   delivered = final.head;
 

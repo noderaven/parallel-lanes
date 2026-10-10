@@ -403,11 +403,12 @@ test('resume with only lane tasks done and reviewed: lanes skipped, empty lanes 
   assert.equal(result.status, 'complete');
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
   assert.ok(labels(calls).includes('integrate'));
-  // Their task minors are not carried from the earlier launch: the run says so.
-  const gap = result.final.cannot_verify.filter((c) => c.source === 'run' && /task reviews an earlier launch/.test(c.requirement));
+  // Their task minors are not carried from the earlier launch: the run says
+  // so in a note (a plain string, no source), which does not warn.
+  const gap = result.final.cannot_verify.filter((c) => typeof c === 'string' && /task reviews an earlier launch/.test(c));
   assert.equal(gap.length, 1, JSON.stringify(result.final.cannot_verify));
-  assert.ok(gap[0].requirement.includes('(T2, T3, T4)'), gap[0].requirement);
-  assert.ok(result.acceptance.warnings.length > 0, 'a sourced gap note warns');
+  assert.ok(gap[0].includes('(T2, T3, T4)'), gap[0]);
+  assert.deepEqual(result.acceptance.warnings.filter((w) => /earlier launch/.test(w)), [], JSON.stringify(result.acceptance.warnings));
 });
 
 test('a done but unreviewed task is reviewed from the previous head before the lane continues', async () => {

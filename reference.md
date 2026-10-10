@@ -375,8 +375,8 @@ finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens r
 them in the report, so minors from task reviews are not lost. Task minors are not stored in
 the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
 so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
-`cannot_verify` entry with `source: "run"` naming those tasks (check them in the earlier
-launch's report).
+`cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
+naming those tasks (check them in the earlier launch's report).
 The fixer gives each id a disposition with its evidence; the re-review names the revision it
 judged (`head`). A disposition without evidence, a re-review of another revision than the fix
 head, or two different dispositions or results for one id leave the finding open (the new
