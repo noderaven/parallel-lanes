@@ -43,7 +43,8 @@ function checkedReview(v) {
 // whole task range. Reviews use reviewSettings with the changed_lines of the
 // implement or fix result under review.
 // Returns {task, status:'done'|'deferred'|'blocked', base, head, rounds,
-// tier_used, notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
+// tier_used, notes, rulings, next_note?, minor_findings? (done only: taskMinorFindings of the
+// approving review)}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
 // 'adjudicator_stop: <condition>').
 // base is owned by the script (the previous task's head, or the feature tip):
@@ -112,6 +113,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (r.status !== 'done') return blockedBy(`${label} blocked: ${r.notes}`);
     if (!present(r.head)) return blockedBy(`${label} reported no head`);
+    if (!isSha(r.head)) return blockedBy(`${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`);
     if (r.head === from) return blockedBy(`${label} reported done with no new commits`);
     return null;
   };
@@ -134,7 +136,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
         latest = r;
         return null;
       }
-      if (r && !r.__budget && present(r.head) && r.head !== past) observed = r.head;
+      if (r && !r.__budget && isSha(r.head) && r.head !== past) observed = r.head;
       if (!escalates(fail)) return fail;
       escalate(fail.reason);
       retry = { reason: fail.reason, findings: null };
@@ -223,7 +225,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // An open park or unblock must say where the settled range ends: the head
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
-    if (deferring && refused === null && !present(out.head)) {
+    if (deferring && refused === null && !isSha(out.head)) {
       out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
         text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
           + 'the ledger holds the task as deferred: check ledger status before resuming)' };
@@ -322,7 +324,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       tierSettings(tierUsed), implementSchema());
     if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
-    if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
+    if (fail !== null && fix && !fix.__budget && isSha(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
     else if (fail === null) {
       const prevHead = head;
@@ -338,8 +340,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
 
   const notes = [];
   for (const f of verdict.findings || []) notes.push(`${f.severity} finding: ${f.file}:${f.line} - ${f.issue}`);
-  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
-  return result('done', doneNotes(notes));
+  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${cannotVerifyText(item)}`);
+  return result('done', doneNotes(notes), { minor_findings: taskMinorFindings(task, verdict.findings) });
+}
+
+// The minor findings of a task's approving review, for the final lenses:
+// each {id, severity, file, line, issue, fix}, id 'T<task>-<n>' numbered from
+// 1 (a task id that already starts with a letter, such as 'T2', is used as
+// it is: 'T2-1').
+function taskMinorFindings(task, findings) {
+  const prefix = /^[A-Za-z]/.test(task.id) ? task.id : `T${task.id}`;
+  return (Array.isArray(findings) ? findings : []).filter((f) => f && f.severity === 'minor')
+    .map((f, i) => ({
+      id: `${prefix}-${i + 1}`, severity: f.severity, file: f.file, line: f.line, issue: f.issue, fix: f.fix,
+    }));
 }
 
 // One batch unit (spec D3) for consecutive light tasks with the same batch

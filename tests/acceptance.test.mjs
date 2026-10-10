@@ -90,3 +90,38 @@ test('a final fix nobody re-reviewed at the delivered revision is missing eviden
   assert.equal(a.status, 'unverified');
   assert.deepEqual(kinds(a), [['final_fix_unreviewed', 'missing']]);
 });
+
+// ---- Structured cannot_verify (1.3.1) ----
+
+test('mixed cannot_verify entries: only sourced ones warn', () => {
+  const input = passing();
+  input.final = {
+    ...input.final,
+    cannot_verify: [
+      { requirement: 'bash 3.2', source: 'spec Testing', why: 'no macOS', check_by: 'CI' },
+      'Tested: node --test passes',
+    ],
+  };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'accepted');
+  assert.equal(a.warnings.length, 1, JSON.stringify(a.warnings));
+  assert.ok(a.warnings[0].includes('bash 3.2 (spec Testing)'), a.warnings[0]);
+  assert.ok(!a.warnings.some((w) => w.includes('Tested: node --test passes')), JSON.stringify(a.warnings));
+});
+
+test('the engine\'s own gap notes still warn', () => {
+  const input = passing();
+  input.final = {
+    ...input.final,
+    cannot_verify: [{ requirement: 'the e2e check returned no result', source: 'run', why: 'no result', check_by: 'rerun' }],
+  };
+  const a = acceptanceOf(input);
+  assert.equal(a.warnings.length, 1, JSON.stringify(a.warnings));
+  assert.ok(a.warnings[0].includes('the e2e check returned no result'), a.warnings[0]);
+});
+
+test('an entry with an empty source does not warn', () => {
+  const input = passing();
+  input.final = { ...input.final, cannot_verify: [{ requirement: 'r', source: '', why: 'w', check_by: 'c' }] };
+  assert.deepEqual(acceptanceOf(input).warnings, []);
+});

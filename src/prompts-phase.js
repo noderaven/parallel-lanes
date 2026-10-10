@@ -415,6 +415,17 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   ].join('\n');
 }
 
+// The message the final fix commits with. A function, not a constant: the
+// test harness's loadHelpers returns before top-level bindings initialize.
+function finalFixMessage() {
+  return 'fix: address the final review findings';
+}
+
+// The message a post-integration fix commits with.
+function postIntegrateFixMessage() {
+  return 'fix: make the post-integration check pass';
+}
+
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
 // the notes the failing step returned.
@@ -427,6 +438,7 @@ function postIntegrateFixPrompt(m, failure) {
     failure,
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    commitWithLine(postIntegrateFixMessage()),
     'Rerun every project command afterwards and confirm they pass:',
     commandsText(m, null, featureDir(m)),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
@@ -454,6 +466,7 @@ function postIntegrateReReviewPrompt(m, base, head) {
     '',
     'Check the fix for correctness and for new critical or important problems; do not re-review code the fix',
     'did not touch.',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line, issue, fix}], every',
@@ -462,8 +475,11 @@ function postIntegrateReReviewPrompt(m, base, head) {
 }
 
 // checkOnly: a recheck at the delivered revision after later commits; the
-// agent verifies only and changes nothing.
-function postIntegratePrompt(m, checkOnly = false) {
+// agent verifies only and changes nothing. checks: the project checks'
+// result at the revision the agent starts from ({head, ok, results?}:
+// verify's run-checks JSON, or integrate's run), so the agent runs only what
+// the hook adds; null when none ran there.
+function postIntegratePrompt(m, checkOnly = false, checks = null) {
   const change = checkOnly ? [
     'This is a recheck of the delivered revision: verify only. Change no file, make no commit, and do not',
     'record a start point; if the instructions would need a change, return status failed naming it.',
@@ -478,6 +494,7 @@ function postIntegratePrompt(m, checkOnly = false) {
     'Follow these project instructions:',
     m.hooks.post_integrate,
     '',
+    ...checksLines(checks, !checkOnly),
     ...change,
     '',
     `Plan: ${m.plan}`,
@@ -492,13 +509,16 @@ function postIntegratePrompt(m, checkOnly = false) {
   ].join('\n');
 }
 
-function e2ePrompt(m) {
+// checks: verify's result at the revision a recheck covers (null when none
+// ran there): the checker runs only what the hook adds.
+function e2ePrompt(m, checks = null) {
   return [
     `You are the end-to-end checker for parallel-lanes run ${m.run_id}.`,
     `The integrated code is in ${featureDir(m)} on ${m.repo.branch}.`,
     'Follow these project instructions:',
     m.hooks.e2e,
     '',
+    ...checksLines(checks),
     'Rules: use scratch directories only (mktemp -d, outside the checkout and the project; remove them',
     'when done); never change tracked files or commit; stop every server you start before returning and',
     'confirm its port is free.',
@@ -540,9 +560,23 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
+// The task minors checklist for a final reviewer (taskMinorFindings): []
+// when there are none.
+function taskMinorsLines(minors) {
+  if (!Array.isArray(minors) || minors.length === 0) return [];
+  return [
+    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+    findingsText(minors),
+    'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
+    'issue (for example "[<id>] ..."); otherwise leave it.',
+    '',
+  ];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, and the findings/head result.
-function finalReviewFrame(m, intro, focus) {
+// branch range, the commit-rules scan, the task minors checklist, and the
+// findings/head result.
+function finalReviewFrame(m, intro, focus, minors = []) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -558,22 +592,28 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...taskMinorsLines(minors),
+    ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
-    'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
-    `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
+    'applies), issue, fix}], head = the full sha printed by',
+    `git -C ${dir} rev-parse HEAD (a read-only command you may run), and`,
+    ...cannotVerifyLines(),
   ].join('\n');
 }
 
-function finalReviewPrompt(m, lens, e2e) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e));
+// minors: the task minors checklist (taskMinorsLines).
+function finalReviewPrompt(m, lens, e2e, minors = []) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
-// ctx = {e2e}: the e2e result, or null without an e2e hook.
+// ctx = {e2e, minors?}: the e2e result, or null without an e2e hook, and
+// the task minors checklist (taskMinorsLines).
 function combinedFinalReviewPrompt(m, ctx) {
   const focus = [
     'Review the whole branch through three lenses, in turn, and report every finding of each:',
@@ -587,7 +627,7 @@ function combinedFinalReviewPrompt(m, ctx) {
     '3. Correctness lens.',
     finalLensFocus(m, 'correctness', ctx.e2e),
   ].join('\n');
-  return finalReviewFrame(m, 'You are the final reviewer', focus);
+  return finalReviewFrame(m, 'You are the final reviewer', focus, ctx.minors || []);
 }
 
 function finalFixPrompt(m, findings, base) {
@@ -602,9 +642,11 @@ function finalFixPrompt(m, findings, base) {
     'decline. Rerun every project command afterwards:',
     commandsText(m, null, featureDir(m)),
     'Commit your fixes per the commit rules.',
+    commitWithLine(finalFixMessage()),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -617,8 +659,9 @@ function finalFixPrompt(m, findings, base) {
 }
 
 // findings carry their id and the fixer's dispositions for it
-// ([{status, reason, evidence}]; none when the fixer gave none).
-function finalReReviewPrompt(m, base, head, findings) {
+// ([{status, reason, evidence}]; none when the fixer gave none). verify:
+// the project checks' result at head (run before the re-review), or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -634,10 +677,17 @@ function finalReReviewPrompt(m, base, head, findings) {
     'Findings under verification, with what the fixer said about each:',
     findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     '',
+    ...(verify ? [
+      checksResultText(verify),
+      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      '',
+    ] : []),
     'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...runRulingsLines(m),
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
@@ -663,16 +713,51 @@ function verifyPrompt(m, sha) {
     keepFilesRule(),
     phaseRules(m),
     '',
+    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
   ].join('\n');
 }
 
-function findingKey(f) {
-  return JSON.stringify([f.file, f.line, f.issue]);
+// What the project checks found, for an agent that would otherwise rerun
+// them at the same commit: one line, or '' for null (or a result naming no
+// head). checks is verify's run-checks JSON, or {head, ok} for a run without
+// per-command results (integrate's). Passed means ok and every exit 0.
+function checksResultText(checks) {
+  if (!checks || !present(checks.head)) return '';
+  const results = Array.isArray(checks.results) ? checks.results : [];
+  const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
+  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
+    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
 
-// Merge the lenses' findings: identical file+line+issue becomes one entry
-// listing every lens that reported it, keeping the most severe severity.
+// The checks line for a hook agent (e2e, post-integrate), followed by the
+// instruction to run only what the hook adds; [] when no checks ran there.
+// mayCommit: the agent may commit a change, after which the commands run
+// again.
+function checksLines(checks, mayCommit = false) {
+  const text = checksResultText(checks);
+  if (text === '') return [];
+  return [text, `Run only what the instructions above add to them${mayCommit
+    ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
+}
+
+// The key findings merge on, or null for one that stays apart: a
+// 'commit <sha>' file merges on the file, any other on its exact file and
+// line when the line is above 0.
+function findingKey(f) {
+  if (typeof f.file === 'string' && /^commit \S+$/.test(f.file)) return JSON.stringify([f.file]);
+  if (Number.isInteger(f.line) && f.line > 0) return JSON.stringify([f.file, f.line]);
+  return null;
+}
+
+// Merge the lenses' findings (spec 1.3.1): findings on the same file and
+// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// every lens that reported it, keeping the issue text, severity and fix of
+// its most severe report (the first of those on a tie), and the other
+// reports' distinct issue texts as also_reported, so the issue text always
+// matches its severity. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -681,17 +766,25 @@ function dedupeFindings(reports) {
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
       const key = findingKey(f);
-      const seen = byKey.get(key);
+      const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens] };
-        byKey.set(key, entry);
+        const entry = { ...f, lenses: [lens], also_reported: [] };
+        if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
+        // The more severe report becomes the primary text; the earlier one
+        // moves to also_reported.
+        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
+        seen.issue = f.issue;
+        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
+        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
+      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
+        seen.also_reported.push(f.issue);
       }
     }
   }

@@ -5,10 +5,9 @@ usage:
   python3 run-report TRANSCRIPT_DIR MANIFEST [--out FILE]
 
 TRANSCRIPT_DIR holds agent-*.meta.json (description, workflowPhase, optional
-model) and
-agent-*.jsonl (resolved message.model and usage per line). MANIFEST is the
-run manifest, used to recognise task ids and to derive implement and fix
-effort. Prints JSON (or writes it to FILE):
+model) and agent-*.jsonl (resolved message.model and usage per line).
+MANIFEST is the run manifest, used to recognise task ids. Prints JSON (or
+writes it to FILE):
 
   {agents: [...], tiers: {<tier>: {...}}, totals: {...}, models: {...},
    unavailable: N, output_incomplete: N, escalations: N, fix_rounds: N,
@@ -17,12 +16,24 @@ effort. Prints JSON (or writes it to FILE):
 Anything that cannot be read or derived is the string "unavailable", never a
 guess; totals sum only known values.
 
+Effort: the workflow result file lists result.agent_settings: [{label,
+model, effort}], one per agent started, in start order. Each agent takes the effort of the next unused entry with its
+label (agents in start order), so a label run twice gets its two entries in
+turn. Without that file, or with no matching entry or a non-string effort, an
+agent's effort is "unavailable": nothing is derived from the manifest or meta.
+The Workflow tool writes the transcripts to <session>/subagents/workflows/wf_<id>/
+and the result to <session>/workflows/wf_<id>.json; the result file is looked
+for there first, then at <TRANSCRIPT_DIR>.json beside the directory.
+
 Output tokens: a transcript line written mid-stream carries
 "stop_reason": null and the output count from the start of the stream, not
 the final count. A message whose kept line has stop_reason null is
 incomplete; an agent with any incomplete message has output_tokens
 "unavailable" and output_tokens_min (the counts it does have, a lower
-bound). Lines with no stop_reason key are taken as final.
+bound). Lines with no stop_reason key are taken as final. When any agent
+counted in a tier (or in the run) is incomplete, that tier's (or totals')
+output_tokens is "unavailable" too, since the sum would be an undercount;
+output_tokens_min still sums every count there is.
 
 Models: resolved_models maps every model that served the agent to its
 message count (a fallback model shows up here even when the workflow
@@ -45,10 +56,6 @@ import _shell  # noqa: E402
 UNAVAILABLE = "unavailable"
 TOKEN_FIELDS = ("input_tokens", "output_tokens",
                 "cache_read_input_tokens", "cache_creation_input_tokens")
-# Effort of implement and fix roles. Mirrors tierSettings in src/plan.js:
-# standard, sonnet and light all run their implementers at high.
-TIER_EFFORT = {"standard": "high", "sonnet": "high", "light": "high"}
-DEFAULT_EFFORT = "high"
 
 
 def read_json(path):
@@ -72,15 +79,36 @@ def manifest_task_ids(manifest):
     return {i for i in ids if isinstance(i, str)}
 
 
-def manifest_task_tiers(manifest):
-    tiers = {}
-    tasks = list(manifest.get("prelude") or []) + list(manifest.get("join") or [])
-    for lane in manifest.get("lanes") or []:
-        tasks += lane.get("tasks") or []
-    for t in tasks:
-        if isinstance(t.get("id"), str) and isinstance(t.get("tier"), str):
-            tiers[t["id"]] = t["tier"]
-    return tiers
+def result_paths(transcript_dir):
+    """Where the workflow result file may be, in the order they are tried:
+    <session>/workflows/<name>.json for a transcript dir at
+    <session>/subagents/workflows/<name>, then <transcript_dir>.json."""
+    base = os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir)
+    parent = os.path.dirname(base)
+    paths = []
+    if os.path.basename(parent) == "workflows" and os.path.basename(os.path.dirname(parent)) == "subagents":
+        session = os.path.dirname(os.path.dirname(parent))
+        paths.append(os.path.join(session, "workflows", os.path.basename(base) + ".json"))
+    paths.append(base + ".json")
+    return paths
+
+
+def agent_efforts(transcript_dir):
+    """{label: [effort, ...]} from the workflow result file's
+    result.agent_settings (see result_paths), in start order; {} when no
+    readable result file is found."""
+    result = None
+    for path in result_paths(transcript_dir):
+        if os.path.isfile(path):
+            result = read_json(path).get("result")
+            break
+    settings = result.get("agent_settings") if isinstance(result, dict) else None
+    efforts = {}
+    for s in settings if isinstance(settings, list) else []:
+        if isinstance(s, dict) and isinstance(s.get("label"), str):
+            effort = s.get("effort")
+            efforts.setdefault(s["label"], []).append(effort if isinstance(effort, str) and effort else UNAVAILABLE)
+    return efforts
 
 
 def is_task_word(word, ids):
@@ -216,7 +244,7 @@ def blank_bucket():
 
 def build(transcript_dir, manifest):
     ids = manifest_task_ids(manifest)
-    manifest_tier = manifest_task_tiers(manifest)
+    efforts = agent_efforts(transcript_dir)
     metas = sorted(glob.glob(os.path.join(transcript_dir, "agent-*.meta.json")), key=start_key)
     agents = []
     for meta_path in metas:
@@ -230,12 +258,8 @@ def build(transcript_dir, manifest):
         requested = meta.get("model") if isinstance(meta.get("model"), str) else None
         resolved, sums, models, complete = read_usage(stem + ".jsonl")
         tier = model_tier(resolved) or model_tier(requested) or UNAVAILABLE
-        if isinstance(meta.get("effort"), str):
-            effort = meta["effort"]
-        elif task is not None and re.match(r"^(implement|fix \d+)$", role):
-            effort = TIER_EFFORT.get(manifest_tier.get(task), DEFAULT_EFFORT)
-        else:
-            effort = UNAVAILABLE
+        queue = efforts.get(label)
+        effort = queue.pop(0) if queue else UNAVAILABLE
         entry = {
             "label": label,
             "phase": phase,
@@ -295,6 +319,9 @@ def build(transcript_dir, manifest):
         last_model[a["_base"]] = (tier, model)
 
     for a in agents:
+        if a["output_tokens"] == UNAVAILABLE and a["input_tokens"] != UNAVAILABLE:
+            tiers[a["tier"]]["output_tokens"] = UNAVAILABLE
+            totals["output_tokens"] = UNAVAILABLE
         del a["_base"]
         del a["_retried"]
     return {

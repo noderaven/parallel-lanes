@@ -18,16 +18,25 @@
 // (declines still need judging). Returns {findings, fixed, declined, open,
 // cannot_verify, missing_lenses, head}: head is the delivered feature head
 // (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason.
-async function runFinalReview(m, e2e, base, io, carried = []) {
+// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// project checks (null: the project has none): once a fix agent ran,
+// whatever it returned, they run at the delivered head before the re-review,
+// which gets their result so it does not rerun them; the result is returned
+// as final.verify (absent when no fix agent ran). taskMinors: the minor
+// findings of approved task reviews (taskMinorFindings, ids T<task>-<n>):
+// every lens gets them as a checklist and raises one by putting its id in
+// brackets in a finding's issue; final.task_minors_open lists the ones no
+// lens raised. A lens's cannot_verify entries carry its name: an object as
+// lens, a plain string as a '<lens>: ' prefix.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
   // [label, lens name for findings and cannot_verify, prompt]
   const lenses = m.profile === 'lite'
-    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e })]]
+    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e)]);
+      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -35,16 +44,23 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   lenses.forEach(([, name], i) => {
     const r = results[i];
     if (!r || !Array.isArray(r.findings)) missing.push(name);
-    else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
+    else {
+      for (const item of r.cannot_verify || []) {
+        cannotVerify.push(item !== null && typeof item === 'object' ? { ...item, lens: name } : `${name}: ${item}`);
+      }
+    }
   });
+  const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
+    .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
   const findings = withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
   ]));
-  const lensHead = results.find((r) => r && present(r.head));
+  const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
@@ -68,18 +84,36 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // A refused first call spawned no fix agent: no code changed, so the
+  // caller's budget stop runs the checks.
+  const fixRan = !(fix && fix.__budget);
   // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
   // fix's head stands unless its Opus rerun reports a head of its own.
-  if (fix && present(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  if (fix && present(fix.head)) final.head = fix.head;
+  // A head that is not a commit sha names no commit, so the run cannot say
+  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
+  // leaves every finding open.
+  const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
+  if (fix && isSha(fix.head)) final.head = fix.head;
+  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fix && isSha(fix.head)) final.head = fix.head;
+  // The checks at the delivered head, before the re-review (spec: no
+  // repeated checks at one commit).
+  if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
+  if (badHead(fix)) {
+    const why = noHead(fix, 'the final fix');
+    settle([], null, why);
+    // Any commit it made past the tip is unknown to the run and unreviewed.
+    final.unreviewed_fix = `${why}, so any commit it made past ${tip} was not re-reviewed`;
+    return final;
+  }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
+    finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
@@ -117,7 +151,7 @@ function laneTips(m, laneResults) {
   const tips = {};
   for (const lane of m.lanes) {
     const lr = laneResults.find((r) => r.lane === lane.id);
-    if (lr && present(lr.head)) {
+    if (lr && isSha(lr.head)) {
       tips[lane.id] = lr.head;
       continue;
     }
@@ -139,20 +173,6 @@ function labelTasks(m, label) {
     }
   }
   return [];
-}
-
-// A copy of the manifest whose notes for every not-yet-done task gain the
-// pre-flight ruling (spec C1). taskContext shows a task's note, so the ruling
-// binds every task agent for this run without an engine change.
-function preflightResolved(m, text) {
-  const line = `Pre-flight ruling (binding for this run): ${text}`;
-  const notes = { ...(m.notes || {}) };
-  const done = new Set(m.done);
-  for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    if (done.has(t.id)) continue;
-    notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
-  }
-  return { ...m, notes };
 }
 
 // A copy of the manifest whose notes carry the unblock note of each result
@@ -217,14 +237,15 @@ function withConsumesExtra(m, kept) {
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
-//  verify (the run-checks result at the delivered revision)|null,
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
+//  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
 //  acceptanceOf), agents_spawned,
-//  rulings_spent (adjudications that ran; a relaunch subtracts it from
-//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
+//  agent_settings ([{label, model, effort}] of every agent started, in start
+//  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
+//  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
@@ -236,8 +257,9 @@ function withConsumesExtra(m, kept) {
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
-  // Windows paths in forward-slash form before anything reads them.
-  let m = normalizeManifestPaths(manifest);
+  // Windows paths in forward-slash form, and hooks {} when absent, before
+  // anything reads them.
+  let m = normalizeManifestPaths(withDefaultHooks(manifest));
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
@@ -245,12 +267,12 @@ async function runAll(manifest, io) {
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
       integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0,
+      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
   // Every agent of the run spawns through the budget wrapper (budget.js).
-  const state = { agents: 0, rulings: 0, refused: [] };
+  const state = { agents: 0, rulings: 0, refused: [], spawned: [] };
   const counted = makeIo(m, io, state);
   const standard = tierSettings('standard');
   const sonnetHigh = { model: 'sonnet', effort: 'high' };
@@ -259,7 +281,11 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
 
+  // Run rulings come from this run's pre-flight only, never from the
+  // manifest file.
+  m = { ...m, run_rulings: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -272,14 +298,20 @@ async function runAll(manifest, io) {
       notes: '',
     };
   }
+  // The minor findings of approved task reviews, for the final lenses (a
+  // batch's results repeat them for each task: listed once by id).
+  const taskMinors = [];
   const record = (results) => {
     for (const r of results) {
+      if (r.status === 'done') {
+        for (const f of r.minor_findings || []) if (!taskMinors.some((x) => x.id === f.id)) taskMinors.push(f);
+      }
       tasks[r.task] = {
         // A task the ledger lists as deferred stays deferred when skipped.
         status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
-        commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
+        commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
       };
     }
@@ -315,6 +347,7 @@ async function runAll(manifest, io) {
     acceptance,
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
+    agent_settings: state.spawned.slice(),
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -339,13 +372,8 @@ async function runAll(manifest, io) {
     return report('stopped', 'budget');
   };
 
-  const planned = planAgents(m);
-  if (m.done.length > 0) {
-    io.log(`parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`);
-  } else {
-    const lanesWithWork = new Set(planned.filter((a) => a.lane !== null).map((a) => a.lane)).size;
-    io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
-  }
+  const notices = launchNotices(m, planAgents(m));
+  io.log(m.done.length > 0 ? notices.resume : notices.launch);
 
   // Setup: the session ran scripts/setup and passed its output (the only
   // setup; validateManifest requires it for a launch).
@@ -362,7 +390,7 @@ async function runAll(manifest, io) {
   // attempt made at a first task before recording it are reviewed too. A
   // list that moved no head leaves the tip where the phase put it.
   const starts = m.start_points || {};
-  const moved = (list) => list.results.some((r) => present(r.head));
+  const moved = (list) => list.results.some((r) => isSha(r.head));
   const listTip = (list) => (moved(list) ? list.head : tip);
 
   // Profile lite (spec D2): validateManifest above is the whole pre-flight;
@@ -384,6 +412,9 @@ async function runAll(manifest, io) {
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
     m = withConsumesExtra(m, kept);
+    // Pre-flight's rulings bind every task and final reviewer of this run
+    // (taskContext and the final review prompts show m.run_rulings).
+    m = { ...m, run_rulings: [...pre.rulings] };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -396,10 +427,10 @@ async function runAll(manifest, io) {
         if (ruling.unavailable) return report('stopped', ruling.text);
         return report('preflight_conflicts');
       }
-      // The ruling binds every not-yet-done task: taskContext shows each
-      // task's note, so the ruling reaches every task agent.
+      // The ruling joins the run rulings, so it reaches every task agent
+      // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
-      m = preflightResolved(m, ruling.text);
+      m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
 
@@ -450,7 +481,7 @@ async function runAll(manifest, io) {
     // A phase result that is done must also report the head it left.
     const phaseResult = (r, label) => {
       if (!r) return { status: 'failed', notes: `no result from ${label}` };
-      if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+      if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
       return { status: r.status, notes: r.notes };
     };
     const preludeTip = tip;
@@ -466,7 +497,7 @@ async function runAll(manifest, io) {
       const fix = await callM('post-integrate fix', 'Integrate',
         postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
-      if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
+      if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
           postIntegrateReReviewPrompt(m, base, fix.head), postIntegrateReReviewSchema(), standard);
         if (state.refused.length > 0) return BUDGET;
@@ -498,7 +529,7 @@ async function runAll(manifest, io) {
         const res = await callM('resolve conflicts', 'Integrate',
           resolveConflictsPrompt(m, preludeTip, conflicts), statusSchema(), standard);
         if (state.refused.length > 0) return budgetReport();
-        if (res && res.status === 'done' && present(res.head)) resolved = { files: conflicts, notes: res.notes };
+        if (res && res.status === 'done' && isSha(res.head)) resolved = { files: conflicts, notes: res.notes };
       }
       // Every Sonnet failure or null escalates to one Opus rerun (D5).
       // Autonomous heals a residual command failure into tests_failed;
@@ -533,8 +564,14 @@ async function runAll(manifest, io) {
       }
       tip = integ.head;
     }
+    // Integrate reran the project commands at its head: the post-integrate
+    // agent starting there is told their result, not to rerun them (null once
+    // a post-integrate fix moved the tip, or when the project has none).
+    const integrateChecks = () => (hasChecks && integ.head === tip
+      ? { head: integ.head, ok: !integ.tests_failed } : null);
     if (m.hooks.post_integrate) {
-      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+        statusSchema());
       if (state.refused.length > 0) return budgetReport();
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
@@ -542,7 +579,8 @@ async function runAll(manifest, io) {
         const from = await fixPostIntegration(pr.notes, tip);
         if (from === BUDGET) return budgetReport();
         tip = from;
-        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+          statusSchema());
         if (state.refused.length > 0) return budgetReport();
         pr = phaseResult(post, 'post-integrate');
       }
@@ -567,14 +605,15 @@ async function runAll(manifest, io) {
   // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
   // Opus (same label) and the Opus result is used. It records the revision
   // its checks covered.
-  const runE2e = async (label, phaseName) => {
-    let r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), sonnetHigh);
+  // checks: verify's result at the revision a recheck covers, or null.
+  const runE2e = async (label, phaseName, checks = null) => {
+    let r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), sonnetHigh);
     if (state.refused.length > 0) return null;
     if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
-      r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), standard);
+      r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), standard);
       if (state.refused.length > 0) return null;
     }
-    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
+    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: isSha(r.head) ? r.head : null }
       : { items: [], checked_sha: null, notes: `no result from ${label}` };
   };
   // The project checks at sha (scripts/run-checks through the verify agent).
@@ -582,7 +621,6 @@ async function runAll(manifest, io) {
   // the last change the run has evidence even when the budget is spent.
   const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
     { ...sonnetHigh, overBudget: true });
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -600,27 +638,55 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
-  if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
-  if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
+  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
+    hasChecks ? verifyAt : null, taskMinors);
+  // Checks that ran inside the final review (a fix agent ran) are the run's
+  // verify: the report carries them once, at the top level.
+  const verifiedInReview = 'verify' in final;
+  if (verifiedInReview) {
+    verify = final.verify;
+    delete final.verify;
+  }
+  if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
+  // The run's own gaps are sourced entries (source 'run'), so they warn.
+  if (e2e !== null && e2e.notes) {
+    final.cannot_verify.unshift({ requirement: 'the e2e check returned no result', source: 'run',
+      why: e2e.notes, check_by: 'run the e2e hook at the delivered revision' });
+  }
+  if (fixUnreviewed) {
+    final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
+      why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
+  // Task minors live only in this launch's task results: the tasks an
+  // earlier launch committed and reviewed are not re-run, so their approved
+  // reviews' minor findings never reached the final lenses. Every resume
+  // has such tasks, so this is a note (no source), not a warning.
+  const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
+    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+  if (earlier.length > 0) {
+    final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
+      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + " tasks' approved reviews in the earlier launch's report");
+  }
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.
-  // The project checks always run there (scripts/run-checks); the e2e and
-  // post-integrate checks rerun only when a later commit made their evidence
-  // stale (the post-integrate one check-only).
+  // The project checks always run there (scripts/run-checks), once: here
+  // only when the final review ran no fix agent. The e2e and post-integrate
+  // checks rerun only when a later commit made their evidence stale (the
+  // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
-  if (hasChecks) verify = await verifyAt(delivered);
+  if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
-    e2e = await runE2e('e2e recheck', 'Verify');
+    e2e = await runE2e('e2e recheck', 'Verify', checksHere);
     if (state.refused.length > 0) return budgetReport();
   }
   if (m.hooks.post_integrate && !lite && (!postCheck || postCheck.checked_sha !== delivered)) {
-    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true), statusSchema());
+    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true, checksHere), statusSchema());
     if (state.refused.length > 0) return budgetReport();
     const pr = phaseCheck(r, 'post-integrate recheck');
-    postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };
+    postCheck = { ...pr, checked_sha: r && isSha(r.head) ? r.head : null };
     if (postCheck.checked_sha !== null && postCheck.checked_sha !== delivered) {
       postCheck = { status: 'failed', notes: `the recheck left HEAD at ${postCheck.checked_sha}`, checked_sha: delivered };
     }
@@ -637,6 +703,13 @@ async function runAll(manifest, io) {
 // A phase agent's status result as {status, notes}: done only with a head.
 function phaseCheck(r, label) {
   if (!r) return { status: 'failed', notes: `no result from ${label}` };
-  if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+  if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
   return { status: r.status, notes: r.notes };
+}
+
+// Why a done phase result has no usable head: none reported, or one that is
+// not a commit sha.
+function noHead(r, label) {
+  return present(r.head) ? `${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`
+    : `${label} reported no head`;
 }

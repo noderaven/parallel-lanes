@@ -3,7 +3,7 @@
 // keeps the Plan 1 phases.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers, loadScript } from './harness.mjs';
+import { loadHelpers, loadScript, H } from './harness.mjs';
 
 const { combinedFinalReviewPrompt } = await loadHelpers(['combinedFinalReviewPrompt']);
 
@@ -48,7 +48,7 @@ function manifest(overrides = {}) {
 // feature checkout.
 function liteManifest(overrides = {}) {
   const m = manifest(overrides);
-  m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/repo' }, discarded: [] };
+  m.setup_result = { feature_head: H('S0'), worktrees: { alpha: '/work/repo' }, discarded: [] };
   return m;
 }
 
@@ -59,7 +59,7 @@ const finding = (issue, file = 'src/a.js', line = 3) => ({ severity: 'important'
 function taskScript(ids) {
   const script = {};
   for (const id of ids) {
-    script[`${id} implement`] = [done(`${id}-b`, `${id}-h`)];
+    script[`${id} implement`] = [done(`${id}-b`, H(`${id}-h`))];
     script[`${id} review`] = [approve()];
   }
   return script;
@@ -95,10 +95,10 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   const m = liteManifest();
   const script = {
     ...taskScript(LITE),
-    'final review': [{ findings: [finding('combined issue')], cannot_verify: ['e2e: none'], head: 'T4-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
-    'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
-    verify: [verified('f1')],
+    'final review': [{ findings: [finding('combined issue')], cannot_verify: ['e2e: none'], head: H('T4-h') }],
+    'final fix': [{ status: 'done', head: H('f1'), tests: 'all pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
+    'final re-review': [{ head: H('f1'), results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
+    verify: [verified(H('f1'))],
   };
   const { result, calls, phases } = await run(m, script);
   assert.equal(result.status, 'complete', JSON.stringify(result));
@@ -112,10 +112,11 @@ test('lite: no setup, pre-flight, integrate or post-integrate agent; one combine
   assert.equal(reviewers[0].model, 'opus');
   assert.equal(reviewers[0].phase, 'Final review');
   assert.ok(reviewers[0].schema.required.includes('head'));
-  // The single fix wave and its re-review follow, from the reviewer's head.
-  assert.deepEqual(names.slice(-3), ['final fix', 'final re-review', 'verify']);
+  // The single fix wave follows, from the reviewer's head, then verify and
+  // then the re-review.
+  assert.deepEqual(names.slice(-3), ['final fix', 'verify', 'final re-review']);
   assert.equal(result.acceptance.status, 'accepted');
-  assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes('(now at T4-h)'));
+  assert.ok(calls.find((c) => c.label === 'final fix').prompt.includes(`(now at ${H('T4-h')})`));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['combined issue']);
   assert.deepEqual(result.final.cannot_verify, ['combined: e2e: none']);
   assert.deepEqual(result.preflight, { conflicts: [], rulings: [], undeclared: [] });
@@ -127,8 +128,8 @@ test('lite: the lane works in the feature checkout on the feature branch with le
   const m = liteManifest();
   const script = {
     ...taskScript(LITE),
-    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
-    verify: [verified('T4-h')],
+    'final review': [{ findings: [], cannot_verify: [], head: H('T4-h') }],
+    verify: [verified(H('T4-h'))],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
@@ -143,24 +144,24 @@ test('lite: the lane works in the feature checkout on the feature branch with le
     assert.equal(calls.find((c) => c.label === `${id} implement`).phase, 'Lane alpha');
   }
   // One branch: the lane continues from the prelude, the join from the lane.
-  assert.deepEqual(result.tasks.T1.commits, ['S0', 'T1-h']);
-  assert.deepEqual(result.tasks.T2.commits, ['T1-h', 'T2-h']);
-  assert.deepEqual(result.tasks.T3.commits, ['T2-h', 'T3-h']);
-  assert.deepEqual(result.tasks.T4.commits, ['T3-h', 'T4-h']);
+  assert.deepEqual(result.tasks.T1.commits, [H('S0'), H('T1-h')]);
+  assert.deepEqual(result.tasks.T2.commits, [H('T1-h'), H('T2-h')]);
+  assert.deepEqual(result.tasks.T3.commits, [H('T2-h'), H('T3-h')]);
+  assert.deepEqual(result.tasks.T4.commits, [H('T3-h'), H('T4-h')]);
 });
 
 test('lite: an empty prelude starts the lane at the saved setup start point', async () => {
-  const m = liteManifest({ prelude: [], start_points: { prelude: 'SP0', join: 'SJ0' } });
+  const m = liteManifest({ prelude: [], start_points: { prelude: H('SP0'), join: H('SJ0') } });
   const script = {
     ...taskScript(['T2', 'T3', 'T4']),
-    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
-    verify: [verified('T4-h')],
+    'final review': [{ findings: [], cannot_verify: [], head: H('T4-h') }],
+    verify: [verified(H('T4-h'))],
   };
   const { result } = await run(m, script);
   assert.equal(result.status, 'complete');
-  assert.deepEqual(result.tasks.T2.commits, ['SP0', 'T2-h']);
+  assert.deepEqual(result.tasks.T2.commits, [H('SP0'), H('T2-h')]);
   // Lite records no join start point: the join starts at the lane's last head.
-  assert.deepEqual(result.tasks.T4.commits, ['T3-h', 'T4-h']);
+  assert.deepEqual(result.tasks.T4.commits, [H('T3-h'), H('T4-h')]);
 });
 
 test('lite: a backfilled first lane task after an empty prelude reviews its own range', async () => {
@@ -168,27 +169,27 @@ test('lite: a backfilled first lane task after an empty prelude reviews its own 
     prelude: [],
     done: ['T2'],
     reviewed: [],
-    backfill: { T2: { base: 'T2-old-b', head: 'T2-old-h' } },
+    backfill: { T2: { base: 'T2-old-b', head: H('T2-old-h') } },
   });
-  m.setup_result.feature_head = 'T2-old-h';
+  m.setup_result.feature_head = H('T2-old-h');
   const script = {
     ...taskScript(['T3', 'T4']),
     'T2 review': [approve()],
-    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
-    verify: [verified('T4-h')],
+    'final review': [{ findings: [], cannot_verify: [], head: H('T4-h') }],
+    verify: [verified(H('T4-h'))],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
   const rev = calls.find((c) => c.label === 'T2 review').prompt;
-  assert.ok(rev.includes('range T2-old-b..T2-old-h'), rev.split('\n')[0]);
-  assert.deepEqual(result.tasks.T3.commits, ['T2-old-h', 'T3-h']);
+  assert.ok(rev.includes(`range T2-old-b..${H('T2-old-h')}`), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T3.commits, [H('T2-old-h'), H('T3-h')]);
 });
 
 test('lite: a stopped lane stops the run before the join', async () => {
   const m = liteManifest();
   const script = {
     ...taskScript(['T1', 'T2']),
-    'T3 implement': [{ status: 'blocked', base: 'T2-h', head: 'T2-h', tests: '', notes: 'stuck' }],
+    'T3 implement': [{ status: 'blocked', base: H('T2-h'), head: H('T2-h'), tests: '', notes: 'stuck' }],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'stopped');
@@ -223,16 +224,16 @@ test('combined final review prompt names all three lenses and asks for head', ()
 
 test('full profile unchanged: pre-flight, integrate, the three lenses and verify run', async () => {
   const m = manifest({ profile: 'full', hooks: { post_integrate: 'POST' } });
-  m.setup_result = { feature_head: 'F0', worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
+  m.setup_result = { feature_head: H('F0'), worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
   const script = {
     'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
-    integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
-    'post-integrate': [{ status: 'done', head: 'P1', notes: '' }],
+    integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
+    'post-integrate': [{ status: 'done', head: H('P1'), notes: '' }],
     ...taskScript(LITE),
-    'final review sp': [{ findings: [], cannot_verify: [], head: 'P1' }],
-    'final review security': [{ findings: [], cannot_verify: [], head: 'P1' }],
-    'final review correctness': [{ findings: [], cannot_verify: [], head: 'P1' }],
-    verify: [verified('P1')],
+    'final review sp': [{ findings: [], cannot_verify: [], head: H('P1') }],
+    'final review security': [{ findings: [], cannot_verify: [], head: H('P1') }],
+    'final review correctness': [{ findings: [], cannot_verify: [], head: H('P1') }],
+    verify: [verified(H('P1'))],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
@@ -240,5 +241,5 @@ test('full profile unchanged: pre-flight, integrate, the three lenses and verify
     ['pre-flight', 'integrate', 'post-integrate', 'final review sp', 'final review security', 'final review correctness', 'verify']);
   const t2 = calls.find((c) => c.label === 'T2 implement').prompt;
   assert.ok(t2.includes('Worktree: /work/wt/lane-alpha (branch pl-run-1-alpha)'), t2);
-  assert.deepEqual(result.tasks.T4.commits, ['P1', 'T4-h']);
+  assert.deepEqual(result.tasks.T4.commits, [H('P1'), H('T4-h')]);
 });

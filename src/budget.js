@@ -2,8 +2,10 @@
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused, untyped?, typedNulls?}), and refuses
-// calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
+// state ({agents, rulings, refused, spawned?, untyped?, typedNulls?}),
+// records each agent it starts as {label, model, effort} in state.spawned
+// (created on first use; in start order; refused calls add nothing), and
+// refuses calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
@@ -42,6 +44,12 @@ function makeIo(m, baseIo, state) {
     // Only calls that run count: state.rulings is the adjudications spent.
     if (ruling) state.rulings += 1;
     state.agents += 1;
+    if (!state.spawned) state.spawned = [];
+    state.spawned.push({
+      label,
+      model: opts.model === undefined ? null : opts.model,
+      effort: opts.effort === undefined ? null : opts.effort,
+    });
     return baseIo.agent(prompt, opts);
   };
   return {

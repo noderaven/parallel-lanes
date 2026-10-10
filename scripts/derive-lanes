@@ -12,7 +12,9 @@ Per task:
   files  backticked paths in the task's '**Files:**' block, from clauses that
          start with Create, Modify, or Test. The block is the Files line plus
          the lines after it up to a blank line; clauses are bullets or
-         ';'-separated parts. A backticked token there is a path unless it
+         ';'-separated parts (a ';' inside backticks or parentheses does not
+         split; when a line leaves a backtick or '(' open, it splits on every
+         ';' with a warning). A backticked token there is a path unless it
          sits inside a
          parenthesized aside ('Modify: `a.py` (add `fn`)' names a.py only),
          looks like code ('(', ')', '<', '>', '{', '}', '=', ',' or '$'), or has
@@ -146,7 +148,35 @@ def path_of(token, task_id):
     return None if norm == "." else norm
 
 
-def files_blocks(body):
+def split_clauses(item, task_id):
+    """Split item on ';' at parenthesis depth 0 and outside backtick spans, so
+    a note like '(lines 34, 64; required keys)' does not cut the paths after it.
+    When a backtick or '(' is left open, the depth cannot be trusted (a stray
+    tick would hide every later ';'), so it warns and splits on every ';'."""
+    parts = []
+    start = depth = 0
+    in_tick = False
+    for i, ch in enumerate(item):
+        if ch == "`":
+            in_tick = not in_tick
+        elif in_tick:
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif ch == ";" and depth == 0:
+            parts.append(item[start:i])
+            start = i + 1
+    if in_tick or depth > 0:
+        warn(f"task {task_id}: unbalanced backticks or parentheses in Files line {item.strip()!r};"
+             " split on every ';' instead")
+        return item.split(";")
+    parts.append(item[start:])
+    return parts
+
+
+def files_blocks(body, task_id):
     """Yield the clause texts of each Files block in a task body."""
     i = 0
     while i < len(body):
@@ -163,7 +193,7 @@ def files_blocks(body):
             else:
                 items[-1] += " " + body[i].strip()
             i += 1
-        yield [part.strip() for item in items for part in item.split(";")]
+        yield [part.strip() for item in items for part in split_clauses(item, task_id)]
 
 
 def outside_asides(clause):
@@ -182,7 +212,7 @@ def parse_files(body, task_id):
     """Return (has_files_block, files)."""
     has_block = False
     files = []
-    for clauses in files_blocks(body):
+    for clauses in files_blocks(body, task_id):
         has_block = True
         for clause in clauses:
             if not FILE_VERB.match(clause):

@@ -29,6 +29,13 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// A commit sha as an agent reports it: 7 to 40 lowercase hex digits. Any
+// other head an agent reports (a note such as 'see below', a branch name)
+// counts as no head: the run cannot tell which commit it means.
+function isSha(v) {
+  return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
+}
+
 // Rules every agent gets, task and phase alike.
 function agentRules() {
   return [
@@ -64,11 +71,12 @@ function keepFilesRule() {
 }
 
 // Top-level manifest keys that must be present (manifest.schema.json lists
-// the same keys as its top-level "required").
+// the same keys as its top-level "required"). hooks is optional: a manifest
+// without it runs as if it were {} (withDefaultHooks).
 function manifestRequiredKeys() {
   return [
     'version', 'run_id', 'plan', 'spec', 'commit_rules', 'repo', 'commands',
-    'prelude', 'lanes', 'join', 'hooks', 'limits', 'dry_run', 'done',
+    'prelude', 'lanes', 'join', 'limits', 'dry_run', 'done',
     'reviewed', 'sp_dir', 'skill_dir',
   ];
 }
@@ -642,6 +650,15 @@ function normalizeManifestPaths(m) {
   return out;
 }
 
+// The manifest with hooks {} when it has no hooks key (hooks is optional; a
+// present value, even an invalid one, is kept for validateManifest to
+// check). A copy; anything that is not an object is returned unchanged.
+// Applied with normalizeManifestPaths before anything reads the manifest.
+function withDefaultHooks(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m) || 'hooks' in m) return m;
+  return { ...m, hooks: {} };
+}
+
 // Model settings. The sonnet and light tiers apply to implementers of
 // sonnet and light tasks only; reviewers always run standard. Integrate,
 // e2e, and minor-only or docs-only final fixes start on Sonnet with settings
@@ -668,7 +685,9 @@ function tierSettings(tier) {
 // finding is minor or docs-only) and final_re_review are listed as the upper
 // bound; they run only when the final reviews report findings. Verify: the
 // verify agent (Sonnet) runs the project checks at the delivered revision
-// whenever a test, lint or build command exists; e2e_recheck and
+// once, whenever a test, lint or build command exists: after the final fix
+// and before the final re-review (which gets its result), or after the
+// lenses when they found nothing; it is listed in that place; e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -705,13 +724,24 @@ function planAgents(m) {
   const lenses = lite
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
-  for (const role of [...lenses, 'final_fix', 'final_re_review']) {
-    add('Final review', null, null, role, standard);
-  }
+  for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
   if (['test', 'lint', 'build'].some((g) => (m.commands[g] || []).length > 0)) add('Verify', null, null, 'verify', sonnetHigh);
+  add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
   return agents;
+}
+
+// The lines the session prints when it launches the run (launch) or
+// relaunches it with tasks already committed (resume), and runAll logs:
+// launch counts the distinct lanes among agents (planAgents(m)) and the
+// agents; resume counts m.done. Expects a valid manifest.
+function launchNotices(m, agents) {
+  const lanes = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane)).size;
+  return {
+    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents`,
+    resume: `parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`,
+  };
 }
 
 // Lanes that would run at once: lanes with at least one planned agent,
@@ -870,15 +900,63 @@ function commandsText(m, laneId, dir = null) {
   const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`);
+    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
+      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+      '  (the log\'s parent) once you have read what you need.');
   }
   return lines.join('\n');
 }
 
+// One line per finding; a finding merged from several reports
+// (dedupeFindings) also lists the other reports' issue text.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
-    + ` - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
+    + ` - ${f.issue} (suggested fix: ${f.fix})`
+    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
+      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+}
+
+// One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
+// the reviewer needed to check and could not, with source citing the task
+// step or spec section, why it could not be checked, and how to check it.
+function cannotVerifyItemSchema() {
+  return {
+    type: 'object',
+    properties: {
+      requirement: { type: 'string' },
+      source: { type: 'string' },
+      why: { type: 'string' },
+      check_by: { type: 'string' },
+    },
+    required: ['requirement', 'source', 'why', 'check_by'],
+  };
+}
+
+// A cannot_verify entry as text: '<requirement> (<source>): <why>; check:
+// <check_by>' for an object, the string itself for a plain string (an agent
+// from before 1.3.1).
+function cannotVerifyText(item) {
+  if (item === null || typeof item !== 'object') return String(item);
+  return `${item.requirement} (${item.source}): ${item.why}; check: ${item.check_by}`;
+}
+
+// A cannot_verify entry that names where its requirement comes from: only
+// these warn at acceptance; a plain string is kept as a note.
+function isSourced(item) {
+  return item !== null && typeof item === 'object' && present(item.source);
+}
+
+// What a reviewer returns as cannot_verify, and what it must leave out.
+function cannotVerifyLines() {
+  return [
+    'cannot_verify = [{requirement, source, why, check_by}], one per requirement from the plan or spec that you',
+    'needed to check and could not: source = the task step or spec section it comes from, why = why you could',
+    'not check it, check_by = how it can be checked. Leave out things you verified, verdicts or decisions,',
+    'limits the plan already accepts, the instruction not to re-run tests, and problems (those are findings);',
+    'empty when there is nothing.',
+  ];
 }
 
 // The note for a finding with file "start-task" (reviewStartFailure): the
@@ -888,6 +966,50 @@ function startFindingNote(findings) {
   if (!Array.isArray(findings) || !findings.some((f) => f && f.file === 'start-task')) return [];
   return ['A finding with file "start-task" is the reviewer\'s start command failing (a setup problem, not the',
     'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
+}
+
+// The rulings already made for this run (m.run_rulings, set only by the
+// workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
+// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
+// ruling quoted as written. Empty when there are none.
+function runRulingsLines(m) {
+  const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
+  if (rulings.length === 0) return [];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+}
+
+// The message a task fix round commits with: 'fix: address review findings
+// for Task <id>', or for a batch 'for Batch <first>-<last>'.
+function fixCommitMessage(task) {
+  return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
+}
+
+// The message an implement attempt commits further work with once HEAD holds
+// the task's first commit and no review findings are behind the attempt (a
+// retry after a blocked or escalated attempt, a reopened task): 'chore:
+// continue Task <id>', so history shows no fix of findings no review raised.
+function continueCommitMessage(task) {
+  return `chore: continue Task ${task.id}`;
+}
+
+// What every reviewer, re-reviewer and final lens is told about fix commits:
+// each fix message, and that neither the plan's message on a task's first
+// commit nor a fix message on a fix commit is a commit-rule finding.
+function fixMessagesLines() {
+  return [
+    'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
+    '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
+    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
+    'with `chore: continue Task <id>`.',
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
+    'continuation commit its continuation message; none of them is a commit-rule finding.',
+  ];
+}
+
+// The line that tells a fix agent which message to commit with.
+function commitWithLine(message) {
+  return `Commit with the message \`${message}\`, in the form the commit rules use (for example their prefix style).`;
 }
 
 // Shared context every task agent gets. guidance (optional) is
@@ -922,6 +1044,7 @@ function taskContext(m, task, where, guidance = null) {
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
     checkoutRules(where.dir, where.branch),
     ...briefs,
+    ...runRulingsLines(m),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -1119,13 +1242,14 @@ function reviewResultText(m, task, where, rounds, head) {
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
+    ...fixMessagesLines(),
     'Report a commit message that breaks the commit rules as a minor finding (file "commit <sha>", line 0):',
     'history is never rewritten, so it cannot hold up the task; it is reported to the user.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
-    'cannot_verify = requirements you could not verify from the diff. That result replaces the output format',
-    'named in the instructions above.',
+    ...cannotVerifyLines(),
+    'That result replaces the output format named in the instructions above.',
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
@@ -1191,6 +1315,16 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
+    // A batch's commits are one per task, each with its brief's message. A
+    // first attempt has no first commit to add to, so only a retry or a
+    // reopened task gets the line; the fix message only when review findings
+    // are behind this attempt.
+    ...(batch || (!retry && !reopen) ? [] : [
+      'When HEAD already holds the task\'s first commit, commit further changes with the message',
+      `\`${retry && Array.isArray(retry.findings) && retry.findings.length > 0
+        ? fixCommitMessage(task) : continueCommitMessage(task)}\`, in the form the commit rules use (for example`,
+      'their prefix style).',
+    ]),
   ].join('\n'));
   if (retry) {
     parts.push('', [
@@ -1275,6 +1409,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
     ...startFindingNote(findings),
@@ -1359,7 +1494,8 @@ function reviewSchema() {
           required: ['severity', 'file', 'line', 'issue', 'fix'],
         },
       },
-      cannot_verify: { type: 'array', items: { type: 'string' } },
+      // Plain strings: agents from before 1.3.1 (kept as notes).
+      cannot_verify: { type: 'array', items: { anyOf: [cannotVerifyItemSchema(), { type: 'string' }] } },
     },
     required: ['verdict', 'findings', 'cannot_verify'],
   };
@@ -1782,6 +1918,17 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   ].join('\n');
 }
 
+// The message the final fix commits with. A function, not a constant: the
+// test harness's loadHelpers returns before top-level bindings initialize.
+function finalFixMessage() {
+  return 'fix: address the final review findings';
+}
+
+// The message a post-integration fix commits with.
+function postIntegrateFixMessage() {
+  return 'fix: make the post-integration check pass';
+}
+
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
 // the notes the failing step returned.
@@ -1794,6 +1941,7 @@ function postIntegrateFixPrompt(m, failure) {
     failure,
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    commitWithLine(postIntegrateFixMessage()),
     'Rerun every project command afterwards and confirm they pass:',
     commandsText(m, null, featureDir(m)),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
@@ -1821,6 +1969,7 @@ function postIntegrateReReviewPrompt(m, base, head) {
     '',
     'Check the fix for correctness and for new critical or important problems; do not re-review code the fix',
     'did not touch.',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line, issue, fix}], every',
@@ -1829,8 +1978,11 @@ function postIntegrateReReviewPrompt(m, base, head) {
 }
 
 // checkOnly: a recheck at the delivered revision after later commits; the
-// agent verifies only and changes nothing.
-function postIntegratePrompt(m, checkOnly = false) {
+// agent verifies only and changes nothing. checks: the project checks'
+// result at the revision the agent starts from ({head, ok, results?}:
+// verify's run-checks JSON, or integrate's run), so the agent runs only what
+// the hook adds; null when none ran there.
+function postIntegratePrompt(m, checkOnly = false, checks = null) {
   const change = checkOnly ? [
     'This is a recheck of the delivered revision: verify only. Change no file, make no commit, and do not',
     'record a start point; if the instructions would need a change, return status failed naming it.',
@@ -1845,6 +1997,7 @@ function postIntegratePrompt(m, checkOnly = false) {
     'Follow these project instructions:',
     m.hooks.post_integrate,
     '',
+    ...checksLines(checks, !checkOnly),
     ...change,
     '',
     `Plan: ${m.plan}`,
@@ -1859,13 +2012,16 @@ function postIntegratePrompt(m, checkOnly = false) {
   ].join('\n');
 }
 
-function e2ePrompt(m) {
+// checks: verify's result at the revision a recheck covers (null when none
+// ran there): the checker runs only what the hook adds.
+function e2ePrompt(m, checks = null) {
   return [
     `You are the end-to-end checker for parallel-lanes run ${m.run_id}.`,
     `The integrated code is in ${featureDir(m)} on ${m.repo.branch}.`,
     'Follow these project instructions:',
     m.hooks.e2e,
     '',
+    ...checksLines(checks),
     'Rules: use scratch directories only (mktemp -d, outside the checkout and the project; remove them',
     'when done); never change tracked files or commit; stop every server you start before returning and',
     'confirm its port is free.',
@@ -1907,9 +2063,23 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
+// The task minors checklist for a final reviewer (taskMinorFindings): []
+// when there are none.
+function taskMinorsLines(minors) {
+  if (!Array.isArray(minors) || minors.length === 0) return [];
+  return [
+    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+    findingsText(minors),
+    'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
+    'issue (for example "[<id>] ..."); otherwise leave it.',
+    '',
+  ];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, and the findings/head result.
-function finalReviewFrame(m, intro, focus) {
+// branch range, the commit-rules scan, the task minors checklist, and the
+// findings/head result.
+function finalReviewFrame(m, intro, focus, minors = []) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -1925,22 +2095,28 @@ function finalReviewFrame(m, intro, focus) {
     '',
     focus,
     '',
+    ...taskMinorsLines(minors),
+    ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
-    'applies), issue, fix}], cannot_verify = what you could not verify, and head = the full sha printed by',
-    `git -C ${dir} rev-parse HEAD (a read-only command you may run).`,
+    'applies), issue, fix}], head = the full sha printed by',
+    `git -C ${dir} rev-parse HEAD (a read-only command you may run), and`,
+    ...cannotVerifyLines(),
   ].join('\n');
 }
 
-function finalReviewPrompt(m, lens, e2e) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e));
+// minors: the task minors checklist (taskMinorsLines).
+function finalReviewPrompt(m, lens, e2e, minors = []) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
-// ctx = {e2e}: the e2e result, or null without an e2e hook.
+// ctx = {e2e, minors?}: the e2e result, or null without an e2e hook, and
+// the task minors checklist (taskMinorsLines).
 function combinedFinalReviewPrompt(m, ctx) {
   const focus = [
     'Review the whole branch through three lenses, in turn, and report every finding of each:',
@@ -1954,7 +2130,7 @@ function combinedFinalReviewPrompt(m, ctx) {
     '3. Correctness lens.',
     finalLensFocus(m, 'correctness', ctx.e2e),
   ].join('\n');
-  return finalReviewFrame(m, 'You are the final reviewer', focus);
+  return finalReviewFrame(m, 'You are the final reviewer', focus, ctx.minors || []);
 }
 
 function finalFixPrompt(m, findings, base) {
@@ -1969,9 +2145,11 @@ function finalFixPrompt(m, findings, base) {
     'decline. Rerun every project command afterwards:',
     commandsText(m, null, featureDir(m)),
     'Commit your fixes per the commit rules.',
+    commitWithLine(finalFixMessage()),
     '',
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -1984,8 +2162,9 @@ function finalFixPrompt(m, findings, base) {
 }
 
 // findings carry their id and the fixer's dispositions for it
-// ([{status, reason, evidence}]; none when the fixer gave none).
-function finalReReviewPrompt(m, base, head, findings) {
+// ([{status, reason, evidence}]; none when the fixer gave none). verify:
+// the project checks' result at head (run before the re-review), or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -2001,10 +2180,17 @@ function finalReReviewPrompt(m, base, head, findings) {
     'Findings under verification, with what the fixer said about each:',
     findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     '',
+    ...(verify ? [
+      checksResultText(verify),
+      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      '',
+    ] : []),
     'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
     'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
     'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
     'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...runRulingsLines(m),
+    ...fixMessagesLines(),
     phaseRules(m),
     '',
     `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
@@ -2030,16 +2216,51 @@ function verifyPrompt(m, sha) {
     keepFilesRule(),
     phaseRules(m),
     '',
+    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean.',
   ].join('\n');
 }
 
-function findingKey(f) {
-  return JSON.stringify([f.file, f.line, f.issue]);
+// What the project checks found, for an agent that would otherwise rerun
+// them at the same commit: one line, or '' for null (or a result naming no
+// head). checks is verify's run-checks JSON, or {head, ok} for a run without
+// per-command results (integrate's). Passed means ok and every exit 0.
+function checksResultText(checks) {
+  if (!checks || !present(checks.head)) return '';
+  const results = Array.isArray(checks.results) ? checks.results : [];
+  const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
+  const outcome = checks.ok === true && failed.length === 0 ? 'passed'
+    : `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`;
+  return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }
 
-// Merge the lenses' findings: identical file+line+issue becomes one entry
-// listing every lens that reported it, keeping the most severe severity.
+// The checks line for a hook agent (e2e, post-integrate), followed by the
+// instruction to run only what the hook adds; [] when no checks ran there.
+// mayCommit: the agent may commit a change, after which the commands run
+// again.
+function checksLines(checks, mayCommit = false) {
+  const text = checksResultText(checks);
+  if (text === '') return [];
+  return [text, `Run only what the instructions above add to them${mayCommit
+    ? '; after a change you commit, rerun the project commands as below' : ''}.`, ''];
+}
+
+// The key findings merge on, or null for one that stays apart: a
+// 'commit <sha>' file merges on the file, any other on its exact file and
+// line when the line is above 0.
+function findingKey(f) {
+  if (typeof f.file === 'string' && /^commit \S+$/.test(f.file)) return JSON.stringify([f.file]);
+  if (Number.isInteger(f.line) && f.line > 0) return JSON.stringify([f.file, f.line]);
+  return null;
+}
+
+// Merge the lenses' findings (spec 1.3.1): findings on the same file and
+// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// every lens that reported it, keeping the issue text, severity and fix of
+// its most severe report (the first of those on a tie), and the other
+// reports' distinct issue texts as also_reported, so the issue text always
+// matches its severity. Every other finding stays separate.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -2048,17 +2269,25 @@ function dedupeFindings(reports) {
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
       const key = findingKey(f);
-      const seen = byKey.get(key);
+      const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens] };
-        byKey.set(key, entry);
+        const entry = { ...f, lenses: [lens], also_reported: [] };
+        if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
+        // The more severe report becomes the primary text; the earlier one
+        // moves to also_reported.
+        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
+        seen.issue = f.issue;
+        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
+        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
+      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
+        seen.also_reported.push(f.issue);
       }
     }
   }
@@ -2194,7 +2423,7 @@ function adjudicatorResult(r) {
   const hasCondition = r.stop_condition !== undefined;
   if (hasCondition && !adjudicatorStopConditions().includes(r.stop_condition)) return null;
   if (r.outcome === 'park' || r.outcome === 'unblock') {
-    return { outcome: r.outcome, text: r.text, ...(present(r.head) ? { head: r.head } : {}) };
+    return { outcome: r.outcome, text: r.text, ...(isSha(r.head) ? { head: r.head } : {}) };
   }
   if (r.outcome !== 'stop') return { outcome: r.outcome, text: r.text };
   if (!hasCondition) return null;
@@ -2223,8 +2452,10 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused, untyped?, typedNulls?}), and refuses
-// calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
+// state ({agents, rulings, refused, spawned?, untyped?, typedNulls?}),
+// records each agent it starts as {label, model, effort} in state.spawned
+// (created on first use; in start order; refused calls add nothing), and
+// refuses calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
 // sentinel {__budget: true}; callers read it as a blocked or invalid result,
 // and runAll stops the run with reason budget. Once one call is refused every
 // later call is refused too, so no new agent starts while the ones in flight
@@ -2263,6 +2494,12 @@ function makeIo(m, baseIo, state) {
     // Only calls that run count: state.rulings is the adjudications spent.
     if (ruling) state.rulings += 1;
     state.agents += 1;
+    if (!state.spawned) state.spawned = [];
+    state.spawned.push({
+      label,
+      model: opts.model === undefined ? null : opts.model,
+      effort: opts.effort === undefined ? null : opts.effort,
+    });
     return baseIo.agent(prompt, opts);
   };
   return {
@@ -2355,7 +2592,8 @@ function checkedReview(v) {
 // whole task range. Reviews use reviewSettings with the changed_lines of the
 // implement or fix result under review.
 // Returns {task, status:'done'|'deferred'|'blocked', base, head, rounds,
-// tier_used, notes, rulings, next_note?}; for a blocked task notes is the reason (exactly
+// tier_used, notes, rulings, next_note?, minor_findings? (done only: taskMinorFindings of the
+// approving review)}; for a blocked task notes is the reason (exactly
 // 'review_rounds' at the cap in supervised mode, 'adjudication_cap', or
 // 'adjudicator_stop: <condition>').
 // base is owned by the script (the previous task's head, or the feature tip):
@@ -2424,6 +2662,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (r.status !== 'done') return blockedBy(`${label} blocked: ${r.notes}`);
     if (!present(r.head)) return blockedBy(`${label} reported no head`);
+    if (!isSha(r.head)) return blockedBy(`${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`);
     if (r.head === from) return blockedBy(`${label} reported done with no new commits`);
     return null;
   };
@@ -2446,7 +2685,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
         latest = r;
         return null;
       }
-      if (r && !r.__budget && present(r.head) && r.head !== past) observed = r.head;
+      if (r && !r.__budget && isSha(r.head) && r.head !== past) observed = r.head;
       if (!escalates(fail)) return fail;
       escalate(fail.reason);
       retry = { reason: fail.reason, findings: null };
@@ -2535,7 +2774,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // An open park or unblock must say where the settled range ends: the head
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
-    if (deferring && refused === null && !present(out.head)) {
+    if (deferring && refused === null && !isSha(out.head)) {
       out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
         text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
           + 'the ledger holds the task as deferred: check ledger status before resuming)' };
@@ -2634,7 +2873,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       tierSettings(tierUsed), implementSchema());
     if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
-    if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
+    if (fail !== null && fix && !fix.__budget && isSha(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
     else if (fail === null) {
       const prevHead = head;
@@ -2650,8 +2889,20 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
 
   const notes = [];
   for (const f of verdict.findings || []) notes.push(`${f.severity} finding: ${f.file}:${f.line} - ${f.issue}`);
-  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${item}`);
-  return result('done', doneNotes(notes));
+  for (const item of verdict.cannot_verify || []) notes.push(`cannot verify: ${cannotVerifyText(item)}`);
+  return result('done', doneNotes(notes), { minor_findings: taskMinorFindings(task, verdict.findings) });
+}
+
+// The minor findings of a task's approving review, for the final lenses:
+// each {id, severity, file, line, issue, fix}, id 'T<task>-<n>' numbered from
+// 1 (a task id that already starts with a letter, such as 'T2', is used as
+// it is: 'T2-1').
+function taskMinorFindings(task, findings) {
+  const prefix = /^[A-Za-z]/.test(task.id) ? task.id : `T${task.id}`;
+  return (Array.isArray(findings) ? findings : []).filter((f) => f && f.severity === 'minor')
+    .map((f, i) => ({
+      id: `${prefix}-${i + 1}`, severity: f.severity, file: f.file, line: f.line, issue: f.issue, fix: f.fix,
+    }));
 }
 
 // One batch unit (spec D3) for consecutive light tasks with the same batch
@@ -2949,7 +3200,10 @@ function acceptanceOf(input) {
       add('blocking_findings', 'failed', blocking.map((f) => `${f.id} [${f.severity}] ${f.file}:${f.line} ${f.issue} (${f.reason})`).join('; '));
     }
     for (const f of open.filter((x) => !isBlocking(x))) warnings.push(`open minor finding ${f.id}: ${f.file}:${f.line} ${f.issue}`);
-    for (const item of final.cannot_verify || []) warnings.push(`cannot verify: ${item}`);
+    // Only sourced entries warn; a plain string is a note in the report.
+    for (const item of (final.cannot_verify || []).filter(isSourced)) {
+      warnings.push(`cannot verify: ${present(item.lens) ? `${item.lens}: ` : ''}${cannotVerifyText(item)}`);
+    }
   } else {
     add('review_missing', 'missing', 'the final review did not run');
   }
@@ -2979,16 +3233,25 @@ function acceptanceOf(input) {
 // (declines still need judging). Returns {findings, fixed, declined, open,
 // cannot_verify, missing_lenses, head}: head is the delivered feature head
 // (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason.
-async function runFinalReview(m, e2e, base, io, carried = []) {
+// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// project checks (null: the project has none): once a fix agent ran,
+// whatever it returned, they run at the delivered head before the re-review,
+// which gets their result so it does not rerun them; the result is returned
+// as final.verify (absent when no fix agent ran). taskMinors: the minor
+// findings of approved task reviews (taskMinorFindings, ids T<task>-<n>):
+// every lens gets them as a checklist and raises one by putting its id in
+// brackets in a finding's issue; final.task_minors_open lists the ones no
+// lens raised. A lens's cannot_verify entries carry its name: an object as
+// lens, a plain string as a '<lens>: ' prefix.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
   // [label, lens name for findings and cannot_verify, prompt]
   const lenses = m.profile === 'lite'
-    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e })]]
+    ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e)]);
+      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -2996,16 +3259,23 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   lenses.forEach(([, name], i) => {
     const r = results[i];
     if (!r || !Array.isArray(r.findings)) missing.push(name);
-    else for (const item of r.cannot_verify || []) cannotVerify.push(`${name}: ${item}`);
+    else {
+      for (const item of r.cannot_verify || []) {
+        cannotVerify.push(item !== null && typeof item === 'object' ? { ...item, lens: name } : `${name}: ${item}`);
+      }
+    }
   });
+  const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
+    .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
   const findings = withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
   ]));
-  const lensHead = results.find((r) => r && present(r.head));
+  const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
@@ -3029,18 +3299,36 @@ async function runFinalReview(m, e2e, base, io, carried = []) {
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
+  // A refused first call spawned no fix agent: no code changed, so the
+  // caller's budget stop runs the checks.
+  const fixRan = !(fix && fix.__budget);
   // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
   // fix's head stands unless its Opus rerun reports a head of its own.
-  if (fix && present(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  if (fix && present(fix.head)) final.head = fix.head;
+  // A head that is not a commit sha names no commit, so the run cannot say
+  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
+  // leaves every finding open.
+  const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
+  if (fix && isSha(fix.head)) final.head = fix.head;
+  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fix && isSha(fix.head)) final.head = fix.head;
+  // The checks at the delivered head, before the re-review (spec: no
+  // repeated checks at one commit).
+  if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
+  if (badHead(fix)) {
+    const why = noHead(fix, 'the final fix');
+    settle([], null, why);
+    // Any commit it made past the tip is unknown to the run and unreviewed.
+    final.unreviewed_fix = `${why}, so any commit it made past ${tip} was not re-reviewed`;
+    return final;
+  }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying), finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
+    finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
@@ -3078,7 +3366,7 @@ function laneTips(m, laneResults) {
   const tips = {};
   for (const lane of m.lanes) {
     const lr = laneResults.find((r) => r.lane === lane.id);
-    if (lr && present(lr.head)) {
+    if (lr && isSha(lr.head)) {
       tips[lane.id] = lr.head;
       continue;
     }
@@ -3100,20 +3388,6 @@ function labelTasks(m, label) {
     }
   }
   return [];
-}
-
-// A copy of the manifest whose notes for every not-yet-done task gain the
-// pre-flight ruling (spec C1). taskContext shows a task's note, so the ruling
-// binds every task agent for this run without an engine change.
-function preflightResolved(m, text) {
-  const line = `Pre-flight ruling (binding for this run): ${text}`;
-  const notes = { ...(m.notes || {}) };
-  const done = new Set(m.done);
-  for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    if (done.has(t.id)) continue;
-    notes[t.id] = notes[t.id] ? `${notes[t.id]}\n${line}` : line;
-  }
-  return { ...m, notes };
 }
 
 // A copy of the manifest whose notes carry the unblock note of each result
@@ -3178,14 +3452,15 @@ function withConsumesExtra(m, kept) {
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head},
-//  verify (the run-checks result at the delivered revision)|null,
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
+//  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
 //  acceptanceOf), agents_spawned,
-//  rulings_spent (adjudications that ran; a relaunch subtracts it from
-//  limits.max_rulings), reason (stopped runs only), errors (invalid only),
+//  agent_settings ([{label, model, effort}] of every agent started, in start
+//  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
+//  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
@@ -3197,8 +3472,9 @@ function withConsumesExtra(m, kept) {
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
-  // Windows paths in forward-slash form before anything reads them.
-  let m = normalizeManifestPaths(manifest);
+  // Windows paths in forward-slash form, and hooks {} when absent, before
+  // anything reads them.
+  let m = normalizeManifestPaths(withDefaultHooks(manifest));
   let errors = validateManifest(m);
   if (errors.length === 0) errors = setupResultErrors(m);
   if (errors.length > 0) {
@@ -3206,12 +3482,12 @@ async function runAll(manifest, io) {
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
       integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0,
+      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
   // Every agent of the run spawns through the budget wrapper (budget.js).
-  const state = { agents: 0, rulings: 0, refused: [] };
+  const state = { agents: 0, rulings: 0, refused: [], spawned: [] };
   const counted = makeIo(m, io, state);
   const standard = tierSettings('standard');
   const sonnetHigh = { model: 'sonnet', effort: 'high' };
@@ -3220,7 +3496,11 @@ async function runAll(manifest, io) {
   const callM = (label, phaseName, prompt, schema, settings) =>
     counted.agent(prompt, { label, phase: phaseName, schema, ...settings });
   const autonomous = effectiveAutonomy(m) === 'autonomous';
+  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
 
+  // Run rulings come from this run's pre-flight only, never from the
+  // manifest file.
+  m = { ...m, run_rulings: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -3233,14 +3513,20 @@ async function runAll(manifest, io) {
       notes: '',
     };
   }
+  // The minor findings of approved task reviews, for the final lenses (a
+  // batch's results repeat them for each task: listed once by id).
+  const taskMinors = [];
   const record = (results) => {
     for (const r of results) {
+      if (r.status === 'done') {
+        for (const f of r.minor_findings || []) if (!taskMinors.some((x) => x.id === f.id)) taskMinors.push(f);
+      }
       tasks[r.task] = {
         // A task the ledger lists as deferred stays deferred when skipped.
         status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
-        commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
+        commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
       };
     }
@@ -3276,6 +3562,7 @@ async function runAll(manifest, io) {
     acceptance,
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
+    agent_settings: state.spawned.slice(),
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -3300,13 +3587,8 @@ async function runAll(manifest, io) {
     return report('stopped', 'budget');
   };
 
-  const planned = planAgents(m);
-  if (m.done.length > 0) {
-    io.log(`parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`);
-  } else {
-    const lanesWithWork = new Set(planned.filter((a) => a.lane !== null).map((a) => a.lane)).size;
-    io.log(`parallel-lanes: launching run ${m.run_id}: ${lanesWithWork} lanes, ${planned.length} agents`);
-  }
+  const notices = launchNotices(m, planAgents(m));
+  io.log(m.done.length > 0 ? notices.resume : notices.launch);
 
   // Setup: the session ran scripts/setup and passed its output (the only
   // setup; validateManifest requires it for a launch).
@@ -3323,7 +3605,7 @@ async function runAll(manifest, io) {
   // attempt made at a first task before recording it are reviewed too. A
   // list that moved no head leaves the tip where the phase put it.
   const starts = m.start_points || {};
-  const moved = (list) => list.results.some((r) => present(r.head));
+  const moved = (list) => list.results.some((r) => isSha(r.head));
   const listTip = (list) => (moved(list) ? list.head : tip);
 
   // Profile lite (spec D2): validateManifest above is the whole pre-flight;
@@ -3345,6 +3627,9 @@ async function runAll(manifest, io) {
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
     m = withConsumesExtra(m, kept);
+    // Pre-flight's rulings bind every task and final reviewer of this run
+    // (taskContext and the final review prompts show m.run_rulings).
+    m = { ...m, run_rulings: [...pre.rulings] };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -3357,10 +3642,10 @@ async function runAll(manifest, io) {
         if (ruling.unavailable) return report('stopped', ruling.text);
         return report('preflight_conflicts');
       }
-      // The ruling binds every not-yet-done task: taskContext shows each
-      // task's note, so the ruling reaches every task agent.
+      // The ruling joins the run rulings, so it reaches every task agent
+      // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
-      m = preflightResolved(m, ruling.text);
+      m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
 
@@ -3411,7 +3696,7 @@ async function runAll(manifest, io) {
     // A phase result that is done must also report the head it left.
     const phaseResult = (r, label) => {
       if (!r) return { status: 'failed', notes: `no result from ${label}` };
-      if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+      if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
       return { status: r.status, notes: r.notes };
     };
     const preludeTip = tip;
@@ -3427,7 +3712,7 @@ async function runAll(manifest, io) {
       const fix = await callM('post-integrate fix', 'Integrate',
         postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
-      if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
+      if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
           postIntegrateReReviewPrompt(m, base, fix.head), postIntegrateReReviewSchema(), standard);
         if (state.refused.length > 0) return BUDGET;
@@ -3459,7 +3744,7 @@ async function runAll(manifest, io) {
         const res = await callM('resolve conflicts', 'Integrate',
           resolveConflictsPrompt(m, preludeTip, conflicts), statusSchema(), standard);
         if (state.refused.length > 0) return budgetReport();
-        if (res && res.status === 'done' && present(res.head)) resolved = { files: conflicts, notes: res.notes };
+        if (res && res.status === 'done' && isSha(res.head)) resolved = { files: conflicts, notes: res.notes };
       }
       // Every Sonnet failure or null escalates to one Opus rerun (D5).
       // Autonomous heals a residual command failure into tests_failed;
@@ -3494,8 +3779,14 @@ async function runAll(manifest, io) {
       }
       tip = integ.head;
     }
+    // Integrate reran the project commands at its head: the post-integrate
+    // agent starting there is told their result, not to rerun them (null once
+    // a post-integrate fix moved the tip, or when the project has none).
+    const integrateChecks = () => (hasChecks && integ.head === tip
+      ? { head: integ.head, ok: !integ.tests_failed } : null);
     if (m.hooks.post_integrate) {
-      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+      let post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+        statusSchema());
       if (state.refused.length > 0) return budgetReport();
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
@@ -3503,7 +3794,8 @@ async function runAll(manifest, io) {
         const from = await fixPostIntegration(pr.notes, tip);
         if (from === BUDGET) return budgetReport();
         tip = from;
-        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m), statusSchema());
+        post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
+          statusSchema());
         if (state.refused.length > 0) return budgetReport();
         pr = phaseResult(post, 'post-integrate');
       }
@@ -3528,14 +3820,15 @@ async function runAll(manifest, io) {
   // E2E runs on Sonnet first (D5); a null result or any FAIL reruns it on
   // Opus (same label) and the Opus result is used. It records the revision
   // its checks covered.
-  const runE2e = async (label, phaseName) => {
-    let r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), sonnetHigh);
+  // checks: verify's result at the revision a recheck covers, or null.
+  const runE2e = async (label, phaseName, checks = null) => {
+    let r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), sonnetHigh);
     if (state.refused.length > 0) return null;
     if (!r || (r.items || []).some((i) => i.result === 'FAIL')) {
-      r = await callM(label, phaseName, e2ePrompt(m), e2eSchema(), standard);
+      r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), standard);
       if (state.refused.length > 0) return null;
     }
-    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
+    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: isSha(r.head) ? r.head : null }
       : { items: [], checked_sha: null, notes: `no result from ${label}` };
   };
   // The project checks at sha (scripts/run-checks through the verify agent).
@@ -3543,7 +3836,6 @@ async function runAll(manifest, io) {
   // the last change the run has evidence even when the budget is spent.
   const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
     { ...sonnetHigh, overBudget: true });
-  const hasChecks = checksCommand(m, null, featureDir(m)) !== null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -3561,27 +3853,55 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : []);
-  if (state.refused.length > 0) return budgetStopWithChecks(final.head);
-  if (e2e !== null && e2e.notes) final.cannot_verify.unshift('the e2e check returned no result');
-  if (fixUnreviewed) final.cannot_verify.unshift('the post-integrate re-review returned no result');
+  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
+    hasChecks ? verifyAt : null, taskMinors);
+  // Checks that ran inside the final review (a fix agent ran) are the run's
+  // verify: the report carries them once, at the top level.
+  const verifiedInReview = 'verify' in final;
+  if (verifiedInReview) {
+    verify = final.verify;
+    delete final.verify;
+  }
+  if (state.refused.length > 0) return verifiedInReview ? budgetReport() : budgetStopWithChecks(final.head);
+  // The run's own gaps are sourced entries (source 'run'), so they warn.
+  if (e2e !== null && e2e.notes) {
+    final.cannot_verify.unshift({ requirement: 'the e2e check returned no result', source: 'run',
+      why: e2e.notes, check_by: 'run the e2e hook at the delivered revision' });
+  }
+  if (fixUnreviewed) {
+    final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
+      why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
+  // Task minors live only in this launch's task results: the tasks an
+  // earlier launch committed and reviewed are not re-run, so their approved
+  // reviews' minor findings never reached the final lenses. Every resume
+  // has such tasks, so this is a note (no source), not a warning.
+  const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
+    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+  if (earlier.length > 0) {
+    final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
+      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + " tasks' approved reviews in the earlier launch's report");
+  }
   delivered = final.head;
 
   // Verify: the evidence acceptance rests on, at the delivered revision.
-  // The project checks always run there (scripts/run-checks); the e2e and
-  // post-integrate checks rerun only when a later commit made their evidence
-  // stale (the post-integrate one check-only).
+  // The project checks always run there (scripts/run-checks), once: here
+  // only when the final review ran no fix agent. The e2e and post-integrate
+  // checks rerun only when a later commit made their evidence stale (the
+  // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
-  if (hasChecks) verify = await verifyAt(delivered);
+  if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
-    e2e = await runE2e('e2e recheck', 'Verify');
+    e2e = await runE2e('e2e recheck', 'Verify', checksHere);
     if (state.refused.length > 0) return budgetReport();
   }
   if (m.hooks.post_integrate && !lite && (!postCheck || postCheck.checked_sha !== delivered)) {
-    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true), statusSchema());
+    const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true, checksHere), statusSchema());
     if (state.refused.length > 0) return budgetReport();
     const pr = phaseCheck(r, 'post-integrate recheck');
-    postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };
+    postCheck = { ...pr, checked_sha: r && isSha(r.head) ? r.head : null };
     if (postCheck.checked_sha !== null && postCheck.checked_sha !== delivered) {
       postCheck = { status: 'failed', notes: `the recheck left HEAD at ${postCheck.checked_sha}`, checked_sha: delivered };
     }
@@ -3598,14 +3918,21 @@ async function runAll(manifest, io) {
 // A phase agent's status result as {status, notes}: done only with a head.
 function phaseCheck(r, label) {
   if (!r) return { status: 'failed', notes: `no result from ${label}` };
-  if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+  if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
   return { status: r.status, notes: r.notes };
+}
+
+// Why a done phase result has no usable head: none reported, or one that is
+// not a commit sha.
+function noHead(r, label) {
+  return present(r.head) ? `${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`
+    : `${label} reported no head`;
 }
 
 // ---- Script body ----
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
-  const dry = normalizeManifestPaths(args);
+  const dry = normalizeManifestPaths(withDefaultHooks(args));
   const errors = validateManifest(dry);
   const agents = errors.length === 0 ? planAgents(dry) : [];
   return {
@@ -3613,6 +3940,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     errors,
     agents,
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
+    // The exact lines the session prints at the launch; null when invalid.
+    notices: errors.length === 0 ? launchNotices(dry, agents) : null,
   };
 }
 

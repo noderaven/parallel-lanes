@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers, loadScript } from './harness.mjs';
+import { loadHelpers, loadScript, H } from './harness.mjs';
 
 const { planAgents, validateManifest, dedupeFindings, preflightPrompt, preflightSchema } = await loadHelpers([
   'planAgents', 'validateManifest', 'dedupeFindings', 'preflightPrompt', 'preflightSchema',
@@ -42,7 +42,7 @@ function manifest(overrides = {}) {
     skill_dir: '/skills/parallel-lanes',
     // scripts/setup's output: the only setup (validateManifest requires it).
     setup_result: {
-      feature_head: 'F0', discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
+      feature_head: H('F0'), discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
     },
     ...overrides,
   };
@@ -65,21 +65,21 @@ const finding = (issue, file = 'src/a.js', line = 3) => ({ severity: 'important'
 function phaseScript(extra = {}) {
   return {
     'pre-flight': [{ conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] }],
-    integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
-    'post-integrate': [{ status: 'done', head: 'P1', notes: 'contracts ok' }],
-    e2e: [{ head: 'T5-h', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
-    'final review sp': [{ findings: [finding('dup issue')], cannot_verify: [], head: 'T5-h' }],
-    'final review security': [{ findings: [finding('dup issue'), finding('sec issue', 'src/b.js', 9)], cannot_verify: [], head: 'T5-h' }],
-    'final review correctness': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: 'all pass', notes: '', dispositions: [
+    integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
+    'post-integrate': [{ status: 'done', head: H('P1'), notes: 'contracts ok' }],
+    e2e: [{ head: H('T5-h'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    'final review sp': [{ findings: [finding('dup issue')], cannot_verify: [], head: H('T5-h') }],
+    'final review security': [{ findings: [finding('dup issue'), finding('sec issue', 'src/b.js', 9)], cannot_verify: [], head: H('T5-h') }],
+    'final review correctness': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
+    'final fix': [{ status: 'done', head: H('f1'), tests: 'all pass', notes: '', dispositions: [
       { id: 'F1', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' }, { id: 'F2', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' },
     ] }],
-    'final re-review': [{ head: 'f1', results: [
+    'final re-review': [{ head: H('f1'), results: [
       { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'resolved', evidence: 'gone' },
     ], new_findings: [] }],
-    verify: [verified('f1')],
-    'e2e recheck': [{ head: 'f1', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
-    'post-integrate recheck': [{ status: 'done', head: 'f1', notes: 'contracts ok at f1' }],
+    verify: [verified(H('f1'))],
+    'e2e recheck': [{ head: H('f1'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    'post-integrate recheck': [{ status: 'done', head: H('f1'), notes: 'contracts ok at f1' }],
     ...extra,
   };
 }
@@ -87,7 +87,7 @@ function phaseScript(extra = {}) {
 function taskScript(ids) {
   const script = {};
   for (const id of ids) {
-    script[`${id} implement`] = [done(`${id}-b`, `${id}-h`)];
+    script[`${id} implement`] = [done(`${id}-b`, H(`${id}-h`))];
     script[`${id} review`] = [approve()];
   }
   return script;
@@ -129,7 +129,7 @@ const ALL = ['T1', 'T2', 'T3', 'T4', 'T5'];
 
 // Backfill ranges for done tasks, as SKILL.md Resume builds them.
 function backfillFor(ids) {
-  return Object.fromEntries(ids.map((id) => [id, { base: `${id}-old-b`, head: `${id}-old-h` }]));
+  return Object.fromEntries(ids.map((id) => [id, { base: `${id}-old-b`, head: H(`${id}-old-h`) }]));
 }
 
 test('backslash manifest paths are normalized in the dry run and the run', async () => {
@@ -197,13 +197,13 @@ test('happy path: complete, phases in order, report filled in', async () => {
   assert.ok(calls[integ + 1].prompt.includes('POST-INTEGRATE: check contracts'));
   assert.ok(!calls[integ].prompt.includes('POST-INTEGRATE'), 'hook text is not in the integrate prompt');
 
-  const bases = { T1: 'F0', T2: 'T1-h', T3: 'T2-h', T4: 'T1-h', T5: 'P1' };
+  const bases = { T1: H('F0'), T2: H('T1-h'), T3: H('T2-h'), T4: H('T1-h'), T5: H('P1') };
   for (const id of ALL) {
     const t = result.tasks[id];
     assert.equal(t.status, 'done', id);
     assert.equal(t.rounds, 0);
     assert.equal(t.tier_used, 'standard');
-    assert.deepEqual(t.commits, [bases[id], `${id}-h`]);
+    assert.deepEqual(t.commits, [bases[id], H(`${id}-h`)]);
   }
   assert.deepEqual(result.stopped_lanes, []);
   assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] });
@@ -216,10 +216,10 @@ test('happy path: complete, phases in order, report filled in', async () => {
   assert.deepEqual(result.final.declined, []);
   assert.deepEqual(result.final.open, []);
   // The final fix moved the head, so every check reran at the delivered f1.
-  assert.equal(result.delivered_sha, 'f1');
-  assert.equal(result.verify.head, 'f1');
-  assert.equal(result.e2e.checked_sha, 'f1');
-  assert.deepEqual(result.acceptance, { status: 'accepted', delivered_sha: 'f1', reasons: [], warnings: [] });
+  assert.equal(result.delivered_sha, H('f1'));
+  assert.equal(result.verify.head, H('f1'));
+  assert.equal(result.e2e.checked_sha, H('f1'));
+  assert.deepEqual(result.acceptance, { status: 'accepted', delivered_sha: H('f1'), reasons: [], warnings: [] });
   assert.equal(result.agents_spawned, calls.length);
   assert.equal(result.agents_spawned, planAgents(m).length, 'no fix rounds: matches the dry-run plan');
   assert.ok(logs.includes(`parallel-lanes: launching run run-1: 2 lanes, ${planAgents(m).length} agents`), JSON.stringify(logs));
@@ -241,11 +241,11 @@ test('happy path: complete, phases in order, report filled in', async () => {
   // The script owns every review base: setup's feature head, then each
   // task's head; lanes start at the prelude tip, join at the integrated tip.
   const review = (id) => calls.find((c) => c.label === `${id} review`).prompt;
-  assert.ok(review('T1').includes('F0..T1-h'));
-  assert.ok(review('T2').includes('T1-h..T2-h'));
-  assert.ok(review('T3').includes('T2-h..T3-h'));
-  assert.ok(review('T4').includes('T1-h..T4-h'));
-  assert.ok(review('T5').includes('P1..T5-h'), 'join starts after post-integrate');
+  assert.ok(review('T1').includes(`${H('F0')}..${H('T1-h')}`));
+  assert.ok(review('T2').includes(`${H('T1-h')}..${H('T2-h')}`));
+  assert.ok(review('T3').includes(`${H('T2-h')}..${H('T3-h')}`));
+  assert.ok(review('T4').includes(`${H('T1-h')}..${H('T4-h')}`));
+  assert.ok(review('T5').includes(`${H('P1')}..${H('T5-h')}`), 'join starts after post-integrate');
   for (const id of ALL) assert.deepEqual(result.tasks[id].commits.length, 2);
 });
 
@@ -368,28 +368,28 @@ test('resume with every task done and reviewed: no task agents, integration stil
 // on evidence gathered at FX0 in this run.
 test('resume after the final fixes: no task agents, fresh review and checks at the fixed head', async () => {
   const m = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
-  const lens = () => [{ findings: [], cannot_verify: [], head: 'FX0' }];
+  const lens = () => [{ findings: [], cannot_verify: [], head: H('FX0') }];
   const script = phaseScript({
-    e2e: [{ head: 'FX0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    e2e: [{ head: H('FX0'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
     'final review sp': lens(), 'final review security': lens(), 'final review correctness': lens(),
-    verify: [verified('FX0')],
-    'post-integrate recheck': [{ status: 'done', head: 'FX0', notes: 'contracts ok at FX0' }],
+    verify: [verified(H('FX0'))],
+    'post-integrate recheck': [{ status: 'done', head: H('FX0'), notes: 'contracts ok at FX0' }],
   });
   const { result, calls } = await run(m, script);
   assert.ok(!calls.some((c) => / (implement|review|fix \d+|re-review \d+)$/.test(c.label)), labels(calls).join(', '));
   for (const id of ALL) assert.equal(result.tasks[id].status, 'skipped', id);
-  assert.equal(result.delivered_sha, 'FX0');
-  assert.equal(result.verify.head, 'FX0');
-  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes('rev-parse HEAD must print FX0'));
+  assert.equal(result.delivered_sha, H('FX0'));
+  assert.equal(result.verify.head, H('FX0'));
+  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes(`rev-parse HEAD must print ${H('FX0')}`));
   assert.ok(labels(calls).includes('post-integrate recheck'), 'the post-integrate check covered P1, not FX0');
   assert.equal(result.acceptance.status, 'accepted');
 
   // Without checks at FX0 in this run, nothing from before counts.
   const stale = await run(m, phaseScript({
-    e2e: [{ head: 'FX0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+    e2e: [{ head: H('FX0'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
     'final review sp': lens(), 'final review security': lens(), 'final review correctness': lens(),
-    verify: [verified('P1')],
-    'post-integrate recheck': [{ status: 'done', head: 'FX0', notes: 'ok' }],
+    verify: [verified(H('P1'))],
+    'post-integrate recheck': [{ status: 'done', head: H('FX0'), notes: 'ok' }],
   }));
   assert.equal(stale.result.acceptance.status, 'unverified');
   assert.deepEqual(stale.result.acceptance.reasons.map((r) => r.kind), ['checks_stale']);
@@ -403,13 +403,19 @@ test('resume with only lane tasks done and reviewed: lanes skipped, empty lanes 
   assert.equal(result.status, 'complete');
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
   assert.ok(labels(calls).includes('integrate'));
+  // Their task minors are not carried from the earlier launch: the run says
+  // so in a note (a plain string, no source), which does not warn.
+  const gap = result.final.cannot_verify.filter((c) => typeof c === 'string' && /task reviews an earlier launch/.test(c));
+  assert.equal(gap.length, 1, JSON.stringify(result.final.cannot_verify));
+  assert.ok(gap[0].includes('(T2, T3, T4)'), gap[0]);
+  assert.deepEqual(result.acceptance.warnings.filter((w) => /earlier launch/.test(w)), [], JSON.stringify(result.acceptance.warnings));
 });
 
 test('a done but unreviewed task is reviewed from the previous head before the lane continues', async () => {
   const m = manifest({
     done: ['T1', 'T2'],
     reviewed: ['T1'],
-    backfill: { T1: { base: 'p0', head: 'p1' }, T2: { base: 'old-b', head: 'old-h' } },
+    backfill: { T1: { base: 'p0', head: H('p1') }, T2: { base: 'old-b', head: H('old-h') } },
   });
   const script = { ...phaseScript(), ...taskScript(['T3', 'T4', 'T5']), 'T2 review': [approve()] };
   const { result, calls, logs } = await run(m, script);
@@ -421,21 +427,21 @@ test('a done but unreviewed task is reviewed from the previous head before the l
   const rev = calls.find((c) => c.label === 'T2 review').prompt;
   // The range starts at the prelude tip (T1's head), not at the ledger's
   // first T2 commit, so commits of an unrecorded attempt are reviewed too.
-  assert.ok(rev.includes('p1..old-h'));
+  assert.ok(rev.includes(`${H('p1')}..${H('old-h')}`));
   assert.equal(result.tasks.T2.status, 'done');
-  assert.deepEqual(result.tasks.T2.commits, ['p1', 'old-h']);
-  assert.deepEqual(result.tasks.T1.commits, ['p0', 'p1']);
-  assert.ok(calls.find((c) => c.label === 'T3 review').prompt.includes('old-h..T3-h'));
+  assert.deepEqual(result.tasks.T2.commits, [H('p1'), H('old-h')]);
+  assert.deepEqual(result.tasks.T1.commits, ['p0', H('p1')]);
+  assert.ok(calls.find((c) => c.label === 'T3 review').prompt.includes(`${H('old-h')}..${H('T3-h')}`));
   assert.ok(logs.includes('parallel-lanes: resuming run run-1: 2 tasks already committed'));
 });
 
 test('a backfilled review that requests changes runs the normal fix loop', async () => {
-  const m = manifest({ done: ['T2'], reviewed: [], backfill: { T2: { base: 'old-b', head: 'old-h' } } });
+  const m = manifest({ done: ['T2'], reviewed: [], backfill: { T2: { base: 'old-b', head: H('old-h') } } });
   const script = {
     ...phaseScript(),
     ...taskScript(['T1', 'T3', 'T4', 'T5']),
     'T2 review': [{ verdict: 'changes', findings: [finding('old bug')], cannot_verify: [] }],
-    'T2 fix 1': [done('old-h', 'new-h')],
+    'T2 fix 1': [done(H('old-h'), H('new-h'))],
     'T2 re-review 1': [approve()],
   };
   const { result, calls } = await run(m, script);
@@ -443,7 +449,7 @@ test('a backfilled review that requests changes runs the normal fix loop', async
   assert.ok(l.indexOf('T2 re-review 1') < l.indexOf('T3 implement'));
   assert.ok(calls.find((c) => c.label === 'T2 fix 1').prompt.includes('old bug'));
   assert.equal(result.tasks.T2.rounds, 1);
-  assert.deepEqual(result.tasks.T2.commits, ['T1-h', 'new-h']);
+  assert.deepEqual(result.tasks.T2.commits, [H('T1-h'), H('new-h')]);
 });
 
 test('a stopped lane yields stopped and integration does not run', async () => {
@@ -503,7 +509,7 @@ test('a failed integration stops before join (supervised)', async () => {
 test('a supervised sonnet integrate that returns null is finished by the opus rerun', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const script = {
-    ...phaseScript({ integrate: [null, { status: 'done', head: 'I2', notes: 'merged on opus' }], 'integrate retry': [null] }),
+    ...phaseScript({ integrate: [null, { status: 'done', head: H('I2'), notes: 'merged on opus' }], 'integrate retry': [null] }),
     ...taskScript(ALL),
   };
   const { result, calls } = await run(m, script);
@@ -570,11 +576,23 @@ test('final review dedupe merges identical findings from two lenses', () => {
   assert.deepEqual(merged[1].lenses, ['security']);
 });
 
+test('a merged finding takes the issue text of its most severe report', () => {
+  const at = (severity, issue, fix) => ({ severity, file: 'src/a.js', line: 3, issue, fix });
+  const [m] = dedupeFindings([
+    { lens: 'superpowers', findings: [at('minor', 'minor text', 'minor fix')] },
+    { lens: 'security', findings: [at('critical', 'critical text', 'critical fix')] },
+    { lens: 'correctness', findings: [at('important', 'important text', 'important fix')] },
+  ]);
+  assert.deepEqual([m.severity, m.issue, m.fix], ['critical', 'critical text', 'critical fix']);
+  assert.deepEqual(m.also_reported, ['minor text', 'important text']);
+  assert.deepEqual(m.lenses, ['superpowers', 'security', 'correctness']);
+});
+
 test('final fix gets the deduped findings once, by id; a decline the re-review accepts is declined', async () => {
   const script = {
     ...phaseScript({
       'final fix': [{
-        status: 'done', head: 'f1', tests: 'pass', notes: '',
+        status: 'done', head: H('f1'), tests: 'pass', notes: '',
         dispositions: [{ id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' }],
       }],
     }),
@@ -585,7 +603,7 @@ test('final fix gets the deduped findings once, by id; a decline the re-review a
   assert.equal(fix.split('dup issue').length - 1, 1, 'duplicate finding listed once');
   assert.ok(fix.includes('[F1] [important] src/a.js:3 - dup issue'), fix);
   const rr = calls.find((c) => c.label === 'final re-review').prompt;
-  assert.ok(rr.includes("'T5-h..f1'"), 'the final fix range starts at the feature tip the script tracked');
+  assert.ok(rr.includes(`'${H('T5-h')}..${H('f1')}'`), 'the final fix range starts at the feature tip the script tracked');
   assert.ok(rr.includes('fixer: declined - false positive'), 'the re-reviewer judges the decline');
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['dup issue']);
   assert.deepEqual(result.final.declined.map((f) => [f.id, f.reason]), [['F2', 'false positive']]);
@@ -597,8 +615,8 @@ test('a finding the re-review still sees open stays open even after it moved a l
   const moved = { ...finding('dup issue'), line: 4 };
   const script = {
     ...phaseScript({
-      'final review security': [{ findings: [finding('dup issue'), { ...finding('authz bypass', 'src/auth.js', 10), severity: 'critical' }], cannot_verify: [], head: 'T5-h' }],
-      'final re-review': [{ head: 'f1', results: [
+      'final review security': [{ findings: [finding('dup issue'), { ...finding('authz bypass', 'src/auth.js', 10), severity: 'critical' }], cannot_verify: [], head: H('T5-h') }],
+      'final re-review': [{ head: H('f1'), results: [
         { id: 'F1', status: 'resolved', evidence: 'gone' },
         { id: 'F2', status: 'open', evidence: 'still bypassable, now at src/auth.js:11' },
       ], new_findings: [] }],
@@ -618,8 +636,8 @@ test('a finding the re-review still sees open stays open even after it moved a l
 test('a finding without a disposition or a re-review result is open, never fixed', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
-      'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
+      'final fix': [{ status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }],
+      'final re-review': [{ head: H('f1'), results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
         { severity: 'important', file: 'src/c.js', line: 2, issue: 'the fix broke c', fix: 'restore' },
       ] }],
     }),
@@ -637,7 +655,7 @@ test('a finding without a disposition or a re-review result is open, never fixed
 test('a final re-review of another revision than the delivered one leaves every finding open', async () => {
   const script = {
     ...phaseScript({
-      'final re-review': [{ head: 'T5-h', results: [
+      'final re-review': [{ head: H('T5-h'), results: [
         { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'resolved', evidence: 'gone' },
       ], new_findings: [] }],
     }),
@@ -646,19 +664,19 @@ test('a final re-review of another revision than the delivered one leaves every 
   const { result } = await run(manifest(), script);
   assert.deepEqual(result.final.fixed, []);
   assert.deepEqual(result.final.open.map((f) => f.id), ['F1', 'F2']);
-  assert.match(result.final.open[0].reason, /judged T5-h, not the delivered f1/);
+  assert.match(result.final.open[0].reason, new RegExp(`judged ${H('T5-h')}, not the delivered ${H('f1')}`));
   assert.equal(result.acceptance.status, 'rejected');
 });
 
 test('contradictory dispositions or re-review results for one id leave it open', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+      'final fix': [{ status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [
         { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
         { id: 'F2', status: 'fixed', reason: 'done', evidence: 'src/b.js:9' },
         { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'n/a' },
       ] }],
-      'final re-review': [{ head: 'f1', results: [
+      'final re-review': [{ head: H('f1'), results: [
         { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F1', status: 'open', evidence: 'still there' },
         { id: 'F2', status: 'resolved', evidence: 'gone' },
       ], new_findings: [] }],
@@ -676,11 +694,11 @@ test('contradictory dispositions or re-review results for one id leave it open',
 test('a decline the re-reviewer overrules stays open and blocks acceptance', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+      'final fix': [{ status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [
         { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
         { id: 'F2', status: 'declined', reason: 'false positive', evidence: 'the input is trusted' },
       ] }],
-      'final re-review': [{ head: 'f1', results: [
+      'final re-review': [{ head: H('f1'), results: [
         { id: 'F1', status: 'resolved', evidence: 'gone' },
         { id: 'F2', status: 'open', evidence: 'the input comes from the request: src/b.js:9' },
       ], new_findings: [] }],
@@ -701,14 +719,14 @@ test('a decline the re-reviewer overrules stays open and blocks acceptance', asy
 test('a final fix the re-review did not cover at the delivered revision keeps the run from being accepted', async () => {
   const minor = { ...finding('naming'), severity: 'minor' };
   // Fresh result queues for each run (the stub consumes them).
-  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const none = () => [{ findings: [], cannot_verify: [], head: H('T5-h') }];
   const base = () => ({
-    'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+    'final review sp': [{ findings: [minor], cannot_verify: [], head: H('T5-h') }],
     'final review security': none(), 'final review correctness': none(),
-    'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+    'final fix': [{ status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [
       { id: 'F1', status: 'fixed', reason: 'renamed', evidence: 'src/a.js:3' }] }],
   });
-  const wrongHead = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [{ head: 'T5-h', results: [
+  const wrongHead = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [{ head: H('T5-h'), results: [
     { id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [
     { severity: 'critical', file: 'src/c.js', line: 2, issue: 'the fix opened a hole', fix: 'close it' }] }] }), ...taskScript(ALL) });
   assert.deepEqual(wrongHead.result.final.open.map((f) => f.id), ['F1', 'N1']);
@@ -718,13 +736,13 @@ test('a final fix the re-review did not cover at the delivered revision keeps th
   const noReview = await run(manifest(), { ...phaseScript({ ...base(), 'final re-review': [null], 'final re-review retry': [null] }), ...taskScript(ALL) });
   assert.equal(noReview.result.acceptance.status, 'unverified', JSON.stringify(noReview.result.acceptance));
   assert.deepEqual(noReview.result.acceptance.reasons.map((r) => r.kind), ['final_fix_unreviewed']);
-  assert.match(noReview.result.acceptance.reasons[0].detail, /T5-h\.\.f1/);
+  assert.match(noReview.result.acceptance.reasons[0].detail, new RegExp(`${H('T5-h')}\\.\\.${H('f1')}`));
 });
 
 test('a disposition without evidence does not settle its finding', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [
+      'final fix': [{ status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [
         { id: 'F1', status: 'fixed', reason: 'done', evidence: 'src/a.js:3' },
         { id: 'F2', status: 'declined', reason: 'false positive' },
       ] }],
@@ -746,9 +764,10 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.equal(result.status, 'complete');
   assert.ok(!labels(calls).includes('final fix'));
   assert.deepEqual(result.final, {
-    findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: 'T5-h',
+    findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: H('T5-h'),
+    task_minors_open: [],
   });
-  assert.equal(result.delivered_sha, 'T5-h');
+  assert.equal(result.delivered_sha, H('T5-h'));
   assert.ok(!labels(calls).includes('e2e recheck'), 'the e2e result already covers the delivered revision');
 });
 
@@ -766,8 +785,51 @@ test('a final review lens that returns null is reported, never counted as clean'
   assert.ok(result.acceptance.reasons.some((r) => r.kind === 'review_missing' && r.detail.includes('correctness')));
 });
 
+// Live run l131: the final fix returned head 'see-below' and no dispositions,
+// and the run took 'see-below' as the delivered revision.
+test('a final fix that reports a head that is not a commit sha delivers no such head and is not accepted', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript({
+    'final fix': [{ status: 'done', head: 'see-below', tests: 'all pass', notes: '', dispositions: [] }],
+    verify: [verified(H('T5-h'))],
+  }), ...taskScript(ALL) });
+  assert.equal(result.delivered_sha, H('T5-h'));
+  assert.ok(!labels(calls).includes('final re-review'));
+  const why = 'the final fix reported head "see-below", which is not a commit sha';
+  assert.deepEqual(result.final.open.map((f) => [f.id, f.reason]), [['F1', why], ['F2', why]]);
+  assert.deepEqual(result.final.fixed, []);
+  assert.equal(result.final.unreviewed_fix, `${why}, so any commit it made past ${H('T5-h')} was not re-reviewed`);
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'), JSON.stringify(result.acceptance));
+});
+
+test('a Sonnet final fix that reports a head that is not a commit sha reruns on Opus', async () => {
+  const minor = { ...finding('naming'), severity: 'minor' };
+  const none = () => [{ findings: [], cannot_verify: [], head: H('T5-h') }];
+  const { result, calls } = await run(manifest(), { ...phaseScript({
+    'final review sp': [{ findings: [minor], cannot_verify: [], head: H('T5-h') }],
+    'final review security': none(), 'final review correctness': none(),
+    'final fix': [
+      { status: 'done', head: 'see-below', tests: '', notes: '', dispositions: [] },
+      { status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [
+        { id: 'F1', status: 'fixed', reason: 'renamed', evidence: 'src/a.js:3' }] },
+    ],
+    'final re-review': [{ head: H('f1'), results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] }],
+  }), ...taskScript(ALL) });
+  assert.deepEqual(calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(result.delivered_sha, H('f1'));
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('an integration that reports a head that is not a commit sha stops before join', async () => {
+  const bad = { status: 'done', head: 'merged-ok', notes: 'merged' };
+  const { result, calls } = await run(manifest(), { ...phaseScript({ integrate: [bad, bad] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'integration failed: integrate reported head "merged-ok", which is not a commit sha');
+  assert.ok(!calls.some((c) => c.phase === 'Join'));
+});
+
 test('a final fix agent that returns null leaves every finding open and the run rejected', async () => {
-  const script = { ...phaseScript({ 'final fix': [null], 'final fix retry': [null], verify: [verified('T5-h')] }), ...taskScript(ALL) };
+  const script = { ...phaseScript({ 'final fix': [null], 'final fix retry': [null], verify: [verified(H('T5-h'))] }), ...taskScript(ALL) };
   const { result, calls } = await run(manifest(), script);
   assert.ok(labels(calls).includes('final fix retry'));
   assert.ok(!labels(calls).includes('final re-review'));
@@ -835,7 +897,7 @@ test('an integration that reports done without a head escalates to opus, then st
 
 test('a sonnet integrate done without a head is rerun on opus, whose result is used', async () => {
   const script = {
-    ...phaseScript({ integrate: [{ status: 'done', head: '', notes: 'merged' }, { status: 'done', head: 'I2', notes: 'ok' }] }),
+    ...phaseScript({ integrate: [{ status: 'done', head: '', notes: 'merged' }, { status: 'done', head: H('I2'), notes: 'ok' }] }),
     ...taskScript(ALL),
   };
   const { result, calls } = await run(manifest(), script);
@@ -852,28 +914,32 @@ test('an e2e agent that returns null reruns on opus, then is listed under final 
   assert.deepEqual(e2eCalls.map((c) => c.model), ['sonnet', 'opus']);
   assert.ok(labels(calls).includes('e2e retry'));
   assert.equal(result.status, 'complete');
-  assert.ok(result.final.cannot_verify.includes('the e2e check returned no result'), JSON.stringify(result.final));
+  // A sourced entry (source 'run'), so it warns at acceptance.
+  const gap = result.final.cannot_verify.find((c) => c.requirement === 'the e2e check returned no result');
+  assert.ok(gap && gap.source === 'run', JSON.stringify(result.final));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('the e2e check returned no result')),
+    JSON.stringify(result.acceptance.warnings));
 });
 
 test('a final fix with no commits is still re-reviewed: its claims are checked, not trusted', async () => {
   const script = {
     ...phaseScript({
-      'final fix': [{ status: 'done', head: 'T5-h', tests: '', notes: '', dispositions: [
+      'final fix': [{ status: 'done', head: H('T5-h'), tests: '', notes: '', dispositions: [
         { id: 'F1', status: 'fixed', reason: 'already fine', evidence: 'src/a.js:3' }, { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/a.js:3' },
       ] }],
-      'final re-review': [{ head: 'T5-h', results: [
+      'final re-review': [{ head: H('T5-h'), results: [
         { id: 'F1', status: 'open', evidence: 'nothing changed' }, { id: 'F2', status: 'resolved', evidence: 'out of scope indeed' },
       ], new_findings: [] }],
-      verify: [verified('T5-h')],
+      verify: [verified(H('T5-h'))],
     }),
     ...taskScript(ALL),
   };
   const { result, calls } = await run(manifest(), script);
-  assert.ok(calls.find((c) => c.label === 'final re-review').prompt.includes('fix range T5-h..T5-h, no fix commits'));
+  assert.ok(calls.find((c) => c.label === 'final re-review').prompt.includes(`fix range ${H('T5-h')}..${H('T5-h')}, no fix commits`));
   assert.deepEqual(result.final.fixed, []);
   assert.deepEqual(result.final.open.map((f) => f.id), ['F1']);
   assert.deepEqual(result.final.declined.map((f) => [f.id, f.reason]), [['F2', 'out of scope']]);
-  assert.equal(result.delivered_sha, 'T5-h');
+  assert.equal(result.delivered_sha, H('T5-h'));
 });
 
 test('validator: run_id and lane id formats, base_ref differs from branch', () => {
@@ -927,7 +993,7 @@ async function fullRun(mode) {
     ...phaseScript(),
     ...taskScript(ALL),
     'T2 review': [{ verdict: 'changes', findings: [finding('bug')], cannot_verify: [] }],
-    'T2 fix 1': [done('x', 'T2-h2')],
+    'T2 fix 1': [done('x', H('T2-h2'))],
     'T2 re-review 1': [approve()],
   };
   return run(m, script);
@@ -1024,7 +1090,7 @@ test('every provided ledger, start-task, finish-task, and review-package command
 test('integrate checks the first-parent history after the prelude tip', async () => {
   const { calls } = await fullRun('git');
   const integ = calls.find((c) => c.label === 'integrate').prompt;
-  assert.ok(integ.includes("log --first-parent --format='%H %P %s' 'T1-h..HEAD'"), integ);
+  assert.ok(integ.includes(`log --first-parent --format='%H %P %s' '${H('T1-h')}..HEAD'`), integ);
   assert.ok(integ.includes('/work/ledger/join.jsonl'));
   assert.match(integ, /first of steps 1-5 that fails/);
 });
@@ -1054,7 +1120,7 @@ test('resume: a first prelude task done but unreviewed is reviewed on its own ba
   const m = manifest({ done: ['T1'], reviewed: [], backfill: backfillFor(['T1']) });
   const script = {
     ...phaseScript({
-      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }],
+      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: H('T1-old-h'), notes: '' }],
     }),
     ...taskScript(['T2', 'T3', 'T4', 'T5']),
     'T1 review': [approve()],
@@ -1063,39 +1129,39 @@ test('resume: a first prelude task done but unreviewed is reviewed on its own ba
   assert.equal(result.status, 'complete');
   assert.ok(!labels(calls).includes('T1 implement'));
   const rev = calls.find((c) => c.label === 'T1 review').prompt;
-  assert.ok(rev.includes('range T1-old-b..T1-old-h'), rev.split('\n')[0]);
-  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', 'T1-old-h']);
+  assert.ok(rev.includes(`range T1-old-b..${H('T1-old-h')}`), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', H('T1-old-h')]);
   // The next tasks build on T1's head.
-  assert.ok(calls.find((c) => c.label === 'T2 review').prompt.includes('T1-old-h..T2-h'));
+  assert.ok(calls.find((c) => c.label === 'T2 review').prompt.includes(`${H('T1-old-h')}..${H('T2-h')}`));
 });
 
 test('resume: a first join task done but unreviewed is reviewed on its own backfill range', async () => {
   // The post-integrate head is past the join commits an earlier attempt made.
   const m = manifest({ done: [...ALL], reviewed: ['T1', 'T2', 'T3', 'T4'], backfill: backfillFor(ALL) });
   const script = {
-    ...phaseScript({ 'post-integrate': [{ status: 'done', head: 'P9', notes: 'contracts ok' }] }),
+    ...phaseScript({ 'post-integrate': [{ status: 'done', head: H('P9'), notes: 'contracts ok' }] }),
     'T5 review': [approve()],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
   assert.ok(!labels(calls).includes('T5 implement'));
   const rev = calls.find((c) => c.label === 'T5 review').prompt;
-  assert.ok(rev.includes('range T5-old-b..T5-old-h'), rev.split('\n')[0]);
-  assert.deepEqual(result.tasks.T5.commits, ['T5-old-b', 'T5-old-h']);
+  assert.ok(rev.includes(`range T5-old-b..${H('T5-old-h')}`), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T5.commits, ['T5-old-b', H('T5-old-h')]);
 });
 
 test('lanes still review a first backfilled task from the prelude tip', async () => {
   const m = manifest({ done: ['T1', 'T4'], reviewed: ['T1'], backfill: backfillFor(['T1', 'T4']) });
   const script = { ...phaseScript(), ...taskScript(['T2', 'T3', 'T5']), 'T4 review': [approve()] };
   const { calls } = await run(m, script);
-  assert.ok(calls.find((c) => c.label === 'T4 review').prompt.includes('range T1-old-h..T4-old-h'));
+  assert.ok(calls.find((c) => c.label === 'T4 review').prompt.includes(`range ${H('T1-old-h')}..${H('T4-old-h')}`));
 });
 
 test('final review lenses report the feature head; the final fix starts from the real tip', async () => {
   // A resume after an earlier final fix: the feature branch is at FF2, past
   // the join tip the script knows (T5's backfill head).
   const m = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
-  const lens = (findings) => [{ findings, cannot_verify: [], head: 'FF2' }];
+  const lens = (findings) => [{ findings, cannot_verify: [], head: H('FF2') }];
   const script = phaseScript({
     'final review sp': [{ findings: [finding('dup issue')], cannot_verify: [] }],
     'final review security': lens([finding('sec issue', 'src/b.js', 9)]),
@@ -1108,21 +1174,21 @@ test('final review lenses report the feature head; the final fix starts from the
     assert.ok(c.prompt.includes("git -C '/work/repo' rev-parse HEAD"), c.label);
   }
   const fix = calls.find((c) => c.label === 'final fix').prompt;
-  assert.ok(fix.includes('(now at FF2)'), fix);
-  assert.ok(!fix.includes('T5-old-h'));
-  assert.ok(calls.find((c) => c.label === 'final re-review').prompt.includes("'FF2..f1'"));
+  assert.ok(fix.includes(`(now at ${H('FF2')})`), fix);
+  assert.ok(!fix.includes(H('T5-old-h')));
+  assert.ok(calls.find((c) => c.label === 'final re-review').prompt.includes(`'${H('FF2')}..${H('f1')}'`));
 
   // A fix that returns the real tip made no new commits.
   const noop = phaseScript({
     'final review sp': lens([finding('dup issue')]),
     'final review security': lens([]),
     'final review correctness': lens([]),
-    'final fix': [{ status: 'done', head: 'FF2', tests: '', notes: '', dispositions: [] }],
-    'final re-review': [{ head: 'FF2', results: [], new_findings: [] }],
-    verify: [verified('FF2')],
+    'final fix': [{ status: 'done', head: H('FF2'), tests: '', notes: '', dispositions: [] }],
+    'final re-review': [{ head: H('FF2'), results: [], new_findings: [] }],
+    verify: [verified(H('FF2'))],
   });
   const second = await run(m, noop);
-  assert.ok(second.calls.find((c) => c.label === 'final re-review').prompt.includes("'FF2..FF2'"));
+  assert.ok(second.calls.find((c) => c.label === 'final re-review').prompt.includes(`'${H('FF2')}..${H('FF2')}'`));
   assert.deepEqual(second.result.final.fixed, []);
   assert.deepEqual(second.result.final.open.map((f) => f.reason), ['the final re-review gave no result for it']);
 });
@@ -1132,7 +1198,7 @@ test('integrate allows earlier final-fix commits after the join tip only when ev
   const { calls } = await run(resumed, phaseScript());
   const integ = calls.find((c) => c.label === 'integrate').prompt;
   assert.match(integ, /final-fix commits from an earlier attempt/);
-  assert.ok(integ.includes('T5-old-h'), integ);
+  assert.ok(integ.includes(H('T5-old-h')), integ);
 
   const fresh = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   const freshInteg = fresh.calls.find((c) => c.label === 'integrate').prompt;
@@ -1143,7 +1209,7 @@ test('integrate allows earlier final-fix commits after the join tip only when ev
 // run uses for it.
 function setupResultFor(m, extra = {}) {
   const worktrees = Object.fromEntries(m.lanes.map((l) => [l.id, `${m.repo.worktree_root}/lane-${l.id}`]));
-  return { feature_head: 'S0', worktrees, discarded: [], ...extra };
+  return { feature_head: H('S0'), worktrees, discarded: [], ...extra };
 }
 
 test('setup_result: no setup agent, its feature head starts the prelude, lanes use its paths', async () => {
@@ -1156,8 +1222,8 @@ test('setup_result: no setup agent, its feature head starts the prelude, lanes u
   assert.ok(!labels(calls).includes('setup'));
   assert.equal(labels(calls)[0], 'pre-flight');
   assert.ok(!phases.includes('Setup'));
-  assert.deepEqual(result.tasks.T1.commits, ['S0', 'T1-h']);
-  assert.ok(calls.find((c) => c.label === 'T1 implement').prompt.includes('S0'));
+  assert.deepEqual(result.tasks.T1.commits, [H('S0'), H('T1-h')]);
+  assert.ok(calls.find((c) => c.label === 'T1 implement').prompt.includes(H('S0')));
   assert.ok(logs.some((l) => l.includes('/work/wt/lane-alpha: M src/T2.js')), JSON.stringify(logs));
   for (const [id, lane] of [['T2', 'alpha'], ['T3', 'alpha'], ['T4', 'beta']]) {
     const prompt = calls.find((c) => c.label === `${id} implement`).prompt;
@@ -1194,7 +1260,7 @@ test('setup_result under profile lite maps the lane to the feature checkout', as
   const m = manifest({
     profile: 'lite', hooks: {}, lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] }],
   });
-  m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
+  m.setup_result = { feature_head: H('S0'), worktrees: { alpha: '/work/wt/lane-alpha' }, discarded: [] };
   const { result, calls } = await run(m, {});
   assert.equal(result.status, 'invalid');
   assert.ok(result.errors.some((e) => e.includes('alpha') && e.includes('/work/repo')), JSON.stringify(result.errors));
@@ -1202,39 +1268,39 @@ test('setup_result under profile lite maps the lane to the feature checkout', as
 });
 
 test('start_points: the saved prelude and join heads are the bases of the first tasks', async () => {
-  const m = manifest({ start_points: { prelude: 'SP0', join: 'SJ0' } });
+  const m = manifest({ start_points: { prelude: H('SP0'), join: H('SJ0') } });
   const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(result.status, 'complete');
-  assert.deepEqual(result.tasks.T1.commits, ['SP0', 'T1-h']);
-  assert.ok(calls.find((c) => c.label === 'T1 review').prompt.includes('range SP0..T1-h'));
-  assert.deepEqual(result.tasks.T5.commits, ['SJ0', 'T5-h']);
-  assert.ok(calls.find((c) => c.label === 'T5 review').prompt.includes('range SJ0..T5-h'));
+  assert.deepEqual(result.tasks.T1.commits, [H('SP0'), H('T1-h')]);
+  assert.ok(calls.find((c) => c.label === 'T1 review').prompt.includes(`range ${H('SP0')}..${H('T1-h')}`));
+  assert.deepEqual(result.tasks.T5.commits, [H('SJ0'), H('T5-h')]);
+  assert.ok(calls.find((c) => c.label === 'T5 review').prompt.includes(`range ${H('SJ0')}..${H('T5-h')}`));
   // Lanes still start from the prelude tip.
-  assert.deepEqual(result.tasks.T2.commits, ['T1-h', 'T2-h']);
+  assert.deepEqual(result.tasks.T2.commits, [H('T1-h'), H('T2-h')]);
 });
 
 test('start_points: a review-state first task with a backfill entry still reviews its backfill range', async () => {
   const m = manifest({
-    done: ['T1'], reviewed: [], backfill: backfillFor(['T1']), start_points: { prelude: 'SP0' },
+    done: ['T1'], reviewed: [], backfill: backfillFor(['T1']), start_points: { prelude: H('SP0') },
   });
   const script = {
-    ...phaseScript({ setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }] }),
+    ...phaseScript({ setup: [{ ok: true, discarded: [], worktrees: [], feature_head: H('T1-old-h'), notes: '' }] }),
     ...taskScript(['T2', 'T3', 'T4', 'T5']),
     'T1 review': [approve()],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete');
   const rev = calls.find((c) => c.label === 'T1 review').prompt;
-  assert.ok(rev.includes('range T1-old-b..T1-old-h'), rev.split('\n')[0]);
-  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', 'T1-old-h']);
+  assert.ok(rev.includes(`range T1-old-b..${H('T1-old-h')}`), rev.split('\n')[0]);
+  assert.deepEqual(result.tasks.T1.commits, ['T1-old-b', H('T1-old-h')]);
 });
 
 test('start_points: an empty prelude leaves the lanes on the setup feature head', async () => {
-  const m = manifest({ prelude: [], start_points: { prelude: 'SP0' } });
+  const m = manifest({ prelude: [], start_points: { prelude: H('SP0') } });
   const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T2', 'T3', 'T4', 'T5']) });
   assert.equal(result.status, 'complete');
-  assert.deepEqual(result.tasks.T2.commits, ['F0', 'T2-h']);
-  assert.ok(calls.find((c) => c.label === 'integrate').prompt.includes('F0 is the feature tip after the prelude'));
+  assert.deepEqual(result.tasks.T2.commits, [H('F0'), H('T2-h')]);
+  assert.ok(calls.find((c) => c.label === 'integrate').prompt.includes(`${H('F0')} is the feature tip after the prelude`));
 });
 
 // ---- H4: self-healing phases and phase tiers ----
@@ -1250,10 +1316,10 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
   const { result, calls } = await run(manifest(), script);
   assert.equal(result.status, 'complete');
   assert.ok(result.preflight.rulings.includes('use the v2 contract'), JSON.stringify(result.preflight));
-  // The ruling reaches every not-yet-done task through its note.
+  // The ruling reaches every not-yet-done task as a run ruling.
   for (const id of ALL) {
     const impl = calls.find((c) => c.label === `${id} implement`).prompt;
-    assert.ok(impl.includes('Pre-flight ruling (binding for this run): use the v2 contract'), id);
+    assert.ok(impl.includes('Rulings already made for this run (binding):\n- use the v2 contract'), id);
   }
   const adj = calls.find((c) => c.label === 'run adjudicate');
   assert.equal(adj.phase, 'Pre-flight');
@@ -1298,7 +1364,7 @@ test('pre-flight undeclared entries reach every brief of their task', async () =
     ...undeclaredScript([entry]),
     ...taskScript(ALL),
     'T2 review': [{ verdict: 'changes', findings: [finding('wrong format')], cannot_verify: [] }],
-    'T2 fix 1': [done('T2-h', 'T2-h2')],
+    'T2 fix 1': [done(H('T2-h'), H('T2-h2'))],
     'T2 re-review 1': [approve()],
   };
   const { result, calls, logs } = await run(manifest(), script);
@@ -1327,7 +1393,7 @@ test('pre-flight drops malformed undeclared entries', async () => {
   const m = manifest({ done: ['T1'], reviewed: ['T1'], backfill: backfillFor(['T1']) });
   const script = {
     ...undeclaredScript(entries, {
-      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: 'T1-old-h', notes: '' }],
+      setup: [{ ok: true, discarded: [], worktrees: [], feature_head: H('T1-old-h'), notes: '' }],
     }),
     ...taskScript(['T2', 'T3', 'T4', 'T5']),
   };
@@ -1359,7 +1425,7 @@ test('undeclared entries for a done but unreviewed task reach its reviewer', asy
   const m = manifest({
     done: ['T1', 'T2'],
     reviewed: ['T1'],
-    backfill: { T1: { base: 'p0', head: 'p1' }, T2: { base: 'old-b', head: 'old-h' } },
+    backfill: { T1: { base: 'p0', head: H('p1') }, T2: { base: 'old-b', head: H('old-h') } },
   });
   const entries = [
     { task: 'T2', producer: 'T1', what: 'reads the T1 format' },
@@ -1394,7 +1460,7 @@ test('a batch gets --also per task', async () => {
   const script = {
     ...undeclaredScript([{ task: 'T3', producer: 'T1', what: 'uses the T1 helper' }]),
     ...taskScript(['T1', 'T4', 'T5']),
-    'T2-T3 implement': [done('T2-b', 'T3-h')],
+    'T2-T3 implement': [done('T2-b', H('T3-h'))],
     'T2-T3 review': [approve()],
   };
   const { result, calls } = await run(m, script);
@@ -1409,11 +1475,11 @@ test('profile lite reports no undeclared entries', async () => {
     profile: 'lite', hooks: {}, lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [task('T2'), task('T3')] }],
     join: [task('T4')],
   });
-  m.setup_result = { feature_head: 'S0', worktrees: { alpha: '/work/repo' }, discarded: [] };
+  m.setup_result = { feature_head: H('S0'), worktrees: { alpha: '/work/repo' }, discarded: [] };
   const script = {
     ...taskScript(['T1', 'T2', 'T3', 'T4']),
-    'final review': [{ findings: [], cannot_verify: [], head: 'T4-h' }],
-    verify: [verified('T4-h')],
+    'final review': [{ findings: [], cannot_verify: [], head: H('T4-h') }],
+    verify: [verified(H('T4-h'))],
   };
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'complete', JSON.stringify(result));
@@ -1442,9 +1508,9 @@ test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the o
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
-        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+        { status: 'done', head: H('I2'), notes: 'merged after resolve' },
       ],
-      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'resolved' }],
+      'resolve conflicts': [{ status: 'done', head: H('R1'), notes: 'resolved' }],
     }),
     ...taskScript(ALL),
   };
@@ -1470,7 +1536,7 @@ test('a resolver that fails or returns null: the opus rerun resolves on the plai
       ...phaseScript({
         integrate: [
           { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
-          { status: 'done', head: 'I2', notes: 'resolved on the rerun' },
+          { status: 'done', head: H('I2'), notes: 'resolved on the rerun' },
         ],
         'resolve conflicts': [resolved],
         'resolve conflicts retry': [null],
@@ -1493,9 +1559,9 @@ test('a resolver that finishes hands its notes to the reviewing opus rerun', asy
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
-        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+        { status: 'done', head: H('I2'), notes: 'merged after resolve' },
       ],
-      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'RESOLVER-NOTES: kept both exports' }],
+      'resolve conflicts': [{ status: 'done', head: H('R1'), notes: 'RESOLVER-NOTES: kept both exports' }],
     }),
     ...taskScript(ALL),
   };
@@ -1518,10 +1584,10 @@ test('post-integrate re-review findings are reported and reach the final fix wav
       ...quiet,
       integrate: [
         { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
-        { status: 'done', head: 'I3', notes: 'tests pass now' },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
       'post-integrate re-review': [{ findings: [fxIssue] }],
     }),
     ...taskScript(ALL),
@@ -1542,9 +1608,9 @@ test('post-integrate re-review findings are reported and reach the final fix wav
       ...quiet,
       'post-integrate': [
         { status: 'failed', head: '', notes: 'contract drift' },
-        { status: 'done', head: 'P2', notes: 'contracts ok' },
+        { status: 'done', head: H('P2'), notes: 'contracts ok' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'PFX', notes: 'realigned contract' }],
+      'post-integrate fix': [{ status: 'done', head: H('PFX'), notes: 'realigned contract' }],
       'post-integrate re-review': [null],
       'post-integrate re-review retry': [null],
     }),
@@ -1552,8 +1618,8 @@ test('post-integrate re-review findings are reported and reach the final fix wav
   });
   assert.equal(viaHook.result.status, 'complete');
   assert.deepEqual(viaHook.result.integrate.fix_review, []);
-  assert.ok(viaHook.result.final.cannot_verify.includes('the post-integrate re-review returned no result'),
-    JSON.stringify(viaHook.result.final.cannot_verify));
+  assert.ok(viaHook.result.final.cannot_verify.some((c) => c.requirement === 'the post-integrate re-review returned no result'
+    && c.source === 'run'), JSON.stringify(viaHook.result.final.cannot_verify));
 });
 
 test('autonomous integrate failure without conflicts: one opus rerun, no resolver', async () => {
@@ -1561,7 +1627,7 @@ test('autonomous integrate failure without conflicts: one opus rerun, no resolve
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'command failed', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'fixed on opus' },
+        { status: 'done', head: H('I2'), notes: 'fixed on opus' },
       ],
     }),
     ...taskScript(ALL),
@@ -1581,10 +1647,10 @@ test('autonomous post-integration test failure: opus fix + scoped re-review, the
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
-        { status: 'done', head: 'I3', notes: 'tests pass now' },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
       'post-integrate re-review': [{ findings: [] }],
     }),
     ...taskScript(ALL),
@@ -1598,7 +1664,7 @@ test('autonomous post-integration test failure: opus fix + scoped re-review, the
   assert.ok(fix.prompt.includes('merged but tests fail'), fix.prompt);
   const rr = calls.find((c) => c.label === 'post-integrate re-review');
   assert.deepEqual([rr.model, rr.effort], ['opus', 'high']);
-  assert.ok(rr.prompt.includes('I2..FX'), rr.prompt.split('\n')[0]);
+  assert.ok(rr.prompt.includes(`${H('I2')}..${H('FX')}`), rr.prompt.split('\n')[0]);
   assert.equal(result.integrate.status, 'done');
 });
 
@@ -1608,10 +1674,10 @@ test('autonomous post-integration test failure that stays red after one rerun st
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'still red', tests_failed: true },
-        { status: 'done', head: 'I3', notes: 'still red again', tests_failed: true },
+        { status: 'done', head: H('I2'), notes: 'still red', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'still red again', tests_failed: true },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'tried' }],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'tried' }],
       'post-integrate re-review': [{ findings: [] }],
     }),
     ...taskScript(ALL),
@@ -1627,9 +1693,9 @@ test('autonomous post_integrate hook failure: opus fix + re-review, then the hoo
     ...phaseScript({
       'post-integrate': [
         { status: 'failed', head: '', notes: 'contract drift' },
-        { status: 'done', head: 'P2', notes: 'contracts ok' },
+        { status: 'done', head: H('P2'), notes: 'contracts ok' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'PFX', notes: 'realigned contract' }],
+      'post-integrate fix': [{ status: 'done', head: H('PFX'), notes: 'realigned contract' }],
       'post-integrate re-review': [{ findings: [] }],
     }),
     ...taskScript(ALL),
@@ -1640,7 +1706,7 @@ test('autonomous post_integrate hook failure: opus fix + re-review, then the hoo
   assert.deepEqual(l, ['post-integrate', 'post-integrate fix', 'post-integrate re-review', 'post-integrate',
     'post-integrate recheck']);
   assert.ok(calls.find((c) => c.label === 'post-integrate fix').prompt.includes('contract drift'));
-  assert.ok(calls.find((c) => c.label === 'post-integrate re-review').prompt.includes('I1..PFX'));
+  assert.ok(calls.find((c) => c.label === 'post-integrate re-review').prompt.includes(`${H('I1')}..${H('PFX')}`));
   assert.equal(result.integrate.post_integrate.status, 'done');
 });
 
@@ -1669,7 +1735,7 @@ test('e2e all PASS on sonnet does not rerun on opus', async () => {
 
 test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwise, sonnet null reruns on opus', async () => {
   const minorF = (file = 'src/a.js') => ({ severity: 'minor', file, line: 1, issue: 'nit', fix: 'tidy' });
-  const okFix = { status: 'done', head: 'f1', tests: 'pass', notes: '', declined: [] };
+  const okFix = { status: 'done', head: H('f1'), tests: 'pass', notes: '', declined: [] };
   const oneLens = (findings) => ({
     'final review sp': [{ findings, cannot_verify: [] }],
     'final review security': [{ findings: [], cannot_verify: [] }],
@@ -1703,22 +1769,22 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
 // Opus rerun reports no head, so they are never left unreviewed silently.
 test('a Sonnet final fix that committed and stopped keeps its head when the Opus rerun reports none', async () => {
   const minor = { ...finding('naming'), severity: 'minor' };
-  const none = () => [{ findings: [], cannot_verify: [], head: 'T5-h' }];
+  const none = () => [{ findings: [], cannot_verify: [], head: H('T5-h') }];
   const { result, calls } = await run(manifest(), {
     ...phaseScript({
-      'final review sp': [{ findings: [minor], cannot_verify: [], head: 'T5-h' }],
+      'final review sp': [{ findings: [minor], cannot_verify: [], head: H('T5-h') }],
       'final review security': none(), 'final review correctness': none(),
       'final fix': [
-        { status: 'blocked', head: 'S1', tests: '', notes: 'ran out of room', dispositions: [] },
+        { status: 'blocked', head: H('S1'), tests: '', notes: 'ran out of room', dispositions: [] },
         { status: 'blocked', tests: '', notes: 'could not finish either', dispositions: [] },
       ],
-      verify: [verified('S1')],
+      verify: [verified(H('S1'))],
     }),
     ...taskScript(ALL),
   });
   assert.deepEqual(calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['sonnet', 'opus']);
-  assert.equal(result.delivered_sha, 'S1');
-  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes('rev-parse HEAD must print S1'));
+  assert.equal(result.delivered_sha, H('S1'));
+  assert.ok(calls.find((c) => c.label === 'verify').prompt.includes(`rev-parse HEAD must print ${H('S1')}`));
   assert.ok(result.acceptance.reasons.some((r) => r.kind === 'final_fix_unreviewed'), JSON.stringify(result.acceptance));
 });
 
@@ -1728,7 +1794,7 @@ test('supervised integrate conflict escalates to one opus rerun with no resolver
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
-        { status: 'done', head: 'I2', notes: 'resolved with confidence' },
+        { status: 'done', head: H('I2'), notes: 'resolved with confidence' },
       ],
     }),
     ...taskScript(ALL),
@@ -1761,9 +1827,9 @@ test('the finishing integrate-phase agent records the join start point (A4)', as
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'conflict', conflict_files: ['src/shared.js'] },
-        { status: 'done', head: 'I2', notes: 'merged after resolve' },
+        { status: 'done', head: H('I2'), notes: 'merged after resolve' },
       ],
-      'resolve conflicts': [{ status: 'done', head: 'R1', notes: 'resolved' }],
+      'resolve conflicts': [{ status: 'done', head: H('R1'), notes: 'resolved' }],
     }),
     ...taskScript(ALL),
   });
@@ -1775,10 +1841,10 @@ test('the finishing integrate-phase agent records the join start point (A4)', as
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
-        { status: 'done', head: 'I3', notes: 'tests pass now' },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
       'post-integrate re-review': [{ findings: [] }],
     }),
     ...taskScript(ALL),
@@ -1798,10 +1864,10 @@ test('heal mode: a tests_failed integrate holds cleanup back, and every rerun kn
     ...phaseScript({
       integrate: [
         { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
-        { status: 'done', head: 'I2', notes: 'merged but tests fail', tests_failed: true },
-        { status: 'done', head: 'I3', notes: 'tests pass now' },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
       ],
-      'post-integrate fix': [{ status: 'done', head: 'FX', notes: 'fixed import' }],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
       'post-integrate re-review': [{ findings: [] }],
     }),
     ...taskScript(ALL),
@@ -1810,8 +1876,8 @@ test('heal mode: a tests_failed integrate holds cleanup back, and every rerun kn
   const integ = calls.filter((c) => c.label === 'integrate');
   assert.equal(integ.length, 3);
   for (const c of integ) {
-    assert.ok(c.prompt.includes('- pl-run-1-alpha: T3-h'), 'lane alpha tip');
-    assert.ok(c.prompt.includes('- pl-run-1-beta: T4-h'), 'lane beta tip');
+    assert.ok(c.prompt.includes(`- pl-run-1-alpha: ${H('T3-h')}`), 'lane alpha tip');
+    assert.ok(c.prompt.includes(`- pl-run-1-beta: ${H('T4-h')}`), 'lane beta tip');
     assert.match(c.prompt, /merge-base --is-ancestor <sha> HEAD/);
   }
   for (const c of integ.slice(1)) {
@@ -1825,7 +1891,7 @@ test('resume: a lane with nothing left to run gives integrate its backfill tip',
   const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T1', 'T2', 'T3', 'T5']) });
   assert.equal(result.status, 'complete');
   const integ = calls.find((c) => c.label === 'integrate').prompt;
-  assert.ok(integ.includes('- pl-run-1-beta: T4-old-h'), integ);
+  assert.ok(integ.includes(`- pl-run-1-beta: ${H('T4-old-h')}`), integ);
 });
 
 test('resume: a task the adjudicator parked with no commits is skipped and the lane goes on from its range', async () => {
@@ -1834,15 +1900,15 @@ test('resume: a task the adjudicator parked with no commits is skipped and the l
   const m = manifest({
     done: ['T1', 'T2'],
     reviewed: ['T1', 'T2'],
-    backfill: { T1: { base: 'T1-old-b', head: 'T1-old-h' }, T2: { base: 'T1-old-h', head: 'T1-old-h' } },
+    backfill: { T1: { base: 'T1-old-b', head: H('T1-old-h') }, T2: { base: H('T1-old-h'), head: H('T1-old-h') } },
   });
   const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(['T3', 'T4', 'T5']) });
   assert.equal(result.status, 'complete');
   assert.ok(!labels(calls).some((l) => l.startsWith('T2 ')), 'the parked task never runs again');
   assert.equal(result.tasks.T2.status, 'skipped');
-  assert.deepEqual(result.tasks.T2.commits, ['T1-old-h', 'T1-old-h']);
-  assert.deepEqual(result.tasks.T3.commits, ['T1-old-h', 'T3-h']);
-  assert.ok(calls.find((c) => c.label === 'T3 review').prompt.includes('range T1-old-h..T3-h'));
+  assert.deepEqual(result.tasks.T2.commits, [H('T1-old-h'), H('T1-old-h')]);
+  assert.deepEqual(result.tasks.T3.commits, [H('T1-old-h'), H('T3-h')]);
+  assert.ok(calls.find((c) => c.label === 'T3 review').prompt.includes(`range ${H('T1-old-h')}..${H('T3-h')}`));
 });
 
 test('validator: profile lite with hooks.post_integrate makes the run invalid, never skips the hook', async () => {
@@ -1859,11 +1925,11 @@ test('validator: profile lite with hooks.post_integrate makes the run invalid, n
 test('integratePrompt: a lane without a known tip falls back to its ledger; plan 1 cleanup is unchanged', async () => {
   const { integratePrompt } = await loadHelpers(['integratePrompt']);
   const m = manifest();
-  const p = integratePrompt(m, 'T1-h', { laneTips: { alpha: 'A9' } });
-  assert.ok(p.includes('- pl-run-1-alpha: A9'));
+  const p = integratePrompt(m, H('T1-h'), { laneTips: { alpha: H('A9') } });
+  assert.ok(p.includes(`- pl-run-1-alpha: ${H('A9')}`));
   assert.ok(p.includes('- pl-run-1-beta: the last sha of the last committed event in /work/ledger/beta.jsonl'));
   assert.match(p, /6\. Only when steps 1-5 passed, clean up each lane:/);
-  const heal = integratePrompt(m, 'T1-h', { testFailure: 'heal' });
+  const heal = integratePrompt(m, H('T1-h'), { testFailure: 'heal' });
   assert.match(heal, /6\. Only when steps 1-5 passed and you return tests_failed false/);
   assert.match(heal, /When you return tests_failed true, skip this step entirely/);
 });
@@ -1873,7 +1939,7 @@ test('integratePrompt: a lane without a known tip falls back to its ledger; plan
 const acceptanceOf = async (extra, m = manifest()) => (await run(m, { ...phaseScript(), ...taskScript(ALL), ...extra })).result;
 
 test('acceptance: an e2e that fails twice keeps a complete run from being accepted', async () => {
-  const fail = { head: 'f1', items: [{ item: 'login', result: 'FAIL', evidence: '500' }] };
+  const fail = { head: H('f1'), items: [{ item: 'login', result: 'FAIL', evidence: '500' }] };
   const result = await acceptanceOf({ 'e2e recheck': [fail, fail] });
   assert.equal(result.status, 'complete', 'the run executed to the end');
   assert.equal(result.acceptance.status, 'rejected');
@@ -1881,17 +1947,17 @@ test('acceptance: an e2e that fails twice keeps a complete run from being accept
 });
 
 test('acceptance: a failing check at the delivered revision rejects the run, whatever the fixer said', async () => {
-  const result = await acceptanceOf({ verify: [verified('f1', 1)] });
+  const result = await acceptanceOf({ verify: [verified(H('f1'), 1)] });
   assert.equal(result.acceptance.status, 'rejected');
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_failed']);
   assert.match(result.acceptance.reasons[0].detail, /npm test \(exit 1\)/);
 });
 
 test('acceptance: checks run at another revision, or not all of them, are missing evidence', async () => {
-  let result = await acceptanceOf({ verify: [verified('T5-h')] });
+  let result = await acceptanceOf({ verify: [verified(H('T5-h'))] });
   assert.equal(result.acceptance.status, 'unverified');
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_stale']);
-  result = await acceptanceOf({ verify: [{ ...verified('f1'), results: [] }] });
+  result = await acceptanceOf({ verify: [{ ...verified(H('f1')), results: [] }] });
   assert.equal(result.acceptance.status, 'unverified');
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_incomplete']);
   result = await acceptanceOf({ verify: [null], 'verify retry': [null] });
@@ -1904,8 +1970,8 @@ test('acceptance: a final fix makes the earlier e2e evidence stale, so e2e rerun
   assert.ok(order.indexOf('e2e') < order.indexOf('final fix'));
   assert.ok(order.indexOf('final fix') < order.indexOf('e2e recheck'));
   assert.equal(calls.find((c) => c.label === 'e2e recheck').phase, 'Verify');
-  assert.equal(result.e2e.checked_sha, 'f1');
-  const stale = await acceptanceOf({ 'e2e recheck': [{ head: 'T5-h', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }] });
+  assert.equal(result.e2e.checked_sha, H('f1'));
+  const stale = await acceptanceOf({ 'e2e recheck': [{ head: H('T5-h'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }] });
   assert.equal(stale.acceptance.status, 'unverified');
   assert.deepEqual(stale.acceptance.reasons.map((r) => r.kind), ['e2e_stale']);
 });
@@ -1915,15 +1981,15 @@ test('acceptance: the post-integrate recheck is check-only and must leave HEAD w
   const recheck = calls.find((c) => c.label === 'post-integrate recheck').prompt;
   assert.match(recheck, /verify only\. Change no file, make no commit/);
   assert.ok(!recheck.includes('"event":"run_started"'), 'a recheck records no start point');
-  const moved = await acceptanceOf({ 'post-integrate recheck': [{ status: 'done', head: 'sneaky', notes: 'ok' }] });
+  const moved = await acceptanceOf({ 'post-integrate recheck': [{ status: 'done', head: H('sneaky'), notes: 'ok' }] });
   assert.equal(moved.acceptance.status, 'rejected');
-  assert.ok(moved.acceptance.reasons.some((r) => r.kind === 'post_integrate_failed' && r.detail.includes('sneaky')));
+  assert.ok(moved.acceptance.reasons.some((r) => r.kind === 'post_integrate_failed' && r.detail.includes(H('sneaky'))));
 });
 
 test('acceptance: a deferred task keeps the run from being accepted, now and on a resume', async () => {
   const blocked = { status: 'blocked', head: 'T2-b', tests: '', notes: 'stuck' };
   const result = await acceptanceOf({
-    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'park', text: 'park it', head: 'T1-h' }],
+    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'park', text: 'park it', head: H('T1-h') }],
   });
   assert.equal(result.tasks.T2.status, 'deferred');
   assert.equal(result.status, 'complete');
@@ -1938,31 +2004,278 @@ test('acceptance: a deferred task keeps the run from being accepted, now and on 
 test('acceptance: minor findings and cannot-verify items are warnings, not reasons', async () => {
   const minor = { ...finding('naming'), severity: 'minor' };
   const result = await acceptanceOf({
-    'final review sp': [{ findings: [minor], cannot_verify: ['load under 1k users'], head: 'T5-h' }],
-    'final review security': [{ findings: [], cannot_verify: [], head: 'T5-h' }],
-    'final fix': [{ status: 'done', head: 'f1', tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
-    'final re-review': [{ head: 'f1', results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
+    'final review sp': [{ findings: [minor], cannot_verify: [{
+      requirement: 'load under 1k users', source: 'spec Performance', why: 'no load rig', check_by: 'a load test',
+    }, 'Tested: npm test passes'], head: H('T5-h') }],
+    'final review security': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
+    'final fix': [{ status: 'done', head: H('f1'), tests: '', notes: '', dispositions: [{ id: 'F1', status: 'declined', reason: 'style', evidence: 'src/a.js:3' }] }],
+    'final re-review': [{ head: H('f1'), results: [{ id: 'F1', status: 'open', evidence: 'still named oddly' }], new_findings: [] }],
   });
   assert.equal(result.acceptance.status, 'accepted');
   assert.deepEqual(result.acceptance.reasons, []);
   assert.ok(result.acceptance.warnings.some((w) => w.includes('open minor finding F1')));
-  assert.ok(result.acceptance.warnings.some((w) => w.includes('load under 1k users')));
+  assert.ok(result.acceptance.warnings.some((w) => w.includes('superpowers: load under 1k users (spec Performance)')),
+    JSON.stringify(result.acceptance.warnings));
+  // A plain string is kept in the report as a note, not a warning.
+  assert.ok(result.final.cannot_verify.includes('superpowers: Tested: npm test passes'));
+  assert.ok(!result.acceptance.warnings.some((w) => w.includes('Tested: npm test passes')));
 });
 
 test('an unblock note reaches a join task that depends on the unblocked lane task', async () => {
   const m = manifest();
   m.join[0].depends_on = [{ id: 'T2', kind: 'contract' }];
-  const blocked = { status: 'blocked', head: 'T1-h', tests: '', notes: 'upstream missing' };
+  const blocked = { status: 'blocked', head: H('T1-h'), tests: '', notes: 'upstream missing' };
   const { calls } = await run(m, {
     ...phaseScript(), ...taskScript(ALL),
-    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'unblock', text: 'UNBLOCK-X: stub the v2 shape', head: 'T1-h' }],
+    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'unblock', text: 'UNBLOCK-X: stub the v2 shape', head: H('T1-h') }],
   });
   assert.ok(calls.find((c) => c.label === 'T5 implement').prompt.includes('UNBLOCK-X: stub the v2 shape'));
 });
 
 test('a deferred task stays deferred in the report when its lane resumes with other work', async () => {
-  const m = manifest({ done: ['T2'], reviewed: ['T2'], deferred: ['T2'], backfill: { T2: { base: 'T1-h', head: 'T1-h' } } });
+  const m = manifest({ done: ['T2'], reviewed: ['T2'], deferred: ['T2'], backfill: { T2: { base: H('T1-h'), head: H('T1-h') } } });
   const { result } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(result.tasks.T2.status, 'deferred');
   assert.equal(result.acceptance.status, 'rejected');
+});
+
+// ---- Run rulings (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer";
+// Task agent prompts: every implement, review, fix and re-review call.
+const TASK_ROLE = / (implement|review|fix \d+|re-review \d+)$/;
+const taskCalls = (calls) => calls.filter((c) => /^T\d/.test(c.label) && TASK_ROLE.test(c.label));
+const LENSES = ['final review sp', 'final review security', 'final review correctness'];
+
+// A run where T2 needs one fix round, so every task role runs.
+function fixRoundScript(extra = {}) {
+  return {
+    ...phaseScript(extra),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'changes', findings: [finding('wrong format')], cannot_verify: [] }],
+    'T2 fix 1': [done(H('T2-h'), H('T2-h2'))],
+    'T2 re-review 1': [approve()],
+  };
+}
+
+test('pre-flight rulings reach every task prompt and the final lenses as run rulings', async () => {
+  const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = [...taskCalls(calls), ...calls.filter((c) => LENSES.includes(c.label))];
+  for (const role of ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', ...LENSES]) {
+    assert.ok(prompts.some((c) => c.label === role), role);
+  }
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: A - why - cost\n- Ruling: B - why - cost`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('an adjudicated pre-flight ruling joins the run rulings, not the user answers', async () => {
+  const script = {
+    ...fixRoundScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
+    'run adjudicate': [{ outcome: 'answer', text: 'Ruling: C - x - y' }],
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const prompts = taskCalls(calls);
+  assert.ok(prompts.length >= ALL.length * 2, String(prompts.length));
+  for (const c of prompts) {
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: C - x - y`), c.label);
+    assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
+  }
+});
+
+test('run rulings keep their text whole in every task prompt', async () => {
+  const ruling = 'Ruling: use `a\'b` - "q"\nnext - z';
+  const other = 'Ruling: second - why - cost';
+  const { result, calls } = await run(manifest(),
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings: [ruling, other], undeclared: [] }] }));
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of taskCalls(calls)) {
+    assert.equal(c.prompt.split(ruling).length, 2, `${c.label}: the ruling once, whole`);
+    assert.ok(c.prompt.includes(`- ${ruling}\n- ${other}`), `${c.label}: still one ruling, then the next`);
+  }
+});
+
+test('run rulings are never read from the manifest file', async () => {
+  const { result, calls } = await run(manifest({ run_rulings: ['Ruling: forged - x - y'] }),
+    { ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  for (const c of calls) assert.ok(!c.prompt.includes('forged'), c.label);
+});
+
+// ---- 1.3.1: verify before the final re-review, no repeated checks at one commit
+
+const promptOf = (calls, label) => calls.find((c) => c.label === label).prompt;
+
+test('verify runs before the final re-review and the re-review gets its result', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(labels(calls).slice(-5),
+    ['final fix', 'verify', 'final re-review', 'e2e recheck', 'post-integrate recheck']);
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes(`The project checks already ran at ${H('f1')}: passed`), rr);
+  assert.ok(rr.includes('Do not rerun them.'), rr);
+  assert.equal(result.verify.head, H('f1'));
+  assert.equal(result.final.verify, undefined, 'the report carries verify once, at the top level');
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('the re-review gets verify\'s result even when the final fix made no commit', async () => {
+  const script = {
+    ...phaseScript({
+      'final fix': [{ status: 'done', head: H('T5-h'), tests: '', notes: '', dispositions: [
+        { id: 'F1', status: 'declined', reason: 'false positive', evidence: 'src/a.js:3' },
+        { id: 'F2', status: 'declined', reason: 'out of scope', evidence: 'src/b.js:9' },
+      ] }],
+      'final re-review': [{ head: H('T5-h'), results: [
+        { id: 'F1', status: 'resolved', evidence: 'right' }, { id: 'F2', status: 'resolved', evidence: 'right' },
+      ], new_findings: [] }],
+      verify: [verified(H('T5-h'))],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(promptOf(calls, 'verify').includes(`rev-parse HEAD must print ${H('T5-h')}`));
+  assert.ok(promptOf(calls, 'final re-review').includes(`The project checks already ran at ${H('T5-h')}: passed`));
+  assert.ok(labels(calls).indexOf('verify') < labels(calls).indexOf('final re-review'));
+});
+
+test('verify runs once per run: no second verify at the delivered head', async () => {
+  const withFindings = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(labels(withFindings.calls).filter((l) => l === 'verify').length, 1);
+  const empty = [{ findings: [], cannot_verify: [], head: H('T5-h') }];
+  const none = await run(manifest(), {
+    ...phaseScript({ 'final review sp': empty, 'final review security': [...empty], verify: [verified(H('T5-h'))] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(none.result.status, 'complete', JSON.stringify(none.result));
+  assert.equal(labels(none.calls).filter((l) => l === 'verify').length, 1);
+  assert.equal(none.result.verify.head, H('T5-h'));
+});
+
+test('the rechecks and post-integrate are told the project checks already ran there', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  for (const label of ['e2e recheck', 'post-integrate recheck']) {
+    const p = promptOf(calls, label);
+    assert.ok(p.includes(`The project checks already ran at ${H('f1')}: passed. Do not rerun them.`), `${label}: ${p}`);
+  }
+  const post = promptOf(calls, 'post-integrate');
+  assert.ok(post.includes(`The project checks already ran at ${H('I1')}: passed. Do not rerun them.`), post);
+  assert.ok(!promptOf(calls, 'e2e').includes('already ran at'), 'the first e2e run gets no checks line');
+});
+
+test('a failing verify is passed on as failed, and acceptance still rejects', async () => {
+  const { result, calls } = await run(manifest(), { ...phaseScript({ verify: [verified(H('f1'), 1)] }), ...taskScript(ALL) });
+  const rr = promptOf(calls, 'final re-review');
+  assert.ok(rr.includes(`The project checks already ran at ${H('f1')}: FAILED: npm test (exit 1). Do not rerun them.`), rr);
+  assert.ok(promptOf(calls, 'e2e recheck').includes('FAILED: npm test (exit 1)'));
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.ok(result.acceptance.reasons.some((r) => r.kind === 'checks_failed'), JSON.stringify(result.acceptance));
+});
+
+test('checksResultText: one line per result, empty for null', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  assert.equal(checksResultText(null), '');
+  assert.equal(checksResultText(verified(H('f1'))), `The project checks already ran at ${H('f1')}: passed. Do not rerun them.`);
+  const two = { head: H('f2'), ok: false, results: [
+    { group: 'test', command: 'npm test', exit: 1 }, { group: 'lint', command: 'npm run lint', exit: 0 },
+    { group: 'build', command: 'make', exit: 2 },
+  ] };
+  assert.equal(checksResultText(two),
+    `The project checks already ran at ${H('f2')}: FAILED: npm test (exit 1), make (exit 2). Do not rerun them.`);
+  assert.equal(checksResultText({ head: H('I1'), ok: true }), `The project checks already ran at ${H('I1')}: passed. Do not rerun them.`);
+  assert.equal(checksResultText({ head: H('I1'), ok: false }), `The project checks already ran at ${H('I1')}: FAILED. Do not rerun them.`);
+});
+
+// ---- Task minors to the final review, exact-line combining (1.3.1) ----
+
+const minorT2 = { severity: 'minor', file: 'src/T2.js', line: 5, issue: 'rename the helper', fix: 'rename it' };
+const lensLabels = ['final review sp', 'final review security', 'final review correctness'];
+
+test('final lenses get the open minor findings of approved task reviews', async () => {
+  const script = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { calls } = await run(manifest(), script);
+  for (const label of lensLabels) {
+    const p = calls.find((c) => c.label === label).prompt;
+    assert.ok(p.includes('[T2-1]') && p.includes('rename the helper'), `${label}: ${p}`);
+  }
+});
+
+test('a task minor no final lens raised is listed in final.task_minors_open', async () => {
+  const base = {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const { result } = await run(manifest(), base);
+  assert.deepEqual(result.final.task_minors_open.map((f) => f.id), ['T2-1']);
+  assert.equal(result.final.task_minors_open[0].issue, 'rename the helper');
+  const raised = {
+    ...phaseScript({
+      'final review correctness': [{
+        findings: [{ ...minorT2, issue: '[T2-1] the helper name still misleads' }], cannot_verify: [], head: H('T5-h'),
+      }],
+    }),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+  };
+  const again = await run(manifest(), raised);
+  assert.deepEqual(again.result.final.task_minors_open, []);
+  // With no task minors the list is empty.
+  const none = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.deepEqual(none.result.final.task_minors_open, []);
+});
+
+test('findings on the same file and line merge across lenses; others stay apart', async () => {
+  const f = (issue, line) => ({ severity: 'minor', file: 'a.js', line, issue, fix: 'fix it' });
+  const script = {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: H('T5-h') }],
+      'final review security': [{ findings: [f('y', 7)], cannot_verify: [], head: H('T5-h') }],
+      'final review correctness': [{ findings: [f('x', 9), f('z', 0), f('z', 0)], cannot_verify: [], head: H('T5-h') }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result } = await run(manifest(), script);
+  const got = result.final.findings.map((x) => [x.id, x.file, x.line, x.issue, x.lenses, x.also_reported]);
+  assert.deepEqual(got, [
+    ['F1', 'a.js', 7, 'x', ['superpowers', 'security'], ['y']],
+    ['F2', 'a.js', 9, 'x', ['correctness'], []],
+    ['F3', 'a.js', 0, 'z', ['correctness'], []],
+    ['F4', 'a.js', 0, 'z', ['correctness'], []],
+  ]);
+  // The fixer sees the merged-away report too.
+  const fix = (await run(manifest(), {
+    ...phaseScript({
+      'final review sp': [{ findings: [f('x', 7)], cannot_verify: [], head: H('T5-h') }],
+      'final review security': [{ findings: [f('y-only-in-security', 7)], cannot_verify: [], head: H('T5-h') }],
+    }),
+    ...taskScript(ALL),
+  })).calls.find((c) => c.label === 'final fix').prompt;
+  assert.ok(fix.includes('[F1]'), fix);
+  assert.ok(fix.includes('Also reported here: y-only-in-security'), fix);
+});
+
+test('commit findings on the same sha merge', () => {
+  const c = (issue, line = 0) => ({ severity: 'minor', file: 'commit abc1234', line, issue, fix: 'none' });
+  const merged = dedupeFindings([
+    { lens: 'superpowers', findings: [c('trailer')] },
+    { lens: 'security', findings: [c('non-ASCII subject')] },
+    { lens: 'correctness', findings: [{ ...c('other'), file: 'commit def5678' }] },
+  ]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged[0].lenses, ['superpowers', 'security']);
+  assert.equal(merged[0].issue, 'trailer');
+  assert.deepEqual(merged[0].also_reported, ['non-ASCII subject']);
+  assert.equal(merged[1].file, 'commit def5678');
 });

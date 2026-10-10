@@ -154,7 +154,10 @@ function acceptanceOf(input) {
       add('blocking_findings', 'failed', blocking.map((f) => `${f.id} [${f.severity}] ${f.file}:${f.line} ${f.issue} (${f.reason})`).join('; '));
     }
     for (const f of open.filter((x) => !isBlocking(x))) warnings.push(`open minor finding ${f.id}: ${f.file}:${f.line} ${f.issue}`);
-    for (const item of final.cannot_verify || []) warnings.push(`cannot verify: ${item}`);
+    // Only sourced entries warn; a plain string is a note in the report.
+    for (const item of (final.cannot_verify || []).filter(isSourced)) {
+      warnings.push(`cannot verify: ${present(item.lens) ? `${item.lens}: ` : ''}${cannotVerifyText(item)}`);
+    }
   } else {
     add('review_missing', 'missing', 'the final review did not run');
   }

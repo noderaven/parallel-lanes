@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers } from './harness.mjs';
+import { loadHelpers, H } from './harness.mjs';
 
 const {
   runTask, runLane, runLanes,
@@ -87,13 +87,13 @@ const labels = (calls) => calls.map((c) => c.label);
 
 test('approve the first time: implement then review, no fix rounds', async () => {
   const m = manifest();
-  const s = stub({ 'T2 implement': [done('b0', 'h1')], 'T2 review': [approve()] });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [done(H('b0'), H('h1'))], 'T2 review': [approve()] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review']);
   assert.equal(r.task, 'T2');
   assert.equal(r.status, 'done');
-  assert.equal(r.base, 'b0');
-  assert.equal(r.head, 'h1');
+  assert.equal(r.base, H('b0'));
+  assert.equal(r.head, H('h1'));
   assert.equal(r.rounds, 0);
   assert.equal(r.tier_used, 'standard');
   for (const c of s.calls) assert.equal(c.phase, 'Lane alpha');
@@ -101,35 +101,35 @@ test('approve the first time: implement then review, no fix rounds', async () =>
   assert.equal(s.calls[0].effort, 'high');
   assert.deepEqual(s.calls[0].schema.required.slice().sort(), ['head', 'notes', 'status', 'tests']);
   assert.deepEqual(s.calls[1].schema.required.slice().sort(), ['cannot_verify', 'findings', 'verdict']);
-  assert.ok(s.calls[1].prompt.includes('b0') && s.calls[1].prompt.includes('h1'));
+  assert.ok(s.calls[1].prompt.includes(H('b0')) && s.calls[1].prompt.includes(H('h1')));
 });
 
 test('changes then approve after 2 rounds: fix and re-review on the fix range', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes('first')],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [changes('second')],
-    'T2 fix 2': [done('h2', 'h3')],
+    'T2 fix 2': [done(H('h2'), H('h3'))],
     'T2 re-review 2': [approve()],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 fix 2', 'T2 re-review 2',
   ]);
   assert.equal(r.status, 'done');
   assert.equal(r.rounds, 2);
-  assert.equal(r.base, 'b0');
-  assert.equal(r.head, 'h3');
+  assert.equal(r.base, H('b0'));
+  assert.equal(r.head, H('h3'));
   const fix1 = s.calls[2].prompt;
   assert.ok(fix1.includes('first'), 'fix 1 gets the review findings');
   const rr1 = s.calls[3].prompt;
-  assert.ok(rr1.includes('h1') && rr1.includes('h2'), 're-review 1 covers h1..h2');
+  assert.ok(rr1.includes(H('h1')) && rr1.includes(H('h2')), `re-review 1 covers ${H('h1')}..${H('h2')}`);
   assert.ok(rr1.includes('first'), 're-review 1 verifies the findings it was given');
   assert.ok(s.calls[4].prompt.includes('second'), 'fix 2 gets the re-review findings');
   const rr2 = s.calls[5].prompt;
-  assert.ok(rr2.includes('h2') && rr2.includes('h3'), 're-review 2 covers h2..h3');
+  assert.ok(rr2.includes(H('h2')) && rr2.includes(H('h3')), `re-review 2 covers ${H('h2')}..${H('h3')}`);
   for (const c of s.calls.filter((x) => /review/.test(x.label))) {
     assert.equal(c.model, 'opus');
     assert.equal(c.effort, 'high');
@@ -139,15 +139,15 @@ test('changes then approve after 2 rounds: fix and re-review on the fix range', 
 test('5 rounds of changes stop the lane with reason review_rounds', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const script = {
-    'T2 implement': [done('b0', 'h0')],
+    'T2 implement': [done(H('b0'), H('h0'))],
     'T2 review': [changes()],
   };
   for (let n = 1; n <= 5; n += 1) {
-    script[`T2 fix ${n}`] = [done(`h${n - 1}`, `h${n}`)];
+    script[`T2 fix ${n}`] = [done(H(`h${n - 1}`), H(`h${n}`))];
     script[`T2 re-review ${n}`] = [changes()];
   }
   const s = stub(script);
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.lane, 'alpha');
   assert.equal(r.stopped, 'review_rounds');
   assert.equal(r.results.length, 1);
@@ -160,12 +160,12 @@ test('5 rounds of changes stop the lane with reason review_rounds', async () => 
 test('a light task escalates to standard after the second changes verdict', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1'), done('h2', 'h3')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h2'), H('h3'))],
     'T2 review': [changes('first'), approve()],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [changes('second')],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 implement', 'T2 review',
   ]);
@@ -175,21 +175,21 @@ test('a light task escalates to standard after the second changes verdict', asyn
   assert.deepEqual([rev1.model, rev1.effort], ['opus', 'high']);
   assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
   assert.ok(impl2.prompt.includes('second'), 'the escalated implementer sees the open findings');
-  assert.ok(rev2.prompt.includes('b0') && rev2.prompt.includes('h3'), 'the full task range is reviewed again');
+  assert.ok(rev2.prompt.includes(H('b0')) && rev2.prompt.includes(H('h3')), 'the full task range is reviewed again');
   assert.equal(r.status, 'done');
   assert.equal(r.tier_used, 'standard');
-  assert.equal(r.base, 'b0');
-  assert.equal(r.head, 'h3');
+  assert.equal(r.base, H('b0'));
+  assert.equal(r.head, H('h3'));
   assert.equal(r.rounds, 1);
 });
 
 test('a light task escalates to standard after a blocked implement', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'cannot find the parser'), done('b0', 'h1')],
+    'T2 implement': [blocked(H('b0'), 'cannot find the parser'), done(H('b0'), H('h1'))],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 implement', 'T2 review']);
   assert.equal(s.calls[0].model, 'sonnet');
   assert.equal(s.calls[1].model, 'opus');
@@ -199,32 +199,32 @@ test('a light task escalates to standard after a blocked implement', async () =>
   assert.equal(r.tier_used, 'standard');
 });
 
-for (const [name, fixResult] of [['reports blocked', blocked('h1', 'fix stuck')], ['returns null', null]]) {
+for (const [name, fixResult] of [['reports blocked', blocked(H('h1'), 'fix stuck')], ['returns null', null]]) {
   test(`a light task escalates to standard when its fix round ${name}`, async () => {
     const m = manifest();
     const s = stub({
-      'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+      'T2 implement': [done(H('b0'), H('h1')), done(H('h1'), H('h2'))],
       'T2 review': [changes('first'), approve()],
       'T2 fix 1': [fixResult],
     });
-    const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+    const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
     assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 implement', 'T2 review']);
     const [, , fix1, impl2, rev2] = s.calls;
     assert.deepEqual([fix1.model, fix1.effort], ['sonnet', 'high']);
     assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
     assert.ok(impl2.prompt.includes('first'), 'the escalated implementer sees the open findings');
-    assert.ok(rev2.prompt.includes('b0') && rev2.prompt.includes('h2'), 'the full task range is reviewed again');
+    assert.ok(rev2.prompt.includes(H('b0')) && rev2.prompt.includes(H('h2')), 'the full task range is reviewed again');
     assert.equal(r.status, 'done');
     assert.equal(r.tier_used, 'standard');
-    assert.equal(r.base, 'b0');
-    assert.equal(r.head, 'h2');
+    assert.equal(r.base, H('b0'));
+    assert.equal(r.head, H('h2'));
   });
 }
 
 test('a standard task does not escalate; a blocked implement blocks the task', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const s = stub({ 'T2 implement': [blocked('b0', 'contract change needed')] });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [blocked(H('b0'), 'contract change needed')] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement']);
   assert.equal(r.status, 'blocked');
   assert.ok(r.notes.includes('contract change needed'));
@@ -234,17 +234,17 @@ test('a null agent result counts as blocked, never as approved', async () => {
   const m = manifest({ autonomy: 'supervised' });
   for (const script of [
     { 'T2 implement': [null] },
-    { 'T2 implement': [done('b0', 'h1')], 'T2 review': [null] },
-    { 'T2 implement': [done('b0', 'h1')], 'T2 review': [changes()], 'T2 fix 1': [null] },
+    { 'T2 implement': [done(H('b0'), H('h1'))], 'T2 review': [null] },
+    { 'T2 implement': [done(H('b0'), H('h1'))], 'T2 review': [changes()], 'T2 fix 1': [null] },
     {
-      'T2 implement': [done('b0', 'h1')],
+      'T2 implement': [done(H('b0'), H('h1'))],
       'T2 review': [changes()],
-      'T2 fix 1': [done('h1', 'h2')],
+      'T2 fix 1': [done(H('h1'), H('h2'))],
       'T2 re-review 1': [null],
     },
   ]) {
     const s = stub(script);
-    const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
     assert.equal(r.status, 'blocked', JSON.stringify(Object.keys(script)));
     assert.match(r.notes, /no result/);
   }
@@ -253,7 +253,7 @@ test('a null agent result counts as blocked, never as approved', async () => {
 test('a light task whose escalated implement also returns null is blocked', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const s = stub({ 'T2 implement': [null, null] });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.tier_used, 'standard');
   assert.equal(s.calls.length, 2);
@@ -261,20 +261,29 @@ test('a light task whose escalated implement also returns null is blocked', asyn
 
 test('an implement that reports done without commits is blocked before review', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const s = stub({ 'T2 implement': [done('b0', 'b0')] });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [done(H('b0'), H('b0'))] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
+  assert.deepEqual(labels(s.calls), ['T2 implement']);
+});
+
+test('an implement that reports a head that is not a commit sha is blocked before review', async () => {
+  const m = manifest({ autonomy: 'supervised' });
+  const s = stub({ 'T2 implement': [done(H('b0'), 'see-below')] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
+  assert.equal(r.status, 'blocked');
+  assert.match(r.notes, /T2 implement reported head "see-below", which is not a commit sha/);
   assert.deepEqual(labels(s.calls), ['T2 implement']);
 });
 
 test('one blocked lane stops while another lane finishes', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const s = stub({
-    'T2 implement': [blocked('b0')],
-    'T4 implement': [done('c0', 'c1')],
+    'T2 implement': [blocked(H('b0'))],
+    'T4 implement': [done(H('c0'), H('c1'))],
     'T4 review': [approve()],
   });
-  const results = await runLanes(m, m.lanes, 'b0', s.io);
+  const results = await runLanes(m, m.lanes, H('b0'), s.io);
   assert.equal(results.length, 2);
   const [alpha, beta] = results;
   assert.equal(alpha.lane, 'alpha');
@@ -297,13 +306,13 @@ test('never more than max_parallel_lanes lanes in flight', async () => {
     const id = `L${i}`;
     lanes.push({ id: `lane${i}`, name: `Lane ${i}`, tasks: [task(`${id}a`), task(`${id}b`)] });
     for (const t of [`${id}a`, `${id}b`]) {
-      script[`${t} implement`] = [done(`${t}-base`, `${t}-head`)];
+      script[`${t} implement`] = [done(`${t}-base`, H(`${t}-head`))];
       script[`${t} review`] = [approve()];
     }
   }
   const m = manifest({ lanes, limits: { review_rounds: 5, max_parallel_lanes: 2 } });
   const s = stub(script, { delay: 5 });
-  const results = await runLanes(m, lanes, 'b0', s.io);
+  const results = await runLanes(m, lanes, H('b0'), s.io);
   assert.equal(s.stats.maxInFlight, 2);
   assert.deepEqual(results.map((r) => r.lane), lanes.map((l) => l.id), 'results in lane order');
   assert.ok(results.every((r) => r.stopped === null && r.results.length === 2));
@@ -312,9 +321,9 @@ test('never more than max_parallel_lanes lanes in flight', async () => {
 test('prelude and join tasks use their phase and ledger lane', async () => {
   const m = manifest();
   for (const [lane, phaseName] of [['prelude', 'Prelude'], ['join', 'Join']]) {
-    const s = stub({ 'T9 implement': [done('b0', 'h1')], 'T9 review': [approve()] });
+    const s = stub({ 'T9 implement': [done(H('b0'), H('h1'))], 'T9 review': [approve()] });
     const where = { dir: '/work/repo', branch: 'pl/run-1', lane };
-    await runTask(m, task('T9'), where, 'b0', s.io);
+    await runTask(m, task('T9'), where, H('b0'), s.io);
     for (const c of s.calls) {
       assert.equal(c.phase, phaseName);
       assert.ok(c.prompt.includes(`append '/work/ledger' '${lane}'`), c.prompt);
@@ -326,10 +335,10 @@ function allPrompts(m) {
   const t = task('T2');
   const fs = [finding('the bug')];
   return {
-    implement: implementPrompt(m, t, WHERE, 'b0'),
-    review: reviewPrompt(m, t, WHERE, 'b0', 'h1'),
-    fix: fixPrompt(m, t, WHERE, fs, done('b0', 'h1'), 'h1'),
-    reReview: reReviewPrompt(m, t, WHERE, 'h1', 'h2', fs),
+    implement: implementPrompt(m, t, WHERE, H('b0')),
+    review: reviewPrompt(m, t, WHERE, H('b0'), H('h1')),
+    fix: fixPrompt(m, t, WHERE, fs, done(H('b0'), H('h1')), H('h1')),
+    reReview: reReviewPrompt(m, t, WHERE, H('h1'), H('h2'), fs),
   };
 }
 
@@ -409,6 +418,22 @@ function pythonPrompts(m) {
 // The lines of a prompt that start a Python helper of the skill.
 const helperLines = (text) => text.split('\n').filter((l) => /scripts\/(ledger|task-brief|start-task|finish-task|run-checks)' /.test(l));
 
+test('agents handed the every-check run-checks call are told where its logs go and to remove them', () => {
+  const texts = Object.entries(allPrompts(manifest())).filter(([, t]) => t.includes('- every check at once'));
+  assert.ok(texts.length > 0);
+  for (const [name, text] of texts) {
+    // The call itself: run-checks with no --out, which is what puts each
+    // call's logs in a new temporary directory.
+    const lines = text.split('\n');
+    const call = lines[lines.findIndex((l) => l.includes('- every check at once')) + 1];
+    assert.match(call, /scripts\/run-checks' /, name);
+    assert.ok(!/ --out | --root /.test(call), `${name}: ${call}`);
+    const flat = text.replace(/\s+/g, ' ');
+    assert.ok(flat.includes('in a new temporary directory each call'), name);
+    assert.ok(flat.includes("remove that directory (the log's parent)"), name);
+  }
+});
+
 test('every Python command uses the manifest python', () => {
   const m = manifest({ python: '/opt/py/bin/python3' });
   for (const [name, text] of Object.entries(pythonPrompts(m))) {
@@ -464,15 +489,15 @@ test('a reviewer start failure is a start-task finding the fix and retry prompts
   const note = 'A finding with file "start-task" is the reviewer\'s start command failing';
   assert.ok(!p.fix.includes(note), 'no note without a start-task finding');
   const startFinding = { severity: 'critical', file: 'start-task', line: 0, issue: 'exit 1', fix: 'n/a' };
-  assert.ok(fixPrompt(m, task('T2'), WHERE, [startFinding], done('b0', 'h1'), 'h1').includes(note));
+  assert.ok(fixPrompt(m, task('T2'), WHERE, [startFinding], done(H('b0'), H('h1')), H('h1')).includes(note));
   const retry = { reason: 'review cap', findings: [startFinding] };
-  assert.ok(implementPrompt(m, task('T2'), WHERE, 'b0', retry).includes(note));
+  assert.ok(implementPrompt(m, task('T2'), WHERE, H('b0'), retry).includes(note));
   for (const text of Object.values(p)) assert.ok(text.includes('The start command in this prompt regenerates'));
 });
 
 test('lane_commands override the project commands for that lane', () => {
   const m = manifest({ lane_commands: { alpha: { test: ['uv run pytest -q'] } } });
-  const text = implementPrompt(m, task('T2'), WHERE, 'b0');
+  const text = implementPrompt(m, task('T2'), WHERE, H('b0'));
   assert.ok(text.includes('uv run pytest -q'));
   assert.ok(!text.includes('npm test'));
   assert.ok(text.includes('npm ci'));
@@ -481,31 +506,31 @@ test('lane_commands override the project commands for that lane', () => {
 test('the script owns the task base: an implementer-reported base is ignored', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [{ status: 'done', base: 'agent-base', head: 'h1', tests: 'pass', notes: '' }],
+    'T2 implement': [{ status: 'done', base: 'agent-base', head: H('h1'), tests: 'pass', notes: '' }],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'own-base', s.io);
-  assert.equal(r.base, 'own-base');
-  assert.equal(r.head, 'h1');
+  const r = await runTask(m, task('T2'), WHERE, H('own-base'), s.io);
+  assert.equal(r.base, H('own-base'));
+  assert.equal(r.head, H('h1'));
   const [impl, rev] = s.calls;
-  assert.ok(impl.prompt.includes('own-base'), 'the implementer is told its base');
+  assert.ok(impl.prompt.includes(H('own-base')), 'the implementer is told its base');
   assert.match(impl.prompt, /HEAD may already hold commits from an earlier attempt/);
-  assert.ok(rev.prompt.includes('own-base..h1'), 'the review covers the script-owned range');
+  assert.ok(rev.prompt.includes(`${H('own-base')}..${H('h1')}`), 'the review covers the script-owned range');
   assert.ok(!rev.prompt.includes('agent-base'));
 });
 
 test('a rerun implementer that keeps commits from an earlier attempt is reviewed from the base', async () => {
   const m = manifest();
   // HEAD already holds h-old from a failed attempt; the agent adds h-new.
-  const s = stub({ 'T2 implement': [done('h-old', 'h-new')], 'T2 review': [approve()] });
-  await runTask(m, task('T2'), WHERE, 'b0', s.io);
-  assert.ok(s.calls[1].prompt.includes('b0..h-new'));
+  const s = stub({ 'T2 implement': [done(H('h-old'), H('h-new'))], 'T2 review': [approve()] });
+  await runTask(m, task('T2'), WHERE, H('b0'), s.io);
+  assert.ok(s.calls[1].prompt.includes(`${H('b0')}..${H('h-new')}`));
 });
 
 test('an implement that reports the base as head is blocked (no new commits)', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const s = stub({ 'T2 implement': [done('whatever', 'b0')] });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [done('whatever', H('b0'))] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.match(r.notes, /no new commits/);
   assert.deepEqual(labels(s.calls), ['T2 implement']);
@@ -514,32 +539,32 @@ test('an implement that reports the base as head is blocked (no new commits)', a
 test('a fix that reports the current head is blocked, never re-reviewed on an empty range', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes()],
-    'T2 fix 1': [done('h0', 'h1')],
+    'T2 fix 1': [done(H('h0'), H('h1'))],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.match(r.notes, /no new commits/);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1']);
-  assert.ok(s.calls[2].prompt.includes('h1'), 'the fix agent is told the current head');
+  assert.ok(s.calls[2].prompt.includes(H('h1')), 'the fix agent is told the current head');
 });
 
 test('lane tasks chain bases: each task starts at the previous task head', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('x', 'h2')],
+    'T2 implement': [done('x', H('h2'))],
     'T2 review': [approve()],
-    'T3 implement': [done('y', 'h3')],
+    'T3 implement': [done('y', H('h3'))],
     'T3 review': [approve()],
   });
-  const r = await runLane(m, m.lanes[0], 'tip', s.io);
+  const r = await runLane(m, m.lanes[0], H('tip'), s.io);
   assert.equal(r.stopped, null);
-  assert.equal(r.head, 'h3');
+  assert.equal(r.head, H('h3'));
   const prompt = (label) => s.calls.find((c) => c.label === label).prompt;
-  assert.ok(prompt('T2 review').includes('tip..h2'));
-  assert.ok(prompt('T3 implement').includes('h2'));
-  assert.ok(prompt('T3 review').includes('h2..h3'));
+  assert.ok(prompt('T2 review').includes(`${H('tip')}..${H('h2')}`));
+  assert.ok(prompt('T3 implement').includes(H('h2')));
+  assert.ok(prompt('T3 review').includes(`${H('h2')}..${H('h3')}`));
 });
 
 test('implement and fix prompts always regenerate the task brief', () => {
@@ -555,7 +580,7 @@ test('a user note for a task reaches only that task\'s prompts', () => {
   for (const [name, text] of Object.entries(allPrompts(m))) {
     assert.ok(text.includes('USER-ANSWER: use the v2 endpoint'), name);
   }
-  const other = implementPrompt(m, task('T3'), WHERE, 'b0');
+  const other = implementPrompt(m, task('T3'), WHERE, H('b0'));
   assert.ok(!other.includes('USER-ANSWER'));
 });
 
@@ -571,34 +596,34 @@ const settled = (outcome, text, head) => ruled(outcome, text, undefined, head);
 test('autonomous: a blocked implement is adjudicated; an answer reruns implement with it as a note', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'which parser?'), done('b0', 'h1')],
+    'T2 implement': [blocked(H('b0'), 'which parser?'), done(H('b0'), H('h1'))],
     'T2 adjudicate': [ruled('answer', 'ANSWER-1: use the v2 parser')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   const [, adj, impl2, rev] = s.calls;
   assert.deepEqual([adj.model, adj.effort, adj.phase], ['opus', 'high', 'Lane alpha']);
   assert.match(adj.prompt, /Why you were called: blocked/);
   assert.ok(adj.prompt.includes('which parser?'), 'the blocked reason reaches the adjudicator');
   assert.ok(adj.prompt.includes('/work/ledger/reports/T2.md'), 'the report file reaches the adjudicator');
-  assert.ok(adj.prompt.includes('b0'), 'the diff range reaches the adjudicator');
+  assert.ok(adj.prompt.includes(H('b0')), 'the diff range reaches the adjudicator');
   assert.ok(impl2.prompt.includes('ANSWER-1: use the v2 parser'), 'the answer is the task note');
   assert.ok(rev.prompt.includes('ANSWER-1'), 'the reviewer sees the note too');
-  assert.ok(rev.prompt.includes('b0..h1'));
+  assert.ok(rev.prompt.includes(`${H('b0')}..${H('h1')}`));
   assert.equal(r.status, 'done');
-  assert.equal(r.head, 'h1');
+  assert.equal(r.head, H('h1'));
   assert.deepEqual(r.rulings, ['ANSWER-1: use the v2 parser']);
 });
 
 test('autonomous: a question is adjudicated; clarify_plan amends the brief for the rerun', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [question('b0', 'QUESTION-1: v1 or v2?'), done('b0', 'h1')],
+    'T2 implement': [question(H('b0'), 'QUESTION-1: v1 or v2?'), done(H('b0'), H('h1'))],
     'T2 adjudicate': [ruled('clarify_plan', 'AMEND-1: the brief means v2')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   const [impl1, adj, impl2, rev] = s.calls;
   assert.ok(impl1.schema.properties.status.enum.includes('question'));
@@ -615,11 +640,11 @@ test('autonomous: a question is adjudicated; clarify_plan amends the brief for t
 test('autonomous: a light task that blocks escalates to standard before any adjudication', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'light stuck'), blocked('b0', 'standard stuck'), done('b0', 'h1')],
+    'T2 implement': [blocked(H('b0'), 'light stuck'), blocked(H('b0'), 'standard stuck'), done(H('b0'), H('h1'))],
     'T2 adjudicate': [ruled('answer', 'ANSWER-2')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls),
     ['T2 implement', 'T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   assert.deepEqual(s.calls.map((c) => c.model), ['sonnet', 'opus', 'opus', 'opus', 'opus']);
@@ -631,11 +656,11 @@ test('autonomous: a light task that blocks escalates to standard before any adju
 test('autonomous: a light task question is adjudicated without escalating', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [question('b0', 'which file?'), done('b0', 'h1')],
+    'T2 implement': [question(H('b0'), 'which file?'), done(H('b0'), H('h1'))],
     'T2 adjudicate': [ruled('answer', 'ANSWER-3: src/a.js')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   assert.equal(s.calls[0].model, 'sonnet');
   assert.equal(s.calls[2].model, 'sonnet', 'the rerun keeps the current tier');
@@ -647,12 +672,12 @@ test('autonomous: a light task question is adjudicated without escalating', asyn
 test('autonomous: a fix question is adjudicated and the rerun implement sees the open findings', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h1'), H('h2'))],
     'T2 review': [changes('FINDING-1'), approve()],
-    'T2 fix 1': [question('h1', 'rename or keep?')],
+    'T2 fix 1': [question(H('h1'), 'rename or keep?')],
     'T2 adjudicate': [ruled('answer', 'keep the name')],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls),
     ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   const [, , , adj, impl2, rev2] = s.calls;
@@ -660,20 +685,20 @@ test('autonomous: a fix question is adjudicated and the rerun implement sees the
   assert.ok(adj.prompt.includes('rename or keep?'));
   assert.ok(adj.prompt.includes('FINDING-1'), 'the open findings reach the adjudicator');
   assert.ok(impl2.prompt.includes('FINDING-1') && impl2.prompt.includes('keep the name'));
-  assert.ok(rev2.prompt.includes('b0..h2'), 'the whole task range is reviewed again');
+  assert.ok(rev2.prompt.includes(`${H('b0')}..${H('h2')}`), 'the whole task range is reviewed again');
   assert.equal(r.status, 'done');
-  assert.equal(r.head, 'h2');
+  assert.equal(r.head, H('h2'));
 });
 
 test('autonomous: a fix that fails at standard is adjudicated as blocked', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes()],
-    'T2 fix 1': [blocked('h1', 'FIX-STUCK')],
+    'T2 fix 1': [blocked(H('h1'), 'FIX-STUCK')],
     'T2 adjudicate': [ruled('stop', 'needs a credential rotation', 'security')],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 adjudicate']);
   assert.match(s.calls[3].prompt, /Why you were called: blocked/);
   assert.ok(s.calls[3].prompt.includes('FIX-STUCK'));
@@ -686,30 +711,30 @@ test('autonomous: a review with no result is adjudicated as blocked; an answer r
   const m = manifest();
   const s = stub({
     // The rerun may keep the reviewed commits as they are (head unchanged).
-    'T2 implement': [done('b0', 'h1'), done('h1', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h1'), H('h1'))],
     'T2 review': [null, approve()],
     'T2 adjudicate': [ruled('answer', 'the work is complete; confirm and return')],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls),
     ['T2 implement', 'T2 review', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   assert.match(s.calls[2].prompt, /Why you were called: blocked/);
   assert.ok(s.calls[2].prompt.includes('no result from T2 review'));
-  assert.ok(s.calls[4].prompt.includes('b0..h1'));
+  assert.ok(s.calls[4].prompt.includes(`${H('b0')}..${H('h1')}`));
   assert.equal(r.status, 'done');
-  assert.equal(r.head, 'h1');
+  assert.equal(r.head, H('h1'));
 });
 
 test('autonomous: the round cap is adjudicated; an answer reruns implement and resets the fix rounds', async () => {
   const m = manifest({ limits: { review_rounds: 1, max_parallel_lanes: 3 } });
   const s = stub({
-    'T2 implement': [done('b0', 'h1'), done('h2', 'h3')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h2'), H('h3'))],
     'T2 review': [changes('CAP-1'), changes('AFTER-1')],
-    'T2 fix 1': [done('h1', 'h2'), done('h3', 'h4')],
+    'T2 fix 1': [done(H('h1'), H('h2')), done(H('h3'), H('h4'))],
     'T2 re-review 1': [changes('CAP-2'), approve()],
     'T2 adjudicate': [ruled('answer', 'ANSWER-CAP: drop the cache')],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', 'T2 adjudicate',
     'T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1',
@@ -717,33 +742,33 @@ test('autonomous: the round cap is adjudicated; an answer reruns implement and r
   const adj = s.calls[4];
   assert.match(adj.prompt, /Why you were called: round_cap/);
   assert.ok(adj.prompt.includes('CAP-2'), 'the open findings reach the adjudicator');
-  assert.ok(adj.prompt.includes('Diff range: b0..h2'));
+  assert.ok(adj.prompt.includes(`Diff range: ${H('b0')}..${H('h2')}`));
   for (const outcome of ['park', 'unblock']) {
-    assert.ok(adj.prompt.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'b0' '/work/ledger' "
+    assert.ok(adj.prompt.includes(`scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' '${H('b0')}' '/work/ledger' `
       + `'alpha' --task 'T2' --settled ${outcome}`), `details carry the finish-task --settled command for ${outcome}`);
   }
   assert.ok(adj.prompt.includes("append '/work/ledger' 'alpha'"), 'the ruling ledger command');
   const impl2 = s.calls[5];
   assert.ok(impl2.prompt.includes('CAP-2') && impl2.prompt.includes('ANSWER-CAP: drop the cache'));
-  assert.ok(s.calls[6].prompt.includes('b0..h3'));
+  assert.ok(s.calls[6].prompt.includes(`${H('b0')}..${H('h3')}`));
   assert.equal(r.status, 'done');
   assert.equal(r.rounds, 1);
-  assert.equal(r.head, 'h4');
+  assert.equal(r.head, H('h4'));
 });
 
 test('autonomous: park at the round cap completes the task with the findings deferred', async () => {
   const m = manifest({ limits: { review_rounds: 1, max_parallel_lanes: 3 } });
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes('OPEN-1')],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [changes('OPEN-2')],
-    'T2 adjudicate': [settled('park', 'PARK-1: cosmetic, defer', 'h2')],
+    'T2 adjudicate': [settled('park', 'PARK-1: cosmetic, defer', H('h2'))],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'deferred', 'a parked task is deferred, never done (review finding 13)');
-  assert.equal(r.base, 'b0');
-  assert.equal(r.head, 'h2');
+  assert.equal(r.base, H('b0'));
+  assert.equal(r.head, H('h2'));
   assert.equal(r.rounds, 1);
   assert.match(r.notes, /deferred, not accepted: parked/);
   assert.match(r.notes, /deferred finding \[important\]: src\/a\.js:3 - OPEN-2/);
@@ -755,13 +780,13 @@ test('autonomous: park or unblock with no new commits is deferred at the head th
   for (const outcome of ['park', 'unblock']) {
     const m = manifest();
     const s = stub({
-      'T2 implement': [blocked('b0', 'nothing to do')],
-      'T2 adjudicate': [settled(outcome, `${outcome} it`, 'b0')],
+      'T2 implement': [blocked(H('b0'), 'nothing to do')],
+      'T2 adjudicate': [settled(outcome, `${outcome} it`, H('b0'))],
     });
-    const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
     assert.equal(r.status, 'deferred', outcome);
-    assert.equal(r.base, 'b0', outcome);
-    assert.equal(r.head, 'b0', outcome);
+    assert.equal(r.base, H('b0'), outcome);
+    assert.equal(r.head, H('b0'), outcome);
   }
 });
 
@@ -771,22 +796,22 @@ test('autonomous: park or unblock with no new commits is deferred at the head th
 test('autonomous: commits a blocked implementer made stay in the task range when it is parked', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [{ status: 'blocked', head: 'partial', tests: '', notes: 'stuck halfway' }],
-    'T2 adjudicate': [settled('park', 'park the half', 'partial')],
+    'T2 implement': [{ status: 'blocked', head: H('partial'), tests: '', notes: 'stuck halfway' }],
+    'T2 adjudicate': [settled('park', 'park the half', H('partial'))],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
-  assert.ok(s.calls[1].prompt.includes('Diff range: b0..partial'), 'the adjudicator sees the partial commits');
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
+  assert.ok(s.calls[1].prompt.includes(`Diff range: ${H('b0')}..${H('partial')}`), 'the adjudicator sees the partial commits');
   assert.equal(r.status, 'deferred');
-  assert.deepEqual([r.base, r.head], ['b0', 'partial']);
+  assert.deepEqual([r.base, r.head], [H('b0'), H('partial')]);
 });
 
 test('autonomous: a park without the settled head is an invalid ruling and stops the task', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'stuck')],
+    'T2 implement': [blocked(H('b0'), 'stuck')],
     'T2 adjudicate': [ruled('park', 'park it')],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.notes, 'adjudicator_stop: plan_broken');
   assert.deepEqual(r.rulings, []);
@@ -795,10 +820,10 @@ test('autonomous: a park without the settled head is an invalid ruling and stops
 test('autonomous: allow_deferral false refuses park and unblock', async () => {
   const m = manifest({ allow_deferral: false });
   const s = stub({
-    'T2 implement': [blocked('b0', 'stuck')],
-    'T2 adjudicate': [settled('park', 'park it', 'b0')],
+    'T2 implement': [blocked(H('b0'), 'stuck')],
+    'T2 adjudicate': [settled('park', 'park it', H('b0'))],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.notes, 'adjudicator_stop: deferral_not_allowed');
   assert.match(s.calls[1].prompt, /Deferral is not allowed in this run/);
@@ -808,30 +833,30 @@ test('autonomous: allow_deferral false refuses park and unblock', async () => {
 test('autonomous: unblock completes the task and carries its text to the next task as a note', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'upstream contract missing')],
-    'T2 adjudicate': [settled('unblock', 'UNBLOCK-1: stub the contract as {ok: true}', 'b0')],
-    'T3 implement': [done('b0', 'h3')],
+    'T2 implement': [blocked(H('b0'), 'upstream contract missing')],
+    'T2 adjudicate': [settled('unblock', 'UNBLOCK-1: stub the contract as {ok: true}', H('b0'))],
+    'T3 implement': [done(H('b0'), H('h3'))],
     'T3 review': [approve()],
   });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.stopped, null);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate', 'T3 implement', 'T3 review']);
   assert.equal(r.results[0].status, 'deferred');
-  assert.equal(r.results[0].head, 'b0');
+  assert.equal(r.results[0].head, H('b0'));
   assert.ok(r.results[0].notes.includes('UNBLOCK-1'));
   const t3 = s.calls[2].prompt;
   assert.ok(t3.includes('UNBLOCK-1: stub the contract as {ok: true}'), 'the next task gets the note');
-  assert.ok(s.calls[3].prompt.includes('b0..h3'), 'the next task base is the unblocked task head');
-  assert.equal(r.head, 'h3');
+  assert.ok(s.calls[3].prompt.includes(`${H('b0')}..${H('h3')}`), 'the next task base is the unblocked task head');
+  assert.equal(r.head, H('h3'));
 });
 
 test('autonomous: stop ends the lane with adjudicator_stop and its condition', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'would drop the prod table')],
+    'T2 implement': [blocked(H('b0'), 'would drop the prod table')],
     'T2 adjudicate': [ruled('stop', 'irreversible', 'destructive')],
   });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.stopped, 'adjudicator_stop: destructive');
   assert.equal(r.results.length, 1);
   assert.equal(r.results[0].status, 'blocked');
@@ -840,8 +865,8 @@ test('autonomous: stop ends the lane with adjudicator_stop and its condition', a
 
 test('autonomous: an adjudicator with no result stops the lane as an agent error', async () => {
   const m = manifest();
-  const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [null] });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const s = stub({ 'T2 implement': [blocked(H('b0'))], 'T2 adjudicate': [null] });
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.stopped, 'no result from T2 adjudicate');
   assert.deepEqual(r.results[0].rulings, []);
   assert.ok(!labels(s.calls).includes('T3 implement'));
@@ -849,8 +874,8 @@ test('autonomous: an adjudicator with no result stops the lane as an agent error
 
 test('autonomous: an invalid adjudicator result stops the lane, never approves', async () => {
   const m = manifest();
-  const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [{ outcome: 'approve', text: 'ok' }] });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const s = stub({ 'T2 implement': [blocked(H('b0'))], 'T2 adjudicate': [{ outcome: 'approve', text: 'ok' }] });
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.stopped, 'adjudicator_stop: plan_broken');
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 adjudicate']);
 });
@@ -858,10 +883,10 @@ test('autonomous: an invalid adjudicator result stops the lane, never approves',
 test('autonomous: at most 2 adjudications per task; a third need stops with adjudication_cap', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'one'), blocked('b0', 'two'), blocked('b0', 'three')],
+    'T2 implement': [blocked(H('b0'), 'one'), blocked(H('b0'), 'two'), blocked(H('b0'), 'three')],
     'T2 adjudicate': [ruled('answer', 'RULING-A'), ruled('clarify_plan', 'RULING-B')],
   });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.deepEqual(labels(s.calls), [
     'T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 adjudicate', 'T2 implement',
   ]);
@@ -874,15 +899,15 @@ test('autonomous: at most 2 adjudications per task; a third need stops with adju
 
 test('a task result lists rulings, empty without adjudication', async () => {
   const m = manifest();
-  const s = stub({ 'T2 implement': [done('b0', 'h1')], 'T2 review': [approve()] });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [done(H('b0'), H('h1'))], 'T2 review': [approve()] });
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(r.rulings, []);
 });
 
 test('supervised: a question counts as blocked with the question in the notes, no adjudication', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const s = stub({ 'T2 implement': [question('b0', 'QUESTION-S: v1 or v2?')] });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const s = stub({ 'T2 implement': [question(H('b0'), 'QUESTION-S: v1 or v2?')] });
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement']);
   assert.equal(r.results[0].status, 'blocked');
   assert.ok(r.results[0].notes.includes('QUESTION-S: v1 or v2?'));
@@ -893,12 +918,12 @@ test('supervised: a question counts as blocked with the question in the notes, n
 test('supervised: blocked tasks and the round cap stop the lane without adjudication', async () => {
   const m = manifest({ autonomy: 'supervised', limits: { review_rounds: 1, max_parallel_lanes: 3 } });
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes()],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [changes()],
   });
-  const r = await runLane(m, m.lanes[0], 'b0', s.io);
+  const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.equal(r.stopped, 'review_rounds');
   assert.ok(!labels(s.calls).some((l) => l.endsWith('adjudicate')));
 });
@@ -928,43 +953,43 @@ const sized = (base, head, lines) => ({ ...done(base, head), changed_lines: line
 test('a sonnet task escalates to standard after the first changes verdict', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h1'), H('h2'))],
     'T2 review': [changes('FIRST-FINDING'), approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 implement', 'T2 review']);
   const [impl1, rev1, impl2, rev2] = s.calls;
   assert.deepEqual([impl1.model, impl1.effort], ['sonnet', 'high']);
   assert.deepEqual([rev1.model, rev1.effort], ['opus', 'high']);
   assert.deepEqual([impl2.model, impl2.effort], ['opus', 'high'], 'next implement call uses opus/high');
   assert.ok(impl2.prompt.includes('FIRST-FINDING'), 'the escalated implementer sees the open findings');
-  assert.ok(rev2.prompt.includes('b0..h2'), 'the whole task range is reviewed again');
+  assert.ok(rev2.prompt.includes(`${H('b0')}..${H('h2')}`), 'the whole task range is reviewed again');
   assert.equal(r.status, 'done');
   assert.equal(r.tier_used, 'standard');
   assert.equal(r.rounds, 0);
-  assert.equal(r.head, 'h2');
+  assert.equal(r.head, H('h2'));
   assert.match(r.notes, /escalated to standard/);
 });
 
 test('a light task does not escalate on the first changes verdict, only on the second', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [changes('first')],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'light' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
   assert.deepEqual([s.calls[2].model, s.calls[2].effort], ['sonnet', 'high']);
   assert.equal(r.tier_used, 'light');
 });
 
-for (const [name, first] of [['blocked', blocked('b0', 'sonnet stuck')], ['null', null]]) {
+for (const [name, first] of [['blocked', blocked(H('b0'), 'sonnet stuck')], ['null', null]]) {
   test(`a sonnet task escalates to standard after a ${name} implement`, async () => {
     const m = manifest({ autonomy: 'supervised' });
-    const s = stub({ 'T2 implement': [first, done('b0', 'h1')], 'T2 review': [approve()] });
-    const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+    const s = stub({ 'T2 implement': [first, done(H('b0'), H('h1'))], 'T2 review': [approve()] });
+    const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, H('b0'), s.io);
     assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 implement', 'T2 review']);
     assert.deepEqual(s.calls.map((c) => c.model), ['sonnet', 'opus', 'opus']);
     assert.equal(r.status, 'done');
@@ -975,11 +1000,11 @@ for (const [name, first] of [['blocked', blocked('b0', 'sonnet stuck')], ['null'
 test('autonomous: a sonnet task that blocks escalates to standard before any adjudication', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'sonnet stuck'), blocked('b0', 'standard stuck'), done('b0', 'h1')],
+    'T2 implement': [blocked(H('b0'), 'sonnet stuck'), blocked(H('b0'), 'standard stuck'), done(H('b0'), H('h1'))],
     'T2 adjudicate': [ruled('answer', 'ANSWER-S')],
     'T2 review': [approve()],
   });
-  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls),
     ['T2 implement', 'T2 implement', 'T2 adjudicate', 'T2 implement', 'T2 review']);
   assert.deepEqual(s.calls.map((c) => c.model), ['sonnet', 'opus', 'opus', 'opus', 'opus']);
@@ -998,9 +1023,9 @@ test('review effort: medium under 60 changed lines, high at 60, for security, or
   ];
   for (const [extra, lines, effort] of cases) {
     const m = manifest();
-    const impl = lines === undefined ? done('b0', 'h1') : sized('b0', 'h1', lines);
+    const impl = lines === undefined ? done(H('b0'), H('h1')) : sized(H('b0'), H('h1'), lines);
     const s = stub({ 'T2 implement': [impl], 'T2 review': [approve()] });
-    await runTask(m, task('T2', extra), WHERE, 'b0', s.io);
+    await runTask(m, task('T2', extra), WHERE, H('b0'), s.io);
     const rev = s.calls[1];
     assert.deepEqual([rev.model, rev.effort], ['opus', effort], JSON.stringify([extra, lines]));
   }
@@ -1019,12 +1044,12 @@ test('a re-review takes the fix result changed_lines, not the implement one', as
   for (const [implLines, fixLines, revEffort, reEffort] of [[200, 10, 'high', 'medium'], [10, 100, 'medium', 'high']]) {
     const m = manifest();
     const s = stub({
-      'T2 implement': [sized('b0', 'h1', implLines)],
+      'T2 implement': [sized(H('b0'), H('h1'), implLines)],
       'T2 review': [changes()],
-      'T2 fix 1': [sized('h1', 'h2', fixLines)],
+      'T2 fix 1': [sized(H('h1'), H('h2'), fixLines)],
       'T2 re-review 1': [approve()],
     });
-    await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    await runTask(m, task('T2'), WHERE, H('b0'), s.io);
     assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
     assert.equal(s.calls[1].effort, revEffort);
     assert.equal(s.calls[3].effort, reEffort);
@@ -1035,10 +1060,10 @@ test('a re-review takes the fix result changed_lines, not the implement one', as
 test('the review after an escalated rerun takes the rerun implement changed_lines', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [sized('b0', 'h1', 10), sized('h1', 'h2', 80)],
+    'T2 implement': [sized(H('b0'), H('h1'), 10), sized(H('h1'), H('h2'), 80)],
     'T2 review': [changes(), approve()],
   });
-  await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  await runTask(m, task('T2', { tier: 'sonnet' }), WHERE, H('b0'), s.io);
   assert.deepEqual(s.calls.map((c) => [c.label, c.model, c.effort]), [
     ['T2 implement', 'sonnet', 'high'],
     ['T2 review', 'opus', 'medium'],
@@ -1050,7 +1075,7 @@ test('the review after an escalated rerun takes the rerun implement changed_line
 test('a resumed task without a changed_lines count is reviewed at high effort', async () => {
   const m = manifest();
   const s = stub({ 'T2 review': [approve()] });
-  await runTask(m, task('T2'), WHERE, 'b0', s.io, { base: 'b0', head: 'h1' });
+  await runTask(m, task('T2'), WHERE, H('b0'), s.io, { base: H('b0'), head: H('h1') });
   assert.deepEqual([s.calls[0].model, s.calls[0].effort], ['opus', 'high']);
 });
 
@@ -1079,7 +1104,7 @@ test('a final-fix result without changed_lines still validates against finalFixS
   const sc = finalFixSchema();
   assert.equal(sc.properties.changed_lines.type, 'integer');
   assert.ok(!sc.required.includes('changed_lines'));
-  const result = { status: 'done', head: 'h9', tests: 'npm test: pass', notes: '', dispositions: [] };
+  const result = { status: 'done', head: H('h9'), tests: 'npm test: pass', notes: '', dispositions: [] };
   assert.deepEqual(schemaErrors(sc, result), []);
   assert.deepEqual(schemaErrors(sc, { ...result, changed_lines: 12 }), []);
 });
@@ -1091,19 +1116,19 @@ test('implementResultText asks for changed_lines over the agent range; the one-a
   assert.ok(plain.includes("git -C '/work/repo' diff --shortstat <start> HEAD"));
   const p = allPrompts(manifest());
   assert.match(p.implement, /changed_lines/);
-  assert.ok(p.implement.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'b0' "),
+  assert.ok(p.implement.includes(`scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' '${H('b0')}' `),
     'implement counts from the task base');
-  assert.ok(p.fix.includes("scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' 'h1' "),
+  assert.ok(p.fix.includes(`scripts/finish-task' '/work/wt/lane-alpha' 'pl-run-1-alpha' '${H('h1')}' `),
     'a fix counts from the head it builds on');
 });
 
 test('implement prompt opens with start-task and syncs when the lane needs it', () => {
   const m = manifest();
-  const synced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
+  const synced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, H('b0'));
   assert.ok(synced.includes(
     "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
     "'/work/my plan.md' --artifacts '/work/ledger' --sync 'pl/run-1' --brief 'T2' '/work/ledger/briefs/T2.md'"), synced);
-  const plain = implementPrompt(m, task('T2'), WHERE, 'b0');
+  const plain = implementPrompt(m, task('T2'), WHERE, H('b0'));
   assert.ok(plain.includes(
     "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/start-task' '/work/wt/lane-alpha' " +
     "'/work/my plan.md' --artifacts '/work/ledger' --brief 'T2' '/work/ledger/briefs/T2.md'"), plain);
@@ -1114,8 +1139,8 @@ test('review prompts pass the review package to start-task', () => {
   const p = allPrompts(manifest());
   const pkg = (base, head) => "--package '/sp/skills/subagent-driven-development/scripts/review-package' " +
     `'${base}' '${head}' '/work/ledger/reviews/T2-${base}..${head}.diff'`;
-  assert.ok(p.review.includes(pkg('b0', 'h1')), p.review);
-  assert.ok(p.reReview.includes(pkg('h1', 'h2')), p.reReview);
+  assert.ok(p.review.includes(pkg(H('b0'), H('h1'))), p.review);
+  assert.ok(p.reReview.includes(pkg(H('h1'), H('h2'))), p.reReview);
   for (const name of ['review', 'reReview']) {
     assert.ok(p[name].includes("scripts/start-task' "), name);
     assert.ok(!p[name].includes('mkdir -p'), name);
@@ -1127,17 +1152,17 @@ test('review prompts without superpowers keep the git log and diff steps', () =>
   const p = allPrompts(manifest({ sp_dir: null }));
   assert.ok(!p.review.includes('--package'));
   assert.ok(!p.reReview.includes('--package'));
-  assert.ok(p.review.includes("git -C '/work/wt/lane-alpha' diff 'b0..h1'"));
-  assert.ok(p.review.includes("git -C '/work/wt/lane-alpha' log --oneline 'b0..h1'"));
-  assert.ok(p.reReview.includes("git -C '/work/wt/lane-alpha' diff 'h1..h2'"));
+  assert.ok(p.review.includes(`git -C '/work/wt/lane-alpha' diff '${H('b0')}..${H('h1')}'`));
+  assert.ok(p.review.includes(`git -C '/work/wt/lane-alpha' log --oneline '${H('b0')}..${H('h1')}'`));
+  assert.ok(p.reReview.includes(`git -C '/work/wt/lane-alpha' diff '${H('h1')}..${H('h2')}'`));
 });
 
 test('implement and fix prompts record commits with finish-task from their start commit', () => {
   const p = allPrompts(manifest());
   const finish = (from) => "cd '/work/wt/lane-alpha' && 'python3' '/skills/parallel-lanes/scripts/finish-task' " +
     `'/work/wt/lane-alpha' 'pl-run-1-alpha' '${from}' '/work/ledger' 'alpha' --task 'T2'`;
-  assert.ok(p.implement.includes(finish('b0')), p.implement);
-  assert.ok(p.fix.includes(finish('h1')), p.fix);
+  assert.ok(p.implement.includes(finish(H('b0'))), p.implement);
+  assert.ok(p.fix.includes(finish(H('h1'))), p.fix);
   for (const name of ['implement', 'fix']) {
     assert.ok(!p[name].includes('"event":"committed"'), `${name}: no separate committed ledger command`);
   }
@@ -1151,10 +1176,10 @@ test('batch prompts pass every task to start-task and finish-task', () => {
   };
   const fs = [finding('the bug')];
   const p = {
-    implement: implementPrompt(m, unit, WHERE, 'b0'),
-    review: reviewPrompt(m, unit, WHERE, 'b0', 'h1'),
-    fix: fixPrompt(m, unit, WHERE, fs, done('b0', 'h1'), 'h1'),
-    reReview: reReviewPrompt(m, unit, WHERE, 'h1', 'h2', fs),
+    implement: implementPrompt(m, unit, WHERE, H('b0')),
+    review: reviewPrompt(m, unit, WHERE, H('b0'), H('h1')),
+    fix: fixPrompt(m, unit, WHERE, fs, done(H('b0'), H('h1')), H('h1')),
+    reReview: reReviewPrompt(m, unit, WHERE, H('h1'), H('h2'), fs),
   };
   for (const [name, text] of Object.entries(p)) {
     assert.ok(text.includes("--brief 'T3' '/work/ledger/briefs/T3.md' --brief 'T4' '/work/ledger/briefs/T4.md'"),
@@ -1164,14 +1189,14 @@ test('batch prompts pass every task to start-task and finish-task', () => {
     assert.ok(p[name].includes("--task 'T3' --task 'T4'"), `${name}: every task`);
     assert.ok(!p[name].includes('--commit'), `${name}: the range comes from git, not a typed list`);
   }
-  assert.ok(p.review.includes("'/work/ledger/reviews/T3-T4-b0..h1.diff'"), 'one package for the batch range');
+  assert.ok(p.review.includes(`'/work/ledger/reviews/T3-T4-${H('b0')}..${H('h1')}.diff'`), 'one package for the batch range');
 });
 
 test('task prompts carry no separate brief, fast-forward, or shortstat command', () => {
   for (const spDir of ['/sp/skills', null]) {
     const m = manifest({ sp_dir: spDir });
     const p = allPrompts(m);
-    p.implementSynced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, 'b0');
+    p.implementSynced = implementPrompt(m, task('T2'), { ...WHERE, sync: 'pl/run-1' }, H('b0'));
     for (const [name, text] of Object.entries(p)) {
       for (const banned of ['scripts/task-brief', 'merge --ff-only', '--shortstat']) {
         assert.ok(!text.includes(banned), `${name} (sp_dir ${spDir}): ${banned}`);
@@ -1192,14 +1217,14 @@ test('every agent gets the combine-commands rule', () => {
 test('autonomous: a park or unblock without commits gives the adjudicator settled commands at base', async () => {
   const m = manifest();
   const s = stub({
-    'T2 implement': [blocked('b0', 'nothing to do')],
-    'T2 adjudicate': [settled('park', 'PARK-0', 'b0')],
+    'T2 implement': [blocked(H('b0'), 'nothing to do')],
+    'T2 adjudicate': [settled('park', 'PARK-0', H('b0'))],
   });
-  const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'deferred');
   const adj = s.calls[1].prompt;
   for (const outcome of ['park', 'unblock']) {
-    assert.ok(adj.includes(`'b0' '/work/ledger' 'alpha' --task 'T2' --settled ${outcome}`), `${outcome} command from base`);
+    assert.ok(adj.includes(`'${H('b0')}' '/work/ledger' 'alpha' --task 'T2' --settled ${outcome}`), `${outcome} command from base`);
   }
 });
 
@@ -1207,11 +1232,11 @@ test('autonomous: a security task with an important finding open cannot be parke
   for (const outcome of ['park', 'unblock']) {
     const m = manifest({ limits: { review_rounds: 0, max_parallel_lanes: 3 } });
     const s = stub({
-      'T2 implement': [done('b0', 'h1')],
+      'T2 implement': [done(H('b0'), H('h1'))],
       'T2 review': [changes('SEC-1')],
       'T2 adjudicate': [ruled(outcome, `${outcome} it`)],
     });
-    const r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', s.io);
+    const r = await runTask(m, task('T2', { security: true }), WHERE, H('b0'), s.io);
     assert.equal(r.status, 'blocked', outcome);
     assert.equal(r.notes, 'adjudicator_stop: security', outcome);
     const adj = s.calls[2].prompt;
@@ -1226,21 +1251,21 @@ test('autonomous: a security task with an important finding open cannot be parke
 // cannot be parked either.
 test('autonomous: a security task is never parked, even blocked before any review or with only minor findings', async () => {
   const before = stub({
-    'T2 implement': [blocked('b0', 'stuck before any code')],
-    'T2 adjudicate': [settled('park', 'PARK-EARLY', 'b0')],
+    'T2 implement': [blocked(H('b0'), 'stuck before any code')],
+    'T2 adjudicate': [settled('park', 'PARK-EARLY', H('b0'))],
   });
-  let r = await runTask(manifest(), task('T2', { security: true }), WHERE, 'b0', before.io);
+  let r = await runTask(manifest(), task('T2', { security: true }), WHERE, H('b0'), before.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.notes, 'adjudicator_stop: security');
   assert.deepEqual(labels(before.calls), ['T2 implement', 'T2 adjudicate'], 'no reviewer, no settled range');
   const m = manifest({ limits: { review_rounds: 0, max_parallel_lanes: 3 } });
   const minor = { verdict: 'changes', findings: [{ ...finding('NIT-1'), severity: 'minor' }], cannot_verify: [] };
   const later = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [minor],
-    'T2 adjudicate': [settled('park', 'PARK-NIT', 'h1')],
+    'T2 adjudicate': [settled('park', 'PARK-NIT', H('h1'))],
   });
-  r = await runTask(m, task('T2', { security: true }), WHERE, 'b0', later.io);
+  r = await runTask(m, task('T2', { security: true }), WHERE, H('b0'), later.io);
   assert.equal(r.status, 'blocked');
   assert.equal(r.notes, 'adjudicator_stop: security');
 });
@@ -1249,12 +1274,12 @@ test('autonomous: a security task is never parked, even blocked before any revie
 test('an approval that carries a critical finding is acted on as changes, with its severity kept', async () => {
   const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [{ verdict: 'approve', findings: [{ ...crit, severity: 'minor', issue: 'naming' }], cannot_verify: [] }],
   });
-  const r = await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(manifest(), task('T2'), WHERE, H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1']);
   assert.ok(s.calls[2].prompt.includes('authz bypass'), 'the fixer gets the critical finding');
   assert.ok(s.logs.some((l) => l.includes('approved with a critical or important finding')));
@@ -1265,25 +1290,25 @@ test('an approval that carries a critical finding is acted on as changes, with i
 test('the fix after a contradicted approval reopens any approval the reviewer recorded', async () => {
   const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }],
-    'T2 fix 1': [done('h1', 'h2')],
+    'T2 fix 1': [done(H('h1'), H('h2'))],
     'T2 re-review 1': [approve()],
   });
-  await runTask(manifest(), task('T2'), WHERE, 'b0', s.io);
+  await runTask(manifest(), task('T2'), WHERE, H('b0'), s.io);
   const fix = s.calls.find((c) => c.label === 'T2 fix 1').prompt;
   assert.ok(fix.includes('"event":"reopened"'), fix);
-  assert.ok(s.calls.find((c) => c.label === 'T2 review').prompt.includes("'/work/wt/lane-alpha' 'h1' <blocking>"),
+  assert.ok(s.calls.find((c) => c.label === 'T2 review').prompt.includes(`'/work/wt/lane-alpha' '${H('h1')}' <blocking>`),
     'the approval command names the reviewed head and asks for the blocking count');
 });
 
 test('a contradicted approval on a sonnet task is reopened by the escalated implement', async () => {
   const crit = { severity: 'critical', file: 'src/auth.js', line: 10, issue: 'authz bypass', fix: 'check the role' };
   const s = stub({
-    'T2 implement': [done('b0', 'h1'), done('h1', 'h2')],
+    'T2 implement': [done(H('b0'), H('h1')), done(H('h1'), H('h2'))],
     'T2 review': [{ verdict: 'approve', findings: [crit], cannot_verify: [] }, approve()],
   });
-  await runTask(manifest(), task('T2', { tier: 'sonnet' }), WHERE, 'b0', s.io);
+  await runTask(manifest(), task('T2', { tier: 'sonnet' }), WHERE, H('b0'), s.io);
   const impls = s.calls.filter((c) => c.label === 'T2 implement');
   assert.equal(impls.length, 2, 'the changes verdict escalates the sonnet task to a standard rerun');
   assert.ok(!impls[0].prompt.includes('"event":"reopened"'));
@@ -1292,10 +1317,10 @@ test('a contradicted approval on a sonnet task is reopened by the escalated impl
 
 test('a changes verdict with no findings is not a usable review', async () => {
   const s = stub({
-    'T2 implement': [done('b0', 'h1')],
+    'T2 implement': [done(H('b0'), H('h1'))],
     'T2 review': [{ verdict: 'changes', findings: [], cannot_verify: [] }],
   });
-  const r = await runTask(manifest({ autonomy: 'supervised' }), task('T2'), WHERE, 'b0', s.io);
+  const r = await runTask(manifest({ autonomy: 'supervised' }), task('T2'), WHERE, H('b0'), s.io);
   assert.equal(r.status, 'blocked');
   assert.match(r.notes, /invalid result from T2 review: changes with no findings/);
 });
@@ -1305,14 +1330,14 @@ test('autonomous: an unblock note goes to the task that depends on it, not just 
     task('T2'), task('T3'), task('T5', { depends_on: [{ id: 'T2', kind: 'contract' }] }),
   ] }] });
   const s = stub({
-    'T2 implement': [blocked('b0', 'upstream missing')],
-    'T2 adjudicate': [settled('unblock', 'UNBLOCK-DEP: use the v2 shape', 'b0')],
-    'T3 implement': [done('b0', 'h3')],
+    'T2 implement': [blocked(H('b0'), 'upstream missing')],
+    'T2 adjudicate': [settled('unblock', 'UNBLOCK-DEP: use the v2 shape', H('b0'))],
+    'T3 implement': [done(H('b0'), H('h3'))],
     'T3 review': [approve()],
-    'T5 implement': [done('h3', 'h5')],
+    'T5 implement': [done(H('h3'), H('h5'))],
     'T5 review': [approve()],
   });
-  await runLane(m, m.lanes[0], 'b0', s.io);
+  await runLane(m, m.lanes[0], H('b0'), s.io);
   const prompt = (label) => s.calls.find((c) => c.label === label).prompt;
   assert.ok(!prompt('T3 implement').includes('UNBLOCK-DEP'));
   assert.ok(prompt('T5 implement').includes('UNBLOCK-DEP: use the v2 shape'));
@@ -1320,16 +1345,16 @@ test('autonomous: an unblock note goes to the task that depends on it, not just 
 
 test('a non-security task is not told it is security-flagged', async () => {
   const m = manifest();
-  const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [ruled('park', 'P')] });
-  await runTask(m, task('T2'), WHERE, 'b0', s.io);
+  const s = stub({ 'T2 implement': [blocked(H('b0'))], 'T2 adjudicate': [ruled('park', 'P')] });
+  await runTask(m, task('T2'), WHERE, H('b0'), s.io);
   assert.ok(!/security-flagged/.test(s.calls[1].prompt));
 });
 
 test('autonomous: an invalid or budget-refused adjudication is not listed as a ruling', async () => {
   for (const r0 of [{ outcome: 'approve', text: 'ok' }, { __budget: true }]) {
     const m = manifest();
-    const s = stub({ 'T2 implement': [blocked('b0')], 'T2 adjudicate': [r0] });
-    const r = await runTask(m, task('T2'), WHERE, 'b0', s.io);
+    const s = stub({ 'T2 implement': [blocked(H('b0'))], 'T2 adjudicate': [r0] });
+    const r = await runTask(m, task('T2'), WHERE, H('b0'), s.io);
     assert.equal(r.status, 'blocked');
     assert.deepEqual(r.rulings, [], JSON.stringify(r0));
   }
@@ -1338,7 +1363,7 @@ test('autonomous: an invalid or budget-refused adjudication is not listed as a r
 // 1.2.1: review gaps.
 test('the implementer records its task base through start-task before it writes; reviews and fixes do not', () => {
   const p = allPrompts(manifest());
-  assert.ok(p.implement.includes("--record-start '/work/ledger' 'alpha' 'b0'"), p.implement);
+  assert.ok(p.implement.includes(`--record-start '/work/ledger' 'alpha' '${H('b0')}'`), p.implement);
   for (const name of ['review', 'fix', 'reReview']) assert.ok(!p[name].includes('--record-start'), name);
 });
 
@@ -1347,19 +1372,19 @@ test('reviews get the files their range changes outside the Files list, and judg
   const batchTasks = [task('T2', { files: ['src/T2.js', 'docs/a.md'] }), task('T3')];
   const unit = { id: 'T2-T3', title: 'batch', files: [], tier: 'light', security: false, batch: 'k', tasks: batchTasks };
   for (const [text, base, head] of [
-    [reviewPrompt(m, task('T2'), WHERE, 'b0', 'h1'), 'b0', 'h1'],
-    [reReviewPrompt(m, task('T2'), WHERE, 'h1', 'h2', [finding('x')]), 'h1', 'h2'],
+    [reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')), H('b0'), H('h1')],
+    [reReviewPrompt(m, task('T2'), WHERE, H('h1'), H('h2'), [finding('x')]), H('h1'), H('h2')],
   ]) {
     assert.ok(text.includes(`--scope '${base}' '${head}' --declared 'src/T2.js'`), text);
     assert.ok(text.includes("files changed outside the task's Files list"), text);
     assert.ok(/a change the task did not need[^.]*is an important finding/.test(text.replace(/\n/g, ' ')), text);
   }
-  const batch = reviewPrompt(m, unit, WHERE, 'b0', 'h1');
+  const batch = reviewPrompt(m, unit, WHERE, H('b0'), H('h1'));
   assert.ok(batch.includes("--declared 'src/T2.js' --declared 'docs/a.md' --declared 'src/T3.js'"), batch);
   // Without superpowers the scope list still comes from start-task.
-  assert.ok(reviewPrompt(manifest({ sp_dir: null }), task('T2'), WHERE, 'b0', 'h1').includes("--scope 'b0' 'h1'"));
+  assert.ok(reviewPrompt(manifest({ sp_dir: null }), task('T2'), WHERE, H('b0'), H('h1')).includes(`--scope '${H('b0')}' '${H('h1')}'`));
   // A task with no Files list has nothing to compare against.
-  const bare = reviewPrompt(m, task('T2', { files: [] }), WHERE, 'b0', 'h1');
+  const bare = reviewPrompt(m, task('T2', { files: [] }), WHERE, H('b0'), H('h1'));
   assert.ok(!bare.includes('--scope') && !bare.includes('outside the task'), bare);
 });
 
@@ -1379,10 +1404,10 @@ test('prompts carry only the project rules: no ASCII or trailer rule of their ow
     finalSecurity: finalReviewPrompt(m, 'security', null),
     finalCorrectness: finalReviewPrompt(m, 'correctness', null),
     combined: combinedFinalReviewPrompt(m, { e2e: null }),
-    finalFix: finalFixPrompt(m, fs, 'h1'),
+    finalFix: finalFixPrompt(m, fs, H('h1')),
     integrate: integratePrompt(m, 'p0', {}),
     e2e: e2ePrompt(m),
-    verify: verifyPrompt(m, 'h1'),
+    verify: verifyPrompt(m, H('h1')),
     postIntegrate: postIntegratePrompt(m),
     preflight: preflightPrompt(m),
   };
@@ -1392,4 +1417,145 @@ test('prompts carry only the project rules: no ASCII or trailer rule of their ow
     assert.ok(!/ASCII/i.test(own), `${name}: an ASCII rule of its own`);
     assert.ok(!/trailer|co-authored|AI (name|attribution)|Claude/i.test(own), `${name}: a trailer or AI rule of its own`);
   }
+});
+
+// ---- Run rulings and fix commit messages (1.3.1) ----
+
+const RUN_RULINGS = 'Rulings already made for this run (binding):';
+const USER_ANSWER = "The user's answer for this task";
+const TASK_FIX_MESSAGE = 'fix: address review findings for Task';
+const FINAL_FIX_MESSAGE = 'fix: address the final review findings';
+const POST_INTEGRATE_FIX_MESSAGE = 'fix: make the post-integration check pass';
+
+test('a user answer from a resume keeps its own label beside the run rulings', () => {
+  const m = manifest({ notes: { T2: 'yes' }, run_rulings: ['R1'] });
+  const p = implementPrompt(m, task('T2'), WHERE, H('b0'));
+  assert.ok(p.includes(`${USER_ANSWER} (follow it where it settles a question): yes`), p);
+  const lines = p.split('\n');
+  const at = lines.indexOf(RUN_RULINGS);
+  assert.ok(at >= 0, p);
+  assert.equal(lines[at + 1], '- R1');
+  // The ruling is not given the user's label.
+  assert.ok(!lines.some((l) => l.includes(USER_ANSWER) && l.includes('R1')), p);
+  // Without run rulings there is no heading.
+  assert.ok(!implementPrompt(manifest(), task('T2'), WHERE, H('b0')).includes(RUN_RULINGS));
+});
+
+test('fix rounds commit with the fix message, and reviewers are told it is expected', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt } = await loadHelpers(['finalReviewPrompt',
+    'combinedFinalReviewPrompt']);
+  const m = manifest();
+  const fs = [finding('the bug')];
+  assert.ok(fixPrompt(m, task('T2'), WHERE, fs, done(H('b0'), H('h1')), H('h1'))
+    .includes('fix: address review findings for Task T2'));
+  const unit = { id: 'T2-T3', title: 'batch', files: [], tier: 'light', security: false, batch: 'k',
+    tasks: [task('T2', { tier: 'light' }), task('T3', { tier: 'light' })] };
+  const batchFix = fixPrompt(m, unit, WHERE, fs, done(H('b0'), H('h1')), H('h1'));
+  assert.ok(batchFix.includes('fix: address review findings for Batch T2-T3'), batchFix);
+  const reviewers = {
+    review: reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, H('h1'), H('h2'), fs),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(reviewers)) {
+    assert.ok(text.includes(TASK_FIX_MESSAGE), `${name}: the task fix message`);
+    assert.ok(text.includes(FINAL_FIX_MESSAGE), `${name}: the final fix message`);
+  }
+});
+
+test('an implement retry uses the fix message only when review findings are behind it', () => {
+  const m = manifest();
+  const later = (p) => p.split('\n').slice(p.split('\n').findIndex((l) => l.includes("holds the task's first commit")))
+    .slice(0, 2).join(' ');
+  const blocked = implementPrompt(m, task('T2'), WHERE, H('b0'), { reason: 'T2 implement blocked: x', findings: null });
+  assert.ok(later(blocked).includes('chore: continue Task T2'), blocked);
+  assert.ok(!blocked.includes(`${TASK_FIX_MESSAGE} T2`), blocked);
+  // A first attempt has no first commit to add to: no continuation line.
+  const first = implementPrompt(m, task('T2'), WHERE, H('b0'));
+  assert.ok(!first.includes("holds the task's first commit"), first);
+  assert.ok(!first.includes('chore: continue Task'), first);
+  // A reopened task continues its earlier commits.
+  assert.ok(later(implementPrompt(m, task('T2'), WHERE, H('b0'), null, null, true)).includes('chore: continue Task T2'));
+  const reviewed = implementPrompt(m, task('T2'), WHERE, H('b0'),
+    { reason: 'review requested changes', findings: [finding('the bug')] });
+  assert.ok(later(reviewed).includes(`${TASK_FIX_MESSAGE} T2`), reviewed);
+  assert.ok(reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')).includes('chore: continue Task <id>'),
+    'reviewers are told the continuation message');
+});
+
+test('the final fix and the post-integrate fix use their own messages', async () => {
+  const { postIntegrateFixPrompt } = await loadHelpers(['postIntegrateFixPrompt']);
+  const m = manifest({ hooks: { post_integrate: 'smoke test' } });
+  const finalFix = finalFixPrompt(m, [{ ...finding('the bug'), id: 'F1' }], H('h1'));
+  assert.ok(finalFix.includes(FINAL_FIX_MESSAGE), finalFix);
+  assert.ok(!finalFix.includes(POST_INTEGRATE_FIX_MESSAGE), finalFix);
+  const post = postIntegrateFixPrompt(m, 'npm test failed');
+  assert.ok(post.includes(POST_INTEGRATE_FIX_MESSAGE), post);
+  assert.ok(!post.includes(FINAL_FIX_MESSAGE), post);
+});
+
+// ---- Structured cannot_verify (1.3.1) ----
+
+test('review prompts define cannot_verify and ask for the structured form', async () => {
+  const { finalReviewPrompt, combinedFinalReviewPrompt, reviewSchema, finalReviewSchema, cannotVerifyItemSchema,
+    cannotVerifyLines } = await loadHelpers(['finalReviewPrompt', 'combinedFinalReviewPrompt', 'reviewSchema',
+    'finalReviewSchema', 'cannotVerifyItemSchema', 'cannotVerifyLines']);
+  // The prompt names exactly the fields the schema requires, in its order.
+  const fields = cannotVerifyItemSchema().required;
+  assert.deepEqual(Object.keys(cannotVerifyItemSchema().properties), fields);
+  const m = manifest();
+  const prompts = {
+    review: reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')),
+    reReview: reReviewPrompt(m, task('T2'), WHERE, H('h1'), H('h2'), [finding('the bug')]),
+    finalSp: finalReviewPrompt(m, 'sp', null),
+    finalSecurity: finalReviewPrompt(m, 'security', null),
+    finalCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combined: combinedFinalReviewPrompt(m, { e2e: null }),
+  };
+  for (const [name, text] of Object.entries(prompts)) {
+    assert.ok(text.includes(`cannot_verify = [{${fields.join(', ')}}]`), `${name}: the fields`);
+    // The whole definition, exclusions included, from its one source.
+    assert.ok(text.includes(cannotVerifyLines().join('\n')), `${name}: the definition`);
+  }
+  for (const schema of [reviewSchema(), finalReviewSchema()]) {
+    const items = schema.properties.cannot_verify.items;
+    assert.ok(Array.isArray(items.anyOf), JSON.stringify(items));
+    const obj = items.anyOf.find((s) => s.type === 'object');
+    assert.deepEqual(obj.required.slice().sort(), ['check_by', 'requirement', 'source', 'why']);
+    assert.ok(items.anyOf.some((s) => s.type === 'string'), 'plain strings stay accepted');
+  }
+});
+
+test('cannotVerifyText and isSourced', async () => {
+  const { cannotVerifyText, isSourced } = await loadHelpers(['cannotVerifyText', 'isSourced']);
+  const item = { requirement: 'bash 3.2', source: 'spec Testing', why: 'no macOS', check_by: 'CI' };
+  assert.equal(cannotVerifyText(item), 'bash 3.2 (spec Testing): no macOS; check: CI');
+  assert.equal(cannotVerifyText('a note'), 'a note');
+  assert.equal(isSourced(item), true);
+  assert.equal(isSourced({ ...item, source: '' }), false);
+  assert.equal(isSourced('a note'), false);
+  assert.equal(isSourced(null), false);
+});
+
+test('an approving review keeps its minor findings, numbered by task, and notes show cannot_verify text', async () => {
+  const minor = { severity: 'minor', file: 'src/a.js', line: 3, issue: 'naming', fix: 'rename' };
+  const cv = { requirement: 'bash 3.2', source: 'Task 2 Step 3', why: 'no macOS', check_by: 'CI' };
+  const s = stub({
+    'T2 implement': [done(H('b0'), H('h1'))],
+    'T2 review': [{ verdict: 'approve', findings: [minor, { ...minor, issue: 'typo' }], cannot_verify: [cv] }],
+  });
+  const r = await runTask(manifest(), task('T2'), WHERE, H('b0'), s.io);
+  assert.equal(r.status, 'done');
+  assert.deepEqual(r.minor_findings.map((f) => [f.id, f.issue]), [['T2-1', 'naming'], ['T2-2', 'typo']]);
+  assert.ok(r.notes.includes('cannot verify: bash 3.2 (Task 2 Step 3): no macOS; check: CI'), r.notes);
+  // A plan task id with no letter gets the T prefix.
+  const s2 = stub({
+    '3 implement': [done(H('b0'), H('h1'))],
+    '3 review': [{ verdict: 'approve', findings: [minor], cannot_verify: [] }],
+  });
+  const r2 = await runTask(manifest(), task('3'), WHERE, H('b0'), s2.io);
+  assert.deepEqual(r2.minor_findings.map((f) => f.id), ['T3-1']);
 });

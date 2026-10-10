@@ -54,16 +54,16 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `excluded` | Optional `[{id, reason}]`: plan tasks the run leaves out (after-merge, operator, manual, or done by a hook), shown in the confirmation header. `scripts/coverage` checks that every plan task runs or is here. |
 | `allow_deferral` | Optional boolean, default `true`: whether the adjudicator may park or unblock a task (security tasks never). `false` makes every park or unblock a stop. Show it in the table header. |
 | `deferred` | Resume: the `deferred` list of `ledger status`. Those tasks are done for scheduling but keep the run from being accepted. |
-| `hooks` | Optional `post_integrate` (instructions for an agent after integration, e.g. a contract check) and `e2e` (instructions for an end-to-end check, e.g. "Follow plan Task T24"). |
+| `hooks` | Optional: a manifest without it runs as if it were `{}` (1.3.0 required the key; its manifests still validate). It holds optional `post_integrate` (instructions for an agent after integration, e.g. a contract check) and `e2e` (instructions for an end-to-end check, e.g. "Follow plan Task T24"). |
 | `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, CPU count + 2)` (the count from `os.cpu_count()`), `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
 | `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
 | `profile` | `full` (default) or `lite` (see Profiles). |
 | `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved}`. Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
-| `start_points` | `{prelude, join}` feature heads, copied verbatim from `ledger status` after setup. |
+| `start_points` | The feature heads `ledger status` prints after setup, copied exactly as it prints them: `prelude` from setup, `join` only once a launch got past integration (a new run has no `join` key). |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status --plan`. Never by hand. |
 | `backfill` | Resume only: `{<task id>: {base, head}}` for done tasks, from `ledger backfill` (see Backfill below). Required for every done task; each `head` is the next task's review base. |
-| `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents. |
+| `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents as "The user's answer for this task". |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e`, `post-integrate`, and `post-integrate fix` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it (throws or returns no result) is retried once on the default type, and both attempts count toward `max_agents`. After the first such throw, or the second typed agent that returns no result while its retry succeeds, every later agent of the run uses the default type: the run log says so and the run result carries `agent_type_fallback: true`. |
 | `skill_dir` | `<skill_dir>`. |
@@ -190,15 +190,45 @@ findings (`adjudicator_stop: security`), and `allow_deferral: false` refuses it 
 (`adjudicator_stop: deferral_not_allowed`). A task adjudicated twice and still blocked ends with
 `adjudication_cap`. Every ruling is a
 ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
-`preflight.rulings`. Both appear in the hand-back under "Rulings made on your behalf". Under
+`preflight.rulings`.
+
+Run rulings: pre-flight's own rulings, then the adjudicator's ruling on pre-flight conflicts,
+reach every task not yet done and every final reviewer as "Rulings already made for this run
+(binding)", in that order, each quoted as written, so no agent decides a settled point again.
+The workflow builds that list (`run_rulings`) itself during the run and never reads it from
+the manifest file. The user's answers (`notes`) keep their own label, and an adjudicator's
+`answer` or `clarify_plan` for one task reaches only that task. Both appear in the hand-back under "Rulings made on your behalf". Under
 `supervised` there is no adjudicator: a blocked task, a question, or the review cap
 (`review_rounds`) stops the run.
+
+## Fix commits
+
+The plan's commit message applies to a task's first commit. Since the commit rules forbid
+amending, every later commit (a fix, or more work on a task) carries a message of its own, in
+the form the commit rules use (for example their prefix style):
+
+- a task fix round: `fix: address review findings for Task <id>` (a batch: `fix: address
+  review findings for Batch <first>-<last>`);
+- the final fix: `fix: address the final review findings`;
+- the post-integration fix: `fix: make the post-integration check pass`;
+- an implement attempt that adds to a task's first commit (a retry, an escalation, or a
+  reopened task; a first attempt is not told this): the task fix round message when review
+  findings are behind it, else `chore: continue Task <id>` (no review raised anything for it
+  to fix).
+
+Every reviewer, re-reviewer, and final lens is told the same, and that none of the plan's
+message on a first commit, a fix message on a fix commit, and the continuation message is a
+commit-rule finding (before 1.3.1 each fix round repeated the task's message, and reviewers
+raised it).
 
 ## Budgets
 
 - `limits.max_agents`: set to 2 x the dry-run estimate (which lists the Verify agents as an
   upper bound: `verify` runs whenever a check command exists, the rechecks only when later
-  commits made earlier evidence stale). A refused agent ends its task or phase without work;
+  commits made earlier evidence stale). The `model` and `effort` of each dry-run agent are a
+  worst case for its first attempt (`final_fix` is listed on Opus, though a fix of only minor
+  or docs-only findings starts on Sonnet); escalations, retries, and fix rounds are extra
+  agents the list does not show. A refused agent ends its task or phase without work;
   the run stops with reason `budget`, resumable, never accepted.
 - `limits.max_rulings`: 25 adjudicator rulings per run.
 - The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
@@ -219,11 +249,16 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   cap.
 - Spend across launches: after every launch returns (a relaunch included, never a dry run),
   record what it spent:
-  `<python> <skill_dir>/scripts/ledger append <ledger_dir> _run '{"task":"_run","event":"run_ended","status":"<status>","agents":<agents_spawned>,"rulings":<rulings_spent>}'`
-  (`status`: the run status, or `unaccepted` for complete but not accepted). `ledger status`
+  `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned> <rulings_spent>`
+  (`status`: the run status, or `unaccepted` for complete but not accepted). It appends the
+  `run_ended` event to `<ledger_dir>/_run.jsonl` and refuses (exit 2, nothing recorded) a
+  count that is not an integer of 0 or more, or an empty status. At the end of a run it goes in
+  one command line with the lock release (SKILL.md Launch step 5). `ledger status`
   sums them as `spent`; `spent.rulings` is at least the adjudicator's own `ruling` events (they
   survive a session that died), and `spent.unrecorded_launches` counts launches that recorded
-  no end (their agents are not in `spent.agents`: say so). On a resume, set
+  no end (their agents are not in `spent.agents`: say so). That count includes a launch still
+  in progress, or one whose `ledger ended` has not run yet: a `ledger status` taken during a
+  run shows at least 1. On a resume, set
   `limits.max_rulings` to the run's ruling cap (25, or what the user set at the first table)
   minus `spent.rulings` (floor 0; the user may raise it at the table), keep `max_agents` at 2 x
   the new dry-run estimate (the work left), and show `spent` in the table header.
@@ -232,6 +267,13 @@ ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulin
   own). Agent count is the only budget the run enforces; tokens and time per agent are reported
   afterwards by `scripts/run-report`, not capped. This has not been checked in a live Workflow
   session.
+- Concurrency: the Workflow tool itself caps how many agents run at once
+  (`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS`; by default it follows the machine's CPU
+  count). Agents past the cap wait for a free slot, so the table's "lanes at once"
+  (`lanes_effective`, from `limits.max_parallel_lanes`) can overstate how many lanes really
+  progress together when the cap is lower. Raising the cap runs more agents at once, and each
+  running agent takes memory, so raise it only on a machine with memory to spare; lowering
+  `max_parallel_lanes` instead keeps the table accurate.
 
 ## Active-run markers and stops
 
@@ -263,11 +305,19 @@ Output: `agents` (per agent: label, phase, task, role, requested and resolved mo
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
-that cannot be read is the string `unavailable`, never a guess. Transcripts often keep only
+that cannot be read is the string `unavailable`, never a guess. Effort comes from the
+workflow result file, which the Workflow tool writes to `<session>/workflows/wf_<id>.json` for
+a transcript directory `<session>/subagents/workflows/wf_<id>/` (`<transcript_dir>.json`
+beside the directory is the fallback): its `agent_settings`
+(`[{label, model, effort}]`, one per agent started, in start order) gives every agent's
+effort, not only the implementers'; without that file an agent's effort is `unavailable`.
+Transcripts often keep only
 the mid-stream output count of a message (`stop_reason` null); such an agent's
-`output_tokens` is `unavailable` and `output_tokens_min` holds the lower bound; totals and
-tiers sum only complete agents, so when `output_incomplete` > 0 report `output_tokens_min`
-as the output figure (a minimum). Report both,
+`output_tokens` is `unavailable` and `output_tokens_min` holds the lower bound. When any
+agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`')
+`output_tokens` is `unavailable` too, since the sum would be an undercount, and
+`output_tokens_min` still sums every count there is: when `output_incomplete` > 0 report
+`output_tokens_min` as the output figure (a minimum). Report both,
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
@@ -283,17 +333,50 @@ but evidence is missing or covers another revision). Reasons are `{kind, class, 
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `fix_unreviewed`, `final_fix_unreviewed` (the
 final fix committed, but no re-review judged its head), `deferred_task`, `task_not_done`.
-Warnings (open minor findings, cannot-verify items, checks that left the checkout dirty or did
-not say) never block. The checks evidence is the
+Warnings (open minor findings, cannot-verify entries with a source, checks that left the
+checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): an agent that misreports
-it is not caught by the run. Show the
+it is not caught by the run. `run-checks` keeps the commands' output out of its own stdout and
+stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`,
+or a new temporary directory without `--out`, which the caller removes once it has read the logs:
+agents are told to), and each result carries `log` (its path) and `tail` (its last 20 lines, kept
+to the last 4096 characters and starting with `[truncated] ` when cut, so one long line stays
+out too). `--root` checks the JSON and its logs only with `--out`. Verify runs once at the delivered revision, after the final fix and
+before the final re-review, which gets its result and does not rerun the checks; the E2E and
+post-integrate rechecks are told the project checks already ran at that commit and run only
+what their hook adds. Show the
 status and every reason first; only `accepted` is delivered work. A reason or warning the
 user explicitly accepts is recorded with `ledger accept <ledger_dir> <repo root>
 <delivered_sha> "<what>"` (an `accepted` event; `ledger status` lists them under `accepted`)
 and shown as accepted by the user, never folded into `accepted`.
+Each task result's `commits` is its range `[base, head]` (the base before its first commit and
+its last head), not a list of commits; the ledger's `committed` events list every commit.
+
+`cannot_verify`, in every task review and re-review and every final lens result, is
+`[{requirement, source, why, check_by}]`: a requirement the agent needed to check and could
+not, with `source` citing the plan task step or spec section it comes from. Things it
+verified, verdicts or decisions, limits the plan already accepts, the instruction not to
+re-run tests, and problems (those are findings) do not belong there. Acceptance warns only on
+entries with a non-empty `source`; the run's own gap notes ("the e2e check returned no
+result") are entries with `source: "run"`, so they warn too. A plain string (an agent from
+before 1.3.1) is kept in the report as a note, not a warning.
+
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
+Findings two lenses report at the same `file` and `line` (when `line` > 0), or on the same
+`commit <sha>` file, are merged: the merged finding keeps every lens and the issue text,
+severity, and fix of its most severe report (the first of those on a tie), so the text
+matches the severity, and the other texts as `also_reported`; every other finding
+stays separate. Every minor finding of an approved task review gets an id `<task>-<n>`, with
+`T` put in front of a task id that starts with a digit (task 3 gives `T3-1`, task T2 gives
+`T2-1`), and goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
+finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
+them in the report, so minors from task reviews are not lost. Task minors are not stored in
+the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
+so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
+`cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
+naming those tasks (check them in the earlier launch's report).
 The fixer gives each id a disposition with its evidence; the re-review names the revision it
 judged (`head`). A disposition without evidence, a re-review of another revision than the fix
 head, or two different dispositions or results for one id leave the finding open (the new
@@ -313,7 +396,9 @@ Consumes (`{task, producer, what}`, after dropping entries with an unknown or do
 unknown producer, or a task equal to its producer; a task done and reviewed is dropped, one done but still to review is kept); the hand-back lists them under
 "Dependencies pre-flight added" so the user can name them in the plan. When the run result has
 `agent_type_fallback: true`, say in the report that the run switched to the default agent type
-partway through (see `agent_type` under Manifest fields).
+partway through (see `agent_type` under Manifest fields). The run result's `agent_settings`
+lists the model and effort of every agent started, in start order (what `run-report` reads
+for effort).
 
 ## Backfill
 
@@ -376,6 +461,13 @@ h="$(printf '%s' "$p" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/shadow/$h"
 test -f "$d/pl-baseline" && echo "existing shadow: $d"
 ```
+
+The shadow repo's config sets `core.autocrlf=false`, so lane worktrees hold the project's
+exact bytes whatever the user's git settings. A shadow made before 1.3.1 lacked that setting:
+on a machine with `core.autocrlf=true`, the first setup after the upgrade sees every text file
+in its lane worktrees as modified (they were checked out with CRLF), lists them as discarded
+edits, saves a preserved ref, and checks them out again. That happens once and loses nothing
+a task committed.
 
 (`PL_SHADOW_BASE` replaces the base directory when set.) `shadow init` on an existing shadow
 prints it and keeps its old baseline, which is right only for resuming that run. For a new

@@ -92,15 +92,63 @@ function commandsText(m, laneId, dir = null) {
   const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`);
+    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
+      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+      '  (the log\'s parent) once you have read what you need.');
   }
   return lines.join('\n');
 }
 
+// One line per finding; a finding merged from several reports
+// (dedupeFindings) also lists the other reports' issue text.
 function findingsText(findings) {
   if (!Array.isArray(findings) || findings.length === 0) return '(none listed)';
   return findings.map((f, i) => `${present(f.id) ? `[${f.id}]` : `${i + 1}.`} [${f.severity}] ${f.file}:${f.line}`
-    + ` - ${f.issue} (suggested fix: ${f.fix})`).join('\n');
+    + ` - ${f.issue} (suggested fix: ${f.fix})`
+    + (Array.isArray(f.also_reported) && f.also_reported.length > 0
+      ? ` Also reported here: ${f.also_reported.join('; ')}` : '')).join('\n');
+}
+
+// One cannot_verify entry (spec 1.3.1): a requirement from the plan or spec
+// the reviewer needed to check and could not, with source citing the task
+// step or spec section, why it could not be checked, and how to check it.
+function cannotVerifyItemSchema() {
+  return {
+    type: 'object',
+    properties: {
+      requirement: { type: 'string' },
+      source: { type: 'string' },
+      why: { type: 'string' },
+      check_by: { type: 'string' },
+    },
+    required: ['requirement', 'source', 'why', 'check_by'],
+  };
+}
+
+// A cannot_verify entry as text: '<requirement> (<source>): <why>; check:
+// <check_by>' for an object, the string itself for a plain string (an agent
+// from before 1.3.1).
+function cannotVerifyText(item) {
+  if (item === null || typeof item !== 'object') return String(item);
+  return `${item.requirement} (${item.source}): ${item.why}; check: ${item.check_by}`;
+}
+
+// A cannot_verify entry that names where its requirement comes from: only
+// these warn at acceptance; a plain string is kept as a note.
+function isSourced(item) {
+  return item !== null && typeof item === 'object' && present(item.source);
+}
+
+// What a reviewer returns as cannot_verify, and what it must leave out.
+function cannotVerifyLines() {
+  return [
+    'cannot_verify = [{requirement, source, why, check_by}], one per requirement from the plan or spec that you',
+    'needed to check and could not: source = the task step or spec section it comes from, why = why you could',
+    'not check it, check_by = how it can be checked. Leave out things you verified, verdicts or decisions,',
+    'limits the plan already accepts, the instruction not to re-run tests, and problems (those are findings);',
+    'empty when there is nothing.',
+  ];
 }
 
 // The note for a finding with file "start-task" (reviewStartFailure): the
@@ -110,6 +158,50 @@ function startFindingNote(findings) {
   if (!Array.isArray(findings) || !findings.some((f) => f && f.file === 'start-task')) return [];
   return ['A finding with file "start-task" is the reviewer\'s start command failing (a setup problem, not the',
     'code): change no code for it, and when it is the only finding, report blocked quoting it.'];
+}
+
+// The rulings already made for this run (m.run_rulings, set only by the
+// workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
+// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
+// ruling quoted as written. Empty when there are none.
+function runRulingsLines(m) {
+  const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
+  if (rulings.length === 0) return [];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+}
+
+// The message a task fix round commits with: 'fix: address review findings
+// for Task <id>', or for a batch 'for Batch <first>-<last>'.
+function fixCommitMessage(task) {
+  return `fix: address review findings for ${isBatch(task) ? 'Batch' : 'Task'} ${task.id}`;
+}
+
+// The message an implement attempt commits further work with once HEAD holds
+// the task's first commit and no review findings are behind the attempt (a
+// retry after a blocked or escalated attempt, a reopened task): 'chore:
+// continue Task <id>', so history shows no fix of findings no review raised.
+function continueCommitMessage(task) {
+  return `chore: continue Task ${task.id}`;
+}
+
+// What every reviewer, re-reviewer and final lens is told about fix commits:
+// each fix message, and that neither the plan's message on a task's first
+// commit nor a fix message on a fix commit is a commit-rule finding.
+function fixMessagesLines() {
+  return [
+    'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
+    '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
+    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
+    'with `chore: continue Task <id>`.',
+    "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
+    'continuation commit its continuation message; none of them is a commit-rule finding.',
+  ];
+}
+
+// The line that tells a fix agent which message to commit with.
+function commitWithLine(message) {
+  return `Commit with the message \`${message}\`, in the form the commit rules use (for example their prefix style).`;
 }
 
 // Shared context every task agent gets. guidance (optional) is
@@ -144,6 +236,7 @@ function taskContext(m, task, where, guidance = null) {
     `Worktree: ${where.dir} (branch ${where.branch}). Work only there; do not switch branches.`,
     checkoutRules(where.dir, where.branch),
     ...briefs,
+    ...runRulingsLines(m),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -341,13 +434,14 @@ function reviewResultText(m, task, where, rounds, head) {
     'You are read-only: never modify the worktree, the index, HEAD, or any branch. Writing the task brief, the',
     'review package, and the ledger line (all outside the repo) is allowed.',
     'Also check every commit message in the range against the commit rules.',
+    ...fixMessagesLines(),
     'Report a commit message that breaks the commit rules as a minor finding (file "commit <sha>", line 0):',
     'history is never rewritten, so it cannot hold up the task; it is reported to the user.',
     'Return a structured result: verdict "changes" when the spec is not met or any critical or important',
     'finding exists, otherwise "approve" (minor findings may accompany approve); findings = [{severity',
     '("critical", "important", or "minor"), file, line (0 when no single line applies), issue, fix}];',
-    'cannot_verify = requirements you could not verify from the diff. That result replaces the output format',
-    'named in the instructions above.',
+    ...cannotVerifyLines(),
+    'That result replaces the output format named in the instructions above.',
     isBatch(task)
       ? 'Only when your verdict is approve, record it for every task of the batch with:'
       : 'Only when your verdict is approve, record it with:',
@@ -413,6 +507,16 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
     `Task base: ${base}. Everything on this branch after it is this ${noun}'s work, and its review covers`,
     `${base}..HEAD. HEAD may already hold commits from an earlier attempt at this ${noun}: start from the current`,
     'HEAD, keep what is right, and fix what is not.',
+    // A batch's commits are one per task, each with its brief's message. A
+    // first attempt has no first commit to add to, so only a retry or a
+    // reopened task gets the line; the fix message only when review findings
+    // are behind this attempt.
+    ...(batch || (!retry && !reopen) ? [] : [
+      'When HEAD already holds the task\'s first commit, commit further changes with the message',
+      `\`${retry && Array.isArray(retry.findings) && retry.findings.length > 0
+        ? fixCommitMessage(task) : continueCommitMessage(task)}\`, in the form the commit rules use (for example`,
+      'their prefix style).',
+    ]),
   ].join('\n'));
   if (retry) {
     parts.push('', [
@@ -497,6 +601,7 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ...reopenLines(m, task, where, reopen),
     `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
     `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
     ...startFindingNote(findings),
@@ -581,7 +686,8 @@ function reviewSchema() {
           required: ['severity', 'file', 'line', 'issue', 'fix'],
         },
       },
-      cannot_verify: { type: 'array', items: { type: 'string' } },
+      // Plain strings: agents from before 1.3.1 (kept as notes).
+      cannot_verify: { type: 'array', items: { anyOf: [cannotVerifyItemSchema(), { type: 'string' }] } },
     },
     required: ['verdict', 'findings', 'cannot_verify'],
   };

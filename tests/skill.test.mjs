@@ -8,6 +8,7 @@ const SKILL_MD = join(SKILL_DIR, 'SKILL.md');
 const REFERENCE_MD = join(SKILL_DIR, 'reference.md');
 const ADOPT_MD = join(SKILL_DIR, 'adopt.md');
 const README_MD = join(SKILL_DIR, 'README.md');
+const CI_YML = join(SKILL_DIR, '.github', 'workflows', 'tests.yml');
 
 const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
   'execution-method handoff), or when resuming a stopped parallel-lanes run.';
@@ -246,5 +247,48 @@ test('README has a Windows section', () => {
     assert.ok(text.includes(term), `README lacks ${term}`);
   }
   assert.match(text, /^#+ .*Windows/m, 'README has no Windows heading');
-  assert.match(text, /preliminary/i, 'README does not call Windows support preliminary');
+});
+
+// The text of one '## <heading>' section of a markdown file, up to the next one.
+function section(text, heading) {
+  const start = text.indexOf(`## ${heading}`);
+  assert.ok(start >= 0, `no section ${heading}`);
+  const next = text.indexOf('\n## ', start + 1);
+  return text.slice(start, next === -1 ? undefined : next).replace(/\s+/g, ' ');
+}
+
+// The launch message reaches every agent with priority over the plan, so
+// the session asks for a plain yes and says why.
+test('SKILL.md asks for a plain yes at the table and says why', () => {
+  const confirmation = section(read(SKILL_MD).toString('utf8'), 'Confirmation');
+  assert.ok(confirmation.includes('plain yes'), confirmation);
+  assert.ok(confirmation.includes('every agent'), confirmation);
+});
+
+test('SKILL.md checks for a git identity before launch', () => {
+  const building = section(read(SKILL_MD).toString('utf8'), 'Building the manifest');
+  assert.ok(building.includes('git -C <project> var GIT_COMMITTER_IDENT'), building);
+});
+
+test('SKILL.md records the spend and releases the lock in one step, and prints the dry run notices', () => {
+  const launch = section(read(SKILL_MD).toString('utf8'), 'Launch');
+  assert.ok(launch.includes('scripts/ledger ended'), launch);
+  assert.ok(launch.includes('notices'), launch);
+});
+
+test('reference.md documents the Workflow concurrency cap', () => {
+  const text = read(REFERENCE_MD).toString('utf8');
+  assert.ok(text.includes('CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS'), 'reference.md lacks the concurrency cap');
+});
+
+test('README asks for Node 22 and no longer calls Windows preliminary', () => {
+  const text = read(README_MD).toString('utf8');
+  assert.ok(text.includes('Node 22') || text.includes('**node** 22'), 'README does not ask for Node 22');
+  assert.ok(!/preliminary/i.test(text), 'README still calls Windows support preliminary');
+});
+
+test('CI tests Node 22, not Node 18', () => {
+  const text = read(CI_YML).toString('utf8');
+  assert.ok(text.includes('node: 22'), 'CI has no Node 22 job');
+  assert.ok(!text.includes('node: 18'), 'CI still has a Node 18 job');
 });
