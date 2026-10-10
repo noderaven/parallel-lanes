@@ -64,7 +64,7 @@ const finding = (issue, file = 'src/a.js', line = 3) => ({ severity: 'important'
 // at f1, the delivered revision.
 function phaseScript(extra = {}) {
   return {
-    'pre-flight': [{ conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] }],
+    'pre-flight': [{ conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], code_deps: [] }],
     integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
     'post-integrate': [{ status: 'done', head: H('P1'), notes: 'contracts ok' }],
     e2e: [{ head: H('T5-h'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
@@ -206,7 +206,7 @@ test('happy path: complete, phases in order, report filled in', async () => {
     assert.deepEqual(t.commits, [bases[id], H(`${id}-h`)]);
   }
   assert.deepEqual(result.stopped_lanes, []);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [] });
+  assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], schedule: [] });
   assert.equal(result.integrate.status, 'done');
   assert.equal(result.integrate.post_integrate.status, 'done');
   assert.deepEqual(result.e2e.items.map((i) => i.result), ['PASS']);
@@ -316,7 +316,7 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
 
 test('pre-flight conflicts stop before any implement (supervised)', async () => {
   const m = manifest({ autonomy: 'supervised' });
-  const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [], undeclared: [] }] });
+  const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [], undeclared: [], code_deps: [] }] });
   const { result, calls } = await run(m, script);
   assert.equal(result.status, 'preflight_conflicts');
   assert.deepEqual(result.preflight.conflicts, ['plan contradicts spec on X']);
@@ -1377,7 +1377,7 @@ const JOIN_START = /run_started.*"phase":"join"/;
 
 test('autonomous pre-flight conflict: an adjudicator answer continues the run and binds every task', async () => {
   const script = {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [], code_deps: [] }] }),
     ...taskScript(ALL),
     'run adjudicate': [{ outcome: 'answer', text: 'use the v2 contract' }],
   };
@@ -1397,7 +1397,7 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
 
 test('autonomous pre-flight conflict: park continues, stop yields preflight_conflicts, unavailable stops', async () => {
   const withAdj = (adj) => ({
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [], code_deps: [] }] }),
     ...taskScript(ALL),
     'run adjudicate': adj,
   });
@@ -1406,14 +1406,14 @@ test('autonomous pre-flight conflict: park continues, stop yields preflight_conf
   assert.ok(park.result.preflight.rulings.includes('defer the overlap'));
 
   const stop = await run(manifest(), {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [], code_deps: [] }] }),
     'run adjudicate': [{ outcome: 'stop', text: 'security call', stop_condition: 'security' }],
   });
   assert.equal(stop.result.status, 'preflight_conflicts');
   assert.ok(!labels(stop.calls).some((l) => l.endsWith('implement')));
 
   const un = await run(manifest(), {
-    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [] }] }),
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['c'], rulings: [], undeclared: [], code_deps: [] }] }),
     'run adjudicate': [null],
     'run adjudicate retry': [null],
   });
@@ -1424,7 +1424,7 @@ test('autonomous pre-flight conflict: park continues, stop yields preflight_conf
 // ---- pre-flight undeclared dependencies (consumed contracts) ----
 
 const undeclaredScript = (entries, extra = {}) =>
-  phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: entries }], ...extra });
+  phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: entries, code_deps: [] }], ...extra });
 
 test('pre-flight undeclared entries reach every brief of their task', async () => {
   const entry = { task: 'T2', producer: 'T1', what: 'reads the T1 format' };
@@ -1569,6 +1569,91 @@ test('the pre-flight prompt has check 4 and its schema requires undeclared', () 
   assert.ok(s.required.includes('undeclared'));
   assert.deepEqual(s.properties.undeclared.items.required, ['task', 'producer', 'what']);
   for (const f of ['task', 'producer', 'what']) assert.equal(s.properties.undeclared.items.properties[f].type, 'string');
+});
+
+// ---- pre-flight code dependencies (F8) ----
+
+const codeDepScript = (codeDeps, extra = {}) =>
+  phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: codeDeps }], ...extra });
+
+// T1 and T2 in different lanes: a code dependency of T2 on T1 cannot be met.
+const splitLanes = (overrides = {}) => manifest({
+  prelude: [task('T0')],
+  lanes: [
+    { id: 'alpha', name: 'Lane alpha', tasks: [task('T1'), task('T3')] },
+    { id: 'beta', name: 'Lane beta', tasks: [task('T2'), task('T4')] },
+  ],
+  ...overrides,
+});
+
+for (const autonomy of ['autonomous', 'supervised']) {
+  test(`an unmet code dependency from pre-flight stops the run before any task (${autonomy})`, async () => {
+    const entry = { task: 'T2', producer: 'T1', what: 'calls parse()' };
+    // A prose conflict beside it: the adjudicator would run for it in
+    // autonomous mode, and must not.
+    const script = phaseScript({
+      'pre-flight': [{ conflicts: ['T2 needs the T1 parser'], rulings: [], undeclared: [], code_deps: [entry] }],
+    });
+    const { result, calls } = await run(splitLanes({ autonomy }), script);
+    assert.equal(result.status, 'preflight_conflicts', JSON.stringify(result));
+    assert.deepEqual(result.preflight.schedule, [{ ...entry, fix: "move T2 to join, or into T1's lane after it" }]);
+    assert.ok(result.preflight.schedule[0].fix.includes('move T2 to join'));
+    assert.ok(!labels(calls).some((l) => l.includes('adjudicate')), labels(calls).join(', '));
+    assert.ok(!labels(calls).includes('T2 implement'), labels(calls).join(', '));
+    assert.deepEqual(labels(calls), ['pre-flight']);
+  });
+}
+
+test('a met code dependency from pre-flight only adds context', async () => {
+  const entry = { task: 'T2', producer: 'T1', what: 'calls parse()' };
+  const { result, calls, logs } = await run(manifest(), { ...codeDepScript([entry]), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(result.preflight.schedule, []);
+  assert.deepEqual(result.preflight.undeclared, [entry]);
+  assert.ok(calls.find((c) => c.label === 'T2 implement').prompt.includes("--also 'T2' 'T1'"));
+  assert.ok(logs.includes('parallel-lanes: pre-flight: T2 also consumes T1 (calls parse())'), JSON.stringify(logs));
+});
+
+test('a prose conflict is still adjudicated', async () => {
+  const script = {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['x'], rulings: [], undeclared: [], code_deps: [] }] }),
+    ...taskScript(ALL),
+    'run adjudicate': [{ outcome: 'clarify_plan', text: 'read x as y' }],
+  };
+  const { result, calls } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(labels(calls).includes('run adjudicate'));
+  assert.ok(result.preflight.rulings.includes('read x as y'), JSON.stringify(result.preflight));
+  assert.deepEqual(result.preflight.schedule, []);
+});
+
+test('the schedule fix names the move for a join or prelude producer; malformed code_deps are dropped', async () => {
+  const m = manifest({ prelude: [task('T1'), task('T0')], join: [task('T5'), task('T6')] });
+  const entries = [
+    { task: 'T5', producer: 'T6', what: 'uses the T6 table' },
+    { task: 'T1', producer: 'T0', what: 'imports T0' },
+    { task: 'T2', producer: 'T9', what: 'unknown producer' },
+    { task: 'T3', producer: 'T3', what: 'itself' },
+  ];
+  const { result, calls, logs } = await run(m, codeDepScript(entries));
+  assert.equal(result.status, 'preflight_conflicts', JSON.stringify(result));
+  assert.deepEqual(result.preflight.schedule, [
+    { ...entries[0], fix: 'move T5 to join after T6' },
+    { ...entries[1], fix: 'move T1 after T0 in the prelude' },
+  ]);
+  assert.deepEqual(labels(calls), ['pre-flight']);
+  const dropped = logs.filter((l) => l.startsWith('parallel-lanes: pre-flight: dropped code_deps entry '));
+  assert.equal(dropped.length, 2, JSON.stringify(logs));
+  for (const e of entries.slice(2)) assert.ok(dropped.some((l) => l.includes(`entry ${JSON.stringify(e)} (`)), JSON.stringify(e));
+});
+
+test('the pre-flight prompt sends code dependencies to code_deps and its schema requires it', () => {
+  const p = preflightPrompt(manifest());
+  assert.ok(p.includes('Report each in code_deps, not as a conflict: return it as {task, producer, what}'), p);
+  assert.ok(!p.includes('must be in join'), p);
+  const s = preflightSchema();
+  assert.ok(s.required.includes('code_deps'));
+  assert.deepEqual(s.properties.code_deps, s.properties.undeclared);
 });
 
 test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the opus rerun reviews it', async () => {
@@ -2169,7 +2254,7 @@ function fixRoundScript(extra = {}) {
 test('pre-flight rulings reach every task prompt and the final lenses as run rulings', async () => {
   const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
   const { result, calls } = await run(manifest(),
-    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [] }] }));
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [], code_deps: [] }] }));
   assert.equal(result.status, 'complete', JSON.stringify(result));
   const prompts = [...taskCalls(calls), ...calls.filter((c) => LENSES.includes(c.label))];
   for (const role of ['T2 implement', 'T2 review', 'T2 fix 1', 'T2 re-review 1', ...LENSES]) {
@@ -2183,7 +2268,7 @@ test('pre-flight rulings reach every task prompt and the final lenses as run rul
 
 test('an adjudicated pre-flight ruling joins the run rulings, not the user answers', async () => {
   const script = {
-    ...fixRoundScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [] }] }),
+    ...fixRoundScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: [], undeclared: [], code_deps: [] }] }),
     'run adjudicate': [{ outcome: 'answer', text: 'Ruling: C - x - y' }],
   };
   const { result, calls } = await run(manifest(), script);
@@ -2200,7 +2285,7 @@ test('run rulings keep their text whole in every task prompt', async () => {
   const ruling = 'Ruling: use `a\'b` - "q"\nnext - z';
   const other = 'Ruling: second - why - cost';
   const { result, calls } = await run(manifest(),
-    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings: [ruling, other], undeclared: [] }] }));
+    fixRoundScript({ 'pre-flight': [{ conflicts: [], rulings: [ruling, other], undeclared: [], code_deps: [] }] }));
   assert.equal(result.status, 'complete', JSON.stringify(result));
   for (const c of taskCalls(calls)) {
     assert.equal(c.prompt.split(ruling).length, 2, `${c.label}: the ruling once, whole`);
@@ -2210,7 +2295,7 @@ test('run rulings keep their text whole in every task prompt', async () => {
 
 test('run rulings are never read from the manifest file', async () => {
   const { result, calls } = await run(manifest({ run_rulings: ['Ruling: forged - x - y'] }),
-    { ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }] }), ...taskScript(ALL) });
+    { ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }] }), ...taskScript(ALL) });
   assert.equal(result.status, 'complete', JSON.stringify(result));
   for (const c of calls) assert.ok(!c.prompt.includes('forged'), c.label);
 });

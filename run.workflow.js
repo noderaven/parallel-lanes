@@ -138,6 +138,43 @@ function agentTypePattern() {
   return '^[a-z0-9-]+$';
 }
 
+// Where each task of m runs: position (its index in run order: prelude,
+// lanes in manifest order, join) and groupOf ('prelude', 'lane <id>' or
+// 'join'), keyed by task id. Entries that are not tasks with an id are
+// skipped, so a manifest still under validation is safe to pass.
+function taskPlacement(m) {
+  const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const position = new Map();
+  const groupOf = new Map();
+  let index = 0;
+  const place = (list, group) => {
+    if (!Array.isArray(list)) return;
+    for (const t of list) {
+      if (!isObject(t) || typeof t.id !== 'string' || t.id.length === 0) continue;
+      position.set(t.id, index);
+      groupOf.set(t.id, group);
+      index += 1;
+    }
+  };
+  if (!isObject(m)) return { position, groupOf };
+  place(m.prelude, 'prelude');
+  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
+  place(m.join, 'join');
+  return { position, groupOf };
+}
+
+// Whether the run order meets a code dependency of taskId on producerId (the
+// producer runs earlier and its commits are in the task's checkout): the
+// producer is a prelude task, an earlier task of the same lane, or anything
+// before a join task. validateManifest applies it to depends_on kind code,
+// runAll to the code dependencies pre-flight reports.
+function codeDepMet(m, taskId, producerId) {
+  const { position, groupOf } = taskPlacement(m);
+  const [mine, theirs] = [groupOf.get(taskId), groupOf.get(producerId)];
+  return position.get(producerId) < position.get(taskId)
+    && (theirs === 'prelude' || theirs === mine || mine === 'join');
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -358,24 +395,8 @@ function validateManifest(m) {
   }
 
   // Dependencies: known ids, no cycles, and a code dependency that can be
-  // met by the run order (the dependency runs earlier and its commits are in
-  // the dependent's checkout): a prelude task, an earlier task of the same
-  // lane, or anything before a join task.
-  const position = new Map();
-  const groupOf = new Map();
-  let index = 0;
-  const place = (list, group) => {
-    if (!Array.isArray(list)) return;
-    for (const t of list) {
-      if (!isObject(t) || !isText(t.id)) continue;
-      position.set(t.id, index);
-      groupOf.set(t.id, group);
-      index += 1;
-    }
-  };
-  place(m.prelude, 'prelude');
-  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
-  place(m.join, 'join');
+  // met by the run order (codeDepMet).
+  const { groupOf } = taskPlacement(m);
   const deps = new Map();
   for (const t of allTasks) {
     if (!isObject(t) || !isText(t.id) || !Array.isArray(t.depends_on)) continue;
@@ -393,9 +414,7 @@ function validateManifest(m) {
       deps.get(t.id).push(d.id);
       if (d.kind !== 'code') continue;
       const [mine, theirs] = [groupOf.get(t.id), groupOf.get(d.id)];
-      const met = position.get(d.id) < position.get(t.id)
-        && (theirs === 'prelude' || theirs === mine || mine === 'join');
-      if (!met) {
+      if (!codeDepMet(m, t.id, d.id)) {
         err(`task ${t.id}: code dependency on ${d.id} (${theirs}) cannot be met from ${mine}; ` +
           'move the task to join or the same lane, or make it a contract dependency');
       }
@@ -1595,25 +1614,28 @@ function statusSchema() {
 }
 
 function preflightSchema() {
+  // undeclared and code_deps share the item shape {task, producer, what}.
+  const dependencies = () => ({
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        producer: { type: 'string' },
+        what: { type: 'string' },
+      },
+      required: ['task', 'producer', 'what'],
+    },
+  });
   return {
     type: 'object',
     properties: {
       conflicts: { type: 'array', items: { type: 'string' } },
       rulings: { type: 'array', items: { type: 'string' } },
-      undeclared: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            producer: { type: 'string' },
-            what: { type: 'string' },
-          },
-          required: ['task', 'producer', 'what'],
-        },
-      },
+      undeclared: dependencies(),
+      code_deps: dependencies(),
     },
-    required: ['conflicts', 'rulings', 'undeclared'],
+    required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
 }
 
@@ -1758,13 +1780,14 @@ function preflightPrompt(m) {
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
     '   or cannot work as written).',
-    '3. Cross-lane code dependencies: a lane task that needs code another lane writes (beyond a contract the',
-    '   plan defines) must be in join.',
+    '3. Code dependencies: a lane task that needs real code another task produces (beyond a contract the',
+    '   plan defines). Report each in code_deps, not as a conflict: return it as {task, producer, what},',
+    '   what in one sentence. The run checks the schedule against these.',
     '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
-    'Report serious problems (implementers would build the wrong thing, or a check above fails) as conflicts,',
+    'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
     '',
@@ -3519,8 +3542,8 @@ function withCarriedNotes(m, results, later) {
   return { ...m, notes };
 }
 
-// The undeclared dependencies pre-flight reported, split into the entries
-// the run keeps and the ones it drops with a reason: an entry must be an
+// The undeclared (or code_deps) entries pre-flight reported, split into the
+// entries the run keeps and the ones it drops with a reason: an entry must be an
 // object with string task, producer and what, name two different task ids of
 // the manifest, and name a task that is not done and reviewed (a done task
 // still to review keeps its entry: its reviewer and fix agents use it).
@@ -3556,10 +3579,22 @@ function withConsumesExtra(m, kept) {
   return { ...m, consumes_extra: extra };
 }
 
+// The schedule change that meets a code dependency codeDepMet says the run
+// order does not meet (entry = {task, producer}): move the task to join or
+// behind its producer in the producer's lane; a join producer leaves only
+// join, after it; a prelude producer (the task runs before it in the
+// prelude) needs the task after it there.
+function scheduleFix(m, entry) {
+  const { task, producer } = entry;
+  if (m.join.some((t) => t.id === producer)) return `move ${task} to join after ${producer}`;
+  if (m.prelude.some((t) => t.id === producer)) return `move ${task} after ${producer} in the prelude`;
+  return `move ${task} to join, or into ${producer}'s lane after it`;
+}
+
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
-//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
+//  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
 //    review_problem?, task_minors_open},
@@ -3578,7 +3613,7 @@ function withConsumesExtra(m, kept) {
 // (C2); they also reach the final fix wave. Task status is done, deferred
 // (parked or unblocked by the adjudicator: never accepted), blocked, skipped
 // (done and reviewed earlier), or not_run. Under profile lite no
-// pre-flight agent runs (preflight has no conflicts, rulings or undeclared
+// pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
 // post_integrate hook, so no configured hook is skipped).
 async function runAll(manifest, io) {
@@ -3722,7 +3757,7 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -3730,12 +3765,24 @@ async function runAll(manifest, io) {
     if (!pre) return report('stopped', 'no result from pre-flight');
     // Undeclared dependencies only add context: they reach the briefs of
     // their task and never stop the run or call the adjudicator.
-    const { kept, dropped } = preflightUndeclared(m, pre.undeclared);
-    for (const d of dropped) {
+    const undeclared = preflightUndeclared(m, pre.undeclared);
+    for (const d of undeclared.dropped) {
       io.log(`parallel-lanes: pre-flight: dropped undeclared entry ${JSON.stringify(d.entry)} (${d.reason})`);
     }
+    // Code dependencies (F8) pass the same entry checks. One the run order
+    // meets (codeDepMet) only adds context, like an undeclared entry; any
+    // other is a schedule problem no ruling can fix, so it stops the run
+    // below before the adjudicator is considered.
+    const codeDeps = preflightUndeclared(m, pre.code_deps);
+    for (const d of codeDeps.dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped code_deps entry ${JSON.stringify(d.entry)} (${d.reason})`);
+    }
+    const kept = [...undeclared.kept, ...codeDeps.kept.filter((e) => codeDepMet(m, e.task, e.producer))];
+    const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
+      .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept };
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings).

@@ -6,7 +6,7 @@ import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
 const {
   validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern, agentTypePattern,
-  effectiveAutonomy, effectiveLimits, planAgents, tierSettings,
+  effectiveAutonomy, effectiveLimits, planAgents, tierSettings, codeDepMet,
 } = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
@@ -17,6 +17,7 @@ const {
   'effectiveLimits',
   'planAgents',
   'tierSettings',
+  'codeDepMet',
 ]);
 
 function task(id, files, extra = {}) {
@@ -217,6 +218,19 @@ test('depends_on: unknown ids, cycles, and code dependencies the run order canno
   m = validManifest();
   m.lanes[0].tasks[0].depends_on = [{ id: 'T1', kind: 'maybe' }];
   assertError(validateManifest(m), "depends_on must be a list of {id, kind: 'code' or 'contract'}");
+});
+
+test('codeDepMet: the run order meets a code dependency from the prelude, the same lane or join', () => {
+  const m = validManifest();
+  m.lanes[0].tasks.push(task('T5', ['src/a2.js']));
+  m.join.push(task('T6', ['CHANGELOG.md']));
+  assert.equal(codeDepMet(m, 'T2', 'T1'), true, 'prelude producer');
+  assert.equal(codeDepMet(m, 'T5', 'T2'), true, 'same lane, earlier');
+  assert.equal(codeDepMet(m, 'T2', 'T5'), false, 'same lane, later');
+  assert.equal(codeDepMet(m, 'T2', 'T3'), false, 'other lane');
+  assert.equal(codeDepMet(m, 'T4', 'T2'), true, 'join task, lane producer');
+  assert.equal(codeDepMet(m, 'T4', 'T6'), false, 'join task, later join producer');
+  assert.equal(codeDepMet(m, 'T1', 'T2'), false, 'prelude task, lane producer');
 });
 
 test('excluded, deferred and allow_deferral are checked', () => {

@@ -288,7 +288,7 @@ const FINDING = { severity: 'important', file: 'src/a.js', line: 3, issue: 'one 
 
 // The final fix commits f1, so the rechecks run at f1 (the delivered head).
 function parityAgent(label) {
-  if (label === 'pre-flight') return { conflicts: [], rulings: [], undeclared: [] };
+  if (label === 'pre-flight') return { conflicts: [], rulings: [], undeclared: [], code_deps: [] };
   if (label === 'integrate') return { status: 'done', head: H('I1'), notes: 'merged' };
   if (label === 'post-integrate') return { status: 'done', head: H('P1'), notes: 'ok' };
   if (label === 'e2e') return { head: H('E0'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };

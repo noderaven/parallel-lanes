@@ -51,25 +51,28 @@ function statusSchema() {
 }
 
 function preflightSchema() {
+  // undeclared and code_deps share the item shape {task, producer, what}.
+  const dependencies = () => ({
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        producer: { type: 'string' },
+        what: { type: 'string' },
+      },
+      required: ['task', 'producer', 'what'],
+    },
+  });
   return {
     type: 'object',
     properties: {
       conflicts: { type: 'array', items: { type: 'string' } },
       rulings: { type: 'array', items: { type: 'string' } },
-      undeclared: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            task: { type: 'string' },
-            producer: { type: 'string' },
-            what: { type: 'string' },
-          },
-          required: ['task', 'producer', 'what'],
-        },
-      },
+      undeclared: dependencies(),
+      code_deps: dependencies(),
     },
-    required: ['conflicts', 'rulings', 'undeclared'],
+    required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
 }
 
@@ -214,13 +217,14 @@ function preflightPrompt(m) {
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
     '   or cannot work as written).',
-    '3. Cross-lane code dependencies: a lane task that needs code another lane writes (beyond a contract the',
-    '   plan defines) must be in join.',
+    '3. Code dependencies: a lane task that needs real code another task produces (beyond a contract the',
+    '   plan defines). Report each in code_deps, not as a conflict: return it as {task, producer, what},',
+    '   what in one sentence. The run checks the schedule against these.',
     '4. Undeclared dependencies: a task in a lane that relies on something a task in another',
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
-    'Report serious problems (implementers would build the wrong thing, or a check above fails) as conflicts,',
+    'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
     '',

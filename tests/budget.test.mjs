@@ -346,7 +346,7 @@ const approve = () => ({ verdict: 'approve', findings: [], cannot_verify: [] });
 
 function cleanScript() {
   const script = {
-    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }],
     integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
     'final review sp': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
     'final review security': [{ findings: [], cannot_verify: [], head: H('T5-h') }],

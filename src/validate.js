@@ -60,6 +60,43 @@ function agentTypePattern() {
   return '^[a-z0-9-]+$';
 }
 
+// Where each task of m runs: position (its index in run order: prelude,
+// lanes in manifest order, join) and groupOf ('prelude', 'lane <id>' or
+// 'join'), keyed by task id. Entries that are not tasks with an id are
+// skipped, so a manifest still under validation is safe to pass.
+function taskPlacement(m) {
+  const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const position = new Map();
+  const groupOf = new Map();
+  let index = 0;
+  const place = (list, group) => {
+    if (!Array.isArray(list)) return;
+    for (const t of list) {
+      if (!isObject(t) || typeof t.id !== 'string' || t.id.length === 0) continue;
+      position.set(t.id, index);
+      groupOf.set(t.id, group);
+      index += 1;
+    }
+  };
+  if (!isObject(m)) return { position, groupOf };
+  place(m.prelude, 'prelude');
+  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
+  place(m.join, 'join');
+  return { position, groupOf };
+}
+
+// Whether the run order meets a code dependency of taskId on producerId (the
+// producer runs earlier and its commits are in the task's checkout): the
+// producer is a prelude task, an earlier task of the same lane, or anything
+// before a join task. validateManifest applies it to depends_on kind code,
+// runAll to the code dependencies pre-flight reports.
+function codeDepMet(m, taskId, producerId) {
+  const { position, groupOf } = taskPlacement(m);
+  const [mine, theirs] = [groupOf.get(taskId), groupOf.get(producerId)];
+  return position.get(producerId) < position.get(taskId)
+    && (theirs === 'prelude' || theirs === mine || mine === 'join');
+}
+
 // Validate a run manifest. Returns a list of error messages; empty means
 // valid. This function is authoritative; manifest.schema.json documents it.
 function validateManifest(m) {
@@ -280,24 +317,8 @@ function validateManifest(m) {
   }
 
   // Dependencies: known ids, no cycles, and a code dependency that can be
-  // met by the run order (the dependency runs earlier and its commits are in
-  // the dependent's checkout): a prelude task, an earlier task of the same
-  // lane, or anything before a join task.
-  const position = new Map();
-  const groupOf = new Map();
-  let index = 0;
-  const place = (list, group) => {
-    if (!Array.isArray(list)) return;
-    for (const t of list) {
-      if (!isObject(t) || !isText(t.id)) continue;
-      position.set(t.id, index);
-      groupOf.set(t.id, group);
-      index += 1;
-    }
-  };
-  place(m.prelude, 'prelude');
-  if (Array.isArray(m.lanes)) for (const lane of m.lanes) if (isObject(lane)) place(lane.tasks, `lane ${lane.id}`);
-  place(m.join, 'join');
+  // met by the run order (codeDepMet).
+  const { groupOf } = taskPlacement(m);
   const deps = new Map();
   for (const t of allTasks) {
     if (!isObject(t) || !isText(t.id) || !Array.isArray(t.depends_on)) continue;
@@ -315,9 +336,7 @@ function validateManifest(m) {
       deps.get(t.id).push(d.id);
       if (d.kind !== 'code') continue;
       const [mine, theirs] = [groupOf.get(t.id), groupOf.get(d.id)];
-      const met = position.get(d.id) < position.get(t.id)
-        && (theirs === 'prelude' || theirs === mine || mine === 'join');
-      if (!met) {
+      if (!codeDepMet(m, t.id, d.id)) {
         err(`task ${t.id}: code dependency on ${d.id} (${theirs}) cannot be met from ${mine}; ` +
           'move the task to join or the same lane, or make it a contract dependency');
       }
