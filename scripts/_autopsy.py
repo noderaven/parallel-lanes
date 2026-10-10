@@ -963,27 +963,115 @@ def _manifest_commands(manifest):
     return commands if isinstance(commands, dict) else {}
 
 
+_SEPARATORS = ";&|()\n"
+_SEGMENT_SPLIT = re.compile(r"[;&|()\n]+")
+_INTERPRETER = re.compile(r"^(python[0-9.]*|py|bash|sh)(\.exe)?$", re.I)
+_PREFIX_WORDS = ("env", "exec", "time", "nohup", "command")
+_ARG_FLAGS = ("-X", "-W")
+
+
+def _segments(command):
+    """The simple commands of a line as word lists: shell words split at
+    ; & | ( ) and newlines, or, when the quoting does not parse, plain
+    whitespace words of each piece between those characters."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=_SEPARATORS)
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return _plain_segments(command)
+    out = [[]]
+    for token in tokens:
+        if token and all(c in _SEPARATORS for c in token):
+            out.append([])
+        else:
+            out[-1].append(token)
+    return [s for s in out if s]
+
+
+def _plain_segments(command):
+    out = []
+    for piece in _SEGMENT_SPLIT.split(command):
+        words = [w.strip("'\"") for w in piece.split()]
+        if words:
+            out.append(words)
+    return out
+
+
+def _run_checks_args(words):
+    """The words after run-checks when a simple command runs it (as the
+    program, or as the script of an interpreter such as python or bash),
+    else None."""
+    i = 0
+    while i < len(words) and (words[i] in _PREFIX_WORDS or _ASSIGNMENT.match(words[i])):
+        i += 1
+    if i >= len(words):
+        return None
+    if _basename(words[i]) == RUN_CHECKS:
+        return words[i + 1:]
+    if not _INTERPRETER.match(_basename(words[i])):
+        return None
+    i += 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in _ARG_FLAGS else 1
+    if i < len(words) and _basename(words[i]) == RUN_CHECKS:
+        return words[i + 1:]
+    return None
+
+
+def _full_suite_in(line, checks):
+    """True when line runs a full-suite entry of checks: it holds one at a
+    place no longer matched command covers (so a lane override such as
+    'npm test -- a' does not count as 'npm test')."""
+    names = [(_squash(name), full) for name, full in checks if _squash(name) in line]
+    spans = []
+    for name, _ in names:
+        start = line.find(name)
+        while start != -1:
+            spans.append((start, start + len(name)))
+            start = line.find(name, start + 1)
+    for name, full in names:
+        if not full:
+            continue
+        start = line.find(name)
+        while start != -1:
+            end = start + len(name)
+            if not any(a <= start and end <= b and b - a > end - start for a, b in spans):
+                return True
+            start = line.find(name, start + 1)
+    return False
+
+
 def match_check(command, checks):
     """(name, full_suite) when a Bash command line runs a check, else None.
 
-    A line with a word whose basename is run-checks is a run-checks call:
-    name 'run-checks', and a full-suite run when it passes '--cmd test'.
-    Otherwise name is the longest of checks' commands the line holds
-    (whitespace-normalised), first in checks' order on a tie."""
+    A line with a simple command that runs run-checks (as the program, or as
+    an interpreter's script) is a run-checks call: name 'run-checks', and a
+    full-suite run when it passes '--cmd test'. Otherwise name is the
+    longest of checks' commands the line holds (whitespace-normalised),
+    first in checks' order on a tie, and full_suite is True when the line
+    holds a full-suite entry anywhere (see _full_suite_in), so a chained
+    'lint && test' counts even when the lint string is the longer one."""
     if not isinstance(command, str):
         return None
-    # Shell words, and plain words too: shlex drops the backslashes of an
-    # unquoted Windows path.
-    for words in (_words(command), [w.strip("'\"") for w in command.split()]):
-        if any(_basename(w) == RUN_CHECKS for w in words):
-            full = any(w == "--cmd" and words[i + 1:i + 2] == ["test"] for i, w in enumerate(words))
-            return RUN_CHECKS, full
+    # Shell words, and plain words too when the line holds a backslash:
+    # shlex drops the backslashes of an unquoted Windows path.
+    passes = [_segments(command)] + ([_plain_segments(command)] if "\\" in command else [])
+    for segments in passes:
+        for words in segments:
+            args = _run_checks_args(words)
+            if args is not None:
+                full = any(w == "--cmd" and args[i + 1:i + 2] == ["test"] for i, w in enumerate(args))
+                return RUN_CHECKS, full
     line = _squash(command)
     best = None
     for name, full in checks:
         if _squash(name) in line and (best is None or len(_squash(name)) > len(_squash(best[0]))):
             best = (name, full)
-    return best
+    if best is None:
+        return None
+    return best[0], _full_suite_in(line, checks)
 
 
 def _execution_end(agent, call):

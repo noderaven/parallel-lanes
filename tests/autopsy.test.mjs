@@ -557,6 +557,32 @@ test('a check command never appears in raw form', () => {
   assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), ['run-checks', false]);
   assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), ['run-checks', true]);
   assert.equal(match('node --test tests/run-checks.test.mjs'), null);
+  // run-checks counts only in command position: as the program, or as the
+  // script an interpreter runs, in any simple command of the line.
+  assert.equal(match('git diff scripts/run-checks'), null);
+  assert.equal(match('cat scripts/run-checks && grep -n cmd scripts/run-checks'), null);
+  assert.equal(match('echo "python3 scripts/run-checks --cmd test x"'), null);
+  assert.deepEqual(match("cd /w && PATH=/x:$PATH 'C:/py/python.exe' -X utf8 -B 'C:/s/run-checks' /w --cmd test t"),
+    ['run-checks', true]);
+  assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), ['run-checks', false]);
+  assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), ['run-checks', true]);
+  // A full-suite run counts wherever the test command sits in the line, even
+  // when a longer configured string names the execution; a lane override
+  // that only contains it does not.
+  const chainedManifest = {
+    commands: { test: ['npm test'], lint: ['npm run lint'] },
+    lane_commands: { a: { test: ['npm test -- a'] } },
+  };
+  const chained = (command) => python([
+    'import _autopsy',
+    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(chainedManifest))}))`,
+    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
+  ]);
+  assert.deepEqual(chained('npm run lint && npm test'), ['npm run lint', true]);
+  assert.deepEqual(chained('npm run lint'), ['npm run lint', false]);
+  assert.deepEqual(chained('npm test -- a'), ['npm test -- a', false]);
+  assert.deepEqual(chained('npm test -- a && npm test'), ['npm test -- a', true]);
+  assert.deepEqual(chained('npm run lint && npm test -- a'), ['npm test -- a', false]);
 });
 
 test('checks without tool events are unavailable, not zero', () => {

@@ -112,15 +112,18 @@ background, on_critical_path}], by_command {<command>: {runs, total_s}} and
 full_suite_runs {total, by_role: {<role>: n}}.
 - An execution is a Bash call whose command line holds a configured command
   (commands.test, lint and build, and the lane_commands overrides) or runs
-  run-checks (a word whose basename is run-checks). command is the
-  configured string (the longest one the line holds, whitespace-normalised)
-  or 'run-checks', never the command line itself.
+  run-checks (a word whose basename is run-checks, as the program of a
+  simple command or as the script of python, py, bash or sh). command is
+  the configured string (the longest one the line holds,
+  whitespace-normalised) or 'run-checks', never the command line itself.
 - start is the call; end is its result. A backgrounded call ends at the
   first later result or notice naming its ID (measured); without one, or
   for a call with no result, end is the agent's last event (bound).
 - on_critical_path: the agent is on time.critical_path.
-- A full-suite run is an execution of a commands.test entry, or a
-  run-checks call passing '--cmd test'; by_role uses run-report's roles.
+- A full-suite run is an execution whose line runs a commands.test entry
+  (anywhere in it, outside a longer configured command that contains it),
+  or a run-checks call passing '--cmd test'; by_role uses run-report's
+  roles.
 - With no tool event in the whole run, executions, by_command, total and
   by_role are "unavailable".
 
