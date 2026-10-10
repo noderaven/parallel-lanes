@@ -106,6 +106,12 @@ test('log, tail, checkout and branch are not compared', () => {
   expectStatus(check({ verify }), 'match', undefined, 0);
 });
 
+test('timing fields are not compared', () => {
+  const timed = { ...RESULT, log: '/ledger/checks/v.1.log', tail: 'ok', started: '2026-10-10T07:00:00.123Z',
+    ended: '2026-10-10T07:00:01.456Z', duration_s: 1.333 };
+  expectStatus(check({ evidence: { ...evidence(), results: [timed] } }), 'match', undefined, 0);
+});
+
 test('each compared field that differs is named', () => {
   const cases = [
     ['head', OTHER, SHA],
