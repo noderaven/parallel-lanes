@@ -14,6 +14,14 @@ import _plan
 # same pattern as taskIdPattern in src/validate.js.
 TASK_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
+# Ids that are JavaScript property names; the engine rejects them too. The
+# same list as RESERVED_IDS in src/validate.js.
+RESERVED_IDS = frozenset([
+    "__proto__", "constructor", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+    "toLocaleString", "toString", "valueOf",
+    "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+])
+
 # A fence marker at any indent (a fence inside a nested bullet is indented).
 FENCE_ANY = re.compile(r"^\s*(`{3,}|~{3,})")
 
@@ -32,7 +40,7 @@ class BriefError(Exception):
 
 
 def is_safe_id(task_id):
-    return bool(TASK_ID.fullmatch(task_id))
+    return bool(TASK_ID.fullmatch(task_id)) and task_id not in RESERVED_IDS
 
 
 def _fence_closes(line, marker):
@@ -140,6 +148,8 @@ def consumed_ids(block_text, known_ids, self_id):
 
 def own_section(lines, sections, task_id):
     """(TaskSection, section lines without trailing blank lines)."""
+    if task_id in RESERVED_IDS:
+        raise BriefError(3, f"task id {task_id!r} is reserved (a JavaScript property name)")
     starts = [s for s in sections if s.id == task_id]
     if not starts:
         raise BriefError(3, f"no heading for task {task_id!r}")

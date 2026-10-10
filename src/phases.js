@@ -54,10 +54,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   });
   const raised = results.flatMap((r) => (r && Array.isArray(r.findings) ? r.findings : []))
     .map((f) => (f && typeof f.issue === 'string' ? f.issue : '')).join('\n');
-  const findings = withFindingIds(dedupeFindings([
+  const findings = linkSameLocation(withFindingIds(dedupeFindings([
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
-  ]));
+  ])));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
@@ -332,7 +332,9 @@ async function runAll(manifest, io) {
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
-    const range = taskState(m, t.id) === 'skip' ? (m.backfill || {})[t.id] : null;
+    const given = m.backfill || {};
+    const range = taskState(m, t.id) === 'skip' && Object.prototype.hasOwnProperty.call(given, t.id)
+      ? given[t.id] : null;
     tasks[t.id] = {
       status: taskState(m, t.id) === 'skip' ? (deferredBefore.has(t.id) ? 'deferred' : 'skipped') : 'not_run',
       rounds: null,

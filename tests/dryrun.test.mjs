@@ -301,7 +301,7 @@ function parityAgent(label) {
   if (label === 'verify') {
     return {
       head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true,
-      tracked_before: [], tracked_after: [],
+      tracked_before: [], tracked_after: [], untracked_before: [], untracked_after: [],
     };
   }
   if (label === 'e2e recheck') return { head: H('f1'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };

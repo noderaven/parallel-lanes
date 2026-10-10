@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
@@ -624,4 +625,51 @@ test('lite profile with hooks.post_integrate is reported naming the rule', () =>
   assertError(validateManifest(m), 'profile lite', 'hooks.post_integrate');
   m.hooks = { e2e: 'run the checklist' };
   assert.deepEqual(validateManifest(m), []);
+});
+
+test('prototype names are rejected as task ids', () => {
+  for (const id of ['__proto__', 'constructor', 'toString']) {
+    const m = liteManifest();
+    m.lanes[0].tasks[0] = task(id, ['src/l1.js']);
+    assertError(validateManifest(m), `id "${id}" is reserved`);
+    assertError(validateManifest(m), 'is reserved', 'JavaScript property name');
+  }
+});
+
+test('prototype names are rejected as lane ids', () => {
+  const m = liteManifest();
+  m.lanes[0].id = 'constructor';
+  m.setup_result.worktrees = { constructor: '/work/repo' };
+  assertError(validateManifest(m), 'id "constructor" is reserved');
+});
+
+test('a done task needs its own backfill entry', () => {
+  const m = liteManifest();
+  m.done = ['L1'];
+  m.reviewed = ['L1'];
+  m.backfill = Object.create({ L1: { base: 'a', head: 'b' } });
+  assertError(validateManifest(m), 'backfill: missing an entry for task L1');
+  m.backfill = { L1: { base: 'a', head: 'b' } };
+  assert.deepEqual(validateManifest(m).filter((e) => e.includes('backfill')), []);
+});
+
+test('the plan parser rejects reserved ids', () => {
+  const code = [
+    'import sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(join(SKILL_DIR, 'scripts'))})`,
+    'import _brief',
+    'plan = "### Task constructor: x\\n\\nBody text.\\n"',
+    'assert not _brief.is_safe_id("constructor")',
+    'assert _brief.is_safe_id("T1")',
+    'try:',
+    '    _brief.build(plan, "constructor", [])',
+    'except _brief.BriefError as e:',
+    '    print("BriefError", e)',
+    'else:',
+    '    sys.exit("no BriefError")',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code], { encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr + res.stdout);
+  assert.match(res.stdout, /BriefError.*reserved/);
 });

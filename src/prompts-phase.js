@@ -198,8 +198,10 @@ function verifySchema() {
       clean: { type: 'boolean' },
       tracked_before: { type: 'array', items: { type: 'string' } },
       tracked_after: { type: 'array', items: { type: 'string' } },
+      untracked_before: { type: 'array', items: { type: 'string' } },
+      untracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
 }
 
@@ -724,7 +726,7 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after.',
+    'tracked_after, untracked_before, untracked_after.',
   ].join('\n');
 }
 
@@ -772,12 +774,19 @@ function findingKey(f) {
   return null;
 }
 
-// Merge the lenses' findings (spec 1.3.1): findings on the same file and
-// line (line > 0), or on the same 'commit <sha>', become one entry listing
+// A finding's issue text as findings merge on it: trimmed, with every run
+// of whitespace collapsed to one space.
+function issueKey(f) {
+  return String(f.issue == null ? '' : f.issue).replace(/\s+/g, ' ').trim();
+}
+
+// Merge the lenses' findings (spec 1.3.1): findings at the same location
+// (findingKey) with the same issue text (issueKey) become one entry listing
 // every lens that reported it, keeping the issue text, severity and fix of
-// its most severe report (the first of those on a tie), and the other
-// reports' distinct issue texts as also_reported, so the issue text always
-// matches its severity. Every other finding stays separate.
+// its most severe report (the first of those on a tie). Findings at one
+// location with different issue texts stay separate entries, each its own
+// obligation; linkSameLocation lists the others' ids once ids are assigned.
+// also_reported stays on every entry, always [], so the shape is unchanged.
 // reports: [{lens, findings|null}].
 function dedupeFindings(reports) {
   const rank = { critical: 3, important: 2, minor: 1 };
@@ -785,28 +794,37 @@ function dedupeFindings(reports) {
   const byKey = new Map();
   for (const { lens, findings } of reports) {
     for (const f of findings || []) {
-      const key = findingKey(f);
+      const location = findingKey(f);
+      const key = location === null ? null : JSON.stringify([location, issueKey(f)]);
       const seen = key === null ? undefined : byKey.get(key);
       if (seen === undefined) {
-        const entry = { ...f, lenses: [lens], also_reported: [] };
+        const entry = { ...f, lenses: [lens], also_reported: [], same_location: [] };
         if (key !== null) byKey.set(key, entry);
         merged.push(entry);
         continue;
       }
       if (!seen.lenses.includes(lens)) seen.lenses.push(lens);
       if ((rank[f.severity] || 0) > (rank[seen.severity] || 0)) {
-        // The more severe report becomes the primary text; the earlier one
-        // moves to also_reported.
-        const earlier = seen.issue;
         seen.severity = f.severity;
         seen.fix = f.fix;
         seen.issue = f.issue;
-        seen.also_reported = seen.also_reported.filter((x) => x !== f.issue);
-        if (earlier !== f.issue && !seen.also_reported.includes(earlier)) seen.also_reported.unshift(earlier);
-      } else if (f.issue !== seen.issue && !seen.also_reported.includes(f.issue)) {
-        seen.also_reported.push(f.issue);
       }
     }
   }
   return merged;
+}
+
+// Fill each finding's same_location with the ids of the other findings at
+// its location (findingKey), in order; a finding with no location key gets
+// []. findings: dedupeFindings output with ids (withFindingIds).
+function linkSameLocation(findings) {
+  const idsAt = new Map();
+  for (const f of findings) {
+    const key = findingKey(f);
+    if (key !== null) idsAt.set(key, [...(idsAt.get(key) || []), f.id]);
+  }
+  return findings.map((f) => {
+    const key = findingKey(f);
+    return { ...f, same_location: key === null ? [] : idsAt.get(key).filter((id) => id !== f.id) };
+  });
 }
