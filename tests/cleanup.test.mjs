@@ -257,14 +257,16 @@ function restorePoint(c, out) {
 
 test('cleanup: --yes writes a verified restore point first', () => {
   const c = newCase();
-  const dir = restorePoint(c, cleanupOk(c, ['--yes']));
-  const saved = JSON.parse(readFileSync(join(dir, 'refs.json'), 'utf8'));
-  assert.deepEqual(saved, {
+  // The lane branches are deleted by the cleanup, so take their shas first.
+  const want = {
     'refs/heads/feature/x': sha(c, 'feature/x'),
     'refs/heads/pl-r1-a': sha(c, 'pl-r1-a'),
     'refs/heads/pl-r1-b': sha(c, 'pl-r1-b'),
     'refs/parallel-lanes/r1/abandoned/x': c.abandoned,
-  });
+  };
+  const dir = restorePoint(c, cleanupOk(c, ['--yes']));
+  const saved = JSON.parse(readFileSync(join(dir, 'refs.json'), 'utf8'));
+  assert.deepEqual(saved, want);
   const verify = sh('git', ['-C', c.project, 'bundle', 'verify', join(dir, 'run.bundle')]);
   assert.equal(verify.code, 0, verify.stderr);
   const restore = readFileSync(join(dir, 'restore.md'), 'utf8');
@@ -280,11 +282,9 @@ test('cleanup: --yes writes a verified restore point first', () => {
 
 test('cleanup: the bundle restores a deleted branch', () => {
   const c = newCase();
-  const dir = restorePoint(c, cleanupOk(c, ['--yes']));
   const want = sha(c, 'pl-r1-a');
-  // git will not delete a branch a worktree has checked out.
-  git(c.project, 'worktree', 'remove', c.lanes.a);
-  git(c.project, 'branch', '-D', 'pl-r1-a');
+  // The cleanup itself removes the lane's worktree and deletes its branch.
+  const dir = restorePoint(c, cleanupOk(c, ['--yes']));
   assert.notEqual(sh('git', ['-C', c.project, 'rev-parse', '--verify', '--quiet', 'refs/heads/pl-r1-a']).code, 0);
   const line = readFileSync(join(dir, 'restore.md'), 'utf8').split('\n')
     .find((l) => /^git .* fetch /.test(l) && l.includes('refs/heads/pl-r1-a:refs/heads/pl-r1-a'));
@@ -309,4 +309,218 @@ test('cleanup: two cleanups in the same second keep both restore points', () => 
   const saved = JSON.parse(readFileSync(join(second, 'refs.json'), 'utf8'));
   assert.equal(saved['refs/heads/feature/x'], sha(c, 'feature/x'));
   assert.ok(existsSync(join(second, 'run.bundle')));
+});
+
+// The removal steps of cleanup --yes.
+
+const hasRef = (dir, ref) => sh('git', ['-C', dir, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
+const worktreePaths = (dir) => git(dir, 'worktree', 'list', '--porcelain').split('\n')
+  .filter((l) => l.startsWith('worktree ')).map((l) => l.slice('worktree '.length));
+const hasWorktree = (dir, path) => worktreePaths(dir).some((p) => samePath(p, path));
+const findItem = (list, kind, pred) => list.find((i) => i.kind === kind && pred(i));
+const currentBranch = (c) => git(c.project, 'symbolic-ref', '--short', 'HEAD');
+
+// Merge the feature branch into origin's main from another clone, the way a
+// merged pull request does; return origin's new main.
+function mergeIntoOrigin(c) {
+  const clone = join(c.root, 'other clone');
+  git(c.root, 'clone', '-q', '-b', 'main', c.origin, clone);
+  commitFile(clone, 'upstream.txt', 'someone else\n');
+  git(clone, 'fetch', '-q', c.project, 'feature/x');
+  git(clone, 'merge', '-q', '--no-ff', '-m', 'merge pull request', 'FETCH_HEAD');
+  git(clone, 'push', '-q', 'origin', 'main');
+  return git(clone, 'rev-parse', 'HEAD');
+}
+
+test('cleanup: removes clean run-owned worktrees and merged lane branches', () => {
+  const c = newCase();
+  const want = { a: sha(c, 'pl-r1-a'), b: sha(c, 'pl-r1-b') };
+  const out = cleanupOk(c, ['--yes']);
+  const dir = restorePoint(c, out);
+  const saved = JSON.parse(readFileSync(join(dir, 'refs.json'), 'utf8'));
+  assert.ok(existsSync(join(dir, 'run.bundle')));
+  assert.ok(existsSync(join(dir, 'restore.md')));
+  for (const id of ['a', 'b']) {
+    assert.equal(saved[`refs/heads/pl-r1-${id}`], want[id]);
+    assert.ok(!existsSync(c.lanes[id]), `lane-${id} is gone`);
+    assert.ok(!hasWorktree(c.project, c.lanes[id]), `lane-${id} is not a worktree any more`);
+    assert.ok(!hasRef(c.project, `refs/heads/pl-r1-${id}`), `pl-r1-${id} is deleted`);
+    assert.ok(findItem(out.removed, 'worktree', (i) => samePath(i.path, c.lanes[id])), JSON.stringify(out.removed));
+    assert.ok(findItem(out.removed, 'branch', (i) => i.branch === `pl-r1-${id}`), JSON.stringify(out.removed));
+  }
+  // The worktree root held only the run's worktrees, so it is removed too.
+  assert.ok(!existsSync(c.worktreeRoot));
+  assert.ok(findItem(out.removed, 'worktree_root', (i) => samePath(i.path, c.worktreeRoot)), JSON.stringify(out.removed));
+  for (const item of [...out.removed, ...out.kept]) assert.ok(item.reason, JSON.stringify(item));
+});
+
+test('cleanup: never removes what the run does not own', () => {
+  const c = newCase();
+  git(c.project, 'branch', 'topic', 'main');
+  const other = join(c.worktreeRoot, 'other');
+  git(c.project, 'worktree', 'add', '-q', other, 'topic');
+  git(c.lanes.b, 'switch', '-q', '-c', 'swapped');
+  const out = cleanupOk(c, ['--yes']);
+  restorePoint(c, out);
+  for (const path of [other, c.lanes.b]) {
+    assert.ok(existsSync(path), `${path} is still there`);
+    assert.ok(hasWorktree(c.project, path), `${path} is still a worktree`);
+    const kept = out.kept.find((i) => i.path && samePath(i.path, path));
+    assert.ok(kept, `${path} is listed as kept: ${JSON.stringify(out.kept)}`);
+    assert.equal(kept.reason, 'not owned by this run');
+    assert.ok(!out.removed.some((i) => i.path && samePath(i.path, path)), JSON.stringify(out.removed));
+  }
+  assert.ok(hasRef(c.project, 'refs/heads/topic'));
+  assert.ok(hasRef(c.project, 'refs/heads/swapped'));
+  assert.equal(git(other, 'symbolic-ref', '--short', 'HEAD'), 'topic');
+  assert.equal(git(c.lanes.b, 'symbolic-ref', '--short', 'HEAD'), 'swapped');
+  // The run-owned lane-a still goes, and the root stays because it is not empty.
+  assert.ok(!existsSync(c.lanes.a));
+  assert.ok(existsSync(c.worktreeRoot));
+  assert.ok(findItem(out.kept, 'worktree_root', (i) => samePath(i.path, c.worktreeRoot)), JSON.stringify(out.kept));
+});
+
+test('cleanup: keeps a dirty worktree and names it', () => {
+  const c = newCase();
+  writeFileSync(join(c.lanes.a, 'scratch.txt'), 'not committed\n');
+  const res = sh('python3', [CLEANUP, c.manifest, '--yes', '--history-dir', c.history], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(existsSync(join(c.lanes.a, 'scratch.txt')));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'));
+  assert.ok(!existsSync(c.lanes.b));
+  assert.ok(!hasRef(c.project, 'refs/heads/pl-r1-b'));
+  const line = res.stdout.split('\n').find((l) => l.includes('lane-a') && l.includes('uncommitted or untracked'));
+  assert.ok(line, res.stdout);
+  assert.match(res.stdout, /pl-r1-a.*kept worktree/, res.stdout);
+  assert.match(res.stdout, /restore point: /);
+});
+
+test('cleanup: before the PR merges the checkout stays on the feature branch', () => {
+  const c = newCase();
+  const tip = sha(c, 'feature/x');
+  const out = cleanupOk(c, ['--yes']);
+  assert.equal(currentBranch(c), 'feature/x');
+  assert.equal(sha(c, 'feature/x'), tip);
+  assert.equal(sha(c, 'main'), git(c.origin, 'rev-parse', 'main'));
+  const kept = findItem(out.kept, 'branch', (i) => i.branch === 'feature/x');
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /not merged/);
+});
+
+test('cleanup: after the merge it switches to the base, fast-forwards and deletes the feature branch', () => {
+  const c = newCase();
+  const tip = mergeIntoOrigin(c);
+  const out = cleanupOk(c, ['--yes']);
+  assert.equal(currentBranch(c), 'main');
+  assert.equal(sha(c, 'main'), tip);
+  assert.equal(sha(c, 'HEAD'), tip);
+  assert.ok(!hasRef(c.project, 'refs/heads/feature/x'));
+  assert.ok(findItem(out.removed, 'branch', (i) => i.branch === 'feature/x'), JSON.stringify(out.removed));
+  assert.equal(git(c.project, 'status', '--porcelain'), '');
+  // A fast-forward: no new commit was made on main.
+  assert.equal(git(c.project, 'rev-list', '--count', `${tip}..main`), '0');
+});
+
+test('cleanup: a dirty main checkout is never switched', () => {
+  const c = newCase();
+  const tip = mergeIntoOrigin(c);
+  const mainBefore = sha(c, 'main');
+  writeFileSync(join(c.project, 'README.md'), 'changed\n');
+  const out = cleanupOk(c, ['--yes']);
+  assert.equal(currentBranch(c), 'feature/x');
+  assert.ok(hasRef(c.project, 'refs/heads/feature/x'));
+  assert.equal(sha(c, 'main'), mainBefore);
+  assert.notEqual(mainBefore, tip);
+  assert.equal(readFileSync(join(c.project, 'README.md'), 'utf8'), 'changed\n');
+  const kept = findItem(out.kept, 'branch', (i) => i.branch === 'feature/x');
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /uncommitted/);
+});
+
+test('cleanup: abandoned refs survive', () => {
+  const c = newCase();
+  mergeIntoOrigin(c);
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(!hasRef(c.project, 'refs/heads/feature/x'), 'the full cleanup ran');
+  assert.equal(sha(c, 'refs/parallel-lanes/r1/abandoned/x'), c.abandoned);
+  const kept = findItem(out.kept, 'ref', (i) => i.ref === 'refs/parallel-lanes/r1/abandoned/x');
+  assert.ok(kept && kept.reason, JSON.stringify(out.kept));
+});
+
+// A finished shadow-mode run 'r1': a bare git dir (the shadow repo) for a
+// project folder that is not a git repo, with the feature worktree and two
+// lane worktrees, both lanes merged into the feature branch.
+function newShadowCase() {
+  counter += 1;
+  const root = join(TMP, `case ${counter}`);
+  const project = join(root, 'my project');
+  const gitDir = join(root, 'shadow git');
+  const worktreeRoot = join(root, 'wt root');
+  const ledgerDir = join(root, 'ledger dir');
+  const history = join(root, 'history');
+  const active = join(root, 'active');
+  mkdirSync(project, { recursive: true });
+  mkdirSync(ledgerDir, { recursive: true });
+  writeFileSync(join(project, 'README.md'), 'hello\n');
+  git(root, 'init', '-q', '--bare', '-b', 'pl-base', gitDir);
+  const gd = `--git-dir=${gitDir}`;
+  git(root, gd, `--work-tree=${project}`, 'add', '-A');
+  git(root, gd, `--work-tree=${project}`, 'commit', '-q', '-m', 'baseline');
+  const feature = join(worktreeRoot, 'feature');
+  git(root, gd, 'worktree', 'add', '-q', '-b', 'feature/x', feature, 'pl-base');
+  const lanes = {};
+  for (const id of ['a', 'b']) {
+    const dir = join(worktreeRoot, `lane-${id}`);
+    git(root, gd, 'worktree', 'add', '-q', '-b', `pl-r1-${id}`, dir, 'feature/x');
+    commitFile(dir, `${id}.txt`, `lane ${id}\n`);
+    lanes[id] = dir;
+    git(feature, 'merge', '-q', '--no-ff', '-m', `merge ${id}`, `pl-r1-${id}`);
+  }
+  const m = {
+    version: 1,
+    run_id: 'r1',
+    repo: {
+      mode: 'shadow',
+      root: project,
+      git_dir: gitDir,
+      base_ref: 'pl-base',
+      branch: 'feature/x',
+      worktree_root: worktreeRoot,
+      ledger_dir: ledgerDir,
+    },
+    commands: { setup: [], test: [], lint: [], build: [] },
+    lanes: [
+      { id: 'a', name: 'Lane A', tasks: [] },
+      { id: 'b', name: 'Lane B', tasks: [] },
+    ],
+  };
+  const manifest = join(root, 'manifest.json');
+  writeFileSync(manifest, JSON.stringify(m, null, 2));
+  const folder = '2026-10-10-r1';
+  const runFolder = join(history, folder);
+  mkdirSync(runFolder, { recursive: true });
+  writeIndex(history, manifest, folder);
+  return { root, project, gitDir, worktreeRoot, history, active, manifest, runFolder, lanes, feature };
+}
+
+test('cleanup: shadow mode removes worktrees and keeps branches', () => {
+  const c = newShadowCase();
+  const gd = `--git-dir=${c.gitDir}`;
+  const branches = () => git(c.root, gd, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads');
+  const before = branches();
+  for (const b of ['feature/x', 'pl-r1-a', 'pl-r1-b', 'pl-base']) assert.ok(before.includes(`refs/heads/${b} `), before);
+  const out = cleanupOk(c, ['--yes']);
+  restorePoint(c, out);
+  for (const path of [c.lanes.a, c.lanes.b, c.feature]) {
+    assert.ok(!existsSync(path), `${path} is gone`);
+    assert.ok(findItem(out.removed, 'worktree', (i) => samePath(i.path, path)), JSON.stringify(out.removed));
+  }
+  const left = git(c.root, gd, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree '));
+  assert.equal(left.length, 1, left.join('\n'));
+  assert.equal(branches(), before);
+  assert.ok(!out.removed.some((i) => i.kind === 'branch'), JSON.stringify(out.removed));
+  assert.ok(existsSync(c.gitDir));
+  assert.ok(!existsSync(c.worktreeRoot));
+  assert.deepEqual(readdirSync(c.project), ['README.md']);
 });

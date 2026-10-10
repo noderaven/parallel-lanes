@@ -41,18 +41,45 @@ replaces the UTC timestamp (for tests). It holds, written in this order:
 In shadow mode every repo command uses --git-dir=<repo.git_dir>; in git mode
 -C <repo.root>.
 
+Removal (--yes, after the restore point), in this order; an item that
+cannot be removed safely is kept and named with the reason:
+1. run-owned worktrees the plan marks remove (clean and unlocked), with
+   git worktree remove (which itself refuses a dirty or locked worktree);
+2. lane branches the plan marks remove, with git branch -d (git mode only);
+3. the feature branch (git mode only). It stops at the first failed
+   condition, leaving the checkout and the branch as they are:
+   - the main checkout is on repo.branch and clean;
+   - base_ref is a local branch with an upstream;
+   - git fetch <remote> <upstream branch> succeeds;
+   - repo.branch is an ancestor of the fetched tip (the PR is merged);
+   - base_ref is an ancestor of the fetched tip (a fast-forward).
+   Then git switch <base_ref>, git merge --ff-only <fetched tip>,
+   git branch -d <repo.branch>;
+4. worktree_root, with rmdir, only when it is empty.
+Shadow mode removes the lane worktrees and <worktree_root>/feature, and
+keeps every branch and the shadow repo. Foreign items under worktree_root
+and refs/parallel-lanes/<run_id>/ refs are always kept. It never uses
+--force or branch -D, never deletes a remote branch, never makes a merge
+commit, resets or rebases, and never touches the manifest, the ledger or
+the history folder (other than writing the restore point).
+
 Output: the plan, as text or (--json) one JSON object:
   {"run_id", "mode", "run_folder",
    "worktrees": [{"path", "branch", "action", "reason"}],
    "branches": [{"branch", "sha", "action", "reason"}],
    "feature_steps": [...], "refs": [{"ref", "sha", "action", "reason"}],
    "foreign": [{"path", "reason"}], "restore_point": <path or null>}
-Paths use '/' separators (C:/... on Windows).
+With --yes the object also has "removed" and "kept": lists of
+  {"kind", ..., "reason"}, where kind is worktree (with path, branch),
+  branch (branch, sha), ref (ref, sha), path (a foreign item under
+  worktree_root), worktree_root (path) or shadow_repo (path).
+The text form of --yes lists removed, kept with reasons, and the restore
+point. Paths use '/' separators (C:/... on Windows).
 
-Exit 0 when done or planned; 1 when a git command needed for the plan fails
-(nothing changed); 2 on a usage error or an unreadable manifest or index; 3
-when refused (nothing changed); 4 when the restore point could not be
-written or verified (nothing removed).
+Exit 0 when done or planned (kept items included); 1 when a git command
+needed for the plan fails (nothing changed); 2 on a usage error or an
+unreadable manifest or index; 3 when refused (nothing changed); 4 when the
+restore point could not be written or verified (nothing removed).
 """
 
 import argparse
@@ -74,6 +101,8 @@ SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+# git fetch must fail rather than wait for a password nobody types.
+ENV["GIT_TERMINAL_PROMPT"] = "0"
 STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NOT_OWNED = "not owned by this run"
 
@@ -257,9 +286,7 @@ def feature_item(repo, m, sha):
     if repo.mode == "shadow":
         return (dict(item, action="keep", reason="shadow mode keeps every branch and the shadow repo"),
                 ["keep " + branch + ": shadow mode keeps every branch and the shadow repo"])
-    current = repo.git("symbolic-ref", "--quiet", "--short", "HEAD").stdout.strip()
-    remote = repo.git("config", "branch." + base + ".remote").stdout.strip()
-    merge = repo.git("config", "branch." + base + ".merge").stdout.strip()
+    reason, remote, merge = feature_precheck(repo, branch, base)
     steps = [
         "check that the main checkout " + slash(repo.root) + " is on " + branch + " and clean",
         "git fetch " + (remote or "<remote>") + " " + (merge or base),
@@ -270,6 +297,20 @@ def feature_item(repo, m, sha):
         "git branch -d " + branch,
         "stop at the first failed check, leaving the checkout and " + branch + " as they are",
     ]
+    if reason is None:
+        return (dict(item, action="remove",
+                     reason="if the fetched " + remote + " " + merge + " contains it (the PR is merged)"
+                     " and " + base + " fast-forwards to it; otherwise it is kept"), steps)
+    return dict(item, action="keep", reason=reason), steps
+
+
+def feature_precheck(repo, branch, base):
+    """(reason, remote, merge): why the git-mode feature branch must stay as
+    it is before anything is fetched, or None; and base's upstream."""
+    current = repo.git("symbolic-ref", "--quiet", "--short", "HEAD").stdout.strip()
+    remote = repo.git("config", "branch." + base + ".remote").stdout.strip()
+    merge = repo.git("config", "branch." + base + ".merge").stdout.strip()
+    reason = None
     if current != branch:
         reason = "the main checkout is on " + (current or "a detached HEAD") + ", not " + branch
     elif repo.git("--no-optional-locks", "status", "--porcelain").stdout.strip():
@@ -278,11 +319,7 @@ def feature_item(repo, m, sha):
         reason = "base_ref " + base + " is not a local branch"
     elif not remote or not merge:
         reason = base + " has no upstream to fetch"
-    else:
-        return (dict(item, action="remove",
-                     reason="if the fetched " + remote + " " + merge + " contains it (the PR is merged)"
-                     " and " + base + " fast-forwards to it; otherwise it is kept"), steps)
-    return dict(item, action="keep", reason=reason), steps
+    return reason, remote, merge
 
 
 def make_plan(repo, m, run_folder):
@@ -405,6 +442,143 @@ def write_restore_point(repo, plan, run_folder):
     return folder
 
 
+def git_error(res):
+    return (res.stderr.strip() or res.stdout.strip() or "exit " + str(res.returncode)).replace("\n", " ")
+
+
+def is_ancestor(repo, older, newer):
+    """True or False, or None when git merge-base cannot tell."""
+    code = repo.git("merge-base", "--is-ancestor", older, newer).returncode
+    return {0: True, 1: False}.get(code)
+
+
+def remove_feature(repo, m):
+    """Switch the main checkout to the base, fast-forward it to the fetched
+    upstream tip and delete the feature branch: (removed, reason). Stops at
+    the first failed condition, leaving the checkout and the branch."""
+    branch, base = m["repo"]["branch"], m["repo"]["base_ref"]
+    reason, remote, merge = feature_precheck(repo, branch, base)
+    if reason is not None:
+        return False, reason
+    fetched = "the fetched " + remote + " " + merge
+    res = repo.git("fetch", remote, merge)
+    if res.returncode != 0:
+        return False, "git fetch " + remote + " " + merge + " failed: " + git_error(res)
+    tip = repo.sha("FETCH_HEAD")
+    if tip is None:
+        return False, "git fetch " + remote + " " + merge + " gave no commit"
+    fetched += " (" + tip[:12] + ")"
+    merged = is_ancestor(repo, "refs/heads/" + branch, tip)
+    if merged is None:
+        return False, "git merge-base could not compare " + branch + " with " + fetched
+    if not merged:
+        return False, ("it is not merged into " + fetched + ": the PR is not merged yet (or was squashed"
+                       " or rebased); run cleanup again after it is")
+    ff = is_ancestor(repo, "refs/heads/" + base, tip)
+    if ff is None:
+        return False, "git merge-base could not compare " + base + " with " + fetched
+    if not ff:
+        return False, base + " cannot fast-forward to " + fetched + ": it has commits the upstream does not"
+    res = repo.git("switch", base)
+    if res.returncode != 0:
+        return False, "git switch " + base + " failed: " + git_error(res)
+    res = repo.git("merge", "--ff-only", tip)
+    if res.returncode != 0:
+        return False, ("the main checkout is now on " + base + ", but git merge --ff-only " + tip[:12]
+                       + " failed: " + git_error(res))
+    done = "switched the main checkout to " + base + " and fast-forwarded it to " + fetched
+    res = repo.git("branch", "-d", branch)
+    if res.returncode != 0:
+        return False, done + "; git branch -d refused: " + git_error(res)
+    return True, "merged into " + fetched + "; " + done + ", then deleted it with git branch -d"
+
+
+def remove_owned(repo, m, plan):
+    """Remove what the plan marks remove, in order; return (removed, kept)."""
+    removed, kept = [], []
+
+    def note(ok, entry, reason):
+        (removed if ok else kept).append(dict(entry, reason=reason))
+
+    # 1. Run-owned worktrees. git worktree remove checks again that each is
+    # clean and unlocked, and refuses otherwise.
+    still_out = {}
+    for w in plan["worktrees"]:
+        entry = {"kind": "worktree", "path": w["path"], "branch": w["branch"]}
+        if w["action"] != "remove":
+            note(False, entry, w["reason"])
+            continue
+        res = repo.git("worktree", "remove", w["path"])
+        if res.returncode != 0:
+            note(False, entry, "git worktree remove refused: " + git_error(res))
+            still_out[w["branch"]] = w["path"]
+        else:
+            note(True, entry, w["reason"])
+    for f in plan["foreign"]:
+        note(False, {"kind": "path", "path": f["path"]}, f["reason"])
+
+    # 2. Lane branches, then 3. the feature branch.
+    feature = m["repo"]["branch"]
+    for b in plan["branches"]:
+        entry = {"kind": "branch", "branch": b["branch"], "sha": b["sha"]}
+        if b["action"] != "remove":
+            note(False, entry, b["reason"])
+        elif b["branch"] == feature:
+            continue
+        elif b["branch"] in still_out:
+            note(False, entry, "it is checked out in the kept worktree " + still_out[b["branch"]])
+        else:
+            res = repo.git("branch", "-d", b["branch"])
+            if res.returncode != 0:
+                note(False, entry, "git branch -d refused: " + git_error(res))
+            else:
+                note(True, entry, b["reason"])
+    for b in plan["branches"]:
+        if b["branch"] == feature and b["action"] == "remove":
+            ok, reason = remove_feature(repo, m)
+            note(ok, {"kind": "branch", "branch": b["branch"], "sha": b["sha"]}, reason)
+    for r in plan["refs"]:
+        note(False, {"kind": "ref", "ref": r["ref"], "sha": r["sha"]}, r["reason"])
+
+    # 4. The worktree root, only when nothing is left in it.
+    root = repo.worktree_root
+    entry = {"kind": "worktree_root", "path": slash(root)}
+    if os.path.isdir(root) and not os.path.islink(root):
+        try:
+            left = os.listdir(root)
+            if left:
+                note(False, entry, "it is not empty (" + str(len(left)) + " item"
+                     + ("" if len(left) == 1 else "s") + " left)")
+            else:
+                os.rmdir(root)
+                note(True, entry, "empty after the run-owned worktrees were removed")
+        except OSError as e:
+            note(False, entry, "rmdir failed: " + str(e))
+    if repo.mode == "shadow":
+        note(False, {"kind": "shadow_repo", "path": slash(repo.git_dir)},
+             "shadow mode keeps the shadow repo; remove it with shadow remove when it is no longer needed")
+    return removed, kept
+
+
+def item_name(item):
+    if item["kind"] == "worktree":
+        return item["path"] + " (" + item["branch"] + ")"
+    if item["kind"] in ("branch", "ref"):
+        return item[item["kind"]] + " " + item["sha"][:12]
+    return item["path"]
+
+
+def render_done(plan):
+    out = ["cleanup of run " + plan["run_id"] + " (" + plan["mode"] + " mode)",
+           "run folder: " + plan["run_folder"], "", "removed:"]
+    out += ["  " + i["kind"] + "  " + item_name(i) + ": " + i["reason"] for i in plan["removed"]] or ["  (nothing)"]
+    out += ["", "kept:"]
+    out += ["  " + i["kind"] + "  " + item_name(i) + ": " + i["reason"] for i in plan["kept"]] or ["  (nothing)"]
+    out += ["", "restore point: " + plan["restore_point"],
+            "(its restore.md has the commands that bring each removed branch and worktree back)"]
+    return "\n".join(out) + "\n"
+
+
 def render(plan):
     out = ["cleanup plan for run " + plan["run_id"] + " (" + plan["mode"] + " mode)",
            "run folder: " + plan["run_folder"], "", "worktrees:"]
@@ -449,10 +623,14 @@ def main():
         plan = make_plan(repo, m, run_folder)
         if args.yes:
             plan["restore_point"] = write_restore_point(repo, plan, run_folder)
+            plan["removed"], plan["kept"] = remove_owned(repo, m, plan)
     except Failure as e:
         sys.stderr.write("cleanup: " + str(e) + "\n")
         return e.code
-    sys.stdout.write(json.dumps(plan, indent=2) + "\n" if args.json else render(plan))
+    if args.json:
+        sys.stdout.write(json.dumps(plan, indent=2) + "\n")
+    else:
+        sys.stdout.write(render_done(plan) if args.yes else render(plan))
     return 0
 
 
