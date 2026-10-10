@@ -79,7 +79,17 @@ strip_filter='
     .hooks |= with_entries(.value |= strip) | .hooks |= with_entries(select(.value | length > 0))
   else . end'
 
+# Claude Code reads settings.json as exactly one JSON object. jq on its own
+# accepts an empty file or several documents, so slurp and count them. A
+# missing file is fine (the install creates it).
+check_settings() {
+  [ -f "$settings" ] || return 0
+  jq -e -s 'length == 1 and (.[0] | type) == "object"' "$settings" >/dev/null 2>&1 \
+    || die "$settings is not a single JSON object (or not valid JSON); fix it and rerun"
+}
+
 if [ "${1:-}" = "--uninstall" ]; then
+  check_settings
   if [ -f "$settings" ]; then
     backup_settings
     tmp="$(mktemp)"
@@ -107,9 +117,7 @@ fi
 bash "$src/scripts/find-python" >/dev/null || die "Python 3.8 or later is required but none works"
 
 # An unreadable settings.json stops the script before the old skill dir goes.
-if [ -f "$settings" ]; then
-  jq empty "$settings" 2>/dev/null || die "$settings is not valid JSON; fix it and rerun"
-fi
+check_settings
 
 mkdir -p "$claude_dir/skills"
 if [ "$src" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then
@@ -130,7 +138,7 @@ cp "$dest/agents/parallel-lanes-worker.md" "$agent_file"
 echo "Installed agent type parallel-lanes-worker to $agent_file"
 
 [ -f "$settings" ] || echo '{}' > "$settings"
-jq empty "$settings" 2>/dev/null || die "$settings is not valid JSON; fix it and rerun"
+check_settings
 backup_settings
 tmp="$(mktemp)"
 jq --arg start "$start_cmd" --arg notice "$notice_cmd" "$strip_filter"'

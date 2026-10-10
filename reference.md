@@ -715,9 +715,10 @@ repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir
 ## Uninstall
 
 `bash install.sh --uninstall` backs up `~/.claude/settings.json`, then removes the two hooks from
-it, the agent file, and the skill directory. When `settings.json` cannot be edited (the edit
-fails, for example because the file is not valid JSON) it stops with `could not edit <file>;
-nothing removed`, deletes its temporary file, and removes neither the agent file nor the skill
-directory: fix the file and run it again. The update path likewise checks that `settings.json`
-is valid JSON before it replaces the installed skill, and stops without changing anything when
-it is not. On uninstall, the `.bak` backup written before the edit stays.
+it, the agent file, and the skill directory. Both uninstall and the update path first check that
+an existing `settings.json` holds exactly one JSON object (an empty file, two documents, or an
+array is refused, as is invalid JSON): otherwise they stop with `<file> is not a single JSON
+object (or not valid JSON); fix it and rerun` and change nothing. When the edit itself fails
+anyway, uninstall stops with `could not edit <file>; nothing removed`, deletes its temporary
+file, and removes neither the agent file nor the skill directory: fix the file and run it
+again. On uninstall, the `.bak` backup written before the edit stays.

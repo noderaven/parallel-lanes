@@ -309,7 +309,7 @@ Other things to know:
 | `Filename too long` from git on Windows | Run `git config --global core.longpaths true`, then ask Claude to resume the run. |
 | Scripts fail with `$'\r': command not found` | The files have Windows line endings, from a clone made before 1.3.0. Pulling does not rewrite them: in the clone, run `git rm -r -q --cached . && git reset -q --hard` once (it discards local changes in that clone), or clone again, then rerun `bash install.sh`. |
 | Hook or tool errors that come from PowerShell on Windows | Claude Code did not find Git Bash. Install Git for Windows (or set `CLAUDE_CODE_GIT_BASH_PATH`) and restart Claude Code. |
-| `settings.json is not valid JSON` | Fix the syntax error in `~/.claude/settings.json`, then rerun. |
+| `settings.json is not a single JSON object (or not valid JSON)` | `~/.claude/settings.json` must hold exactly one JSON object (`{}` at the least). Fix a syntax error, an empty file, or a second document, then rerun. |
 | Claude says `not a fit (Workflow tool unavailable)` | Your Claude Code build lacks the Workflow tool. Update Claude Code, or use Superpowers' Subagent-driven mode. |
 | `superpowers not found; agents use built-in prompts` | Install Superpowers (section 3) and restart Claude Code. |
 | The skill never fires at plan execution | Restart Claude Code so the SessionStart hook loads, and check section 4, step 2. Invoking it by name also works. |

@@ -193,11 +193,43 @@ test('install.sh --uninstall with invalid settings removes nothing', { skip: SKI
   const res = runInstall(dir, ['--uninstall'], { TMPDIR: tmpdirOwn });
 
   assert.notEqual(res.status, 0);
-  assert.match(res.stderr, /could not edit .*settings\.json; nothing removed/);
+  assert.match(res.stderr, /settings\.json is not a single JSON object \(or not valid JSON\)/);
   assert.ok(existsSync(skillDir(dir)), 'the skill directory is still there');
   assert.ok(existsSync(agentFile(dir)), 'the worker agent file is still there');
   assert.deepEqual(readdirSync(tmpdirOwn), [], 'no temp file is left');
 });
+
+// jq accepts zero or several JSON documents, so a settings.json that is empty
+// or holds two documents must be refused like invalid JSON: Claude Code reads
+// exactly one object.
+for (const [name, text] of [['empty', ''], ['two documents', '{}\n{}\n'], ['not an object', '[]\n']]) {
+  test(`install.sh --uninstall with ${name} settings removes nothing`, { skip: SKIP }, () => {
+    const dir = freshConfig();
+    install(dir);
+    writeFileSync(join(dir, 'settings.json'), text);
+    const res = runInstall(dir, ['--uninstall']);
+
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /not a single JSON object/);
+    assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8'), text, 'settings.json is unchanged');
+    assert.ok(existsSync(skillDir(dir)), 'the skill directory is still there');
+    assert.ok(existsSync(agentFile(dir)), 'the worker agent file is still there');
+  });
+
+  test(`install.sh with ${name} settings keeps the old install on an update`, { skip: SKIP }, () => {
+    const dir = freshConfig();
+    install(dir);
+    writeFileSync(join(dir, 'settings.json'), text);
+    const marker = join(skillDir(dir), 'marker.txt');
+    writeFileSync(marker, 'old install\n');
+    const res = runInstall(dir);
+
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /not a single JSON object/);
+    assert.ok(existsSync(marker), 'the old skill directory is untouched');
+    assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8'), text, 'settings.json is unchanged');
+  });
+}
 
 test('install.sh --uninstall without settings.json still uninstalls', { skip: SKIP }, () => {
   const dir = freshConfig();
@@ -218,7 +250,7 @@ test('install.sh with invalid settings keeps the old install on an update', { sk
   const res = runInstall(dir);
 
   assert.notEqual(res.status, 0);
-  assert.match(res.stderr, /not valid JSON/);
+  assert.match(res.stderr, /not a single JSON object \(or not valid JSON\)/);
   assert.ok(existsSync(marker), 'the old skill directory is untouched');
 });
 
