@@ -83,7 +83,8 @@ if [ "${1:-}" = "--uninstall" ]; then
   if [ -f "$settings" ]; then
     backup_settings
     tmp="$(mktemp)"
-    jq "$strip_filter" "$settings" > "$tmp" && mv "$tmp" "$settings"
+    jq "$strip_filter" "$settings" > "$tmp" && mv "$tmp" "$settings" \
+      || { rm -f "$tmp"; die "could not edit $settings; nothing removed"; }
     echo "Removed parallel-lanes hooks from $settings"
   fi
   if [ -e "$agent_file" ]; then
@@ -104,6 +105,11 @@ fi
 # Any working Python 3.8 or later will do (python3, python, or py -3); the
 # skill finds the same one at run time. find-python explains a failure.
 bash "$src/scripts/find-python" >/dev/null || die "Python 3.8 or later is required but none works"
+
+# An unreadable settings.json stops the script before the old skill dir goes.
+if [ -f "$settings" ]; then
+  jq empty "$settings" 2>/dev/null || die "$settings is not valid JSON; fix it and rerun"
+fi
 
 mkdir -p "$claude_dir/skills"
 if [ "$src" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then
