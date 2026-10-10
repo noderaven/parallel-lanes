@@ -358,6 +358,10 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 and call out any agent whose `resolved_models` names a model other than the one requested
 (a fallback).
 
+`run-checks` stamps each result with `started` and `ended` (UTC ISO 8601 with milliseconds) and
+`duration_s` (seconds, from a monotonic clock). They are additive: `check-verify` compares only
+group, command and exit per result. `autopsy` reads them in its `checks` section.
+
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
 lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with
 invalid UTF-8 counts even when it still parses after the bad bytes are replaced (they may have
@@ -685,10 +689,213 @@ prints it and keeps its old baseline, which is right only for resuming that run.
 run, ask: reuse (resume the old run) or remove. To remove: Cleanup below for its worktrees
 (`git --git-dir=<d> worktree list`), then `bash <skill_dir>/scripts/shadow remove <d>`.
 
+## Run history
+
+`<python> <skill_dir>/scripts/archive-run <manifest> <transcript dir>... [--history-dir DIR]`
+copies a run that ended after a launch into the run history (never a dry run). Run it after
+`run-report` has written its report beside the manifest.
+
+- **History dir:** `--history-dir`, else `PL_HISTORY_DIR`, else
+  `<config dir>/parallel-lanes/history/`. `_history.history_dir` resolves it for Python and
+  `pl_history_dir` in `scripts/_paths.sh` the same way for bash. A history dir inside the
+  project (the repo in git mode, the project folder in shadow mode) is refused with exit 3 and
+  nothing is written.
+- **Run identity:** `run_id` plus the manifest's `repo.ledger_dir` (`_history.run_key`), because
+  run ids repeat across projects and machines. A resume in a new session passes only its own
+  `wf_<id>` dirs; the run is found by that key and keeps its folder and first-launch date.
+  `cleanup` finds the run by the same key.
+- **Folder:** `<history dir>/<YYYY-MM-DD>-<run_id>/` (the UTC date of the first launch; `-2`,
+  `-3` ... when another run owns the name). It holds the manifest, the ledger dir (`checks/`
+  included), the run-report JSON, the plan and spec when they exist, each transcript dir
+  `wf_<id>/` with its `wf_<id>.json` result file, and, written by other tools, `autopsy.json`,
+  `autopsy.md` and `cleanup/`. Copying is idempotent: a missing file is added, a changed file is
+  replaced, and a file already in the archive is never deleted. `launches` counts the `wf_<id>`
+  dirs in the folder, so archiving again never raises it.
+- **`index.json`:** `{"version": 1, "runs": [entry, ...]}`, one entry per run with `run_id`,
+  `folder`, `ledger_dir`, `project`, `plan`, `engine_version`, `machine`, `platform`,
+  `first_launch`, `last_launch`, `launches`, `status` and `acceptance`. A value that cannot be
+  read is `unavailable` (an older run has `engine_version: "unavailable"`; it is never inferred).
+  Stored paths use `/`, and `C:/...` on Windows; a Linux path from another machine stays as
+  written.
+- **`index.lock`:** archive-run and `--reindex` change `index.json` only while they hold
+  `<history dir>/index.lock` (created exclusively). They wait up to 30 s; a lock older than 10
+  minutes is left over from a crash and is taken over, with a notice.
+- **`--reindex`:** `archive-run --reindex [--history-dir DIR]` rebuilds `index.json` from the
+  folders already there (imported runs, hand-archived runs). Every folder holding a
+  `*.lanes.json` is one run; the report is the first of `*.report.json`, `*.run-report.json`
+  and `report.json`. Folders keep their names; it prints `{"runs": N, "skipped": [...]}`.
+- **Imported folders are read-only:** do not run their manifests. `--reindex`, `autopsy` and
+  `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,
+  `history.md`) and never change or remove an imported file.
+
+archive-run prints `{"folder": ..., "added": [...], "updated": [...]}`. Exit 0 on success; exit 2
+on a usage error, an unreadable manifest, transcript dir, ledger dir or index, a failed copy, or
+the lock not acquired; exit 3 when the history dir is inside the project (nothing written).
+`--reindex` exits 0, or 2 when the history dir is not a readable directory or the lock is not
+acquired.
+
+## Autopsy
+
+`<python> <skill_dir>/scripts/autopsy <run folder> [--quiet]` reads one archived run folder
+(never a live path from the manifest, so imported runs and runs from another OS work), writes
+`autopsy.json` and `autopsy.md` into it, and prints a summary of at most 15 lines: the wall time
+and slowest phase, the top three slowdowns with their cost, the full-suite runs, total tokens,
+the top suggestion and the path of `autopsy.md`. The session appends that summary to the
+hand-back report.
+
+**Sections of `autopsy.json`:** `done` (per task status, commits, rounds, tier; acceptance;
+final-review counts; E2E), `time` (wall time per launch, phases, lanes with busy and idle time,
+agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `checks`,
+`slowdowns`, `detectors`, `suggestions` and `unexplained`.
+- `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
+  transport and scheduling), never called model time. The critical path is a timing-based
+  estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
+- `checks` lists every execution of a configured project command or of `run-checks` (agent,
+  phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
+  critical path), the totals per command, and the full-suite runs in total and per role. A
+  backgrounded command is timed to its completion notice when the transcript has one
+  (`measured`), else bounded by the agent's last event (`bound`).
+- `tokens` has run-report's token fields per bucket, `unreadable_lines` and `partial`.
+
+**Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and
+`evidence`):
+
+| Kind | Detects |
+|---|---|
+| `background_check` | a command went to the background |
+| `timeout` | a tool call hit its timeout |
+| `repeated_failure` | the same Bash command failed twice or more in one agent |
+| `heredoc_failure` | a failing Bash command holding a heredoc |
+| `edit_retry` | an Edit or Write failed as unread, changed or text not found |
+| `extra_review_round` | a task's fix and re-review rounds |
+| `escalation` | an agent re-run at another model tier |
+| `retry` | a retried agent |
+| `relaunch` | every launch but the last |
+| `long_tool_call` | a tool call over 120 s that no other kind counted |
+| `idle_gap` | over 60 s with no agent of the launch running |
+| `check_rerun` | a check run again with no edit or commit between |
+
+**Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
+exit code when known, the matched marker string, and the program name (the first word of a
+command that is not a `NAME=value` assignment or `env`, as a basename; null when it still holds
+`=`, `@` or `:`). No command text, tool output or prompt text reaches `autopsy.json`,
+`autopsy.md`, history or the chat summary; `checks` names the configured command, never the
+command line.
+
+**Unavailable data:**
+- A figure that cannot be read or derived is `unavailable`, never 0.
+- `detectors` maps each kind to `ok` or `not_available`. A detector whose inputs are missing
+  (no timed tool events, no labels, no timed launch) is `not_available` and adds no slowdown; it
+  never reports zero.
+- `partial: true` means some agent's output is incomplete, has unreadable lines or has no usage,
+  so the token totals are lower bounds (`output_tokens_min`), never complete totals.
+
+**`inputs_fingerprint`** is a sha256 over the path, size and sha256 of every file autopsy read.
+`history` runs autopsy again when it differs, when `autopsy_version` is older, or when
+`autopsy.md` is missing.
+
+**`unclean_checks`:** when acceptance reports `checks_unclean`, `suggestions` holds an
+`unclean_checks` entry. It names the untracked files from the saved verify evidence by path
+only, and says to commit any file a check needs and gitignore only known generated output.
+Never ignore source a check needs.
+
+**`history`:** `<python> <skill_dir>/scripts/history [--history-dir DIR] [--since YYYY-MM-DD]
+[--project NAME]` compares the archived runs. It reads `index.json` and each run's
+`autopsy.json` (running autopsy first where one is missing or stale), writes `history.json` and
+`history.md` into the history dir, and prints a summary of at most 15 lines: a per-run table,
+recurring slowdowns ranked by total time lost with the engine versions they appeared in, token
+trends per task and role by engine version, suggestions ranked by total stake, and the runs
+whose data is too old for a section (left out of that section's totals). There is no automatic
+"regressed after its fix" flag.
+
+Exit codes: `autopsy` exits 0 on success, 2 on a usage error or a folder without a
+`*.lanes.json` or a `wf_*` dir, and 3 when a path needs converting on Windows and no Git Bash
+is found (that is: exit 0, exit 2, exit 3). `scripts/history` ends with exit 0 on success, or
+exit 2 on a usage error, an unreadable history dir or `index.json`, or outputs it cannot write.
+
+## Doctor
+
+`<python> <skill_dir>/scripts/doctor <manifest> [--json]` checks the machine and the project
+before a launch, for a new run and for a resume. It is read-only: it never changes a file, ref,
+config value or setting, and it never runs `git fetch` (the upstream tip comes from `git
+ls-remote`, with a 15 s timeout). A hard failure blocks the launch: tell the user what failed
+and its fix, and wait. Warnings never block; show them in the dry-run table header.
+
+Hard failures:
+
+| Check | Fails when |
+|---|---|
+| `git_identity` | `git var GIT_COMMITTER_IDENT` fails, after any `-c user.name=... -c user.email=...` pair `commit_rules` passes |
+| `base_not_current` | the local `base_ref` does not contain its upstream tip (details below) |
+| `python` | the manifest's `python` does not run Python 3.8 or newer |
+| `dirty_checkout` | git mode: the checkout has uncommitted changes or untracked, non-ignored files; its fix says to commit any file a check needs and gitignore only known generated output, and never to ignore source a check needs |
+| `shadow_repo` | shadow mode: the shadow repo is missing or broken |
+
+`base_not_current` compares the local base with the upstream tip from `git ls-remote`. Its
+detail is `behind` (the base is an ancestor of the tip), `diverged` (neither contains the other)
+or `unknown` (the tip is not present locally, for example in a shallow clone). All three block a
+new run; on a resume (`repo.branch` already exists) a stale base has no effect and all three
+are warnings. An unreachable remote is a warning; a base with no upstream is skipped. This is
+the r131 case.
+
+Warnings: `memory` (under 4 GB available, or the commit charge near its limit), `disk` (under
+5 GB free on the worktree root's drive), `python_alias` (Windows: python resolves through the
+WindowsApps alias), `heavy_processes` (Windows: AppXSvc over 1500 MB; elsewhere a load average
+above the CPU count), `active_runs` (another run holds a launch lock on this machine),
+`defender` (Windows) and `concurrency`
+(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once). A read that
+fails is a warning with detail `unknown`.
+
+- **Platforms:** the checks that exist only on Windows (`python_alias`, `defender`, AppXSvc)
+  are skipped as `not_applicable` on Linux and macOS. Free memory is read per platform:
+  `GlobalMemoryStatusEx` on Windows, `/proc/meminfo` on Linux, `vm_stat` and `sysctl
+  hw.memsize` on macOS; elsewhere it is `unknown`.
+- **Defender:** `defender` reports only `covered`, `not covered` or `unknown` for the worktree
+  root. Reading the exclusion list needs elevation, so without it the answer is `unknown`. It
+  never prints the exclusion list and never suggests excluding `AppData\Local\Temp`.
+
+Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: a usage error or an
+unreadable manifest. `--json` prints `{"status": "ok" | "blocked", "failures": [...],
+"warnings": [...], "skipped": [...]}`.
+
 ## Cleanup
 
-Integration already removes each clean lane worktree and deletes its merged branch; the
-ones it could not remove are listed in its notes. After the user confirms the result:
+`<python> <skill_dir>/scripts/cleanup <manifest> [--yes] [--json] [--history-dir DIR]` tidies a
+finished, archived run after the user confirms the result. Without `--yes` it prints the plan
+and changes nothing; show the plan, and run it with `--yes` only on the user's yes.
+
+- **It refuses (exit 3, nothing changed)** unless the run is archived (its key is in
+  `index.json` and its folder exists) and has no active-run marker, since a marker means the run
+  can still resume.
+- **Ownership rule:** it removes only `<worktree_root>/lane-<id>` for each manifest lane (and
+  `<worktree_root>/feature` in shadow mode), each a worktree of the same repository on its
+  expected branch (`pl-<run_id>-<id>`, or `repo.branch`), plus those branches. Anything else
+  under `worktree_root` is left and listed as `not owned by this run`. A worktree with
+  uncommitted files, or a locked one, is kept and named.
+- **Restore point,** written before anything is removed, into a new folder
+  `<run folder>/cleanup/<YYYYMMDDTHHMMSSZ>[-N]/` (never reused or overwritten): `refs.json` (every
+  run branch and every `refs/parallel-lanes/<run_id>/` ref with its tip), `run.bundle` (a `git
+  bundle` of them, checked with `git bundle verify`, so branches come back even after garbage
+  collection) and `restore.md` (the commands to bring each branch back from the bundle). If the
+  bundle cannot be written or verified, nothing is removed (exit 4).
+- **Order:** worktrees, then lane branches (`git branch -d` only), then the feature branch (git
+  mode), then the empty `worktree_root` (`rmdir`). The feature branch goes only when the main
+  checkout is clean and on it, the PR is merged, and the base fast-forwards from its upstream
+  (`git merge --ff-only`); otherwise the checkout and branch stay as they are, with the reason,
+  and cleanup can be run again later. Shadow mode keeps every branch and the shadow repo
+  (`shadow remove` stays a separate step).
+- **It never** uses `--force` or `branch -D`, deletes a remote branch, makes a merge commit,
+  resets or rebases, deletes `refs/parallel-lanes/<run_id>/abandoned/` refs, or removes the
+  manifest, the ledger or the history folder.
+
+Exit 0 when done or planned (kept items included); exit 1 when a git command the plan needs
+fails (nothing changed); exit 2 on a usage error or an unreadable manifest or index; exit 3 when
+refused (nothing changed); exit 4 when the restore point could not be written or verified
+(nothing removed).
+
+The manual commands below are the fallback when `scripts/cleanup` cannot be used. Integration
+already removes each clean lane worktree and deletes its merged branch; the ones it could not
+remove are listed in its notes. After the user confirms the result:
 
 ```bash
 # git mode

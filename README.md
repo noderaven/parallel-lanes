@@ -304,6 +304,11 @@ Other things to know:
   inside the repo. Worktrees go in a
   sibling directory such as `<repo>-wt-<run_id>`. In git mode the run adds branches to
   your repo, but no run files are written inside the project folder.
+- **Run tools.** Five helpers surround a run: `doctor` checks the machine and the project
+  before a launch, `archive-run` copies a finished run into the run history, `autopsy` reports
+  where one run's time and tokens went, `history` compares the archived runs, and `cleanup`
+  removes a finished run's worktrees and branches after writing a restore point. Claude runs
+  them for you; `reference.md` ("Run history", "Autopsy", "Doctor", "Cleanup") documents each.
 
 ---
 

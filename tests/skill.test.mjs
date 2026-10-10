@@ -361,3 +361,92 @@ test('reference.md documents the 1.4.4 hardening', () => {
     'reference.md lacks the ledger reviewed usage');
   assert.ok(!text.includes('and the other texts as `also_reported`'), 'reference.md still has the old merge rule');
 });
+
+// These tests check instructions to the session in SKILL.md, reference.md and
+// README.md (what they must say about the 1.5.0 run tools), not behaviour the
+// code enforces.
+function docSection(text, heading) {
+  const start = text.indexOf(heading);
+  assert.ok(start >= 0, `lacks ${heading}`);
+  const next = text.indexOf('\n## ', start + heading.length);
+  return text.slice(start, next === -1 ? undefined : next);
+}
+
+test('SKILL.md runs doctor before every dry run and on resume', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const confirmation = text.slice(text.indexOf('## Confirmation'), text.indexOf('## Launch'));
+  const doctor = confirmation.indexOf('scripts/doctor');
+  assert.ok(doctor >= 0 && doctor < confirmation.indexOf('1. Dry run'), 'doctor runs before the dry run');
+  assert.ok(/Exit 3 stops the flow/.test(confirmation), 'doctor exit 3 must stop the flow');
+  assert.ok(/warnings[^.]*table header/.test(confirmation), 'doctor warnings go in the table header');
+  const resume = text.slice(text.indexOf('## Resume'), text.indexOf('## Red flags'));
+  assert.ok(resume.includes('scripts/doctor'), resume);
+});
+
+test('the hand-back archives the run and appends the autopsy summary', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const handBack = text.slice(text.indexOf('## Hand-back'), text.indexOf('## Resume'));
+  const report = handBack.indexOf('scripts/run-report');
+  const archive = handBack.indexOf('scripts/archive-run');
+  const autopsy = handBack.indexOf('scripts/autopsy');
+  assert.ok(report >= 0 && archive > report && autopsy > archive, handBack);
+  assert.ok(/every run that ends after a launch/.test(handBack), 'hand-back must name every run that ends after a launch');
+  assert.ok(/appen\w+ its (summary|output)/.test(handBack.slice(autopsy)), 'autopsy summary is appended');
+});
+
+test('cleanup asks before it removes anything', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const at = text.indexOf('Cleanup, only after');
+  assert.ok(at >= 0, 'SKILL.md lacks the Cleanup line');
+  const line = text.slice(at, text.indexOf('## Resume'));
+  assert.ok(line.includes('scripts/cleanup'), line);
+  const plain = line.indexOf('scripts/cleanup <manifest');
+  const yes = line.indexOf('--yes');
+  assert.ok(plain >= 0 && yes > plain, 'cleanup runs without --yes first');
+  assert.ok(/without `--yes`/.test(line) || line.slice(plain, yes).includes('plan'), line);
+  assert.ok(/(only after|on) the user'?s yes/.test(line.slice(yes - 60)), '--yes only after the user says yes');
+});
+
+test('reference.md documents the tools', () => {
+  const raw = read(REFERENCE_MD).toString('utf8');
+  const text = raw.replace(/\s+/g, ' ');
+  for (const heading of ['## Run history', '## Autopsy', '## Doctor']) {
+    assert.ok(raw.includes('\n' + heading + '\n'), `reference.md lacks ${heading}`);
+  }
+  const cleanup = docSection(raw, '## Cleanup').replace(/\s+/g, ' ');
+  for (const word of ['scripts/cleanup', 'run.bundle', 'restore.md', 'not owned by this run']) {
+    assert.ok(cleanup.includes(word), `the Cleanup section lacks ${word}`);
+  }
+  const words = ['PL_HISTORY_DIR', 'index.lock', 'unclean_checks', 'inputs_fingerprint', 'duration_s',
+    // doctor's checks
+    'git_identity', 'base_not_current', 'python', 'dirty_checkout', 'shadow_repo', 'memory', 'disk',
+    'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
+    // autopsy's detectors
+    'background_check', 'timeout', 'repeated_failure', 'heredoc_failure', 'edit_retry',
+    'extra_review_round', 'escalation', 'retry', 'relaunch', 'long_tool_call', 'idle_gap', 'check_rerun',
+    'not_available', 'unavailable', 'partial', '--reindex'];
+  for (const word of words) {
+    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  }
+  // Each tool's exit codes.
+  const exits = {
+    '## Run history': ['archive-run', 'exit 0', 'exit 2', 'exit 3'],
+    '## Autopsy': ['autopsy', 'exit 0', 'exit 2', 'exit 3'],
+    '## Doctor': ['doctor', 'exit 0', 'exit 2', 'exit 3'],
+    '## Cleanup': ['cleanup', 'exit 0', 'exit 1', 'exit 2', 'exit 3', 'exit 4'],
+  };
+  for (const [heading, terms] of Object.entries(exits)) {
+    const body = docSection(raw, heading).replace(/\s+/g, ' ').toLowerCase();
+    for (const term of terms) assert.ok(body.includes(term), `${heading} lacks ${term}`);
+  }
+  assert.ok(/history[^.]*exit 0[^.]*exit 2|exit 0[^.]*exit 2[^.]*history/i.test(docSection(raw, '## Autopsy').replace(/\s+/g, ' ')),
+    'the Autopsy section gives the history exit codes');
+});
+
+test('README lists the five run tools and points to reference.md', () => {
+  const text = read(README_MD).toString('utf8').replace(/\s+/g, ' ');
+  for (const tool of ['doctor', 'archive-run', 'autopsy', 'history', 'cleanup']) {
+    assert.ok(text.includes('`' + tool + '`'), `README lacks ${tool}`);
+  }
+  assert.ok(text.includes('reference.md'), 'README points to reference.md');
+});

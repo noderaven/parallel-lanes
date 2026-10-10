@@ -135,6 +135,9 @@ Fields: reference.md "Manifest fields". In order:
 
 ## Confirmation (every launch, no exceptions)
 
+Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file>`. Exit 3 stops the
+flow (show each failure and its fix, and wait); its warnings go in the table header.
+
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
    `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
    spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
@@ -259,6 +262,10 @@ lens raised, `final.task_minors_open`), acceptance warnings,
 `agents_spawned`, `agent_type_fallback`, and the `undeclared` files of `ledger status
 <ledger_dir> --manifest <manifest file>` (changed outside their task's Files list).
 
+After the report, for every run that ends after a launch (never a dry run): `<python>
+<skill_dir>/scripts/archive-run <manifest file> <transcript dir>...`, then `<python>
+<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its summary.
+
 Then, for accepted work (or reasons the user accepted), offer the next step; act only on an
 explicit yes:
 - Git mode: a PR from `branch` into `base_ref` (follow the user's PR policy).
@@ -268,7 +275,8 @@ explicit yes:
   reference.md "Cleanup" and ask. Never copy files around it by hand.
 
 Cleanup, only after the user confirms the result: reference.md "Cleanup"; never `--force`,
-never `branch -D`. Keep the manifest and ledger.
+never `branch -D`. Run `<python> <skill_dir>/scripts/cleanup <manifest file>` without `--yes`
+first, show its plan, and add `--yes` only on the user's yes. Keep the manifest and ledger.
 
 ## Resume
 
@@ -287,7 +295,7 @@ never `branch -D`. Keep the manifest and ledger.
    Record an answer in `notes` as `{"<task id>": "<answer>"}`; a plan fix needs
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
-6. Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
+6. `scripts/doctor` as in Confirmation, then Confirmation (same rules; `spent` lowers `limits.max_rulings`: reference.md "Budgets"),
    then, after the yes, Launch step 2 again (setup and `start_points`), the resume notice,
    and launch.
 
