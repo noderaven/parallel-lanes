@@ -144,7 +144,7 @@ function lensHeadsOf(names, results) {
 // review_missing, so alone it is no problem here.
 function reviewProblemOf(lensHeads, results) {
   const reviewed = (i) => Boolean(results[i] && Array.isArray(results[i].findings));
-  const shas = new Set(lensHeads.filter((l) => isSha(l.head)).map((l) => l.head));
+  const shas = new Set(lensHeads.filter((l, i) => reviewed(i) && isSha(l.head)).map((l) => l.head));
   const noSha = lensHeads.some((l, i) => reviewed(i) && !isSha(l.head));
   if (!noSha && shas.size <= 1) return null;
   const each = lensHeads.map((l, i) => (!reviewed(i) ? `${l.lens} returned no result`

@@ -114,10 +114,20 @@ def head_of(directory):
     return res.stdout.strip()
 
 
+def status_of(directory, *args):
+    """The stdout of git status --porcelain; a status git could not read
+    (index.lock contention, a damaged index) ends the run, so it is never
+    taken for a clean checkout."""
+    res = git(directory, "status", "--porcelain", *args)
+    if res.returncode != 0:
+        fail(3, f"git status failed in {directory!r}: {res.stderr.strip()}")
+    return res.stdout
+
+
 def tracked_changes(directory):
     """The lines git status --porcelain --untracked-files=no prints, without
     empty lines or the line end but with the leading status columns."""
-    out = git(directory, "status", "--porcelain", "--untracked-files=no").stdout
+    out = status_of(directory, "--untracked-files=no")
     lines = (line.rstrip("\r\n") for line in out.split("\n"))
     return [line for line in lines if line]
 
@@ -187,7 +197,7 @@ def run(directory, out, root, cmds):
                         "log": log, "tail": tail_of(log)})
     tracked_after = tracked_changes(directory)
     after = head_of(directory)
-    clean = git(directory, "status", "--porcelain").stdout == ""
+    clean = status_of(directory) == ""
     report = {"checkout": directory, "branch": branch, "head": head, "results": results,
               "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": clean,
               "tracked_before": tracked_before, "tracked_after": tracked_after}

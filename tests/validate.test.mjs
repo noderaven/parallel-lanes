@@ -161,6 +161,14 @@ test('ids that name a Windows device are reported', () => {
   assertError(validateManifest(m), 'run_id', 'aux', 'reserved device name on Windows');
 });
 
+test('lane ids prelude and join are reserved in any letter case', () => {
+  for (const id of ['prelude', 'join', 'Prelude', 'JOIN']) {
+    const m = validManifest();
+    renameLane(m, 0, id);
+    assertError(validateManifest(m), `lane ${id}`, 'id is reserved');
+  }
+});
+
 test('ids that only start like a Windows device stay valid', () => {
   const m = validManifest();
   m.prelude[0].id = 'CONFIG';

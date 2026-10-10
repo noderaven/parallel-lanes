@@ -292,7 +292,7 @@ function validateManifest(m) {
         if (!isText(lane.id)) err(`${where}.id: must be a non-empty string`);
         else if (!new RegExp(laneIdPattern()).test(lane.id)) {
           err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
-        } else if (lane.id === 'prelude' || lane.id === 'join') err(`lane ${lane.id}: id is reserved`);
+        } else if (['prelude', 'join'].includes(lane.id.toLowerCase())) err(`lane ${lane.id}: id is reserved`);
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
         else {
           laneIds.add(lane.id);

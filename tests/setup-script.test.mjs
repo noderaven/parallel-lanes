@@ -685,6 +685,19 @@ test('setup: a differently cased path to a locked checkout is the same checkout'
   assert.equal(hasBranch(c.project, 'pl-second'), false);
 });
 
+test('setup: a subdirectory of a locked checkout is the same checkout', () => {
+  const c = newCase();
+  const sub = join(c.project, 'nested dir');
+  mkdirSync(sub);
+  setupOk(c, runManifest(c, 'first'));
+  const res = setup(c, runManifest(c, 'second', sub));
+  assert.equal(res.code, 4, res.stderr);
+  assert.match(res.stderr, /\bfirst\b/);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+  assert.equal(checkoutLocks(c).length, 1);
+});
+
 test('setup: shadow mode takes no checkout lock', () => {
   const c = newCase();
   const project = join(c.root, 'plain', 'my project');

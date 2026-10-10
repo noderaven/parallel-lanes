@@ -166,6 +166,7 @@ test('failing checks on a dirty checkout are rejected, not just unverified', () 
   const a = acceptanceOf(input);
   assert.equal(a.status, 'rejected');
   assert.ok(a.reasons.some((r) => r.kind === 'checks_failed'), JSON.stringify(a.reasons));
+  assert.deepEqual(kinds(a), [['checks_failed', 'failed'], ['checks_unclean', 'missing']]);
 });
 
 test('untracked build output stays a warning', () => {

@@ -176,8 +176,10 @@ this. Say the table is the one required check, show it, and wait.
    token (keep it for relaunches). Exit 4: another session holds the run; stop and ask, and use
    `--takeover` only when the user confirms that session ended. Then run
    `<python> <skill_dir>/scripts/setup <manifest file> --owner <token>`. Its exit 4 naming another
-   run (`the checkout ... is in use by run ...`) means that run holds the checkout: stop and
-   report it. It creates the feature branch and
+   run (`the checkout ... is in use by run ...`) means that run holds the checkout: setup changed
+   nothing, so release this run's own launch lock first (`active-run release <run_id> setup_failed
+   --owner <token>`, or `active-run release <run_id> --remove --owner <token>` for a new run that never
+   started), then stop and report it. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
    wait 10 seconds and retry once; then `active-run release <run_id> setup_failed --owner <token>`, report,
    and stop. Put its output in `setup_result`

@@ -149,6 +149,15 @@ test('run-checks keeps every exit status: a failure before a success fails the r
   assert.equal(JSON.parse(pass.stdout).ok, true);
 });
 
+test('run-checks refuses a checkout whose git status fails instead of reporting it clean', () => {
+  const r = repo();
+  writeFileSync(join(r, '.git', 'index'), 'not an index');
+  const res = py('run-checks', [r, '--cmd', 'test', 'true']);
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /git status failed/);
+  assert.equal(res.stdout, '');
+});
+
 test('run-checks keeps a large output out of its streams', () => {
   const r = repo();
   // Over 1 MB of output, on stdout and stderr both: none of it may reach

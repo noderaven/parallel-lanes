@@ -733,7 +733,8 @@ function verifyPrompt(m, sha) {
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
 // per-command results (integrate's). Passed means ok and every exit 0, on a
 // checkout with no tracked change before or after the commands; checks that
-// passed on uncommitted tracked changes do not cover head. A missing tracked
+// passed on uncommitted tracked changes do not cover head, and a failure on
+// them may come from the uncommitted edit, so it is not reported as head's. A missing tracked
 // list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
@@ -742,8 +743,10 @@ function checksResultText(checks) {
   const tracked = new Set([checks.tracked_before, checks.tracked_after]
     .flatMap((l) => (Array.isArray(l) ? l : []))
     .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
+  const files = `${tracked.size} file${tracked.size === 1 ? '' : 's'}`;
   const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
-    : tracked.size > 0 ? `ran on uncommitted tracked changes (${tracked.size} file${tracked.size === 1 ? '' : 's'}),`
+      + (tracked.size > 0 ? ` (on uncommitted tracked changes, ${files}, so not at ${checks.head})` : '')
+    : tracked.size > 0 ? `ran on uncommitted tracked changes (${files}),`
       + ` so they do not cover ${checks.head}`
       : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;

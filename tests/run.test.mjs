@@ -2394,6 +2394,26 @@ test('checksResultText: checks on uncommitted tracked changes do not cover the h
     + ` ${H('f1')}: ran on uncommitted tracked changes (1 file), so they do not cover ${H('f1')}. Do not rerun them.`);
 });
 
+test('checksResultText: a failure on uncommitted tracked changes is not reported as a failure of head', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  const failing = { head: H('f2'), ok: false, results: [{ group: 'test', command: 'npm test', exit: 1 }],
+    tracked_before: [' M value.txt'], tracked_after: [' M value.txt', ' M c.txt'] };
+  assert.equal(checksResultText(failing), `The project checks already ran at ${H('f2')}: FAILED: npm test (exit 1)`
+    + ` (on uncommitted tracked changes, 2 files, so not at ${H('f2')}). Do not rerun them.`);
+  assert.equal(checksResultText({ head: H('f2'), ok: false, tracked_after: [' M x.txt'] }),
+    `The project checks already ran at ${H('f2')}: FAILED (on uncommitted tracked changes, 1 file, so not at ${H('f2')}).`
+    + ' Do not rerun them.');
+});
+
+test('reviewProblemOf: the head of a lens with no findings is not one the lenses disagree on', async () => {
+  const { reviewProblemOf } = await loadHelpers(['reviewProblemOf', 'isSha']);
+  const done = { findings: [], head: H('A') };
+  const heads = [{ lens: 'sp', head: H('A') }, { lens: 'security', head: H('A') }, { lens: 'correctness', head: H('B') }];
+  assert.equal(reviewProblemOf(heads, [done, done, { cannot_verify: [], head: H('B') }]), null);
+  const problem = reviewProblemOf(heads, [done, { findings: [], head: H('A') }, { findings: [], head: H('B') }]);
+  assert.ok(problem.includes(H('A')) && problem.includes(H('B')), problem);
+});
+
 // ---- Task minors to the final review, exact-line combining (1.3.1) ----
 
 const minorT2 = { severity: 'minor', file: 'src/T2.js', line: 5, issue: 'rename the helper', fix: 'rename it' };
