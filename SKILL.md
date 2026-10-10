@@ -199,8 +199,10 @@ this. Say the table is the one required check, show it, and wait.
    line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)
    keeps the lock until it is fixed: `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status>
    <agents_spawned> <rulings_spent> && bash <skill_dir>/scripts/active-run release <run_id>
-   <release> --owner <token>`, where `<release>` is `--remove` only for `complete` with `acceptance.status`
-   `accepted`, otherwise `<status>`, so a later session offers the resume.
+   <release> --owner <token>`, where `<release>` is `--remove` only for `complete` when the hand-back gate
+   passes: `acceptance.status` `accepted`, and `<python> <skill_dir>/scripts/check-verify <transcript dir>
+   <manifest file>` exits 0 printing status `match` or `not_required`; otherwise `<status>` (`unaccepted` for
+   a complete run), so a later session offers the resume. Run check-verify before that end record.
 
 ## Transient stops (relaunch once, no prompt)
 
@@ -236,7 +238,10 @@ The run returns `status`:
 - `stopped`: transient: relaunch as above. Otherwise show `reason` and each `stopped_lanes`
   entry (lane, task, reason), notify, keep the marker. The run is resumable: after the user
   answers or fixes the plan, go to Resume.
-- `complete`: lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
+- `complete`: run check-verify first (Launch step 5); any other outcome than exit 0 with `match` or
+  `not_required` (exit 1, 2 or 3, a crash, no or unparseable output) is `unverified`: show its reason, or
+  "check-verify error" with the exit code and stderr, keep the marker, and recover as reference.md "Verify
+  evidence" says. Lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
   with `<python> <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
