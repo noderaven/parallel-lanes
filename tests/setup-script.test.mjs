@@ -561,7 +561,7 @@ test('setup: a run with no launch lock is refused, even with a token from a rele
   assert.match(res.stderr, /no launch lock/);
   const token = activeRun(env, 'acquire', 'r1', '/m.json').stdout.trim();
   setupOk(c, m, ['--owner', token], env);
-  assert.equal(activeRun(env, 'release', 'r1', 'stopped').code, 0);
+  assert.equal(activeRun(env, 'release', 'r1', 'stopped', '--owner', token).code, 0);
   write(laneDir(c, 'a'), 'wip.txt', 'work of a session still running\n');
   res = setup(c, m, ['--owner', token], env);
   assert.equal(res.code, 3, res.stderr);

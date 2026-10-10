@@ -6,7 +6,7 @@
 #
 # usage:
 #   active-run acquire RUN_ID MANIFEST [--takeover]
-#   active-run release RUN_ID STATUS|--remove
+#   active-run release RUN_ID STATUS|--remove --owner TOKEN
 #   active-run write RUN_ID MANIFEST [STATUS]
 #   active-run remove RUN_ID [--takeover]
 #   active-run list
@@ -24,8 +24,12 @@
 # (exit 4): another session may still be running it. --takeover replaces an
 # existing lock; use it only when the user confirms the session that held it
 # has ended.
-# release removes the run's checkout locks and then its lock, and either
-# writes the marker with STATUS or, with --remove, deletes the marker.
+# release requires the owner token acquire printed (--owner TOKEN). When the
+# run's lock holds another token (a takeover replaced it), release refuses
+# (exit 4) and changes nothing. Otherwise it either writes the marker with
+# STATUS or, with --remove, deletes the marker, and then removes the run's
+# checkout locks and its lock. A run whose lock is already gone still gets its
+# status recorded.
 # write creates or replaces a marker: STATUS defaults to running, and
 # rewriting an existing marker keeps its started time and updates its status.
 # remove deletes a marker (a missing one is fine); a locked run is refused
@@ -36,15 +40,22 @@
 # must be a safe run id equal to its file name); a missing directory lists
 # as [].
 #
-# Exit 0 on success; 2 on usage error; 3 on an unsafe run id or a marker
-# directory that cannot be created or written; 4 when acquire finds the run
-# locked.
+# acquire, release and remove do their lock work under a per-run mutex, the
+# directory <active dir>/.<RUN_ID>.mutex (mkdir is atomic), so a takeover
+# cannot slip between release's token check and its unlock. A waiter retries
+# for $PL_MUTEX_WAIT seconds (default 10), then fails (exit 3) naming the
+# mutex: it is stale only if no active-run is running.
+#
+# Exit 0 on success; 2 on usage error; 3 on an unsafe run id, a marker
+# directory that cannot be created or written, or a mutex that stays held; 4
+# when acquire or remove finds the run locked, or release finds it locked by
+# another owner.
 set -euo pipefail
 
 dir="${PL_ACTIVE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/active}"
 
 usage() {
-  echo "usage: active-run acquire RUN_ID MANIFEST [--takeover] | release RUN_ID STATUS|--remove" \
+  echo "usage: active-run acquire RUN_ID MANIFEST [--takeover] | release RUN_ID STATUS|--remove --owner TOKEN" \
     "| write RUN_ID MANIFEST [STATUS] | remove RUN_ID [--takeover] | list" >&2
   exit 2
 }
@@ -105,6 +116,34 @@ drop_checkout_locks() {
   done
 }
 
+# The per-run mutex: lock_mutex RUN_ID takes <dir>/.<RUN_ID>.mutex, waiting up
+# to $PL_MUTEX_WAIT seconds; unlock_mutex gives it back, and runs on exit too,
+# so a failure inside the locked section never leaves it behind.
+mutex=""
+
+unlock_mutex() {
+  [ -z "$mutex" ] || rmdir "$mutex" 2>/dev/null || true
+  mutex=""
+}
+
+lock_mutex() {
+  local path="$dir/.$1.mutex" wait="${PL_MUTEX_WAIT:-10}" tries=0
+  [[ "$wait" =~ ^[0-9]+$ ]] || fail 2 "PL_MUTEX_WAIT must be a whole number of seconds"
+  trap unlock_mutex EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  until mkdir "$path" 2>/dev/null; do
+    if [ "$tries" -ge $((10#$wait * 10)) ]; then
+      [ -d "$path" ] || fail 3 "cannot create $path"
+      fail 3 "$path is held; if no active-run is running, remove it"
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  mutex="$path"
+}
+
 [ "$#" -ge 1 ] || usage
 command -v jq >/dev/null 2>&1 || fail 3 "jq is required"
 
@@ -119,6 +158,7 @@ case "$1" in
     lock="$dir/$run_id.lock"
     token="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
     [ -n "$token" ] || fail 3 "cannot generate an owner token"
+    lock_mutex "$run_id"
     if [ -n "$takeover" ]; then
       tmp="$(umask 077 && mktemp "$dir/.$run_id.lock.XXXXXX")" || fail 3 "cannot write in $dir"
       printf '%s\n' "$token" >"$tmp" && mv -f "$tmp" "$lock" || fail 3 "cannot write $lock"
@@ -128,23 +168,32 @@ case "$1" in
       fail 4 "run $run_id is locked by another launch (marker status: ${status:-unknown}); if that session has ended, acquire again with --takeover"
     fi
     write_marker "$run_id" "$manifest" running
+    unlock_mutex
     printf '%s\n' "$token"
     ;;
   release)
-    [ "$#" -eq 3 ] || usage
-    run_id="$2" what="$3"
-    [ -n "$what" ] || usage
+    [ "$#" -eq 5 ] && [ "$4" = "--owner" ] || usage
+    run_id="$2" what="$3" owner="$5"
+    [ -n "$what" ] && [ -n "$owner" ] || usage
     check_id "$run_id"
+    ensure_dir
+    lock="$dir/$run_id.lock"
+    lock_mutex "$run_id"
+    if [ -e "$lock" ]; then
+      held="$(head -n 1 "$lock" 2>/dev/null)" || fail 3 "cannot read $lock"
+      [ "$held" = "$owner" ] ||
+        fail 4 "run $run_id is locked by another owner (its lock was taken over); nothing was released"
+    fi
     if [ "$what" = "--remove" ]; then
       rm -f "$dir/$run_id.json" || fail 3 "cannot remove $dir/$run_id.json"
     else
-      ensure_dir
       manifest="$( (read_marker "$dir/$run_id.json" | jq -r '.manifest') 2>/dev/null || true)"
       [ -n "$manifest" ] || fail 3 "no marker for run $run_id to release"
       write_marker "$run_id" "$manifest" "$what"
     fi
     drop_checkout_locks "$run_id"
-    rm -f "$dir/$run_id.lock" || fail 3 "cannot remove $dir/$run_id.lock"
+    rm -f "$lock" || fail 3 "cannot remove $lock"
+    unlock_mutex
     ;;
   write)
     [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
@@ -158,11 +207,14 @@ case "$1" in
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
     [ "$#" -eq 2 ] || [ "$3" = "--takeover" ] || usage
     check_id "$2"
+    ensure_dir
+    lock_mutex "$2"
     if [ -e "$dir/$2.lock" ] && [ "$#" -eq 2 ]; then
       fail 4 "run $2 is locked by a launch that may still be running; if that session has ended, remove it with --takeover"
     fi
     drop_checkout_locks "$2"
     rm -f "$dir/$2.json" "$dir/$2.lock" || fail 3 "cannot remove $dir/$2.json"
+    unlock_mutex
     ;;
   list)
     [ "$#" -eq 1 ] || usage

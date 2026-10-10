@@ -23,13 +23,24 @@ function markerDir() {
   return join(TMP, `case ${counter}`, 'active dir');
 }
 
-function activeRun(dir, ...args) {
+function activeRunWith(dir, env, ...args) {
   const res = spawnSync(BASH, [ACTIVE_RUN, ...args], {
     encoding: 'utf8',
-    env: { ...process.env, PL_ACTIVE_DIR: dir },
+    env: { ...process.env, ...env, PL_ACTIVE_DIR: dir },
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
+
+const activeRun = (dir, ...args) => activeRunWith(dir, {}, ...args);
+
+// Acquires run r1 in dir and returns the owner token.
+function acquire(dir, ...extra) {
+  const res = activeRun(dir, 'acquire', 'r1', M('/m.json'), ...extra);
+  assert.equal(res.code, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+const readLock = (dir) => readFileSync(join(dir, 'r1.lock'), 'utf8').trim();
 
 function list(dir) {
   const res = activeRun(dir, 'list');
@@ -119,13 +130,95 @@ test('active-run: acquire --takeover replaces a stale lock with a new token', ()
 
 test('active-run: release drops the lock and records the status, or removes the marker', () => {
   const dir = markerDir();
-  activeRun(dir, 'acquire', 'r1', M('/m.json'));
-  const rel = activeRun(dir, 'release', 'r1', 'unaccepted');
+  const token = acquire(dir);
+  const rel = activeRun(dir, 'release', 'r1', 'unaccepted', '--owner', token);
   assert.equal(rel.code, 0, rel.stderr);
   assert.deepEqual(list(dir).map(({ status, locked }) => ({ status, locked })), [{ status: 'unaccepted', locked: false }]);
-  assert.equal(activeRun(dir, 'acquire', 'r1', M('/m.json')).code, 0, 'a released run can be acquired again');
-  assert.equal(activeRun(dir, 'release', 'r1', '--remove').code, 0);
+  const again = acquire(dir);
+  assert.equal(activeRun(dir, 'release', 'r1', '--remove', '--owner', again).code, 0);
   assert.deepEqual(list(dir), []);
+  assert.equal(existsSync(join(dir, '.r1.mutex')), false, 'the mutex is not left behind');
+});
+
+test('active-run: release without --owner is a usage error', () => {
+  const dir = markerDir();
+  const token = acquire(dir);
+  for (const args of [['stopped'], ['--remove'], ['stopped', '--owner'], ['stopped', '--owner', ''],
+    ['stopped', '--owner', token, 'extra'], ['stopped', '--token', token], ['--owner', token]]) {
+    const res = activeRun(dir, 'release', 'r1', ...args);
+    assert.equal(res.code, 2, `args ${JSON.stringify(args)}`);
+    assert.match(res.stderr, /--owner TOKEN/);
+  }
+  assert.equal(readLock(dir), token);
+  assert.equal(list(dir)[0].status, 'running');
+});
+
+test('active-run: release with another token is refused and changes nothing', () => {
+  for (const what of ['stopped', '--remove']) {
+    const dir = markerDir();
+    const token = acquire(dir);
+    writeCheckoutLocks(dir);
+    const marker = readFileSync(join(dir, 'r1.json'), 'utf8');
+    const res = activeRun(dir, 'release', 'r1', what, '--owner', 'f'.repeat(32));
+    assert.equal(res.code, 4, res.stderr);
+    assert.match(res.stderr, /another owner/);
+    assert.equal(readLock(dir), token);
+    assert.equal(readFileSync(join(dir, 'r1.json'), 'utf8'), marker);
+    assert.equal(existsSync(join(dir, 'checkout-1-2.lock')), true, "the run's checkout lock is kept");
+    assert.equal(existsSync(join(dir, '.r1.mutex')), false, 'a refused release leaves no mutex');
+  }
+});
+
+test('active-run: release after a takeover cannot drop the new lock', () => {
+  const dir = markerDir();
+  const first = acquire(dir);
+  const second = acquire(dir, '--takeover');
+  const old = activeRun(dir, 'release', 'r1', 'stopped', '--owner', first);
+  assert.equal(old.code, 4, old.stderr);
+  assert.equal(readLock(dir), second);
+  assert.deepEqual(list(dir).map(({ status, locked }) => ({ status, locked })), [{ status: 'running', locked: true }]);
+  const own = activeRun(dir, 'release', 'r1', 'stopped', '--owner', second);
+  assert.equal(own.code, 0, own.stderr);
+  assert.equal(existsSync(join(dir, 'r1.lock')), false);
+  assert.deepEqual(list(dir).map(({ status, locked }) => ({ status, locked })), [{ status: 'stopped', locked: false }]);
+});
+
+test('active-run: release with no lock records the status', () => {
+  const dir = markerDir();
+  assert.equal(activeRun(dir, 'write', 'r1', M('/m.json')).code, 0);
+  const res = activeRun(dir, 'release', 'r1', 'stopped', '--owner', 'f'.repeat(32));
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(list(dir).map(({ status, locked }) => ({ status, locked })), [{ status: 'stopped', locked: false }]);
+  const rm = activeRun(dir, 'release', 'r1', '--remove', '--owner', 'f'.repeat(32));
+  assert.equal(rm.code, 0, rm.stderr);
+  assert.deepEqual(list(dir), []);
+});
+
+test('active-run: a held mutex blocks acquire and then reports it', () => {
+  const dir = markerDir();
+  const mutex = join(dir, '.r1.mutex');
+  mkdirSync(mutex, { recursive: true });
+  const res = activeRunWith(dir, { PL_MUTEX_WAIT: '1' }, 'acquire', 'r1', M('/m.json'));
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /\.r1\.mutex is held/);
+  assert.match(res.stderr, /if no active-run is running, remove it/);
+  assert.equal(res.stdout, '');
+  assert.equal(existsSync(join(dir, 'r1.lock')), false);
+  assert.deepEqual(list(dir), []);
+  rmSync(mutex, { recursive: true });
+  const token = acquire(dir);
+  assert.equal(existsSync(mutex), false);
+
+  // release and remove wait for it too, and change nothing while it is held.
+  mkdirSync(mutex);
+  for (const args of [['release', 'r1', 'stopped', '--owner', token], ['remove', 'r1', '--takeover']]) {
+    const held = activeRunWith(dir, { PL_MUTEX_WAIT: '0' }, ...args);
+    assert.equal(held.code, 3, `${args[0]}: ${held.stderr}`);
+    assert.match(held.stderr, /\.r1\.mutex is held/);
+    assert.equal(readLock(dir), token);
+    assert.equal(list(dir)[0].status, 'running');
+  }
+  assert.ok(existsSync(mutex), "a waiter never removes another process's mutex");
 });
 
 test('active-run: list with no directory prints []', () => {
@@ -202,9 +295,9 @@ function assertOnlyOthersKept(dir) {
 test("active-run: release removes the run's checkout lock", () => {
   for (const what of ['stopped', '--remove']) {
     const dir = markerDir();
-    assert.equal(activeRun(dir, 'acquire', 'r1', M('/m.json')).code, 0);
+    const token = acquire(dir);
     writeCheckoutLocks(dir);
-    const rel = activeRun(dir, 'release', 'r1', what);
+    const rel = activeRun(dir, 'release', 'r1', what, '--owner', token);
     assert.equal(rel.code, 0, rel.stderr);
     assertOnlyOthersKept(dir);
     assert.equal(existsSync(join(dir, 'r1.lock')), false);
