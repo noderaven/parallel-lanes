@@ -172,6 +172,9 @@ function acceptanceOf(input) {
   if (final) {
     if (final.unreviewed_fix) add('final_fix_unreviewed', 'missing', final.unreviewed_fix);
     for (const lens of final.missing_lenses || []) add('review_missing', 'missing', `the ${lens} final review returned no result`);
+    // Lenses that did not all review one commit (F2): their findings are not
+    // bound to the delivered revision.
+    if (hasText(final.review_problem)) add('review_unbound', 'missing', final.review_problem);
     const open = final.open || [];
     const blocking = open.filter(isBlocking);
     if (blocking.length > 0) {

@@ -282,7 +282,8 @@ function parityAgent(label) {
   if (label === 'integrate') return { status: 'done', head: H('I1'), notes: 'merged' };
   if (label === 'post-integrate') return { status: 'done', head: H('P1'), notes: 'ok' };
   if (label === 'e2e') return { head: H('E0'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
-  if (label.startsWith('final review')) return { findings: [{ ...FINDING }], cannot_verify: [] };
+  // Every lens reviews the one feature tip, the head the e2e check reported.
+  if (label.startsWith('final review')) return { findings: [{ ...FINDING }], cannot_verify: [], head: H('E0') };
   if (label === 'final fix') {
     return { status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] };
   }

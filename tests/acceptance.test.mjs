@@ -257,3 +257,15 @@ test('a final finding without a disposition rejects the run', () => {
   assert.deepEqual(kinds(a), [['blocking_findings', 'failed']]);
   assert.match(a.reasons[0].detail, /F1 \[important\].*the final fix gave no disposition for it/);
 });
+
+test('final lenses that did not review one head leave the run unverified', () => {
+  const input = passing();
+  const problem = 'the final review lenses did not all review one commit: superpowers reported head "see below"';
+  input.final = { ...input.final, review_problem: problem };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['review_unbound', 'missing']]);
+  assert.equal(a.reasons[0].detail, problem);
+  // An empty problem is no problem.
+  assert.equal(acceptanceOf({ ...passing(), final: { ...passing().final, review_problem: '' } }).status, 'accepted');
+});

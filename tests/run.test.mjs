@@ -755,7 +755,7 @@ test('a disposition without evidence does not settle its finding', async () => {
 });
 
 test('no final findings: no fix or re-review agent', async () => {
-  const empty = [{ findings: [], cannot_verify: [] }];
+  const empty = [{ findings: [], cannot_verify: [], head: H('T5-h') }];
   const script = {
     ...phaseScript({ 'final review sp': empty, 'final review security': [...empty] }),
     ...taskScript(ALL),
@@ -765,6 +765,7 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.ok(!labels(calls).includes('final fix'));
   assert.deepEqual(result.final, {
     findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: H('T5-h'),
+    lens_heads: ['superpowers', 'security', 'correctness'].map((lens) => ({ lens, head: H('T5-h') })),
     task_minors_open: [],
   });
   assert.equal(result.delivered_sha, H('T5-h'));
@@ -783,6 +784,73 @@ test('a final review lens that returns null is reported, never counted as clean'
   // Review finding 1: a missing reviewer is missing evidence, not a pass.
   assert.equal(result.acceptance.status, 'unverified');
   assert.ok(result.acceptance.reasons.some((r) => r.kind === 'review_missing' && r.detail.includes('correctness')));
+});
+
+// F2: the final lenses must all have reviewed the same head; else the run
+// cannot say which revision the final review covered.
+const lensesAt = (sp, security, correctness) => ({
+  'final review sp': [{ findings: [], cannot_verify: [], head: sp }],
+  'final review security': [{ findings: [], cannot_verify: [], head: security }],
+  'final review correctness': [{ findings: [], cannot_verify: [], head: correctness }],
+});
+// The checks and rechecks of a run with no final fix, all at the delivered sha.
+const checkedAt = (sha) => ({
+  verify: [verified(sha)],
+  'e2e recheck': [{ head: sha, items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] }],
+  'post-integrate recheck': [{ status: 'done', head: sha, notes: 'contracts ok' }],
+});
+const unbound = (result) => result.acceptance.reasons.filter((r) => r.kind === 'review_unbound');
+
+test('final lenses that report different heads leave the run unverified', async () => {
+  const { result } = await run(manifest(), {
+    ...phaseScript({ ...lensesAt(H('A'), H('B'), H('C')), ...checkedAt(H('A')) }), ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete');
+  assert.deepEqual(result.final.lens_heads, [
+    { lens: 'superpowers', head: H('A') }, { lens: 'security', head: H('B') }, { lens: 'correctness', head: H('C') },
+  ]);
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['review_unbound']);
+  const [reason] = unbound(result);
+  assert.ok(reason, JSON.stringify(result.acceptance.reasons));
+  assert.equal(reason.class, 'missing');
+  for (const h of [H('A'), H('B'), H('C')]) assert.ok(reason.detail.includes(h), reason.detail);
+  assert.equal(reason.detail, result.final.review_problem);
+});
+
+test('final lenses that report an empty head leave the run unverified', async () => {
+  const { result } = await run(manifest(), {
+    ...phaseScript({ ...lensesAt('', '', ''), ...checkedAt(H('T5-h')) }), ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete');
+  assert.equal(result.final.head, H('T5-h'), 'no valid head: the tip stays the tracked base');
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['review_unbound']);
+  const [reason] = unbound(result);
+  assert.ok(reason, JSON.stringify(result.acceptance.reasons));
+  for (const lens of ['superpowers', 'security', 'correctness']) assert.ok(reason.detail.includes(lens), reason.detail);
+});
+
+test('a lens with a non-sha head while the others agree', async () => {
+  const { result } = await run(manifest(), {
+    ...phaseScript({ ...lensesAt('see below', H('T5-h'), H('T5-h')), ...checkedAt(H('T5-h')) }), ...taskScript(ALL),
+  });
+  assert.equal(result.final.head, H('T5-h'));
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['review_unbound']);
+  const [reason] = unbound(result);
+  assert.ok(reason, JSON.stringify(result.acceptance.reasons));
+  assert.ok(reason.detail.includes('superpowers'), reason.detail);
+  assert.ok(reason.detail.includes('see below'), reason.detail);
+});
+
+test('agreeing lens heads accept', async () => {
+  const { result } = await run(manifest(), {
+    ...phaseScript({ ...lensesAt(H('T5-h'), H('T5-h'), H('T5-h')), ...checkedAt(H('T5-h')) }), ...taskScript(ALL),
+  });
+  assert.equal(result.final.review_problem, undefined);
+  assert.equal(result.final.lens_heads.length, 3);
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance.reasons));
 });
 
 // Live run l131: the final fix returned head 'see-below' and no dispositions,

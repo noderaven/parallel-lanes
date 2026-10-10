@@ -16,9 +16,11 @@
 // is judged by the re-reviewer, not just by the fixer. The re-review runs
 // whenever there are findings and a fix result, even without fix commits
 // (declines still need judging). Returns {findings, fixed, declined, open,
-// cannot_verify, missing_lenses, head}: head is the delivered feature head
-// (the fix head when the fix committed), open lists every finding not fixed
-// and not rightly declined, each with a reason. verifyAt(sha) runs the
+// cannot_verify, missing_lenses, head, lens_heads, review_problem?}: head is
+// the delivered feature head (the fix head when the fix committed), open
+// lists every finding not fixed and not rightly declined, each with a reason;
+// lens_heads is the head each lens reported and review_problem (absent when
+// they all reviewed one commit) says why they did not. verifyAt(sha) runs the
 // project checks (null: the project has none): once a fix agent ran,
 // whatever it returned, they run at the delivered head before the re-review,
 // which gets their result so it does not rerun them; the result is returned
@@ -58,10 +60,14 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   ]));
   const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
+  const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
+    lens_heads: lensHeads,
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
+  const unbound = reviewProblemOf(lensHeads, results);
+  if (unbound !== null) final.review_problem = unbound;
   if (findings.length === 0) return final;
   // A fix that committed is reviewed only by a re-review of its head: else
   // its commits are delivered unreviewed (unreviewed_fix, acceptance
@@ -120,6 +126,30 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
       : 'no result from final re-review');
   }
   return settle(dispositions, rr, undefined, final.head);
+}
+
+// The head each final lens reported reviewing ({lens, head}): the string it
+// reported, or null when it returned no result (or reported no string).
+function lensHeadsOf(names, results) {
+  return names.map((lens, i) => {
+    const r = results[i];
+    return { lens, head: r && !r.__budget && typeof r.head === 'string' ? r.head : null };
+  });
+}
+
+// Why the final lenses' findings are not bound to one revision (F2), or null:
+// a lens that returned findings (an array, even an empty one) without a
+// commit sha as its head, or lenses that report different commit shas. The
+// sentence names every lens and its head; a lens that returned no result is
+// review_missing, so alone it is no problem here.
+function reviewProblemOf(lensHeads, results) {
+  const reviewed = (i) => Boolean(results[i] && Array.isArray(results[i].findings));
+  const shas = new Set(lensHeads.filter((l) => isSha(l.head)).map((l) => l.head));
+  const noSha = lensHeads.some((l, i) => reviewed(i) && !isSha(l.head));
+  if (!noSha && shas.size <= 1) return null;
+  const each = lensHeads.map((l, i) => (!reviewed(i) ? `${l.lens} returned no result`
+    : l.head === null ? `${l.lens} reported no head` : `${l.lens} reported head ${JSON.stringify(l.head)}`));
+  return `the final review lenses did not all review one commit: ${each.join(', ')}`;
 }
 
 // setup_result (scripts/setup) must name, for every lane, the worktree the
@@ -237,7 +267,8 @@ function withConsumesExtra(m, kept) {
 //  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
-//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, task_minors_open},
+//  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
+//    review_problem?, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,

@@ -348,9 +348,9 @@ function cleanScript() {
   const script = {
     'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
     integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
-    'final review sp': [{ findings: [], cannot_verify: [] }],
-    'final review security': [{ findings: [], cannot_verify: [] }],
-    'final review correctness': [{ findings: [], cannot_verify: [] }],
+    'final review sp': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
+    'final review security': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
+    'final review correctness': [{ findings: [], cannot_verify: [], head: H('T5-h') }],
     verify: [{ head: H('T5-h'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true, tracked_before: [], tracked_after: [] }],
   };
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) {
