@@ -198,8 +198,10 @@ function verifySchema() {
       clean: { type: 'boolean' },
       tracked_before: { type: 'array', items: { type: 'string' } },
       tracked_after: { type: 'array', items: { type: 'string' } },
+      untracked_before: { type: 'array', items: { type: 'string' } },
+      untracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
 }
 
@@ -724,7 +726,7 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after.',
+    'tracked_after, untracked_before, untracked_after.',
   ].join('\n');
 }
 

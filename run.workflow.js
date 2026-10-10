@@ -1800,8 +1800,10 @@ function verifySchema() {
       clean: { type: 'boolean' },
       tracked_before: { type: 'array', items: { type: 'string' } },
       tracked_after: { type: 'array', items: { type: 'string' } },
+      untracked_before: { type: 'array', items: { type: 'string' } },
+      untracked_after: { type: 'array', items: { type: 'string' } },
     },
-    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after'],
+    required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
 }
 
@@ -2326,7 +2328,7 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after.',
+    'tracked_after, untracked_before, untracked_after.',
   ].join('\n');
 }
 
@@ -3247,20 +3249,42 @@ function expectedChecks(m) {
   return finalChecks(m);
 }
 
+// Porcelain lines as a list of JSON-quoted strings.
+function quotedLines(lines) {
+  return lines.map((l) => JSON.stringify(l)).join(', ');
+}
+
 // Why a verify result at sha does not cover the commit itself, or null when
 // git status showed no tracked or staged change before and after the checks
-// (run-checks' tracked_before and tracked_after, porcelain lines). A result
-// without the lists cannot show that, so it does not cover the commit either.
+// (run-checks' tracked_before and tracked_after, porcelain lines) and no
+// untracked file before them (untracked_before): an untracked file the
+// commands could read is not part of the commit. Setup requires a clean
+// checkout, so any untracked file counts. A result without the lists cannot
+// show that, so it does not cover the commit either.
 function uncleanChecksDetail(verify, sha) {
   const parts = [];
   for (const [field, when] of [['tracked_before', 'before'], ['tracked_after', 'after']]) {
     const lines = verify[field];
     if (!Array.isArray(lines)) parts.push(`they did not report tracked changes ${when} the commands (${field})`);
-    else if (lines.length > 0) {
-      parts.push(`uncommitted tracked changes ${when} the commands: ${lines.map((l) => JSON.stringify(l)).join(', ')}`);
-    }
+    else if (lines.length > 0) parts.push(`uncommitted tracked changes ${when} the commands: ${quotedLines(lines)}`);
   }
+  const untracked = verify.untracked_before;
+  if (!Array.isArray(untracked)) parts.push('they did not report untracked files before the commands (untracked_before)');
+  else if (untracked.length > 0) parts.push(`untracked files before the commands: ${quotedLines(untracked)}`);
   return parts.length === 0 ? null : `the project checks at ${sha} do not cover the commit: ${parts.join('; ')}`;
+}
+
+// The warning for checks that left the checkout not clean afterwards (called
+// only when they ran clean): the untracked files they created (untracked_after
+// minus untracked_before) when there are any, otherwise the general text.
+function afterChecksWarning(verify, sha) {
+  if (verify.clean !== false) return `the project checks did not report whether the checkout was clean at ${sha}`;
+  const before = verify.untracked_before;
+  const after = verify.untracked_after;
+  const created = Array.isArray(before) && Array.isArray(after) ? after.filter((l) => !before.includes(l)) : [];
+  return created.length > 0
+    ? `the project checks left new untracked files in the checkout at ${sha}: ${quotedLines(created)}`
+    : `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`;
 }
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
@@ -3300,17 +3324,16 @@ function acceptanceOf(input) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
     add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
   }
-  // Checks that ran on uncommitted tracked or staged changes, or changed a
-  // tracked file, tested something other than the delivered commit.
+  // Checks that ran on uncommitted tracked or staged changes or with an
+  // untracked file present, or changed a tracked file, tested something
+  // other than the delivered commit.
   const unclean = want.length > 0 && verify && verify.head === sha ? uncleanChecksDetail(verify, sha) : null;
   if (unclean !== null) add('checks_unclean', 'missing', unclean);
   // Checks that leave files behind (build output that is not ignored, a
   // generated file) do not change what was delivered, but the user should
   // know the checkout was not clean after them.
   if (want.length > 0 && verify && verify.head === sha && unclean === null && verify.clean !== true) {
-    warnings.push(verify.clean === false
-      ? `the project checks left uncommitted changes in the checkout at ${sha} (git status was not clean afterwards)`
-      : `the project checks did not report whether the checkout was clean at ${sha}`);
+    warnings.push(afterChecksWarning(verify, sha));
   }
 
   if (m.hooks.e2e) {

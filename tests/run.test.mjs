@@ -52,6 +52,7 @@ function manifest(overrides = {}) {
 const verified = (sha, exit = 0) => ({
   checkout: '/work/repo', branch: 'pl/run-1', head: sha,
   results: [{ group: 'test', command: 'npm test', exit }], ok: exit === 0, clean: true, tracked_before: [], tracked_after: [],
+  untracked_before: [], untracked_after: [],
 });
 
 const done = (base, head) => ({ status: 'done', base, head, tests: 'npm test: pass', notes: '' });
@@ -2126,6 +2127,24 @@ test('a passing verify on an uncommitted edit does not accept the run', async ()
   assert.equal(result.acceptance.status, 'unverified');
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_unclean']);
   assert.ok(result.acceptance.reasons[0].detail.includes('value.txt'), result.acceptance.reasons[0].detail);
+});
+
+test('a passing verify with an untracked file present does not accept the run', async () => {
+  const result = await acceptanceOf({ verify: [{ ...verified(H('f1')), untracked_before: ['?? required.js'] }] });
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_unclean']);
+  assert.ok(result.acceptance.reasons[0].detail.includes('required.js'), result.acceptance.reasons[0].detail);
+});
+
+test('the verify schema requires the untracked lists and the verify prompt names them', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  const verify = calls.find((c) => c.label === 'verify');
+  for (const field of ['untracked_before', 'untracked_after']) {
+    assert.ok(verify.schema.required.includes(field), field);
+    assert.deepEqual(verify.schema.properties[field], { type: 'array', items: { type: 'string' } }, field);
+  }
+  assert.ok(verify.prompt.includes('Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean,'
+    + ' tracked_before,\ntracked_after, untracked_before, untracked_after.'), verify.prompt);
 });
 
 // ---- Lane checks in the final verify (1.4.0, F3) ----

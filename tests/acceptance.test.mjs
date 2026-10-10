@@ -16,7 +16,7 @@ const passing = () => ({
   e2e: null,
   verify: {
     head: SHA, results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true,
-    tracked_before: [], tracked_after: [],
+    tracked_before: [], tracked_after: [], untracked_before: [], untracked_after: [],
   },
   post: null,
   delivered_sha: SHA,
@@ -185,6 +185,59 @@ test('untracked build output stays a warning', () => {
   const input = passing();
   input.verify = { ...input.verify, clean: false, tracked_before: [], tracked_after: [] };
   const a = acceptanceOf(input);
+  assert.equal(a.status, 'accepted');
+  assert.deepEqual(a.warnings, [`the project checks left uncommitted changes in the checkout at ${SHA}`
+    + ' (git status was not clean afterwards)']);
+});
+
+// ---- Checks with untracked files present (1.4.4) ----
+
+test('an untracked file before the checks makes them unclean', () => {
+  const input = passing();
+  input.verify = { ...input.verify, untracked_before: ['?? required.js'], untracked_after: ['?? required.js'] };
+  const a = acceptanceOf(input);
+  assert.equal(a.status, 'unverified');
+  assert.notEqual(a.status, 'accepted');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.ok(unclean(a).detail.includes('required.js'), unclean(a).detail);
+  assert.ok(unclean(a).detail.includes('untracked files before the commands'), unclean(a).detail);
+});
+
+test('verify evidence without untracked lists is unclean', () => {
+  const input = passing();
+  const { untracked_before: before, untracked_after: after, ...rest } = input.verify;
+  void before;
+  void after;
+  const a = acceptanceOf({ ...input, verify: rest });
+  assert.equal(a.status, 'unverified');
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.match(unclean(a).detail, /did not report untracked files before the commands \(untracked_before\)/);
+});
+
+test('an untracked file and a tracked change before the checks are both named', () => {
+  const input = passing();
+  input.verify = { ...input.verify, tracked_before: [' M value.txt'], untracked_before: ['?? required.js'] };
+  const a = acceptanceOf(input);
+  assert.deepEqual(kinds(a), [['checks_unclean', 'missing']]);
+  assert.ok(unclean(a).detail.includes('value.txt'), unclean(a).detail);
+  assert.ok(unclean(a).detail.includes('required.js'), unclean(a).detail);
+});
+
+test('files the checks create are only a warning', () => {
+  const input = passing();
+  input.verify = { ...input.verify, clean: false, untracked_before: [], untracked_after: ['?? out.txt'] };
+  const a = acceptanceOf(input);
+  assert.deepEqual([a.status, a.reasons], ['accepted', []]);
+  assert.equal(a.warnings.length, 1, a.warnings.join('; '));
+  assert.ok(a.warnings[0].includes('out.txt'), a.warnings[0]);
+  assert.equal(a.warnings[0], `the project checks left new untracked files in the checkout at ${SHA}: "?? out.txt"`);
+});
+
+test('without an untracked_after list the after-checks warning keeps its old text', () => {
+  const input = passing();
+  const { untracked_after: after, ...rest } = input.verify;
+  void after;
+  const a = acceptanceOf({ ...input, verify: { ...rest, clean: false } });
   assert.equal(a.status, 'accepted');
   assert.deepEqual(a.warnings, [`the project checks left uncommitted changes in the checkout at ${SHA}`
     + ' (git status was not clean afterwards)']);
