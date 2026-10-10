@@ -237,3 +237,17 @@ test('pythonScripts lists only files, whatever directories sit beside them', () 
   writeFileSync(join(dir, 'notes.txt'), 'not python\n');
   assert.deepEqual(pythonScripts(dir).sort(), [join(dir, 'a.py'), join(dir, 'tool')]);
 });
+
+// Every Python snippet in the tests that imports the helpers from scripts/
+// must turn off bytecode writing first, or it leaves scripts/__pycache__.
+test('every test that puts scripts/ on the Python path turns off bytecode writing', () => {
+  const insert = 'sys.path' + '.insert(0, ';
+  const guard = 'sys.dont_write_bytecode' + ' = True';
+  const testsDir = join(SKILL_DIR, 'tests');
+  for (const name of readdirSync(testsDir).filter((n) => n.endsWith('.mjs'))) {
+    const source = readFileSync(join(testsDir, name), 'utf8');
+    const inserts = source.split(insert).length - 1;
+    const guards = source.split(guard).length - 1;
+    assert.ok(guards >= inserts, `${name}: ${inserts} snippet(s) put scripts/ on sys.path, ${guards} turn off bytecode`);
+  }
+});
