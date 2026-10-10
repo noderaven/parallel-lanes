@@ -22,7 +22,7 @@ when it's time to execute the plan.
 | **jq** 1.6 or later | Installer and SessionStart hook | `jq --version` |
 | **Python** 3.8 or later, as `python3`, `python`, or `py -3` | Lane planning, setup, ledger, reports | `bash scripts/find-python` in the clone prints the one it uses |
 | *Optional:* **node** 22 or later | Only for running the test suite | `node --version` |
-| *Recommended:* **Superpowers** plugin (tested with 6.4.2) | Supplies the per-task implementer and reviewer prompts | See step 3 |
+| *Recommended:* **Superpowers** plugin (tested with 6.4.2; 7.0.0 ships the same prompts) | Supplies the per-task implementer and reviewer prompts | See step 3 |
 
 Platforms: macOS, Linux, and Windows 11. CI runs the test suite on all three, with the stock
 bash 3.2 on macOS, so no newer bash is needed. On Windows 11, Claude Code installed natively
