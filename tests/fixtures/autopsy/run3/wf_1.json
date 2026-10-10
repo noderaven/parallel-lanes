@@ -1,0 +1,22 @@
+{
+  "runId": "wf_1",
+  "workflowName": "parallel-lanes",
+  "status": "completed",
+  "startTime": 1791626400000,
+  "durationMs": 750000,
+  "result": {
+    "status": "complete",
+    "run_id": "f3",
+    "version": "1.5.0",
+    "tasks": {
+      "A1": {"status": "done", "rounds": 0, "tier_used": "standard",
+             "commits": ["4444444444444444444444444444444444444444"]},
+      "B1": {"status": "done", "rounds": 0, "tier_used": "standard",
+             "commits": ["5555555555555555555555555555555555555555"]}
+    },
+    "final": {"findings": [], "fixed": [], "declined": [], "open": [], "cannot_verify": []},
+    "e2e": null,
+    "acceptance": {"status": "accepted", "delivered_sha": "5555555555555555555555555555555555555555",
+                   "reasons": [], "warnings": []}
+  }
+}

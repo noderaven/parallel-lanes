@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-10-10T09:05:39.000Z","message":{"role":"user","content":"Review task B1."}}
+{"type":"assistant","timestamp":"2026-10-10T09:05:40.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Reviewing."}]}}
+{"type":"assistant","timestamp":"2026-10-10T09:06:10.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Checking the diff."}]}}
+{"type":"assistant","timestamp":"2026-10-10T09:06:40.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Approved."}]}}
