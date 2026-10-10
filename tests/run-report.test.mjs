@@ -352,13 +352,14 @@ test('invalid UTF-8 does not crash the report', () => {
 test('a line containing U+2028 inside a string is read whole', () => {
   const dir = join(TMP, 'u2028');
   mkdirSync(dir, { recursive: true });
+  const LS = String.fromCharCode(0x2028); // the line separator, built so the source stays ASCII
   const line = JSON.stringify({
-    type: 'assistant', requestId: 'req-m1', note: 'a b',
+    type: 'assistant', requestId: 'req-m1', note: `a${LS}b`,
     message: { id: 'm1', model: 'claude-opus-x', stop_reason: 'end_turn', usage: {
       input_tokens: 1, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
     } },
   }) + '\n';
-  assert.ok(line.includes(' '), 'the raw separator is in the written line');
+  assert.ok(line.includes(LS), 'the raw separator is in the written line');
   writeFileSync(join(dir, 'agent-s1.meta.json'),
     JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
   writeFileSync(join(dir, 'agent-s1.jsonl'), line);

@@ -393,18 +393,30 @@ every untracked file that is not ignored (`[]` when none). Acceptance gives `che
 (class `missing`) when the verify result at the delivered revision has a non-empty
 `tracked_before`, `tracked_after` or `untracked_before`, or lacks one of those, because checks
 that ran on uncommitted tracked changes, or with an untracked file present that the commands
-could read, did not test the commit. A non-empty `untracked_after` alone (files the checks
-created) stays a warning that names the new files. A missing `untracked_after` does not block
-either: it only affects that after-checks warning, which then falls back to the general text.
+could read, did not test the commit. Verify runs in the feature checkout, and earlier steps of
+the run have already run the same project commands there: integrate (setup, then every
+command), the E2E and post-integrate hooks, the final fix agent, and in the `lite` profile the
+implementers. No agent may delete untracked files, so whatever those commands created that is
+not ignored (`test-results/`, coverage output, a generated file) is still in the checkout when
+verify starts, is listed in `untracked_before`, and makes the run `unverified` with
+`checks_unclean`; the fix is to add those files to `.gitignore`. A non-empty `untracked_after`
+alone (files the checks created) stays a warning that names the new files only when the checks
+run for the first time in a clean checkout, which in a run is rare. A missing `untracked_after`
+does not block either: it only affects that after-checks warning, which then falls back to the
+general text.
 
 The guarantee, in one paragraph: `accepted` means the configured checks passed at the delivered
 commit, with no tracked change and no untracked file present before them. Ignored files are not
 covered: `run-checks` does not list them, so a stale build output or cache that `.gitignore`
-hides can still change what the checks test. The verify prompt runs the project's setup
-commands before `run-checks`, so a setup command that creates a file that is not ignored (an
-uncommitted lockfile, for example) makes every run `unverified` with `checks_unclean`, where it
-once only warned; the user then re-verifies in the session (see "Verify evidence") or adds the
-file to `.gitignore`.
+hides can still change what the checks test. Any file that is not ignored and that the project's
+commands create is present when verify runs `run-checks`: one a setup command creates (the
+verify prompt runs setup first; an uncommitted lockfile, for example), and one the test, lint or
+build commands create when an earlier step of the run ran them (see above). Either makes every
+run `unverified` with `checks_unclean`, where it once only warned. The fix is a `.gitignore`
+entry for the file, or an explicit accept by the user that names it (see "Verify evidence"); a
+session re-verify alone does not clear it, because the session runs the same setup commands
+first in the same checkout. Running verify in an isolated worktree at the delivered sha, so
+that files earlier steps left cannot be present, is later work.
 Warnings (open minor findings, cannot-verify entries with a source, checks that left the
 checkout dirty or did not say) never block. The checks evidence is the
 `scripts/run-checks` JSON the verify agent returns (the workflow cannot read files; the same
@@ -457,11 +469,11 @@ text, severity, and fix of its most severe report (the first of those on a tie),
 matches the severity. Distinct issues at one location stay separate findings, each its own
 obligation: a minor one cannot hide a critical one. Each finding carries `same_location`, the
 ids of the other findings at its location (`[]` when none, and always for a finding with no
-usable line); the agents that get the findings see it as "Same line as". `also_reported` is still
-present on every finding, always `[]`, so the shape is unchanged. Every minor finding of an approved task review gets an id `<task>-<n>`, with
-`T` put in front of a task id that starts with a digit (task 3 gives `T3-1`, task T2 gives
-`T2-1`), and goes to the final lenses as a checklist: a lens raises one by putting its id in brackets in a
-finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
+usable line); the agents that get the findings see it as "Same line as". `also_reported` is
+still present on every finding, always `[]`, so the shape is unchanged. Every minor finding of
+an approved task review gets an id `<task>-<n>`, with `T` put in front of a task id that starts
+with a digit (task 3 gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a
+checklist: a lens raises one by putting its id in brackets in a finding's issue, or leaves it. `final.task_minors_open` lists the ones no lens raised: show
 them in the report, so minors from task reviews are not lost. Task minors are not stored in
 the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
 so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
@@ -538,7 +550,8 @@ Rules, in order:
    verify result, so an accepted run without one had no checks to run.
 4. Validate the report: `head` a string; `ok` and `clean` booleans; `results` a list of objects
    with string `group` and `command` and an integer `exit` (never a boolean); `tracked_before`,
-   `tracked_after`, `untracked_before` and `untracked_after`, when present, lists of strings. Else `invalid`, with `detail` naming the field.
+   `tracked_after`, `untracked_before` and `untracked_after`, when present, lists of strings.
+   Else `invalid`, with `detail` naming the field.
 5. The sha is `result.delivered_sha` when not null, else `result.verify.head`. It must be 40 or 64
    lowercase hex digits; else `invalid`, and it is never put into a path.
 6. No evidence file: `missing`. Not JSON or failing rule 4 (the tracked and untracked lists may be
@@ -562,9 +575,15 @@ Recovery. Resuming a complete run does not run verify again, so resuming alone c
 - `missing`, `stale`, `mismatch`, `invalid`: the session runs the final checks itself at the
   delivered revision in the feature checkout: the setup commands, then the same run-checks command
   the verify prompt gives, with `--out <ledger_dir>/checks/session-verify-<sha>.json --root
-  <ledger_dir>`. Show the result. When every exit is 0, `ok` is true, both tracked lists are
-  empty and `head` is the delivered sha, the user may accept the run explicitly; record that with
+  <ledger_dir>`. Show the result. When every exit is 0, `ok` is true, both tracked lists and
+  `untracked_before` are empty and `head` is the delivered sha, the user may accept the run
+  explicitly; record that with
   `ledger accept <ledger_dir> <repo root> <sha> "session re-verified: <path>; replaces <reason>"`.
+  When `untracked_before` is not empty (or missing), the re-verify does not show that the checks
+  tested the commit: name those files to the user. Record an explicit accept only when the user
+  confirms that none of them is an input to the checks, and name them in the note (`...; replaces
+  <reason>; untracked before the checks, confirmed not inputs: <files>`); the lasting fix is a
+  `.gitignore` entry for them.
   That is an explicit override recorded in the ledger (an `accepted` event), not a match:
   check-verify still reports its original status for that launch. Otherwise the run stays
   unverified; the user fixes the cause and resumes, as for any other reason.

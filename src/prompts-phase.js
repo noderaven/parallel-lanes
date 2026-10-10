@@ -734,22 +734,33 @@ function verifyPrompt(m, sha) {
 // them at the same commit: one line, or '' for null (or a result naming no
 // head). checks is verify's run-checks JSON, or {head, ok} for a run without
 // per-command results (integrate's). Passed means ok and every exit 0, on a
-// checkout with no tracked change before or after the commands; checks that
-// passed on uncommitted tracked changes do not cover head, and a failure on
-// them may come from the uncommitted edit, so it is not reported as head's. A missing tracked
+// checkout with no tracked change before or after the commands and no
+// untracked file before them (untracked_before, as acceptance's
+// checks_unclean rule reads it); checks that passed on uncommitted tracked
+// changes or with an untracked file present do not cover head, and a failure
+// there may come from that file, so it is not reported as head's. A missing
 // list changes nothing here (integrate's results have none).
 function checksResultText(checks) {
   if (!checks || !present(checks.head)) return '';
   const results = Array.isArray(checks.results) ? checks.results : [];
   const failed = results.filter((r) => r && r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-  const tracked = new Set([checks.tracked_before, checks.tracked_after]
+  const paths = (lists) => new Set(lists
     .flatMap((l) => (Array.isArray(l) ? l : []))
     .map((line) => (typeof line === 'string' && line.length > 3 ? line.slice(3) : String(line))));
-  const files = `${tracked.size} file${tracked.size === 1 ? '' : 's'}`;
+  const tracked = paths([checks.tracked_before, checks.tracked_after]);
+  const untracked = paths([checks.untracked_before]);
+  const count = (n) => `${n} file${n === 1 ? '' : 's'}`;
+  const failedOn = [
+    ...(tracked.size > 0 ? [`on uncommitted tracked changes, ${count(tracked.size)}`] : []),
+    ...(untracked.size > 0 ? [`with untracked files present, ${count(untracked.size)}`] : []),
+  ];
+  const ranOn = [
+    ...(tracked.size > 0 ? [`on uncommitted tracked changes (${count(tracked.size)})`] : []),
+    ...(untracked.size > 0 ? [`with untracked files present (${count(untracked.size)})`] : []),
+  ];
   const outcome = checks.ok !== true || failed.length > 0 ? `FAILED${failed.length > 0 ? `: ${failed.join(', ')}` : ''}`
-      + (tracked.size > 0 ? ` (on uncommitted tracked changes, ${files}, so not at ${checks.head})` : '')
-    : tracked.size > 0 ? `ran on uncommitted tracked changes (${files}),`
-      + ` so they do not cover ${checks.head}`
+      + (failedOn.length > 0 ? ` (${failedOn.join(', and ')}, so not at ${checks.head})` : '')
+    : ranOn.length > 0 ? `ran ${ranOn.join(' and ')}, so they do not cover ${checks.head}`
       : 'passed';
   return `The project checks already ran at ${checks.head}: ${outcome}. Do not rerun them.`;
 }

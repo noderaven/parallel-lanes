@@ -2492,6 +2492,25 @@ test('checksResultText: checks on uncommitted tracked changes do not cover the h
     + ` ${H('f1')}: ran on uncommitted tracked changes (1 file), so they do not cover ${H('f1')}. Do not rerun them.`);
 });
 
+test('checksResultText: checks with an untracked file present do not cover the head', async () => {
+  const { checksResultText } = await loadHelpers(['checksResultText']);
+  const h = H('f1');
+  assert.equal(checksResultText({ ...verified(h), untracked_before: ['?? out.txt', '?? cov/a.json'] }),
+    `The project checks already ran at ${h}: ran with untracked files present (2 files), so they do not cover ${h}.`
+    + ' Do not rerun them.');
+  assert.equal(checksResultText({ ...verified(h), tracked_before: [' M a.txt'], untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: ran on uncommitted tracked changes (1 file) and with untracked files`
+    + ` present (1 file), so they do not cover ${h}. Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h, 1), untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: FAILED: npm test (exit 1) (with untracked files present, 1 file,`
+    + ` so not at ${h}). Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h, 1), tracked_after: [' M a.txt'], untracked_before: ['?? out.txt'] }),
+    `The project checks already ran at ${h}: FAILED: npm test (exit 1) (on uncommitted tracked changes, 1 file,`
+    + ` and with untracked files present, 1 file, so not at ${h}). Do not rerun them.`);
+  assert.equal(checksResultText({ ...verified(h), untracked_after: ['?? new.txt'] }),
+    `The project checks already ran at ${h}: passed. Do not rerun them.`, 'files the checks created leave head covered');
+});
+
 test('checksResultText: a failure on uncommitted tracked changes is not reported as a failure of head', async () => {
   const { checksResultText } = await loadHelpers(['checksResultText']);
   const failing = { head: H('f2'), ok: false, results: [{ group: 'test', command: 'npm test', exit: 1 }],
