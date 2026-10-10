@@ -359,13 +359,13 @@ and call out any agent whose `resolved_models` names a model other than the one 
 (a fallback).
 
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
-lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with invalid
-UTF-8 counts even when it still parses after the bad bytes are replaced (they may have been a
-key or a count), and what it holds is still read as far as it goes. An agent with any
+lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with
+invalid UTF-8 counts even when it still parses after the bad bytes are replaced (they may have
+been a key or a count), and what it holds is still read as far as it goes. An agent with any
 unreadable line is incomplete exactly as a mid-stream count makes it (`output_tokens` is
-`unavailable`, `output_tokens_min` holds the lower bound, and it counts in
-`output_incomplete`), since the lost line may have held a later count. Report a non-zero total, because the figures are then
-minimums. An agent with unreadable lines and no usage line at all keeps both values
+`unavailable`, `output_tokens_min` holds the lower bound, and it counts in `output_incomplete`),
+since the lost line may have held a later count. Report a non-zero total, because the figures
+are then minimums. An agent with unreadable lines and no usage line at all keeps both values
 `unavailable`.
 
 `<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` takes the same two
@@ -464,31 +464,31 @@ different commits, `final.review_problem` says so and acceptance gives `review_u
 
 `final` lists findings with stable ids (`F1`...; `N1`... for problems the fix introduced) as
 `fixed`, `declined` (a decline the re-review agreed with), and `open` (each with a reason).
-Findings are merged only when they are the same finding: reported at the same `file` and
-`line` (when `line` > 0), or on the same `commit <sha>` file, with the same issue text (compared
-after trimming and collapsing whitespace). The merged finding keeps every lens and the issue
-text, severity, and fix of its most severe report (the first of those on a tie), so the text
-matches the severity. Distinct issues at one location stay separate findings, each its own
-obligation: a minor one cannot hide a critical one. Each finding carries `same_location`, the
-ids of the other findings at its location (`[]` when none, and always for a finding with no
-usable line); the agents that get the findings see it as "Same line as". `also_reported` is
-still present on every finding, always `[]`, so the shape is unchanged. Every minor finding of
-an approved task review gets an id `<task>-<n>`, with `T` put in front of a task id that starts
-with a digit (task 3 gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a
-checklist: a lens raises one by putting its id in brackets in a finding's issue, or leaves it.
-`final.task_minors_open` lists the ones no lens raised: show them in the report, so minors from
-task reviews are not lost. Task minors are not stored in the ledger: after a resume, the tasks an earlier launch committed and reviewed are not re-run,
-so their minors reach neither the final lenses nor `task_minors_open`; the run says so in a
-`cannot_verify` note (a plain string, so not a warning, since every resume has such tasks)
-naming those tasks (check them in the earlier launch's report).
-The fixer gives each id a disposition with its evidence; the re-review names the revision it
-judged (`head`). A finding the fix gave no disposition for, a disposition or re-review result with blank
-evidence, a re-review of another revision than the fix
-head, or two different dispositions or results for one id leave the finding open (the new
-findings such a re-review reports are kept).
-`ledger status <ledger_dir> --manifest <manifest file>` lists under `undeclared` the files each
-task's recorded range changed outside its `files` (from git; a batch's files count for each of
-its tasks): list them in the report so the user can see work that went beyond the plan.
+Findings are merged only when they are the same finding: reported at the same `file` and `line`
+(when `line` > 0), or on the same `commit <sha>` file, with the same issue text (compared after
+trimming and collapsing whitespace). The merged finding keeps every lens and the issue text,
+severity, and fix of its most severe report (the first of those on a tie), so the text matches
+the severity. Distinct issues at one location stay separate findings, each its own obligation: a
+minor one cannot hide a critical one. Each finding carries `same_location`, the ids of the other
+findings at its location (`[]` when none, and always for a finding with no usable line); the
+agents that get the findings see it as "Same line as". `also_reported` is still present on every
+finding, always `[]`, so the shape is unchanged. Every minor finding of an approved task review
+gets an id `<task>-<n>`, with `T` put in front of a task id that starts with a digit (task 3
+gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a checklist: a lens raises
+one by putting its id in brackets in a finding's issue, or leaves it. `final.task_minors_open`
+lists the ones no lens raised: show them in the report, so minors from task reviews are not
+lost. Task minors are not stored in the ledger: after a resume, the tasks an earlier launch
+committed and reviewed are not re-run, so their minors reach neither the final lenses nor
+`task_minors_open`; the run says so in a `cannot_verify` note (a plain string, so not a warning,
+since every resume has such tasks) naming those tasks (check them in the earlier launch's
+report). The fixer gives each id a disposition with its evidence; the re-review names the
+revision it judged (`head`). A finding the fix gave no disposition for, a disposition or
+re-review result with blank evidence, a re-review of another revision than the fix head, or two
+different dispositions or results for one id leave the finding open (the new findings such a
+re-review reports are kept). `ledger status <ledger_dir> --manifest <manifest file>` lists under
+`undeclared` the files each task's recorded range changed outside its `files` (from git; a
+batch's files count for each of its tasks): list them in the report so the user can see work
+that went beyond the plan.
 
 The hand-back appends the report, saves it beside the manifest, and lists
 "Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
