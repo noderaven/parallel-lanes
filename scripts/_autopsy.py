@@ -13,13 +13,16 @@ archived runs from another machine or OS work too. Anything that cannot be
 read or derived is "unavailable", never 0.
 
 Transcript text is used only inside this module (to match markers); it is
-never written out. Event "text" stays internal.
+never written out. Event "text", notes and tool inputs stay internal: a
+slowdown's evidence holds only the tool name, an exit code, a marker string
+from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of).
 """
 import glob
 import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -129,14 +132,24 @@ def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None):
 def read_events_counted(jsonl_path):
     """(events, skipped): read_events' events, and the number of non-blank
     lines skipped as damaged (not valid UTF-8, or not valid JSON)."""
+    events, skipped, _notes = read_transcript(jsonl_path)
+    return events, skipped
+
+
+def read_transcript(jsonl_path):
+    """(events, skipped, notes): read_events_counted's two values, and notes:
+    [{ts, text}] for each timed user line that carries text rather than tool
+    results (the prompt, and notices such as a background command's
+    completion). Notes are for matching only, like event text."""
     events = []
+    notes = []
     skipped = 0
     names = {}  # tool_use id -> tool name
     try:
         with open(jsonl_path, "rb") as f:
             raw_lines = f.read().split(b"\n")
     except OSError:
-        return [], 0
+        return [], 0, []
     for raw in raw_lines:
         if not raw.strip():
             continue
@@ -167,6 +180,10 @@ def read_events_counted(jsonl_path):
                 events.append(_event(ts, "tool_use", name=name, id_=id_,
                                      input_=b.get("input") if isinstance(b.get("input"), dict) else None))
         elif obj.get("type") == "user":
+            if not any(b.get("type") == "tool_result" for b in blocks):
+                text = _text_of(content)
+                if text:
+                    notes.append({"ts": ts, "text": text})
             for b in blocks:
                 if b.get("type") != "tool_result":
                     continue
@@ -174,7 +191,7 @@ def read_events_counted(jsonl_path):
                 events.append(_event(ts, "tool_result", name=names.get(id_), id_=id_,
                                      is_error=b.get("is_error") is True,
                                      text=_text_of(b.get("content"))))
-    return events, skipped
+    return events, skipped, notes
 
 
 def read_events(jsonl_path):
@@ -274,8 +291,9 @@ def _launch(folder, wf_dir, manifest):
     agents = []
     # build_report lists agents in the same start_key order.
     for meta_path, entry in zip(metas, report["agents"]):
-        events, skipped = read_events_counted(meta_path[:-len(".meta.json")] + ".jsonl")
-        agents.append({"entry": entry, "events": events, "skipped": skipped, "launch": name})
+        events, skipped, notes = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
+        agents.append({"entry": entry, "events": events, "skipped": skipped, "notes": notes,
+                       "launch": name})
     start_ms = data.get("startTime")
     duration_ms = data.get("durationMs")
     start = end = None
@@ -414,6 +432,22 @@ def _span(agents):
     return min(a["start"] for a in timed), max(a["end"] for a in timed)
 
 
+def launch_idle_gaps(launch):
+    """[(start, end)]: the spans over IDLE_GAP_S inside a launch with no
+    agent of it running. None for a launch without timing or without a
+    timed agent: its gaps cannot be told from missing timestamps."""
+    if launch["start"] is None or not _timed(launch["agents"]):
+        return None
+    gaps = []
+    cursor = launch["start"]
+    spans = merged([(a["start"], a["end"]) for a in _timed(launch["agents"])])
+    for start, end in spans + [[launch["end"], launch["end"]]]:
+        if start - cursor > IDLE_GAP_S:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    return gaps
+
+
 def time_section(run):
     lanes_by_phase = lane_ids(run["manifest"])
     phases = []
@@ -435,14 +469,8 @@ def time_section(run):
                 lanes.append({"lane": lanes_by_phase[name], "launch": launch["wf"],
                               "start": iso(start), "end": iso(end), "busy_s": seconds(busy),
                               "idle_s": seconds(None if busy is None else (end - start) - busy)})
-        # Idle gaps: spans over IDLE_GAP_S inside the launch with no agent running.
-        if launch["start"] is not None:
-            cursor = launch["start"]
-            spans = merged([(a["start"], a["end"]) for a in _timed(launch["agents"])])
-            for start, end in spans + [[launch["end"], launch["end"]]]:
-                if start - cursor > IDLE_GAP_S:
-                    gaps.append({"start": iso(cursor), "end": iso(start), "s": seconds(start - cursor)})
-                cursor = max(cursor, end)
+        for start, end in launch_idle_gaps(launch) or []:
+            gaps.append({"start": iso(start), "end": iso(end), "s": seconds(end - start)})
     agents = []
     for a in _all_agents(run):
         e = a["entry"]
@@ -542,6 +570,435 @@ def tokens_section(run):
     }
 
 
+# ---- slowdowns ----
+
+# The marker strings the detectors look for in tool results, matched
+# case-insensitively. A slowdown's evidence.marker is one of these (or HEREDOC
+# or RUN_CHECKS), never text taken from the transcript.
+MARKERS = {
+    "background_check": ("Command running in background with ID",),
+    "timeout": ("timed out",),
+    "edit_retry": ("String to replace not found", "has been modified since", "has not been read yet"),
+}
+HEREDOC = "<<"
+RUN_CHECKS = "run-checks"
+LONG_CALL_S = 120
+TOP_UNEXPLAINED = 5
+WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+TOOL_KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
+              "long_tool_call", "check_rerun")
+KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
+         "extra_review_round", "escalation", "retry", "relaunch", "long_tool_call", "idle_gap",
+         "check_rerun")
+
+# One suggestion per kind: a likely cause, then a change to try.
+SUGGESTIONS = {
+    "background_check": "A check likely went to the background and the agent waited for it. Try running "
+                        "checks in the foreground with a timeout long enough for the suite.",
+    "timeout": "A tool call likely hit its time limit. Try a longer timeout for slow commands, or a "
+               "narrower command while iterating.",
+    "repeated_failure": "The same command likely failed again with nothing changed in between. Try "
+                        "reading the first failure's output and fixing its cause before rerunning.",
+    "heredoc_failure": "Shell quoting in a heredoc likely broke a file write. Try writing files with the "
+                       "Edit or Write tools instead of shell heredocs.",
+    "edit_retry": "An edit likely failed because the file was unread, had changed, or did not hold the "
+                  "text. Try reading the file again right before editing it.",
+    "extra_review_round": "Review likely found problems the implementer did not catch. Try clearer "
+                          "acceptance criteria in the task, or running the full checks before review.",
+    "escalation": "A task likely needed a stronger model than its tier gave it. Try a higher tier for "
+                  "tasks like it.",
+    "retry": "An agent likely ended without a usable result and was run again. Try reading its "
+             "transcript for the cause before the next run.",
+    "relaunch": "The run likely stopped and was launched again. Try finding why the earlier launch "
+                "stopped before resuming.",
+    "long_tool_call": "A single tool call likely ran for over 2 minutes. Try a narrower command while "
+                      "iterating, and the full suite once before committing.",
+    "idle_gap": "No agent ran for over a minute, likely while the session waited between phases. Try "
+                "checking what the session was doing then.",
+    "check_rerun": "A check likely ran again with nothing changed in between. Try reading the earlier "
+                   "run's output instead of rerunning it.",
+}
+UNCLEAN_TEXT = ("Commit any file a check needs; add only known generated output to .gitignore; "
+                "never ignore a file a check reads.")
+UNCLEAN_NAMES = 10
+
+_EXIT = re.compile(r"exit code[:\s]+(-?\d+)", re.I)
+_BACKGROUND_ID = re.compile(r"command running in background with id[:\s]*([A-Za-z0-9_-]+)", re.I)
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*\bcommit\b")
+_FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
+
+
+def _marker(kind, text):
+    """The first of MARKERS[kind] that text holds (any case), or None."""
+    low = (text or "").lower()
+    return next((m for m in MARKERS[kind] if m.lower() in low), None)
+
+
+def exit_code(text):
+    """The exit code a tool result reports ('Exit code N'), or None."""
+    m = _EXIT.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def program_of(command):
+    """The program a Bash command runs: its first word that is not a
+    NAME=value assignment or 'env', reduced to its basename. None when there
+    is none, or when that word still holds '=', '@' or ':' (it may carry a
+    secret or a URL)."""
+    if not isinstance(command, str):
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    for word in words:
+        if word == "env" or _ASSIGNMENT.match(word):
+            continue
+        name = re.split(r"[/\\]", word)[-1]
+        if not name or any(c in name for c in "=@:"):
+            return None
+        return name
+    return None
+
+
+def _calls(agent):
+    """An agent's tool calls in call order: {name, input, start, end,
+    result_i, is_error, text}; end is None when no result answers it."""
+    calls = []
+    waiting = {}
+    for i, e in enumerate(agent["events"]):
+        if e["kind"] == "tool_use":
+            call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "end": None,
+                    "result_i": None, "is_error": False, "text": ""}
+            calls.append(call)
+            if e["id"] is not None:
+                waiting[e["id"]] = call
+        elif e["kind"] == "tool_result" and e["id"] in waiting:
+            call = waiting.pop(e["id"])
+            if e["ts"] >= call["start"]:
+                call.update(end=e["ts"], result_i=i, is_error=e["is_error"], text=e["text"])
+    return calls
+
+
+def _command(call):
+    command = call["input"].get("command")
+    return command if isinstance(command, str) else None
+
+
+def _failed(call):
+    code = exit_code(call["text"])
+    return call["end"] is not None and (call["is_error"] or (code is not None and code != 0))
+
+
+def _bash_failed(call):
+    return call["name"] == "Bash" and _command(call) is not None and _failed(call)
+
+
+def _wrote(call):
+    """A write of a file that succeeded."""
+    return (call["name"] in WRITE_TOOLS and call["end"] is not None and not call["is_error"]
+            and _marker("edit_retry", call["text"]) is None)
+
+
+def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
+    """An internal slowdown: the public fields, plus _cost (seconds or None),
+    _at and _covers [(agent or None, start, end)], the spans it explains (an
+    agent's own time, or any agent's time for None)."""
+    cost = None if start is None or end is None else end - start
+    if covers is None:
+        covers = [] if cost is None else [(agent, start, end)]
+    return {
+        "kind": kind,
+        "agent": agent["entry"]["label"] if agent is not None else None,
+        "_at": start,
+        "_cost": cost,
+        "cost_kind": cost_kind,
+        "evidence": {
+            "tool": call["name"] if call is not None else None,
+            "exit": exit_code(call["text"]) if call is not None else None,
+            "marker": marker,
+            "program": program_of(_command(call)) if call is not None else None,
+        },
+        "_covers": covers,
+    }
+
+
+def _mention_after(agent, call):
+    """When a backgrounded call's ID is first mentioned in a later tool
+    result or notice of the same agent; None when it never is."""
+    m = _BACKGROUND_ID.search(call["text"])
+    if not m:
+        return None
+    pattern = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(m.group(1)) + r"(?![A-Za-z0-9_-])")
+    times = [e["ts"] for e in agent["events"][call["result_i"] + 1:]
+             if e["kind"] == "tool_result" and pattern.search(e["text"])]
+    times += [n["ts"] for n in agent.get("notes", []) if pattern.search(n["text"])]
+    later = [t for t in times if t >= call["end"]]
+    return min(later) if later else None
+
+
+def tool_slowdowns(agent, test_commands):
+    """The slowdowns found in one agent's tool calls (TOOL_KINDS)."""
+    calls = _calls(agent)
+    out = []
+    counted = set()
+
+    def add(kind, indexes, start, end, cost_kind, call, marker=None):
+        out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker))
+        counted.update(indexes)
+
+    for i, c in enumerate(calls):
+        if c["end"] is None:
+            continue
+        marker = _marker("background_check", c["text"])
+        if marker:
+            mention = _mention_after(agent, c)
+            if mention is None:
+                add("background_check", [i], c["start"], c["end"], "measured", c, marker)
+            else:
+                add("background_check", [i], c["start"], mention, "bound", c, marker)
+        marker = _marker("timeout", c["text"])
+        if marker:
+            add("timeout", [i], c["start"], c["end"], "measured", c, marker)
+
+    failures = {}
+    for i, c in enumerate(calls):
+        if _bash_failed(c):
+            failures.setdefault(" ".join(_command(c).split()), []).append(i)
+    for indexes in failures.values():
+        if len(indexes) >= 2:
+            first, last = calls[indexes[0]], calls[indexes[-1]]
+            add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
+
+    until = None
+    for i, c in enumerate(calls):
+        if not _bash_failed(c) or HEREDOC not in _command(c):
+            continue
+        if until is not None and c["start"] < until:
+            continue  # a retry inside the previous heredoc failure's span
+        write = next((w for w in calls[i + 1:] if _wrote(w)), None)
+        if write is None:
+            add("heredoc_failure", [i], c["start"], c["end"], "measured", c, HEREDOC)
+            until = c["end"]
+        else:
+            add("heredoc_failure", [i], c["start"], write["end"], "bound", c, HEREDOC)
+            until = write["end"]
+
+    until = {}
+    for i, c in enumerate(calls):
+        if c["name"] not in WRITE_TOOLS or c["end"] is None:
+            continue
+        marker = _marker("edit_retry", c["text"])
+        path = c["input"].get("file_path")
+        if not marker or not isinstance(path, str):
+            continue
+        if path in until and c["start"] < until[path]:
+            continue  # a retry inside the previous retry's span
+        fixed = next((w for w in calls[i + 1:] if _wrote(w) and w["input"].get("file_path") == path), None)
+        end = c["end"] if fixed is None else fixed["end"]
+        add("edit_retry", [i], c["start"], end, "measured", c, marker)
+        until[path] = end
+
+    last_run = {}
+    for i, c in enumerate(calls):
+        command = _command(c) if c["name"] == "Bash" else None
+        if command is None or not (RUN_CHECKS in command or any(t in command for t in test_commands)):
+            continue
+        key = " ".join(command.split())
+        prev = last_run.get(key)
+        last_run[key] = i
+        if prev is None or c["end"] is None:
+            continue
+        changed = any(b["name"] in WRITE_TOOLS
+                      or (b["name"] == "Bash" and _GIT_COMMIT.search(_command(b) or ""))
+                      for b in calls[prev + 1:i])
+        if not changed:
+            add("check_rerun", [i], c["start"], c["end"], "measured", c,
+                RUN_CHECKS if RUN_CHECKS in command else None)
+
+    for i, c in enumerate(calls):
+        if i not in counted and c["end"] is not None and c["end"] - c["start"] > LONG_CALL_S:
+            add("long_tool_call", [i], c["start"], c["end"], "measured", c)
+    return out
+
+
+def _model(entry):
+    return entry["resolved_model"] if entry["resolved_model"] != UNAVAILABLE else entry["requested_model"]
+
+
+def run_slowdowns(run):
+    """The slowdowns found in roles, launches and idle gaps."""
+    out = []
+    fixes = {}
+    for a in _all_agents(run):
+        e = a["entry"]
+        if e["task"] is not None and _FIX_ROLE.match(e["role"]):
+            fixes.setdefault(e["task"], []).append(a)
+    for members in fixes.values():
+        timed = _timed(members)
+        first = timed[0] if timed else members[0]
+        sd = _slowdown("extra_review_round", first, first["start"], None, "measured",
+                       covers=[(a, a["start"], a["end"]) for a in timed])
+        sd["_cost"] = sum(a["end"] - a["start"] for a in timed) if len(timed) == len(members) else None
+        out.append(sd)
+    for launch in run["launches"]:
+        # Escalations as run-report counts them: the same label (without
+        # ' retry') running again at another model tier in the same launch.
+        last_model = {}
+        for a in launch["agents"]:
+            label = a["entry"]["label"]
+            retried = label.endswith(" retry")
+            base = label[:-len(" retry")].rstrip() if retried else label
+            if retried:
+                out.append(_slowdown("retry", a, a["start"], a["end"], "measured"))
+            model = _model(a["entry"])
+            prev = last_model.get(base)
+            if prev is not None and model != UNAVAILABLE and prev != UNAVAILABLE \
+                    and _transcripts.model_tier(model) != _transcripts.model_tier(prev):
+                out.append(_slowdown("escalation", a, a["start"], a["end"], "measured"))
+            last_model[base] = model
+    for launch in run["launches"][:-1]:
+        out.append(_slowdown("relaunch", None, launch["start"], launch["end"], "measured"))
+    for launch in run["launches"]:
+        for start, end in launch_idle_gaps(launch) or []:
+            out.append(_slowdown("idle_gap", None, start, end, "measured"))
+    return out
+
+
+def detector_status(run):
+    """{kind: 'ok' | 'not_available'}: a detector is not_available when its
+    inputs are missing from every agent or launch."""
+    agents = _all_agents(run)
+    tool_events = any(e["kind"] in ("tool_use", "tool_result") for a in agents for e in a["events"])
+    labels = any(a["entry"]["label"] for a in agents)
+    models = labels and any(_model(a["entry"]) != UNAVAILABLE for a in agents)
+    available = {
+        "extra_review_round": labels,
+        "escalation": models,
+        "retry": labels,
+        "relaunch": bool(run["launches"]),
+        "idle_gap": any(launch_idle_gaps(l) is not None for l in run["launches"]),
+    }
+    for kind in TOOL_KINDS:
+        available[kind] = tool_events
+    return {k: "ok" if available[k] else "not_available" for k in KINDS}
+
+
+def find_slowdowns(run, detectors):
+    """Internal slowdowns of every available detector, largest cost first
+    (unknown costs last), then by time and kind."""
+    commands = run["manifest"].get("commands")
+    tests = commands.get("test") if isinstance(commands, dict) else None
+    test_commands = [t for t in tests if isinstance(t, str) and t.strip()] if isinstance(tests, list) else []
+    found = run_slowdowns(run)
+    for a in _all_agents(run):
+        found += tool_slowdowns(a, test_commands)
+    found = [s for s in found if detectors[s["kind"]] == "ok"]
+    found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
+                              KINDS.index(s["kind"])))
+    return found
+
+
+def public_slowdown(s):
+    return {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
+            "cost_kind": s["cost_kind"], "evidence": s["evidence"]}
+
+
+# ---- suggestions ----
+
+def untracked_paths(run_folder):
+    """The paths run-checks listed as untracked ('?? <path>') in the saved
+    verify evidence (<ledger>/checks/verify-*.json), sorted and unique."""
+    ledger = find_ledger(run_folder)
+    paths = set()
+    for path in _files(os.path.join(ledger, "checks"), "verify-*.json") if ledger else []:
+        data = _transcripts.read_json(path)
+        for key in ("untracked_before", "untracked_after"):
+            lines = data.get(key)
+            for line in lines if isinstance(lines, list) else []:
+                if isinstance(line, str) and line.startswith("?? ") and line[3:].strip():
+                    paths.add(line[3:].strip())
+    return sorted(paths)
+
+
+def unclean_suggestion(run_folder, done):
+    """The unclean_checks suggestion when acceptance reports checks_unclean,
+    else None. It names the untracked files by path only."""
+    acc = done.get("acceptance")
+    reasons = acc.get("reasons") if isinstance(acc, dict) else None
+    if not isinstance(reasons, list) or not any(r.get("kind") == "checks_unclean" for r in reasons):
+        return None
+    paths = untracked_paths(run_folder)
+    if paths:
+        names = ", ".join(paths[:UNCLEAN_NAMES])
+        if len(paths) > UNCLEAN_NAMES:
+            names += ", and %d more" % (len(paths) - UNCLEAN_NAMES)
+        cause = "The checks likely ran with untracked files in the checkout: %s." % names
+    else:
+        cause = "The checks likely ran on uncommitted changes or with untracked files in the checkout."
+    return {"kind": "unclean_checks", "text": cause + " " + UNCLEAN_TEXT, "stake_s": 0, "count": 0,
+            "slowdowns": []}
+
+
+def suggestions_section(slowdowns, unclean):
+    """One suggestion per kind with a slowdown, ranked by stake_s (the sum of
+    its slowdowns' known costs; unavailable when none is known)."""
+    out = []
+    for kind in KINDS:
+        indexes = [i for i, s in enumerate(slowdowns) if s["kind"] == kind]
+        if not indexes:
+            continue
+        costs = [slowdowns[i]["_cost"] for i in indexes if slowdowns[i]["_cost"] is not None]
+        out.append({"kind": kind, "text": SUGGESTIONS[kind],
+                    "stake_s": seconds(sum(costs)) if costs else UNAVAILABLE,
+                    "count": len(indexes), "slowdowns": indexes})
+    if unclean is not None:
+        out.append(unclean)
+    order = list(KINDS) + ["unclean_checks"]
+    out.sort(key=lambda g: (g["stake_s"] == UNAVAILABLE,
+                            -(g["stake_s"] if g["stake_s"] != UNAVAILABLE else 0), order.index(g["kind"])))
+    return out
+
+
+# ---- unexplained ----
+
+def _uncovered(start, end, covers):
+    """The parts of (start, end) outside the merged, sorted covers."""
+    pieces = []
+    cursor = start
+    for s, e in covers:
+        if e <= cursor:
+            continue
+        if s >= end:
+            break
+        if s > cursor:
+            pieces.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < end:
+        pieces.append((cursor, end))
+    return pieces
+
+
+def unexplained_section(run, slowdowns):
+    """The largest TOP_UNEXPLAINED spans over IDLE_GAP_S that no slowdown
+    covers. Each agent's time is cut at its events (a model turn, a tool
+    call); a slowdown covers its own agent's time, and one without an agent
+    (relaunch, idle gap) covers any agent's."""
+    found = []
+    for a in _timed(_all_agents(run)):
+        covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
+                         if owner is None or owner is a])
+        times = sorted(set(e["ts"] for e in a["events"]))
+        for start, end in zip(times, times[1:]):
+            for s, e in _uncovered(start, end, covers):
+                if e - s > IDLE_GAP_S:
+                    found.append((s, e, a["entry"]["label"]))
+    found.sort(key=lambda f: (-(f[1] - f[0]), f[0]))
+    return [{"start": iso(s), "end": iso(e), "s": seconds(e - s), "agent": label}
+            for s, e, label in found[:TOP_UNEXPLAINED]]
+
+
 # ---- the whole analysis ----
 
 def _engine_version(run):
@@ -568,18 +1025,22 @@ def analyze(run_folder):
                          "wall_s": seconds(wall), "status": _str_or_unavailable(result.get("status"))})
     last = run["launches"][-1]["result"] if run["launches"] else None
     run_id = run["manifest"].get("run_id")
+    done = done_section(last)
+    detectors = detector_status(run)
+    found = find_slowdowns(run, detectors)
+    slowdowns = [public_slowdown(s) for s in found]
     return {
         "autopsy_version": AUTOPSY_VERSION,
         "inputs_fingerprint": fingerprint(run_folder),
         "run_id": run_id if isinstance(run_id, str) and run_id else UNAVAILABLE,
         "engine_version": _engine_version(run),
         "launches": launches,
-        "done": done_section(last),
+        "done": done,
         "time": time_section(run),
         "tokens": tokens_section(run),
         "checks": {},
-        "slowdowns": [],
-        "detectors": {},
-        "suggestions": [],
-        "unexplained": [],
+        "slowdowns": slowdowns,
+        "detectors": detectors,
+        "suggestions": suggestions_section(found, unclean_suggestion(run_folder, done)),
+        "unexplained": unexplained_section(run, found),
     }

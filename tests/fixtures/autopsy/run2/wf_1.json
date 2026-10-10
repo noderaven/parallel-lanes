@@ -1,0 +1,8 @@
+{
+  "runId": "wf_1",
+  "workflowName": "parallel-lanes",
+  "status": "stopped",
+  "startTime": 1791619200000,
+  "durationMs": 300000,
+  "result": {"status": "stopped", "run_id": "f2", "version": "1.5.0"}
+}

@@ -47,7 +47,8 @@ end, s}].
 - The critical path is a timing-based estimate: from the last-ending agent,
   walk back to the latest-ending agent that ended before it started.
 - An idle gap is a span over 60 s inside a launch where no agent of that
-  launch runs.
+  launch runs. A launch with no timed agent has none listed: its gaps
+  cannot be told from missing timestamps.
 
 tokens: totals, by_phase, by_role, by_tier and per_task buckets in
 run-report's token-field shape (input_tokens, output_tokens,
@@ -57,8 +58,56 @@ output, output_tokens_min when output is incomplete); unreadable_lines (as
 run-report counts them); partial: true when any agent is output-incomplete,
 has unreadable lines or has no usage at all, so the totals are lower bounds.
 
-checks, slowdowns, detectors, suggestions and unexplained are {} or [] for
-now.
+slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence}], largest
+cost_s first. agent is the label, or null for a run-wide kind (relaunch,
+idle_gap). cost_kind is measured, or bound when the end is an upper limit.
+evidence is {tool, exit, marker, program}: the tool name, the exit code a
+result reports (or null), the marker string matched (from the table in
+_autopsy.py, or null) and the program a Bash command runs (its first word
+that is not a NAME=value assignment or env, as a basename; null when that
+still holds '=', '@' or ':'). No command, output or prompt text is written.
+The kinds:
+- background_check: a result says a command went to the background; from
+  the call to the first later result or notice naming its ID (bound), else
+  the call's span.
+- timeout: a result says 'timed out'; the call's span.
+- repeated_failure: the same Bash command (whitespace-normalised) fails
+  twice or more in one agent; first failing call to last failing result.
+- heredoc_failure: a failing Bash command holding '<<'; from it to the
+  agent's next successful file write (bound), else its own span.
+- edit_retry: an Edit or Write fails as unread, changed, or text not
+  found; from it to the next successful write of that file.
+- extra_review_round: a task's 'fix N' and 're-review N' agents; the sum
+  of their wall times.
+- escalation and retry: an agent run-report counts as one (the same label
+  again at another model tier in the same launch; a label ending ' retry');
+  that agent's wall time.
+- relaunch: every launch but the last; its wall time.
+- long_tool_call: a tool call over 120 s that no kind above counted.
+- idle_gap: each time.idle_gaps entry.
+- check_rerun: a Bash command holding a commands.test entry or run-checks
+  runs again in one agent with no Edit, Write or git commit between; the
+  second run's span.
+A cost that cannot be timed is "unavailable".
+
+detectors: {<kind>: ok | not_available}. A detector is not_available when
+its inputs are missing (no timed tool events, no labels, no models, no
+timed launch); it then adds no slowdown.
+
+suggestions: [{kind, text, stake_s, count, slowdowns}], one per kind with a
+slowdown, worded as a likely cause and a change to try; stake_s is the sum
+of its slowdowns' known cost_s, and slowdowns lists their indexes. Ranked by
+stake_s. When acceptance reports checks_unclean, an unclean_checks
+suggestion (stake_s 0, no slowdowns) names the untracked files from the
+saved verify evidence (<ledger>/checks/verify-*.json) by path and says to
+commit any file a check needs and gitignore only known generated output.
+
+unexplained: [{start, end, s, agent}], the five largest spans over 60 s of
+an agent's time, cut at its events (a model turn, a tool call), that no
+slowdown covers. A slowdown covers its own agent's time; one without an
+agent covers any agent's.
+
+checks is {} for now.
 
 Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
 0.1. Anything that cannot be read or derived is "unavailable", never 0.

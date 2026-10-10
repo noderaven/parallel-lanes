@@ -10,11 +10,30 @@
 //   A1 review     Lane a     07:04:40-07:06:00  Read 07:04:50-07:04:51
 //   (no agent runs 07:06:00-07:07:30, a 90 s gap)
 //   verify        Verify     07:07:30-07:09:50  Bash 07:07:40-07:08:00
+//
+// run2 holds one slowdown of each kind, over two launches:
+//   wf_1 08:00:00-08:05:00 (stopped, then relaunched)
+//     A1 implement  08:00:10-08:04:50, with 100 s and 180 s model turns
+//   wf_2 09:00:00-09:21:30
+//     A1 implement    09:00:05-09:12:10
+//       Bash in the background 09:00:10, its ID b1 completes 09:01:40
+//       a heredoc Bash fails 09:01:50-09:01:52
+//       an Edit fails (file not read) 09:02:00-09:02:01; Read; Edit ok 09:02:20-09:02:22
+//       the same curl command fails twice 09:02:30-09:02:35, 09:02:40-09:02:50
+//       the test command runs twice with no edit between 09:03:00-09:03:30, 09:03:40-09:04:20
+//       a Bash times out 09:04:30-09:06:30; a 130 s Bash 09:06:40-09:08:50
+//       a 200 s model turn 09:08:50-09:12:10 that no detector covers
+//     B1 implement    09:00:20-09:02:00 (sonnet), then again 09:02:10-09:05:00 (opus)
+//     B1 review       09:05:10-09:05:30, then B1 review retry 09:05:40-09:06:40
+//     A1 review       09:12:20-09:13:20
+//     A1 fix 1        09:13:30-09:15:00; A1 re-review 1 09:15:10-09:16:00
+//     (no agent runs 09:16:00-09:20:00, a 240 s gap)
+//     verify          09:20:00-09:21:00
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { tempDir } from './platform.mjs';
@@ -22,14 +41,15 @@ import { tempDir } from './platform.mjs';
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const SCRIPT = join(SCRIPTS, 'autopsy');
 const RUN1 = join(SKILL_DIR, 'tests', 'fixtures', 'autopsy', 'run1');
+const RUN2 = join(SKILL_DIR, 'tests', 'fixtures', 'autopsy', 'run2');
 const TMP = tempDir('pl-autopsy-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
 let copies = 0;
-function copyRun() {
+function copyRun(src = RUN1) {
   copies += 1;
   const dir = join(TMP, `copy${copies}`);
-  cpSync(RUN1, dir, { recursive: true });
+  cpSync(src, dir, { recursive: true });
   return dir;
 }
 
@@ -81,10 +101,8 @@ test('done lists each task and the acceptance', () => {
   });
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
-  // Later tasks fill these.
-  assert.deepEqual(
-    [A.checks, A.slowdowns, A.detectors, A.suggestions, A.unexplained], [{}, [], {}, [], []],
-  );
+  // Task T5 fills checks.
+  assert.deepEqual(A.checks, {});
   // Free text from the result, prompts and tool output is never copied.
   for (const marker of ['NOTES-TEXT-1', 'REASON-DETAIL-1', 'WARNING-TEXT-1', 'FINDING-TEXT-1',
     'E2E-EVIDENCE-1', 'PROMPT-MARKER-1', 'TOOL-OUTPUT-1', 'Reading the brief']) {
@@ -282,4 +300,169 @@ test('exit 2 without a manifest or a wf_ dir, and nothing written', () => {
   assert.ok(!existsSync(join(noWf, 'autopsy.json')));
   r = spawnSync('python3', [SCRIPT], { encoding: 'utf8' });
   assert.equal(r.status, 2);
+});
+
+const KINDS = [
+  'background_check', 'timeout', 'repeated_failure', 'heredoc_failure', 'edit_retry',
+  'extra_review_round', 'escalation', 'retry', 'relaunch', 'long_tool_call', 'idle_gap', 'check_rerun',
+];
+const TOOL_KINDS = [
+  'background_check', 'timeout', 'repeated_failure', 'heredoc_failure', 'edit_retry', 'long_tool_call',
+  'check_rerun',
+];
+const run2 = autopsy(copyRun(RUN2));
+const S = run2.json;
+
+test('each detector finds its slowdown with its cost', () => {
+  assert.equal(run2.code, 0, run2.stderr);
+  assert.deepEqual(S.detectors, Object.fromEntries(KINDS.map((k) => [k, 'ok'])));
+  const expected = {
+    background_check: ['A1 implement', T('09:00:10'), 90, 'bound'],
+    heredoc_failure: ['A1 implement', T('09:01:50'), 32, 'bound'],
+    edit_retry: ['A1 implement', T('09:02:00'), 22, 'measured'],
+    repeated_failure: ['A1 implement', T('09:02:30'), 20, 'measured'],
+    check_rerun: ['A1 implement', T('09:03:40'), 40, 'measured'],
+    timeout: ['A1 implement', T('09:04:30'), 120, 'measured'],
+    long_tool_call: ['A1 implement', T('09:06:40'), 130, 'measured'],
+    escalation: ['B1 implement', T('09:02:10'), 170, 'measured'],
+    retry: ['B1 review retry', T('09:05:40'), 60, 'measured'],
+    extra_review_round: ['A1 fix 1', T('09:13:30'), 140, 'measured'],
+    relaunch: [null, T('08:00:00'), 300, 'measured'],
+    idle_gap: [null, T('09:16:00'), 240, 'measured'],
+  };
+  assert.equal(S.slowdowns.length, KINDS.length);
+  const byKind = {};
+  for (const kind of KINDS) {
+    const found = S.slowdowns.filter((s) => s.kind === kind);
+    assert.equal(found.length, 1, `${kind}: ${JSON.stringify(found)}`);
+    [byKind[kind]] = found;
+    const s = byKind[kind];
+    assert.deepEqual([s.agent, s.at, s.cost_s, s.cost_kind], expected[kind], kind);
+  }
+  // The largest cost comes first.
+  const costs = S.slowdowns.map((s) => s.cost_s);
+  assert.deepEqual(costs, [...costs].sort((x, y) => y - x));
+  assert.deepEqual(byKind.background_check.evidence,
+    { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node' });
+  assert.deepEqual(byKind.timeout.evidence, { tool: 'Bash', exit: null, marker: 'timed out', program: 'npm' });
+  assert.deepEqual(byKind.repeated_failure.evidence, { tool: 'Bash', exit: 6, marker: null, program: 'curl' });
+  assert.deepEqual(byKind.heredoc_failure.evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'cat' });
+  assert.deepEqual(byKind.edit_retry.evidence,
+    { tool: 'Edit', exit: null, marker: 'has not been read yet', program: null });
+  assert.deepEqual(byKind.idle_gap.evidence, { tool: null, exit: null, marker: null, program: null });
+});
+
+test('suggestions rank by time at stake', () => {
+  const sugg = S.suggestions;
+  assert.equal(sugg.length, KINDS.length);
+  assert.deepEqual(sugg.map((g) => g.kind).sort(), [...KINDS].sort());
+  assert.equal(sugg[0].kind, 'relaunch');
+  assert.equal(sugg[0].stake_s, Math.max(...sugg.map((g) => g.stake_s)));
+  const stakes = sugg.map((g) => g.stake_s);
+  assert.deepEqual(stakes, [...stakes].sort((x, y) => y - x));
+  for (const g of sugg) {
+    assert.ok(g.text.length > 0, g.kind);
+    assert.ok(g.slowdowns.length > 0, g.kind);
+    assert.equal(g.count, g.slowdowns.length);
+    for (const i of g.slowdowns) assert.equal(S.slowdowns[i].kind, g.kind);
+    const sum = g.slowdowns.reduce((t, i) => t + S.slowdowns[i].cost_s, 0);
+    assert.equal(g.stake_s, Math.round(sum * 10) / 10);
+  }
+});
+
+test('unexplained lists the largest uncovered spans', () => {
+  // The 200 s model turn no detector covers; the timeout, the long call, the
+  // idle gap and the relaunched launch's long turns are covered.
+  assert.deepEqual(S.unexplained, [
+    { start: T('09:08:50'), end: T('09:12:10'), s: 200, agent: 'A1 implement' },
+  ]);
+  // run1 has no detector over its agents' long model turns.
+  assert.deepEqual(A.unexplained, [
+    { start: T('07:01:40'), end: T('07:04:00'), s: 140, agent: 'B1 implement' },
+    { start: T('07:01:02'), end: T('07:03:00'), s: 118, agent: 'A1 implement' },
+    { start: T('07:08:00'), end: T('07:09:50'), s: 110, agent: 'verify' },
+    { start: T('07:04:51'), end: T('07:06:00'), s: 69, agent: 'A1 review' },
+  ]);
+});
+
+test('a detector without data is not_available, not zero', () => {
+  const dir = copyRun(RUN2);
+  for (const wf of ['wf_1', 'wf_2']) {
+    for (const name of readdirSync(join(dir, wf)).filter((n) => n.endsWith('.jsonl'))) {
+      editLines(join(dir, wf, name), (lines) => lines.map((l) => {
+        const o = JSON.parse(l);
+        delete o.timestamp;
+        return JSON.stringify(o);
+      }));
+    }
+  }
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = res.json;
+  for (const kind of [...TOOL_KINDS, 'idle_gap']) {
+    assert.equal(D.detectors[kind], 'not_available', kind);
+    assert.ok(!D.slowdowns.some((s) => s.kind === kind), `a ${kind} slowdown without data`);
+    assert.ok(!D.suggestions.some((g) => g.kind === kind), `a ${kind} suggestion without data`);
+  }
+  for (const kind of ['extra_review_round', 'escalation', 'retry', 'relaunch']) {
+    assert.equal(D.detectors[kind], 'ok', kind);
+  }
+  // The launch times still come from wf_1.json.
+  const relaunch = D.slowdowns.find((s) => s.kind === 'relaunch');
+  assert.equal(relaunch.cost_s, 300);
+  // Agents without timestamps have no wall time to cost.
+  const retry = D.slowdowns.find((s) => s.kind === 'retry');
+  assert.deepEqual([retry.agent, retry.at, retry.cost_s], ['B1 review retry', 'unavailable', 'unavailable']);
+  assert.equal(D.suggestions.find((g) => g.kind === 'retry').stake_s, 'unavailable');
+  assert.deepEqual(D.unexplained, []);
+});
+
+test('evidence holds structured fields only', () => {
+  const secrets = ['sk-test-123', 'user:pw', 'abc123', 'PROMPT-MARKER-7'];
+  const transcript = readFileSync(join(RUN2, 'wf_2', 'agent-a1.jsonl'), 'utf8');
+  for (const secret of secrets) {
+    assert.ok(transcript.includes(secret), `the fixture lacks ${secret}`);
+    assert.ok(!run2.text.includes(secret), `autopsy.json holds ${secret}`);
+  }
+  for (const marker of ['Authorization', 'example.com', 'TOOL-OUTPUT-7', 'task-notification']) {
+    assert.ok(!run2.text.includes(marker), `autopsy.json holds ${marker}`);
+  }
+  for (const s of S.slowdowns) {
+    assert.deepEqual(Object.keys(s.evidence).sort(), ['exit', 'marker', 'program', 'tool']);
+  }
+  const program = (command) => python([
+    'import _autopsy',
+    `print(json.dumps(_autopsy.program_of(${JSON.stringify(command)})))`,
+  ]);
+  assert.equal(program('API_KEY=abc123 PATH=/x env node a.js'), 'node');
+  assert.equal(program('"C:/Program Files/nodejs/node.exe" a.js'), 'node.exe');
+  assert.equal(program('user:pw@host ls'), null);
+  assert.equal(program('A=1 B=2'), null);
+});
+
+test('unclean checks are explained without suggesting to ignore source', () => {
+  assert.ok(!A.suggestions.some((g) => g.kind === 'unclean_checks'));
+  const dir = copyRun();
+  const wfPath = join(dir, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  wf.result.acceptance.reasons = [{ kind: 'checks_unclean', class: 'missing', detail: 'REASON-DETAIL-2' }];
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  mkdirSync(join(dir, 'p.f1.ledger', 'checks'));
+  writeFileSync(join(dir, 'p.f1.ledger', 'checks', `verify-${'3'.repeat(40)}.json`), JSON.stringify({
+    head: '3'.repeat(40), results: [{ group: 'test', command: 'node tests/run-tests.mjs', exit: 0 }],
+    ok: true, clean: false, tracked_before: [], tracked_after: [],
+    untracked_before: ['?? coverage/out.json'], untracked_after: ['?? coverage/out.json'],
+  }));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const g = res.json.suggestions.find((s) => s.kind === 'unclean_checks');
+  assert.ok(g, JSON.stringify(res.json.suggestions));
+  assert.deepEqual([g.stake_s, g.count, g.slowdowns], [0, 0, []]);
+  assert.match(g.text, /coverage\/out\.json/);
+  assert.ok(!g.text.includes('??'));
+  assert.match(g.text, /commit any file a check needs/i);
+  assert.match(g.text, /only known generated output/i);
+  assert.match(g.text, /never ignore a file a check reads/i);
+  assert.doesNotMatch(g.text, /ignore (all|every|these|them|the listed|the files|coverage)/i);
+  assert.ok(!res.text.includes('REASON-DETAIL-2'));
 });
