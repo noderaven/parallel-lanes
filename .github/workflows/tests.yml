@@ -49,7 +49,7 @@ jobs:
           git config --global user.email "ci@example.invalid"
           git config --global init.defaultBranch main
       - name: Run the test suite
-        run: node --test tests/
+        run: node tests/run-tests.mjs
       # A test that writes into the checkout (a __pycache__, a stray file)
       # can make the next run on the same checkout fail; CI runs only once.
       - name: The test suite leaves the checkout unchanged
