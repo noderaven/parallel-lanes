@@ -612,9 +612,11 @@ file's hash (`null` for `-`). A changed section or head puts the task in `stale`
 two spec reasons, checked when `--plan` is given: an approval that recorded `spec_sha256` is stale
 when it differs from the current spec's hash (`the spec changed since its review`; with `--plan`
 but no `--spec` the current spec counts as absent, so an approval that recorded a hash is
-stale and one that recorded `null` is not), and an approval that recorded none (older ledgers)
-is stale when the spec changed since the last launch (`the spec changed since the last launch
-and the review did not record it`). Pass `--spec` on a resume only when the run has a spec. A
+stale and one that recorded `null` is not), and an approval that recorded none (from before
+1.4.4) is stale whenever the run has a spec: `--spec` is given, or any launch's setup recorded
+one (`the review recorded no spec (it predates 1.4.4) and this run has one`). That holds after
+later setup records too, so an interrupted resume cannot revive it; a fresh approval that
+records the spec settles it. Pass `--spec` on a resume only when the run has a spec. A
 review without a hash (older ledgers) is `unbound`, and both are left out of `reviewed` so the
 resume reviews them again. `inputs`
 says whether the plan or spec changed since the last launch recorded their hashes. A stale

@@ -73,8 +73,9 @@ task's current section, the task has no section, or the review's head is not
 the task's recorded head, or the spec moved on: a review that recorded
 spec_sha256 is stale when it differs from SPEC's sha256 (null without
 --spec: no spec now) ("the spec changed since its review"), and one that
-recorded none is stale when inputs.spec_changed is true ("the spec changed
-since the last launch and the review did not record it"). unbound lists
+recorded none (from before 1.4.4) is stale whenever the run has a spec: SPEC
+is given, or any setup run_started recorded a non-null spec_sha256 ("the
+review recorded no spec (it predates 1.4.4) and this run has one"). unbound lists
 reviewed tasks whose review recorded no brief_sha256. Both are left out of
 reviewed, so a resume reviews them again. inputs: {"plan_changed", "spec_changed"}: true or false against the
 hashes the latest setup run_started recorded (the last launch; with --plan /
@@ -341,6 +342,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
     review_event = {}
     history = {}  # task -> committed/settled events in order
     setup_hashes = None
+    had_spec = False  # any launch's setup recorded a spec
     started = {}  # task -> base of its latest started event
     start_mismatch = {}  # task -> reason, the first one found
     spent = {"agents": 0, "rulings": 0}
@@ -401,6 +403,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             # The latest launch's hashes: inputs report changes since then.
             if entry["phase"] == "setup" and "plan_sha256" in entry:
                 setup_hashes = (entry.get("plan_sha256"), entry.get("spec_sha256"))
+                had_spec = had_spec or entry.get("spec_sha256") is not None
 
     ranges, legacy, inconsistent = {}, [], []
     for task, evs in history.items():
@@ -450,9 +453,12 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
                 # No --spec means no spec now: a review that read one is stale.
                 if rev["spec_sha256"] != spec_sha:
                     stale.append({"task": task, "reason": "the spec changed since its review"})
-            elif inputs["spec_changed"]:
+            elif spec_sha is not None or had_spec:
+                # An approval from before 1.4.4 cannot show which spec it
+                # read: in a run with a spec, now or at any launch, it is
+                # reviewed again (a later setup record must not revive it).
                 stale.append({"task": task, "reason":
-                              "the spec changed since the last launch and the review did not record it"})
+                              "the review recorded no spec (it predates 1.4.4) and this run has one"})
     if manifest is not None and stale:
         # A dependent built on, or against, a stale approval is reviewed again
         # too: transitively, in run order.

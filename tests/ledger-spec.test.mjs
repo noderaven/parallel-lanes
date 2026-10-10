@@ -43,7 +43,7 @@ const sha = (path) => createHash('sha256').update(readFileSync(path)).digest('he
 
 const PLAN = '# P\n\n### Task T1: one\n\nDo one.\n\n### Task T2: two\n\nDo two.\n';
 const SPEC_CHANGED = 'the spec changed since its review';
-const LEGACY_CHANGED = 'the spec changed since the last launch and the review did not record it';
+const LEGACY_UNRECORDED = 'the review recorded no spec (it predates 1.4.4) and this run has one';
 
 let counter = 0;
 // A repo on branch feat with an initial commit, a plan, a spec, a ledger dir
@@ -166,19 +166,43 @@ test('a spec that is now absent makes an approval that recorded one stale, and n
   assert.deepEqual(ok(py('ledger', 'status', c.ledger)).reviewed, ['T1']);
 });
 
-test('a legacy approval is stale only when the spec changed since the launch', () => {
+const setupEvent = (c, specSha) => append(c, { task: '_run', event: 'run_started', phase: 'setup',
+  head: c.start, plan_sha256: sha(c.plan), spec_sha256: specSha });
+
+// An approval from before 1.4.4 recorded no spec. In a run with a spec it is
+// reviewed again once, and that holds across later setup records, a changed
+// spec, or a removed one: a launch's setup record must not make it valid again.
+test('a legacy approval is reviewed again whenever the run has a spec', () => {
   const { c, h } = oneTask();
-  append(c, { task: '_run', event: 'run_started', phase: 'setup', head: c.start,
-    plan_sha256: sha(c.plan), spec_sha256: sha(c.spec) });
+  setupEvent(c, sha(c.spec));
   ok(reviewed(c, 'T1', h));
+  const legacy = [{ task: 'T1', reason: LEGACY_UNRECORDED }];
   let s = status(c, '--spec', c.spec);
+  assert.deepEqual(s.stale, legacy);
+  assert.deepEqual(s.reviewed, []);
+  // The spec changes and the next launch's setup records the new hash.
+  write(c.spec, 'spec v2\n');
+  setupEvent(c, sha(c.spec));
+  s = status(c, '--spec', c.spec);
+  assert.equal(s.inputs.spec_changed, false);
+  assert.deepEqual(s.stale, legacy);
+  assert.deepEqual(s.reviewed, []);
+  // The spec is removed: an earlier launch had one, so the approval stays stale.
+  s = status(c);
+  assert.deepEqual(s.stale, legacy);
+  assert.deepEqual(s.reviewed, []);
+  // A fresh approval that records the spec settles it.
+  ok(reviewed(c, 'T1', h, c.spec));
+  assert.deepEqual(status(c, '--spec', c.spec).reviewed, ['T1']);
+});
+
+test('a legacy approval keeps its status in a run that never had a spec', () => {
+  const { c, h } = oneTask();
+  setupEvent(c, null);
+  ok(reviewed(c, 'T1', h));
+  const s = status(c);
   assert.deepEqual(s.stale, []);
   assert.deepEqual(s.reviewed, ['T1']);
-  write(c.spec, 'spec v2\n');
-  s = status(c, '--spec', c.spec);
-  assert.equal(s.inputs.spec_changed, true);
-  assert.deepEqual(s.stale, [{ task: 'T1', reason: LEGACY_CHANGED }]);
-  assert.deepEqual(s.reviewed, []);
 });
 
 test('staleness spreads to dependents', () => {
@@ -188,14 +212,13 @@ test('staleness spreads to dependents', () => {
   const h2 = commit(c, 'b.txt');
   finish(c, h1, 'T2');
   ok(reviewed(c, 'T1', h1, c.spec));
-  // T2's approval records no spec and no launch reports a change, so only
-  // its dependency on T1 can make it stale.
-  ok(reviewed(c, 'T2', h2));
+  ok(reviewed(c, 'T2', h2, c.spec));
   assert.deepEqual(status(c, '--spec', c.spec, '--manifest', c.manifest).reviewed, ['T1', 'T2']);
-  write(c.spec, 'spec v2\n');
+  // Only T1's section changes, so only its dependency on T1 can make T2 stale.
+  write(c.plan, PLAN.replace('Do one.', 'Do one, differently.'));
   const s = status(c, '--spec', c.spec, '--manifest', c.manifest);
   assert.deepEqual(s.stale, [
-    { task: 'T1', reason: SPEC_CHANGED },
+    { task: 'T1', reason: "the task's section of the plan changed since its review" },
     { task: 'T2', reason: 'it depends on T1, whose approval is stale' },
   ]);
   assert.deepEqual(s.reviewed, []);
