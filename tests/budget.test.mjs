@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers, loadScript } from './harness.mjs';
+import { loadHelpers, loadScript, H } from './harness.mjs';
 
 const { makeIo, planAgents, labelTasks, agentTypeFor } =
   await loadHelpers(['makeIo', 'planAgents', 'labelTasks', 'agentTypeFor']);
@@ -40,7 +40,7 @@ function manifest(overrides = {}) {
     sp_dir: null,
     skill_dir: '/skills/parallel-lanes',
     setup_result: {
-      feature_head: 'F0', discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
+      feature_head: H('F0'), discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
     },
     ...overrides,
   };
@@ -347,14 +347,14 @@ const approve = () => ({ verdict: 'approve', findings: [], cannot_verify: [] });
 function cleanScript() {
   const script = {
     'pre-flight': [{ conflicts: [], rulings: [], undeclared: [] }],
-    integrate: [{ status: 'done', head: 'I1', notes: 'merged' }],
+    integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
     'final review sp': [{ findings: [], cannot_verify: [] }],
     'final review security': [{ findings: [], cannot_verify: [] }],
     'final review correctness': [{ findings: [], cannot_verify: [] }],
-    verify: [{ head: 'T5-h', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }],
+    verify: [{ head: H('T5-h'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }],
   };
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) {
-    script[`${id} implement`] = [done(`${id}-b`, `${id}-h`)];
+    script[`${id} implement`] = [done(`${id}-b`, H(`${id}-h`))];
     script[`${id} review`] = [approve()];
   }
   return script;
@@ -389,7 +389,7 @@ test('a clean run under the default budget completes and counts every agent', as
 test('the run records every agent it started with its model and effort', async () => {
   const script = cleanScript();
   // A small diff: T1's review runs at medium effort.
-  script['T1 implement'] = [{ ...done('T1-b', 'T1-h'), changed_lines: 12 }];
+  script['T1 implement'] = [{ ...done('T1-b', H('T1-h')), changed_lines: 12 }];
   const { result, calls } = await run(manifest(), script);
   assert.equal(result.status, 'complete');
   assert.equal(result.agent_settings.length, calls.length);
@@ -434,9 +434,9 @@ test('cap reached while two lanes run: in-flight agents finish, no new agents st
     'pre-flight', 'T1 implement', 'T1 review', 'T2 implement', 'T4 implement', 'T2 review',
   ]);
   assert.equal(result.tasks.T1.status, 'done');
-  assert.deepEqual(result.tasks.T1.commits, ['F0', 'T1-h']);
+  assert.deepEqual(result.tasks.T1.commits, [H('F0'), H('T1-h')]);
   assert.equal(result.tasks.T2.status, 'done', 'the in-flight review finished and its task is recorded');
-  assert.deepEqual(result.tasks.T2.commits, ['T1-h', 'T2-h']);
+  assert.deepEqual(result.tasks.T2.commits, [H('T1-h'), H('T2-h')]);
   assert.equal(result.tasks.T3.status, 'blocked');
   assert.equal(result.tasks.T3.notes, 'budget exhausted: T3 implement was not run');
   assert.equal(result.tasks.T4.status, 'blocked');
@@ -464,7 +464,7 @@ test('a refusal during the final review stops the run instead of completing it',
   assert.equal(labels(calls).at(-1), 'verify');
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
-  assert.equal(result.verify.head, 'T5-h');
+  assert.equal(result.verify.head, H('T5-h'));
   for (const id of ['T1', 'T2', 'T3', 'T4', 'T5']) assert.equal(result.tasks[id].status, 'done');
 });
 
@@ -476,11 +476,11 @@ test('the project checks run at the final fix head even when the budget refused 
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
-  script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true }];
+  script['final fix'] = [{ status: 'done', head: H('FX'), tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
+  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 1 }], ok: false, clean: true }];
   const { result, calls } = await run(m, script);
   assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
-  assert.ok(calls.at(-1).prompt.includes('rev-parse HEAD must print FX'), calls.at(-1).prompt);
+  assert.ok(calls.at(-1).prompt.includes(`rev-parse HEAD must print ${H('FX')}`), calls.at(-1).prompt);
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'budget');
   assert.equal(result.agents_spawned, 17, 'the checks are counted, over the cap');
@@ -501,8 +501,8 @@ test('a refused final re-review stops the run for budget instead of throwing', a
   const script = cleanScript();
   const finding = { file: 'src/T1.js', line: 3, issue: 'bug', fix: 'fix it', severity: 'important' };
   script['final review sp'] = [{ findings: [finding], cannot_verify: [] }];
-  script['final fix'] = [{ status: 'done', head: 'FX', tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
-  script.verify = [{ head: 'FX', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }];
+  script['final fix'] = [{ status: 'done', head: H('FX'), tests: 'npm test: pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] }];
+  script.verify = [{ head: H('FX'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true }];
   const { result, calls } = await run(m, script);
   assert.equal(calls.length, 17);
   assert.deepEqual(labels(calls).slice(-2), ['final fix', 'verify']);
@@ -517,7 +517,7 @@ test('a refused final re-review stops the run for budget instead of throwing', a
 test('a dead agent retried once completes the run', async () => {
   const script = cleanScript();
   script['T3 implement'] = [null];
-  script['T3 implement retry'] = [done('T3-b', 'T3-h')];
+  script['T3 implement retry'] = [done('T3-b', H('T3-h'))];
   const { result, calls } = await run(manifest(), script);
   assert.equal(result.status, 'complete');
   assert.equal(result.tasks.T3.status, 'done');
@@ -528,7 +528,7 @@ test('a dead agent retried once completes the run', async () => {
 test('rulings_spent counts the adjudications that ran, not the one the cap refused', async () => {
   const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_rulings: 1 } });
   const script = cleanScript();
-  const stuck = { status: 'blocked', head: 'F0', tests: '', notes: 'stuck' };
+  const stuck = { status: 'blocked', head: H('F0'), tests: '', notes: 'stuck' };
   script['T1 implement'] = [stuck, stuck];
   script['T1 adjudicate'] = [{ outcome: 'answer', text: 'Ruling: try v2 - spec says so - low' }];
   const { result, calls } = await run(m, script);

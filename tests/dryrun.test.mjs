@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers, loadScript } from './harness.mjs';
+import { loadHelpers, loadScript, H } from './harness.mjs';
 
 const { planAgents } = await loadHelpers(['planAgents']);
 
@@ -45,7 +45,7 @@ function manifest(overrides = {}) {
 // What scripts/setup reports for manifest(): every lane's worktree.
 function setupResult() {
   return {
-    feature_head: 'S0',
+    feature_head: H('S0'),
     discarded: [],
     worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' },
   };
@@ -279,19 +279,19 @@ const FINDING = { severity: 'important', file: 'src/a.js', line: 3, issue: 'one 
 // The final fix commits f1, so the rechecks run at f1 (the delivered head).
 function parityAgent(label) {
   if (label === 'pre-flight') return { conflicts: [], rulings: [], undeclared: [] };
-  if (label === 'integrate') return { status: 'done', head: 'I1', notes: 'merged' };
-  if (label === 'post-integrate') return { status: 'done', head: 'P1', notes: 'ok' };
-  if (label === 'e2e') return { head: 'E0', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
+  if (label === 'integrate') return { status: 'done', head: H('I1'), notes: 'merged' };
+  if (label === 'post-integrate') return { status: 'done', head: H('P1'), notes: 'ok' };
+  if (label === 'e2e') return { head: H('E0'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
   if (label.startsWith('final review')) return { findings: [{ ...FINDING }], cannot_verify: [] };
   if (label === 'final fix') {
-    return { status: 'done', head: 'f1', tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] };
+    return { status: 'done', head: H('f1'), tests: 'pass', notes: '', dispositions: [{ id: 'F1', status: 'fixed', reason: 'ok', evidence: 'src/a.js:3' }] };
   }
-  if (label === 'final re-review') return { head: 'f1', results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
-  if (label === 'verify') return { head: 'f1', results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };
-  if (label === 'e2e recheck') return { head: 'f1', items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
-  if (label === 'post-integrate recheck') return { status: 'done', head: 'f1', notes: 'ok' };
+  if (label === 'final re-review') return { head: H('f1'), results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] };
+  if (label === 'verify') return { head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 0 }], ok: true, clean: true };
+  if (label === 'e2e recheck') return { head: H('f1'), items: [{ item: 'login', result: 'PASS', evidence: 'ok' }] };
+  if (label === 'post-integrate recheck') return { status: 'done', head: H('f1'), notes: 'ok' };
   const implement = /^(\S+) implement$/.exec(label);
-  if (implement) return { status: 'done', head: `${implement[1]}-h`, tests: 'pass', notes: '' };
+  if (implement) return { status: 'done', head: H(`${implement[1]}-h`), tests: 'pass', notes: '' };
   if (/^\S+ review$/.test(label)) return { verdict: 'approve', findings: [], cannot_verify: [] };
   throw new Error(`unexpected agent call: ${label}`);
 }
@@ -303,7 +303,7 @@ async function parityRun(m) {
       ...m,
       dry_run: false,
       setup_result: m.setup_result || (m.profile === 'lite'
-        ? { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } } : setupResult()),
+        ? { feature_head: H('S0'), discarded: [], worktrees: { alpha: '/work/repo' } } : setupResult()),
     },
     agent: async (prompt, opts) => {
       calls.push(opts);
@@ -351,7 +351,7 @@ test('parity: a run with setup_result spawns exactly the planned agents', async 
 
 test('parity: a lite run with setup_result spawns exactly the planned agents', async () => {
   await assertParity(liteManifest({
-    setup_result: { feature_head: 'S0', discarded: [], worktrees: { alpha: '/work/repo' } },
+    setup_result: { feature_head: H('S0'), discarded: [], worktrees: { alpha: '/work/repo' } },
   }));
 });
 

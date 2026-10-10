@@ -14,6 +14,13 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// A commit sha as an agent reports it: 7 to 40 lowercase hex digits. Any
+// other head an agent reports (a note such as 'see below', a branch name)
+// counts as no head: the run cannot tell which commit it means.
+function isSha(v) {
+  return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
+}
+
 // Rules every agent gets, task and phase alike.
 function agentRules() {
   return [

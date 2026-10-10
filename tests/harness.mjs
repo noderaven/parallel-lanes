@@ -78,3 +78,8 @@ export async function loadHelpers(names) {
   }
   return helpers;
 }
+
+// A fake commit sha for a scripted agent result, readable at the call site:
+// the hex of name, padded to 12 digits (unique per name, always 12 to 40
+// lowercase hex, so the run accepts it as a reported head).
+export const H = (name) => Buffer.from(String(name)).toString('hex').padEnd(12, '0').slice(0, 40);

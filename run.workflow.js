@@ -29,6 +29,13 @@ function present(v) {
   return typeof v === 'string' && v.length > 0;
 }
 
+// A commit sha as an agent reports it: 7 to 40 lowercase hex digits. Any
+// other head an agent reports (a note such as 'see below', a branch name)
+// counts as no head: the run cannot tell which commit it means.
+function isSha(v) {
+  return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
+}
+
 // Rules every agent gets, task and phase alike.
 function agentRules() {
   return [
@@ -2414,7 +2421,7 @@ function adjudicatorResult(r) {
   const hasCondition = r.stop_condition !== undefined;
   if (hasCondition && !adjudicatorStopConditions().includes(r.stop_condition)) return null;
   if (r.outcome === 'park' || r.outcome === 'unblock') {
-    return { outcome: r.outcome, text: r.text, ...(present(r.head) ? { head: r.head } : {}) };
+    return { outcome: r.outcome, text: r.text, ...(isSha(r.head) ? { head: r.head } : {}) };
   }
   if (r.outcome !== 'stop') return { outcome: r.outcome, text: r.text };
   if (!hasCondition) return null;
@@ -2653,6 +2660,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (r.status !== 'done') return blockedBy(`${label} blocked: ${r.notes}`);
     if (!present(r.head)) return blockedBy(`${label} reported no head`);
+    if (!isSha(r.head)) return blockedBy(`${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`);
     if (r.head === from) return blockedBy(`${label} reported done with no new commits`);
     return null;
   };
@@ -2675,7 +2683,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
         latest = r;
         return null;
       }
-      if (r && !r.__budget && present(r.head) && r.head !== past) observed = r.head;
+      if (r && !r.__budget && isSha(r.head) && r.head !== past) observed = r.head;
       if (!escalates(fail)) return fail;
       escalate(fail.reason);
       retry = { reason: fail.reason, findings: null };
@@ -2764,7 +2772,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // An open park or unblock must say where the settled range ends: the head
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
-    if (deferring && refused === null && !present(out.head)) {
+    if (deferring && refused === null && !isSha(out.head)) {
       out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
         text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
           + 'the ledger holds the task as deferred: check ledger status before resuming)' };
@@ -2863,7 +2871,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       tierSettings(tierUsed), implementSchema());
     if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
-    if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
+    if (fail !== null && fix && !fix.__budget && isSha(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
     else if (fail === null) {
       const prevHead = head;
@@ -3261,7 +3269,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     ...lenses.map(([, name], i) => ({ lens: name, findings: results[i] ? results[i].findings : null })),
     { lens: 'post-integrate re-review', findings: carried },
   ]));
-  const lensHead = results.find((r) => r && present(r.head));
+  const lensHead = results.find((r) => r && isSha(r.head));
   const tip = lensHead ? lensHead.head : base;
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
@@ -3294,14 +3302,25 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const fixRan = !(fix && fix.__budget);
   // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
   // fix's head stands unless its Opus rerun reports a head of its own.
-  if (fix && present(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done')) fix = await callFix(standard);
-  if (fix && present(fix.head)) final.head = fix.head;
+  // A head that is not a commit sha names no commit, so the run cannot say
+  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
+  // leaves every finding open.
+  const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
+  if (fix && isSha(fix.head)) final.head = fix.head;
+  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fix && isSha(fix.head)) final.head = fix.head;
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
   if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
+  if (badHead(fix)) {
+    const why = noHead(fix, 'the final fix');
+    settle([], null, why);
+    // Any commit it made past the tip is unknown to the run and unreviewed.
+    final.unreviewed_fix = `${why}, so any commit it made past ${tip} was not re-reviewed`;
+    return final;
+  }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
@@ -3345,7 +3364,7 @@ function laneTips(m, laneResults) {
   const tips = {};
   for (const lane of m.lanes) {
     const lr = laneResults.find((r) => r.lane === lane.id);
-    if (lr && present(lr.head)) {
+    if (lr && isSha(lr.head)) {
       tips[lane.id] = lr.head;
       continue;
     }
@@ -3505,7 +3524,7 @@ async function runAll(manifest, io) {
         status: r.status === 'skipped' && deferredBefore.has(r.task) ? 'deferred' : r.status,
         rounds: r.rounds,
         tier_used: r.tier_used,
-        commits: present(r.base) && present(r.head) ? [r.base, r.head] : null,
+        commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
       };
     }
@@ -3584,7 +3603,7 @@ async function runAll(manifest, io) {
   // attempt made at a first task before recording it are reviewed too. A
   // list that moved no head leaves the tip where the phase put it.
   const starts = m.start_points || {};
-  const moved = (list) => list.results.some((r) => present(r.head));
+  const moved = (list) => list.results.some((r) => isSha(r.head));
   const listTip = (list) => (moved(list) ? list.head : tip);
 
   // Profile lite (spec D2): validateManifest above is the whole pre-flight;
@@ -3675,7 +3694,7 @@ async function runAll(manifest, io) {
     // A phase result that is done must also report the head it left.
     const phaseResult = (r, label) => {
       if (!r) return { status: 'failed', notes: `no result from ${label}` };
-      if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+      if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
       return { status: r.status, notes: r.notes };
     };
     const preludeTip = tip;
@@ -3691,7 +3710,7 @@ async function runAll(manifest, io) {
       const fix = await callM('post-integrate fix', 'Integrate',
         postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
-      if (fix && fix.status === 'done' && present(fix.head) && fix.head !== base) {
+      if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
           postIntegrateReReviewPrompt(m, base, fix.head), postIntegrateReReviewSchema(), standard);
         if (state.refused.length > 0) return BUDGET;
@@ -3723,7 +3742,7 @@ async function runAll(manifest, io) {
         const res = await callM('resolve conflicts', 'Integrate',
           resolveConflictsPrompt(m, preludeTip, conflicts), statusSchema(), standard);
         if (state.refused.length > 0) return budgetReport();
-        if (res && res.status === 'done' && present(res.head)) resolved = { files: conflicts, notes: res.notes };
+        if (res && res.status === 'done' && isSha(res.head)) resolved = { files: conflicts, notes: res.notes };
       }
       // Every Sonnet failure or null escalates to one Opus rerun (D5).
       // Autonomous heals a residual command failure into tests_failed;
@@ -3807,7 +3826,7 @@ async function runAll(manifest, io) {
       r = await callM(label, phaseName, e2ePrompt(m, checks), e2eSchema(), standard);
       if (state.refused.length > 0) return null;
     }
-    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: present(r.head) ? r.head : null }
+    return r && Array.isArray(r.items) ? { items: r.items, checked_sha: isSha(r.head) ? r.head : null }
       : { items: [], checked_sha: null, notes: `no result from ${label}` };
   };
   // The project checks at sha (scripts/run-checks through the verify agent).
@@ -3882,7 +3901,7 @@ async function runAll(manifest, io) {
     const r = await call('post-integrate recheck', 'Verify', postIntegratePrompt(m, true, checksHere), statusSchema());
     if (state.refused.length > 0) return budgetReport();
     const pr = phaseCheck(r, 'post-integrate recheck');
-    postCheck = { ...pr, checked_sha: r && present(r.head) ? r.head : null };
+    postCheck = { ...pr, checked_sha: r && isSha(r.head) ? r.head : null };
     if (postCheck.checked_sha !== null && postCheck.checked_sha !== delivered) {
       postCheck = { status: 'failed', notes: `the recheck left HEAD at ${postCheck.checked_sha}`, checked_sha: delivered };
     }
@@ -3899,8 +3918,15 @@ async function runAll(manifest, io) {
 // A phase agent's status result as {status, notes}: done only with a head.
 function phaseCheck(r, label) {
   if (!r) return { status: 'failed', notes: `no result from ${label}` };
-  if (r.status === 'done' && !present(r.head)) return { status: 'failed', notes: `${label} reported no head` };
+  if (r.status === 'done' && !isSha(r.head)) return { status: 'failed', notes: noHead(r, label) };
   return { status: r.status, notes: r.notes };
+}
+
+// Why a done phase result has no usable head: none reported, or one that is
+// not a commit sha.
+function noHead(r, label) {
+  return present(r.head) ? `${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`
+    : `${label} reported no head`;
 }
 
 // ---- Script body ----

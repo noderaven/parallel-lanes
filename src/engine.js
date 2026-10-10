@@ -113,6 +113,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     if (r.status !== 'done') return blockedBy(`${label} blocked: ${r.notes}`);
     if (!present(r.head)) return blockedBy(`${label} reported no head`);
+    if (!isSha(r.head)) return blockedBy(`${label} reported head ${JSON.stringify(r.head)}, which is not a commit sha`);
     if (r.head === from) return blockedBy(`${label} reported done with no new commits`);
     return null;
   };
@@ -135,7 +136,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
         latest = r;
         return null;
       }
-      if (r && !r.__budget && present(r.head) && r.head !== past) observed = r.head;
+      if (r && !r.__budget && isSha(r.head) && r.head !== past) observed = r.head;
       if (!escalates(fail)) return fail;
       escalate(fail.reason);
       retry = { reason: fail.reason, findings: null };
@@ -224,7 +225,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     // An open park or unblock must say where the settled range ends: the head
     // finish-task --settled printed. Without it the range is unknown, so the
     // result is invalid (a plan_broken stop that is not a ruling).
-    if (deferring && refused === null && !present(out.head)) {
+    if (deferring && refused === null && !isSha(out.head)) {
       out = { outcome: 'stop', stop_condition: 'plan_broken', invalid: true,
         text: 'adjudicator chose park or unblock without the settled head (if it ran the settled command, '
           + 'the ledger holds the task as deferred: check ledger status before resuming)' };
@@ -323,7 +324,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       tierSettings(tierUsed), implementSchema());
     if (ran(fix)) reopen = false;
     let fail = failure(fix, `${task.id} ${fixLabel}`, head);
-    if (fail !== null && fix && !fix.__budget && present(fix.head) && fix.head !== head) observed = fix.head;
+    if (fail !== null && fix && !fix.__budget && isSha(fix.head) && fix.head !== head) observed = fix.head;
     if (fail !== null && escalates(fail)) fail = await rerunAtStandard(fail.reason, findings);
     else if (fail === null) {
       const prevHead = head;

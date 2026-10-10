@@ -127,7 +127,7 @@ function adjudicatorResult(r) {
   const hasCondition = r.stop_condition !== undefined;
   if (hasCondition && !adjudicatorStopConditions().includes(r.stop_condition)) return null;
   if (r.outcome === 'park' || r.outcome === 'unblock') {
-    return { outcome: r.outcome, text: r.text, ...(present(r.head) ? { head: r.head } : {}) };
+    return { outcome: r.outcome, text: r.text, ...(isSha(r.head) ? { head: r.head } : {}) };
   }
   if (r.outcome !== 'stop') return { outcome: r.outcome, text: r.text };
   if (!hasCondition) return null;
