@@ -15,7 +15,9 @@ read or derived is "unavailable", never 0.
 Transcript text is used only inside this module (to match markers); it is
 never written out. Event "text", notes and tool inputs stay internal: a
 slowdown's evidence holds only the tool name, an exit code, a marker string
-from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of).
+from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
+check execution's command is a configured string from the manifest or
+'run-checks', never the command line.
 """
 import glob
 import hashlib
@@ -490,6 +492,11 @@ def time_section(run):
 def critical_path(run):
     """A timing-based estimate: from the last-ending agent, walk back to the
     latest-ending agent that ended before it started; labels, first to last."""
+    return [a["entry"]["label"] for a in critical_agents(run)]
+
+
+def critical_agents(run):
+    """The agents on critical_path, first to last."""
     timed = _timed(_all_agents(run))
     if not timed:
         return []
@@ -502,7 +509,7 @@ def critical_path(run):
             break
         current = max(before, key=lambda ia: (ia[1]["end"], ia[0]))[1]
         path.append(current)
-    return [a["entry"]["label"] for a in reversed(path)]
+    return list(reversed(path))
 
 
 # ---- tokens ----
@@ -646,20 +653,29 @@ def program_of(command):
     NAME=value assignment or 'env', reduced to its basename. None when there
     is none, or when that word still holds '=', '@' or ':' (it may carry a
     secret or a URL)."""
-    if not isinstance(command, str):
-        return None
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        words = command.split()
-    for word in words:
+    for word in _words(command):
         if word == "env" or _ASSIGNMENT.match(word):
             continue
-        name = re.split(r"[/\\]", word)[-1]
+        name = _basename(word)
         if not name or any(c in name for c in "=@:"):
             return None
         return name
     return None
+
+
+def _words(command):
+    """A command line's shell words ([] for a non-string); split on
+    whitespace when its quoting does not parse."""
+    if not isinstance(command, str):
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _basename(word):
+    return re.split(r"[/\\]", word)[-1]
 
 
 def _calls(agent):
@@ -866,11 +882,15 @@ def run_slowdowns(run):
     return out
 
 
+def _has_tool_events(run):
+    return any(e["kind"] in ("tool_use", "tool_result") for a in _all_agents(run) for e in a["events"])
+
+
 def detector_status(run):
     """{kind: 'ok' | 'not_available'}: a detector is not_available when its
     inputs are missing from every agent or launch."""
     agents = _all_agents(run)
-    tool_events = any(e["kind"] in ("tool_use", "tool_result") for a in agents for e in a["events"])
+    tool_events = _has_tool_events(run)
     labels = any(a["entry"]["label"] for a in agents)
     models = labels and any(_model(a["entry"]) != UNAVAILABLE for a in agents)
     available = {
@@ -903,6 +923,122 @@ def find_slowdowns(run, detectors):
 def public_slowdown(s):
     return {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
             "cost_kind": s["cost_kind"], "evidence": s["evidence"]}
+
+
+# ---- checks ----
+
+CHECK_GROUPS = ("test", "lint", "build")
+
+
+def _squash(text):
+    return " ".join(text.split())
+
+
+def configured_checks(manifest):
+    """[(command, full_suite)]: the manifest's commands.test, lint and build
+    entries, then each lane_commands override's, without repeats. full_suite
+    is True for a commands.test entry."""
+    out = []
+    seen = set()
+
+    def add(commands, full_groups):
+        if not isinstance(commands, dict):
+            return
+        for group in CHECK_GROUPS:
+            entries = commands.get(group)
+            for command in entries if isinstance(entries, list) else []:
+                if isinstance(command, str) and _squash(command) and command not in seen:
+                    seen.add(command)
+                    out.append((command, group in full_groups))
+
+    add(_manifest_commands(manifest), ("test",))
+    lanes = manifest.get("lane_commands")
+    for commands in lanes.values() if isinstance(lanes, dict) else []:
+        add(commands, ())
+    return out
+
+
+def _manifest_commands(manifest):
+    commands = manifest.get("commands")
+    return commands if isinstance(commands, dict) else {}
+
+
+def match_check(command, checks):
+    """(name, full_suite) when a Bash command line runs a check, else None.
+
+    A line with a word whose basename is run-checks is a run-checks call:
+    name 'run-checks', and a full-suite run when it passes '--cmd test'.
+    Otherwise name is the longest of checks' commands the line holds
+    (whitespace-normalised), first in checks' order on a tie."""
+    if not isinstance(command, str):
+        return None
+    # Shell words, and plain words too: shlex drops the backslashes of an
+    # unquoted Windows path.
+    for words in (_words(command), [w.strip("'\"") for w in command.split()]):
+        if any(_basename(w) == RUN_CHECKS for w in words):
+            full = any(w == "--cmd" and words[i + 1:i + 2] == ["test"] for i, w in enumerate(words))
+            return RUN_CHECKS, full
+    line = _squash(command)
+    best = None
+    for name, full in checks:
+        if _squash(name) in line and (best is None or len(_squash(name)) > len(_squash(best[0]))):
+            best = (name, full)
+    return best
+
+
+def _execution_end(agent, call):
+    """(background, end, timing) of a check call. A backgrounded call ends
+    at the first later event naming its ID; a call with no such event, or
+    without a result, is bound by the agent's last event."""
+    background = call["input"].get("run_in_background") is True \
+        or (call["end"] is not None and _marker("background_check", call["text"]) is not None)
+    if call["end"] is None:
+        return background, agent["end"], "bound"
+    if background:
+        mention = _mention_after(agent, call)
+        if mention is None:
+            return background, agent["end"], "bound"
+        return background, mention, "measured"
+    return background, call["end"], "measured"
+
+
+def checks_section(run):
+    """Every Bash call that runs a configured check or run-checks, with its
+    timing; per-command totals; full-suite runs per role. Without any tool
+    event in the run the section cannot be derived and is unavailable."""
+    if not _has_tool_events(run):
+        return {"executions": UNAVAILABLE, "by_command": UNAVAILABLE,
+                "full_suite_runs": {"total": UNAVAILABLE, "by_role": UNAVAILABLE}}
+    checks = configured_checks(run["manifest"])
+    on_path = set(id(a) for a in critical_agents(run))
+    found = []
+    for order, a in enumerate(_all_agents(run)):
+        e = a["entry"]
+        for call in _calls(a):
+            match = match_check(_command(call), checks) if call["name"] == "Bash" else None
+            if match is None:
+                continue
+            background, end, timing = _execution_end(a, call)
+            found.append(((call["start"], order), match[1], {
+                "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "command": match[0],
+                "start": iso(call["start"]), "end": iso(end), "s": seconds(end - call["start"]),
+                "timing": timing, "background": background, "on_critical_path": id(a) in on_path,
+            }))
+    found.sort(key=lambda f: f[0])
+    executions = [x for _key, _full, x in found]
+    by_command = {}
+    for x in executions:
+        totals = by_command.setdefault(x["command"], {"runs": 0, "total_s": 0.0})
+        totals["runs"] += 1
+        totals["total_s"] += x["s"]
+    for totals in by_command.values():
+        totals["total_s"] = seconds(totals["total_s"])
+    by_role = {}
+    for _key, full, x in found:
+        if full:
+            by_role[x["role"]] = by_role.get(x["role"], 0) + 1
+    return {"executions": executions, "by_command": by_command,
+            "full_suite_runs": {"total": sum(by_role.values()), "by_role": by_role}}
 
 
 # ---- suggestions ----
@@ -1038,7 +1174,7 @@ def analyze(run_folder):
         "done": done,
         "time": time_section(run),
         "tokens": tokens_section(run),
-        "checks": {},
+        "checks": checks_section(run),
         "slowdowns": slowdowns,
         "detectors": detectors,
         "suggestions": suggestions_section(found, unclean_suggestion(run_folder, done)),

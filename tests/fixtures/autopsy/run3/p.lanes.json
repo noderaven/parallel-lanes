@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "run_id": "f3",
+  "plan": "C:/src/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/src/proj",
+    "branch": "feat",
+    "base": "main",
+    "worktree_root": "C:/src/proj-wt",
+    "ledger_dir": "C:/src/plans/p.f3.ledger"
+  },
+  "commands": {"setup": [], "test": ["node tests/run-tests.mjs"], "lint": ["eslint ."], "build": []},
+  "lane_commands": {"b": {"test": ["node tests/run-tests.mjs --only b"]}},
+  "prelude": [],
+  "lanes": [
+    {"id": "a", "name": "Lane a", "tasks": [{"id": "A1", "title": "Task A1", "tier": "standard"}]},
+    {"id": "b", "name": "Lane b", "tasks": [{"id": "B1", "title": "Task B1", "tier": "standard"}]}
+  ],
+  "join": []
+}

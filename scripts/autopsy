@@ -107,7 +107,22 @@ an agent's time, cut at its events (a model turn, a tool call), that no
 slowdown covers. A slowdown covers its own agent's time; one without an
 agent covers any agent's.
 
-checks is {} for now.
+checks: executions [{agent, phase, role, command, start, end, s, timing,
+background, on_critical_path}], by_command {<command>: {runs, total_s}} and
+full_suite_runs {total, by_role: {<role>: n}}.
+- An execution is a Bash call whose command line holds a configured command
+  (commands.test, lint and build, and the lane_commands overrides) or runs
+  run-checks (a word whose basename is run-checks). command is the
+  configured string (the longest one the line holds, whitespace-normalised)
+  or 'run-checks', never the command line itself.
+- start is the call; end is its result. A backgrounded call ends at the
+  first later result or notice naming its ID (measured); without one, or
+  for a call with no result, end is the agent's last event (bound).
+- on_critical_path: the agent is on time.critical_path.
+- A full-suite run is an execution of a commands.test entry, or a
+  run-checks call passing '--cmd test'; by_role uses run-report's roles.
+- With no tool event in the whole run, executions, by_command, total and
+  by_role are "unavailable".
 
 Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
 0.1. Anything that cannot be read or derived is "unavailable", never 0.

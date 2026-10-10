@@ -29,6 +29,16 @@
 //     A1 fix 1        09:13:30-09:15:00; A1 re-review 1 09:15:10-09:16:00
 //     (no agent runs 09:16:00-09:20:00, a 240 s gap)
 //     verify          09:20:00-09:21:00
+//
+// run3 holds the check executions, in launch wf_1 from 10:00:00 to 10:12:30:
+//   A1 implement  Lane a        10:00:05-10:05:00
+//     the test command in the background 10:00:10, its ID bg7 completes 10:02:40
+//     an Edit, then the test command again 10:03:10-10:03:55
+//     (both command lines carry a PATH=... prefix)
+//   B1 implement  Lane b        10:00:20-10:06:00  two Bash calls that are not checks
+//   verify        Verify        10:06:30-10:09:00  run-checks with the test group 10:06:40-10:08:10
+//   final fix     Final review  10:10:00-10:12:00  the test command 10:10:10-10:11:00
+// The critical path is B1 implement, verify, final fix.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,6 +52,7 @@ const SCRIPTS = join(SKILL_DIR, 'scripts');
 const SCRIPT = join(SCRIPTS, 'autopsy');
 const RUN1 = join(SKILL_DIR, 'tests', 'fixtures', 'autopsy', 'run1');
 const RUN2 = join(SKILL_DIR, 'tests', 'fixtures', 'autopsy', 'run2');
+const RUN3 = join(SKILL_DIR, 'tests', 'fixtures', 'autopsy', 'run3');
 const TMP = tempDir('pl-autopsy-');
 after(() => rmSync(TMP, { recursive: true, force: true }));
 
@@ -101,8 +112,10 @@ test('done lists each task and the acceptance', () => {
   });
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
-  // Task T5 fills checks.
-  assert.deepEqual(A.checks, {});
+  // A1 implement and verify each run the test command once.
+  assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.command, x.s]),
+    [['A1 implement', 'node tests/run-tests.mjs', 30], ['verify', 'node tests/run-tests.mjs', 20]]);
+  assert.deepEqual(A.checks.full_suite_runs, { total: 2, by_role: { implement: 1, verify: 1 } });
   // Free text from the result, prompts and tool output is never copied.
   for (const marker of ['NOTES-TEXT-1', 'REASON-DETAIL-1', 'WARNING-TEXT-1', 'FINDING-TEXT-1',
     'E2E-EVIDENCE-1', 'PROMPT-MARKER-1', 'TOOL-OUTPUT-1', 'Reading the brief']) {
@@ -465,4 +478,100 @@ test('unclean checks are explained without suggesting to ignore source', () => {
   assert.match(g.text, /never ignore a file a check reads/i);
   assert.doesNotMatch(g.text, /ignore (all|every|these|them|the listed|the files|coverage)/i);
   assert.ok(!res.text.includes('REASON-DETAIL-2'));
+});
+
+const run3 = autopsy(copyRun(RUN3));
+const C = run3.json;
+const TEST_CMD = 'node tests/run-tests.mjs';
+
+test('every check execution is listed with its duration', () => {
+  assert.equal(run3.code, 0, run3.stderr);
+  const ex = C.checks.executions;
+  assert.equal(ex.length, 4);
+  for (const x of ex) {
+    assert.deepEqual(Object.keys(x), ['agent', 'phase', 'role', 'command', 'start', 'end', 's', 'timing',
+      'background', 'on_critical_path']);
+  }
+  // The background run is timed to its completion line.
+  assert.deepEqual(ex.map((x) => [x.agent, x.phase, x.role, x.command, x.start, x.end, x.s, x.timing,
+    x.background]), [
+    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:00:10'), T('10:02:40'), 150, 'measured', true],
+    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:03:10'), T('10:03:55'), 45, 'measured', false],
+    ['verify', 'Verify', 'verify', 'run-checks', T('10:06:40'), T('10:08:10'), 90, 'measured', false],
+    ['final fix', 'Final review', 'final fix', TEST_CMD, T('10:10:10'), T('10:11:00'), 50, 'measured', false],
+  ]);
+  assert.deepEqual(C.checks.by_command, {
+    [TEST_CMD]: { runs: 3, total_s: 245 },
+    'run-checks': { runs: 1, total_s: 90 },
+  });
+  // Without a completion line the background run is bound by the agent's last event.
+  const dir = copyRun(RUN3);
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => lines.filter((l) => !l.includes('task-notification')));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const bg = res.json.checks.executions[0];
+  assert.deepEqual([bg.background, bg.start, bg.end, bg.s, bg.timing],
+    [true, T('10:00:10'), T('10:05:00'), 290, 'bound']);
+});
+
+test('full-suite runs are counted per role', () => {
+  assert.deepEqual(C.checks.full_suite_runs, { total: 4, by_role: { implement: 2, verify: 1, 'final fix': 1 } });
+  // run-checks without the test group is an execution but not a full-suite run.
+  const dir = copyRun(RUN3);
+  const path = join(dir, 'wf_1', 'agent-v1.jsonl');
+  const text = readFileSync(path, 'utf8');
+  assert.ok(text.includes(`--cmd 'test' '${TEST_CMD}' `));
+  writeFileSync(path, text.replace(`--cmd 'test' '${TEST_CMD}' `, ''));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.json.checks.executions.length, 4);
+  assert.deepEqual(res.json.checks.full_suite_runs, { total: 3, by_role: { implement: 2, 'final fix': 1 } });
+});
+
+test('critical-path executions are marked', () => {
+  assert.deepEqual(C.time.critical_path.labels, ['B1 implement', 'verify', 'final fix']);
+  const verify = C.checks.executions.find((x) => x.agent === 'verify');
+  assert.equal(verify.on_critical_path, true);
+  assert.deepEqual(C.checks.executions.map((x) => x.on_critical_path), [false, false, true, true]);
+});
+
+test('a check command never appears in raw form', () => {
+  const transcript = readFileSync(join(RUN3, 'wf_1', 'agent-a1.jsonl'), 'utf8');
+  assert.ok(transcript.includes('PATH=\\"/opt/PATH-SECRET-9/bin:$PATH\\" node tests/run-tests.mjs'));
+  for (const raw of ['PATH-SECRET-9', 'PATH=', '/w/lane-a', '/w/proj', '--cmd', '/skill/scripts', 'tail -5',
+    'run-checks.test.mjs', 'git log']) {
+    assert.ok(!run3.text.includes(raw), `autopsy.json holds ${raw}`);
+  }
+  for (const x of C.checks.executions) assert.ok([TEST_CMD, 'run-checks'].includes(x.command), x.command);
+  // The longest configured command a line holds names it; a file named like
+  // run-checks is not a run-checks call.
+  const manifest = JSON.parse(readFileSync(join(RUN3, 'p.lanes.json'), 'utf8'));
+  const match = (command) => python([
+    'import _autopsy',
+    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(manifest))}))`,
+    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
+  ]);
+  assert.deepEqual(match('cd /w && node tests/run-tests.mjs --only b'), ['node tests/run-tests.mjs --only b', false]);
+  assert.deepEqual(match('npx  eslint  .'), ['eslint .', false]);
+  assert.deepEqual(match('node tests/run-tests.mjs'), [TEST_CMD, true]);
+  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), ['run-checks', false]);
+  assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), ['run-checks', true]);
+  assert.equal(match('node --test tests/run-checks.test.mjs'), null);
+});
+
+test('checks without tool events are unavailable, not zero', () => {
+  const dir = copyRun(RUN3);
+  for (const name of readdirSync(join(dir, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(dir, 'wf_1', name), (lines) => lines.map((l) => {
+      const o = JSON.parse(l);
+      delete o.timestamp;
+      return JSON.stringify(o);
+    }));
+  }
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(res.json.checks, {
+    executions: 'unavailable', by_command: 'unavailable',
+    full_suite_runs: { total: 'unavailable', by_role: 'unavailable' },
+  });
 });
