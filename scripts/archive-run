@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""Copy a run into the run history and record it in index.json.
+
+usage:
+  python3 archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]
+  python3 archive-run --reindex [--history-dir DIR]
+
+The history dir is _history.history_dir(DIR): --history-dir, else
+PL_HISTORY_DIR, else <CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/history.
+A history dir inside the project (repo.root: the repo in git mode, the
+project folder in shadow mode) is refused, and nothing is written.
+
+The run goes to <history dir>/<folder>/, which holds:
+  <manifest file>                  the manifest;
+  <plan-name>.<run_id>.ledger/     repo.ledger_dir, copied whole (checks/ too);
+  <plan-name>.<run_id>.report.json from beside the manifest, when present;
+  the plan and spec files          when present, by their own names;
+  wf_<id>/ and wf_<id>.json        each TRANSCRIPT_DIR and its workflow result
+                                   file (found as run-report finds it,
+                                   _shell.result_paths), when present.
+<plan-name> is the manifest file name minus .lanes.json (minus its extension
+when it does not end in .lanes.json). Every TRANSCRIPT_DIR must be a
+directory named wf_<id>, as the Workflow tool names them.
+
+A run is identified by _history.run_key(manifest): run_id plus
+repo.ledger_dir. A run already in index.json keeps its folder, so a relaunch
+or a resume from a new session (which passes only its own wf_ dirs) lands in
+the same folder. A new run gets <YYYY-MM-DD>-<run_id>, the UTC date of its
+first launch, with -2, -3, ... appended while another run owns that name (an
+index entry of another run, or a folder whose manifest is another run's).
+
+Copying is idempotent: a file missing from the folder is added, a file whose
+bytes differ is replaced (each through a temp file and a rename), and a file
+already in the archive is never deleted, even when its source is gone.
+
+The index entry (_history.ENTRY_KEYS) is rebuilt from the folder after
+copying:
+  launches      the number of wf_<id> dirs in the folder;
+  first_launch, last_launch
+                the earliest and latest launch time (ISO 8601 UTC). A
+                launch's time is the startTime of its wf_<id>.json, else the
+                earliest timestamp in its transcripts; with no time at all,
+                now. A first_launch already in the index is kept when it is
+                earlier;
+  status, acceptance
+                result.status and result.acceptance.status of the latest
+                launch's wf_<id>.json;
+  engine_version
+                the archived report's engine_version;
+  project, plan repo.root and plan; machine and platform: socket.gethostname()
+                and sys.platform.
+Any value that cannot be read is "unavailable". Stored paths are normalised
+by _history.norm_path, never converted with cygpath.
+
+The whole read index, choose folder, copy and write index step runs inside
+_history.index_lock, so archive-runs at the same time lose no entry.
+
+Prints one JSON line:
+  {"folder": "<abs folder>", "added": [rel paths], "updated": [rel paths]}
+with paths relative to the folder, '/'-separated.
+
+Exit 0 on success; 2 on a usage error, an unreadable manifest, transcript
+dir, ledger dir or index, a failed copy, or the lock not acquired; 3 when
+the history dir is inside the project (nothing written).
+
+--reindex rebuilds index.json from the folders already in the history dir
+(runs archived by hand, imported, or by an older release), under
+_history.index_lock. Every folder that holds a *.lanes.json is one run, read
+as archive-run reads its own folders: the report is the first of
+*.report.json, *.run-report.json and report.json; launches and dates come
+from the wf_<id> dirs and their wf_<id>.json startTime values. A value that
+cannot be read is "unavailable", and so are first_launch and last_launch when
+no launch has a time (the date is never made up). A folder keeps its name; an
+old index entry of the folder lends its machine, platform and an earlier
+first_launch, and without one machine and platform are "unavailable" (the
+machine running reindex need not be the one that ran the run). The folders
+are listed again under the lock, so a run archived meanwhile is kept.
+Entries of folders that are gone are dropped, and an index that cannot be
+read is replaced. It writes only index.json: no folder or file is renamed,
+changed or removed. Prints
+  {"runs": N, "skipped": [{"folder": "<name>", "reason": "<why>"}]}
+for the folders it did not index (those with no readable manifest). Exit 0,
+or 2 when the history dir is not a readable directory or the lock is not
+acquired.
+"""
+import calendar
+import filecmp
+import glob
+import json
+import os
+import re
+import shutil
+import socket
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _history  # noqa: E402
+import _shell  # noqa: E402
+
+UNAVAILABLE = "unavailable"
+USAGE = ("usage: archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]\n"
+         "       archive-run --reindex [--history-dir DIR]")
+# The report names a run folder may hold, in the order reindex tries them.
+_REPORT_PATTERNS = ("*.report.json", "*.run-report.json", "report.json")
+# A run_id names the run folder, so it must be one plain file name.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_ISO = re.compile(
+    r"^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$"
+)
+
+
+class ArchiveError(Exception):
+    """The run cannot be archived; the message says why (exit 2)."""
+
+
+def read_json(path):
+    """The JSON object in path; None when it is missing, unreadable or not
+    an object."""
+    try:
+        with open(path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def plan_name(manifest_path):
+    base = os.path.basename(manifest_path)
+    if base.endswith(".lanes.json"):
+        return base[:-len(".lanes.json")]
+    return os.path.splitext(base)[0]
+
+
+def result_file(transcript_dir):
+    """The transcript dir's workflow result file, or None."""
+    for path in _shell.result_paths(transcript_dir):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def parse_time(value):
+    """Epoch seconds from a startTime in ms or an ISO 8601 string; None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000.0 if value > 0 else None
+    if not isinstance(value, str):
+        return None
+    m = _ISO.match(value.strip())
+    if not m:
+        return None
+    y, mo, d, h, mi, s, zone = m.groups()
+    try:
+        t = calendar.timegm((int(y), int(mo), int(d), int(h), int(mi), int(s), 0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+    if zone and zone != "Z":
+        sign = 1 if zone[0] == "+" else -1
+        digits = zone[1:].replace(":", "")
+        t -= sign * (int(digits[:2]) * 3600 + int(digits[2:]) * 60)
+    return t
+
+
+def earliest_transcript_time(transcript_dir):
+    """The earliest "timestamp" in the dir's *.jsonl lines; None. Lines that
+    are not UTF-8 JSON objects are skipped."""
+    best = None
+    for path in glob.glob(os.path.join(glob.escape(transcript_dir), "*.jsonl")):
+        try:
+            with open(path, "rb") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                obj = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            t = parse_time(obj.get("timestamp")) if isinstance(obj, dict) else None
+            if t is not None and (best is None or t < best):
+                best = t
+    return best
+
+
+def launch_time(transcript_dir, result_path):
+    """When a launch started: its result file's startTime, else the earliest
+    transcript timestamp; None when neither is known."""
+    data = read_json(result_path) if result_path else None
+    t = parse_time(data.get("startTime")) if data else None
+    return t if t is not None else earliest_transcript_time(transcript_dir)
+
+
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def is_run(entry, run_id, ledger_dir):
+    """Whether an index entry is the run (run_id, ledger_dir)."""
+    return _history.find_run({"runs": [entry]}, run_id, ledger_dir) is not None
+
+
+def owns(manifest, run_id, ledger_dir):
+    """Whether manifest (a dict) is the run (run_id, ledger_dir)."""
+    try:
+        rid, ldir = _history.run_key(manifest)
+    except _history.HistoryError:
+        return False
+    return is_run({"run_id": rid, "ledger_dir": ldir}, run_id, ledger_dir)
+
+
+def name_taken(hdir, name, index, run_id, ledger_dir):
+    """Whether another run owns the folder name: an index entry of another
+    run, or an existing folder holding no manifest of this run."""
+    for entry in index.get("runs", []):
+        if entry.get("folder") == name and not is_run(entry, run_id, ledger_dir):
+            return True
+    path = os.path.join(hdir, name)
+    if not os.path.lexists(path):
+        return False
+    if not os.path.isdir(path):
+        return True
+    for manifest in glob.glob(os.path.join(glob.escape(path), "*.lanes.json")):
+        data = read_json(manifest)
+        if data is not None and owns(data, run_id, ledger_dir):
+            return False
+    return True
+
+
+def choose_folder(hdir, index, run_id, ledger_dir, first):
+    base = time.strftime("%Y-%m-%d", time.gmtime(first)) + "-" + run_id
+    name, n = base, 1
+    while name_taken(hdir, name, index, run_id, ledger_dir):
+        n += 1
+        name = base + "-" + str(n)
+    return name
+
+
+def copy_file(src, dst, rel, added, updated):
+    """Copy src to dst unless dst already holds the same bytes."""
+    if os.path.lexists(dst):
+        if os.path.isfile(dst) and filecmp.cmp(src, dst, shallow=False):
+            return
+        updated.append(rel)
+    else:
+        added.append(rel)
+    folder = os.path.dirname(dst)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(dst) + ".", suffix=".tmp", dir=folder)
+    os.close(fd)
+    try:
+        shutil.copyfile(src, tmp)
+        shutil.copystat(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def copy_tree(src, dst, rel, added, updated):
+    """Copy every file under src to dst; nothing in dst is removed."""
+    os.makedirs(dst, exist_ok=True)
+    for here, dirs, files in os.walk(src):
+        dirs.sort()
+        sub = os.path.relpath(here, src)
+        sub = "" if sub == os.curdir else sub.replace(os.sep, "/") + "/"
+        os.makedirs(os.path.join(dst, sub), exist_ok=True)
+        for name in sorted(files):
+            copy_file(os.path.join(here, name), os.path.join(dst, sub, name),
+                      rel + "/" + sub + name, added, updated)
+
+
+def launches_in(folder):
+    """[(time or None, wf_<id> name)] for every wf_<id> dir in folder."""
+    out = []
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if name.startswith("wf_") and os.path.isdir(path):
+            rf = path + ".json"
+            out.append((launch_time(path, rf if os.path.isfile(rf) else None), name))
+    return out
+
+
+def result_values(result_path):
+    """(status, acceptance) from a workflow result file."""
+    data = read_json(result_path) or {}
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return UNAVAILABLE, UNAVAILABLE
+    status = result.get("status")
+    acceptance = result.get("acceptance")
+    if isinstance(acceptance, dict):
+        acceptance = acceptance.get("status")
+    return (status if isinstance(status, str) and status else UNAVAILABLE,
+            acceptance if isinstance(acceptance, str) and acceptance else UNAVAILABLE)
+
+
+def engine_version(report_path):
+    data = (read_json(report_path) if report_path else None) or {}
+    version = data.get("engine_version")
+    return version if isinstance(version, str) and version else UNAVAILABLE
+
+
+def stored(p):
+    return _history.norm_path(p) if isinstance(p, str) and p else UNAVAILABLE
+
+
+def build_entry(old, folder, name, manifest, report_name, reindex=False):
+    """The index entry of the run in folder. archive-run dates a run without
+    any launch time now; reindex says "unavailable" instead."""
+    run_id, ledger_dir = _history.run_key(manifest)
+    launches = launches_in(folder)
+    times = [t for t, _ in launches if t is not None]
+    now = time.time()
+    if times or not reindex:
+        first = iso(min(times)) if times else iso(now)
+        last = iso(max(times)) if times else iso(now)
+    else:
+        first = last = UNAVAILABLE
+    if first != UNAVAILABLE:
+        if isinstance(old.get("first_launch"), str) and old["first_launch"] and old["first_launch"] < first:
+            first = old["first_launch"]
+        if last < first:
+            last = first
+    status = acceptance = UNAVAILABLE
+    if launches:
+        latest = max(launches, key=lambda x: (x[0] if x[0] is not None else float("-inf"), x[1]))
+        status, acceptance = result_values(os.path.join(folder, latest[1] + ".json"))
+    entry = dict(old)
+    entry.update({
+        "run_id": run_id,
+        "folder": name,
+        "ledger_dir": ledger_dir,
+        "project": stored(manifest["repo"].get("root")),
+        "plan": stored(manifest.get("plan")),
+        "engine_version": engine_version(os.path.join(folder, report_name) if report_name else None),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "first_launch": first,
+        "last_launch": last,
+        "launches": len(launches),
+        "status": status,
+        "acceptance": acceptance,
+    })
+    return entry
+
+
+def parse_args(args):
+    """(positional args, --history-dir value or None, --reindex given)."""
+    pos, hdir, reindex = [], None, False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--reindex":
+            reindex = True
+            i += 1
+            continue
+        if a == "--history-dir":
+            if i + 1 >= len(args) or not args[i + 1]:
+                raise ArchiveError("--history-dir needs a directory")
+            hdir = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--"):
+            raise ArchiveError("unknown option " + a)
+        pos.append(a)
+        i += 1
+    if reindex:
+        if pos:
+            raise ArchiveError("--reindex takes no manifest or transcript dir")
+    elif len(pos) < 2:
+        raise ArchiveError("a manifest and at least one transcript dir are needed")
+    return pos, hdir, reindex
+
+
+def load_manifest(path):
+    manifest = read_json(path)
+    if manifest is None:
+        raise ArchiveError("cannot read the manifest " + path + " (missing, unreadable or not a JSON object)")
+    try:
+        run_id, _ = _history.run_key(manifest)
+    except _history.HistoryError as e:
+        raise ArchiveError(str(e))
+    if not isinstance(run_id, str) or not _SAFE_NAME.match(run_id):
+        raise ArchiveError("the manifest's run_id is not a plain name: " + json.dumps(run_id))
+    repo = manifest["repo"]
+    for key in ("ledger_dir", "root"):
+        if not isinstance(repo, dict) or not isinstance(repo.get(key), str) or not repo[key]:
+            raise ArchiveError("the manifest has no repo." + key)
+    return manifest
+
+
+def transcript_dirs(paths):
+    dirs = []
+    seen = set()
+    for p in paths:
+        d = os.path.abspath(p.rstrip("/\\") or p)
+        name = os.path.basename(d)
+        if not os.path.isdir(d):
+            raise ArchiveError("not a directory: " + p)
+        if not name.startswith("wf_"):
+            raise ArchiveError("not a Workflow transcript dir (its name must start with wf_): " + p)
+        if name in seen:
+            raise ArchiveError("two transcript dirs are named " + name)
+        seen.add(name)
+        dirs.append(d)
+    return dirs
+
+
+def archive(manifest_path, manifest, dirs, hdir):
+    """Copy the run into hdir and update index.json; the output object."""
+    run_id, ledger_key = _history.run_key(manifest)
+    repo = manifest["repo"]
+    ledger_src = _shell.native_path(repo["ledger_dir"])
+    if not os.path.isdir(ledger_src):
+        raise ArchiveError("the ledger dir is not a directory: " + ledger_src)
+    # A copy into a folder under its own source would copy itself again.
+    for src in [ledger_src] + dirs:
+        if _history.inside(hdir, src):
+            raise ArchiveError("the history dir " + hdir + " is inside " + src + ", which it would copy")
+    pname = plan_name(manifest_path)
+    report_name = pname + "." + run_id + ".report.json"
+    sources = []  # (source file, name in the folder)
+    sources.append((manifest_path, os.path.basename(manifest_path)))
+    report = os.path.join(os.path.dirname(manifest_path), report_name)
+    if os.path.isfile(report):
+        sources.append((report, report_name))
+    for key in ("plan", "spec"):
+        p = manifest.get(key)
+        if isinstance(p, str) and p:
+            p = _shell.native_path(p)
+            if os.path.isfile(p):
+                sources.append((p, os.path.basename(p)))
+    results = [result_file(d) for d in dirs]
+
+    with _history.index_lock(hdir):
+        index = _history.read_index(hdir)
+        old = _history.find_run(index, run_id, ledger_key)
+        if old is not None:
+            name = old.get("folder")
+            if not isinstance(name, str) or not _SAFE_NAME.match(name):
+                raise ArchiveError("the index entry of " + run_id + " has a bad folder: " + json.dumps(name))
+        else:
+            times = [launch_time(d, r) for d, r in zip(dirs, results)]
+            times = [t for t in times if t is not None]
+            name = choose_folder(hdir, index, run_id, ledger_key, min(times) if times else time.time())
+        folder = os.path.join(hdir, name)
+        added, updated = [], []
+        os.makedirs(folder, exist_ok=True)
+        for src, rel in sources:
+            copy_file(src, os.path.join(folder, rel), rel, added, updated)
+        ledger_name = pname + "." + run_id + ".ledger"
+        copy_tree(ledger_src, os.path.join(folder, ledger_name), ledger_name, added, updated)
+        for d, r in zip(dirs, results):
+            wf = os.path.basename(d)
+            copy_tree(d, os.path.join(folder, wf), wf, added, updated)
+            if r:
+                copy_file(r, os.path.join(folder, wf + ".json"), wf + ".json", added, updated)
+        entry = build_entry(old or {}, folder, name, manifest, report_name)
+        runs = [e for e in index.get("runs", []) if e is not old]
+        runs.append(entry)
+        index = dict(index)
+        index["runs"] = runs
+        _history.write_index(hdir, index)
+    return {"folder": hdir.rstrip("/\\") + "/" + name, "added": added, "updated": updated}
+
+
+def first_match(folder, patterns):
+    """The first file name in folder matching the patterns, tried in order
+    (sorted within one pattern); None."""
+    for pattern in patterns:
+        names = sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), pattern)))
+        for name in names:
+            if os.path.isfile(os.path.join(folder, name)):
+                return name
+    return None
+
+
+def reindex_folder(hdir, name, old_index):
+    """(entry, None) for the run in hdir/name, or (None, reason)."""
+    folder = os.path.join(hdir, name)
+    manifests = sorted(os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(folder), "*.lanes.json")))
+    manifests = [m for m in manifests if os.path.isfile(os.path.join(folder, m))]
+    if not manifests:
+        return None, "no *.lanes.json manifest"
+    manifest = read_json(os.path.join(folder, manifests[0]))
+    if manifest is None:
+        return None, "cannot read " + manifests[0] + " (unreadable or not a JSON object)"
+    try:
+        run_id, ledger_dir = _history.run_key(manifest)
+    except _history.HistoryError as e:
+        return None, manifests[0] + ": " + str(e)
+    if not isinstance(run_id, str) or not run_id or not isinstance(manifest["repo"], dict):
+        return None, manifests[0] + " has no usable run_id or repo"
+    old = {}
+    for entry in old_index.get("runs", []):
+        if entry.get("folder") == name and _history.find_run({"runs": [entry]}, run_id, ledger_dir) is not None:
+            old = entry
+            break
+    entry = build_entry(old, folder, name, manifest, first_match(folder, _REPORT_PATTERNS), reindex=True)
+    # The machine running reindex is not the one that ran the run.
+    for key in ("machine", "platform"):
+        entry[key] = old[key] if isinstance(old.get(key), str) and old[key] else UNAVAILABLE
+    return entry, None
+
+
+def folders(hdir):
+    """The sorted names of the folders in hdir."""
+    try:
+        return sorted(n for n in os.listdir(hdir) if os.path.isdir(os.path.join(hdir, n)))
+    except OSError as e:
+        raise ArchiveError("cannot read the history dir " + hdir + ": " + str(e))
+
+
+def reindex(hdir):
+    """Rebuild index.json from the folders of hdir; the output object."""
+    # Checked before the lock, which would create a missing dir.
+    folders(hdir)
+    runs, skipped = [], []
+    with _history.index_lock(hdir):
+        # Listed again under the lock: an archive-run that held it may have
+        # added a folder since.
+        names = folders(hdir)
+        try:
+            old_index = _history.read_index(hdir)
+        except _history.HistoryError:
+            old_index = {}  # reindex is the repair for an unreadable index
+        for name in names:
+            entry, reason = reindex_folder(hdir, name, old_index)
+            if entry is None:
+                skipped.append({"folder": name, "reason": reason})
+            else:
+                runs.append(entry)
+        _history.write_index(hdir, {"version": _history.VERSION, "runs": runs})
+    return {"runs": len(runs), "skipped": skipped}
+
+
+def main(argv):
+    _shell.setup_io()
+    try:
+        pos, override, do_reindex = parse_args(argv[1:])
+    except ArchiveError as e:
+        print("archive-run: " + str(e), file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    if do_reindex:
+        try:
+            out = reindex(_history.history_dir(override))
+        except (ArchiveError, _history.HistoryError, _shell.BashNotFound) as e:
+            print("archive-run: " + str(e), file=sys.stderr)
+            return 2
+        except OSError as e:
+            print("archive-run: cannot reindex: " + str(e), file=sys.stderr)
+            return 2
+        sys.stdout.write(json.dumps(out) + "\n")
+        return 0
+    try:
+        manifest_path = os.path.abspath(_shell.native_path(pos[0]))
+        dirs = transcript_dirs([_shell.native_path(p) for p in pos[1:]])
+        manifest = load_manifest(manifest_path)
+        hdir = _history.history_dir(override)
+        root = _shell.native_path(manifest["repo"]["root"])
+    except (ArchiveError, _shell.BashNotFound) as e:
+        print("archive-run: " + str(e), file=sys.stderr)
+        return 2
+    if _history.inside(hdir, root):
+        print("archive-run: refusing the history dir " + hdir + ": it is inside the project "
+              + root + " (set PL_HISTORY_DIR or pass --history-dir)", file=sys.stderr)
+        return 3
+    try:
+        out = archive(manifest_path, manifest, dirs, hdir)
+    except (ArchiveError, _history.HistoryError, _shell.BashNotFound) as e:
+        print("archive-run: " + str(e), file=sys.stderr)
+        return 2
+    except OSError as e:
+        print("archive-run: cannot archive the run: " + str(e), file=sys.stderr)
+        return 2
+    sys.stdout.write(json.dumps(out) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
