@@ -336,7 +336,9 @@ stop, a budget cap, and a failed relaunch.
 
 `<python> <skill_dir>/scripts/run-report <transcript_dir> <manifest> [--out FILE]` reads the
 workflow transcript directory printed at launch (`agent-*.meta.json` and `agent-*.jsonl`).
-Output: `agents` (per agent: label, phase, task, role, requested and resolved model,
+Output: `engine_version` (the workflow result's `version`: the skill version `run.workflow.js`
+was built from, which `scripts/build` stamps from `VERSION` into the workflow's description and
+its first log line, `parallel-lanes v<version> loaded`), `agents` (per agent: label, phase, task, role, requested and resolved model,
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field

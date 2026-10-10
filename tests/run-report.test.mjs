@@ -267,6 +267,19 @@ test('effort comes from the result file where the Workflow tool writes it', () =
   }
 });
 
+test('the report records the engine version from the workflow result', () => {
+  assert.equal(report.engine_version, 'unavailable', 'no result file beside the fixture transcripts');
+  const session = join(TMP, 'session-version');
+  const dir = join(session, 'subagents', 'workflows', 'wf_ver-1');
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(session, 'workflows'), { recursive: true });
+  writeAgent(dir, 'v1', 'T1 implement', 'sonnet', [usageLine('m1', 'claude-sonnet-x', 1, 'end_turn', '2026-10-02T10:00:00.000Z')]);
+  writeFileSync(join(session, 'workflows', 'wf_ver-1.json'), JSON.stringify({ result: { version: '9.8.7', agent_settings: [] } }));
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).engine_version, '9.8.7');
+});
+
 test('effort comes from the workflow result when it is there', () => {
   const dir = join(TMP, 'effort');
   mkdirSync(dir, { recursive: true });
