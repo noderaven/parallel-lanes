@@ -6,7 +6,7 @@ import { SKILL_DIR, loadHelpers, loadScript } from './harness.mjs';
 
 const {
   validateManifest, manifestRequiredKeys, runIdPattern, laneIdPattern, agentTypePattern,
-  effectiveAutonomy, effectiveLimits, planAgents, tierSettings, codeDepMet,
+  effectiveAutonomy, effectiveLimits, planAgents, tierSettings, codeDepMet, reservedName,
 } = await loadHelpers([
   'validateManifest',
   'manifestRequiredKeys',
@@ -18,6 +18,7 @@ const {
   'planAgents',
   'tierSettings',
   'codeDepMet',
+  'reservedName',
 ]);
 
 function task(id, files, extra = {}) {
@@ -118,6 +119,60 @@ test('a task id that is not a safe file name is reported', () => {
     const m = validManifest();
     m.join[0].id = id;
     assertError(validateManifest(m), JSON.stringify(id), 'must match');
+  }
+});
+
+// Lane ids name ledger files and worktrees; renaming one keeps the
+// setup_result worktrees in step so only the id rule under test fails.
+function renameLane(m, index, id) {
+  const old = m.lanes[index].id;
+  m.lanes[index].id = id;
+  const worktrees = m.setup_result.worktrees;
+  worktrees[id] = worktrees[old];
+  delete worktrees[old];
+}
+
+test('task ids that differ only in letter case are reported', () => {
+  const m = validManifest();
+  m.prelude[0].id = 'T1';
+  m.join[0].id = 't1';
+  assertError(validateManifest(m), 'task t1', 'differs from T1 only in letter case');
+});
+
+test('lane ids that differ only in letter case are reported', () => {
+  const m = validManifest();
+  renameLane(m, 0, 'A');
+  renameLane(m, 1, 'a');
+  assertError(validateManifest(m), 'lane a', 'differs from A only in letter case');
+});
+
+test('ids that name a Windows device are reported', () => {
+  let m = validManifest();
+  m.prelude[0].id = 'CON';
+  assertError(validateManifest(m), 'CON', 'reserved device name on Windows');
+  m = validManifest();
+  m.join[0].id = 'nul.x';
+  assertError(validateManifest(m), 'nul.x', 'reserved device name on Windows');
+  m = validManifest();
+  renameLane(m, 0, 'Com1');
+  assertError(validateManifest(m), 'Com1', 'reserved device name on Windows');
+  m = validManifest();
+  m.run_id = 'aux';
+  assertError(validateManifest(m), 'run_id', 'aux', 'reserved device name on Windows');
+});
+
+test('ids that only start like a Windows device stay valid', () => {
+  const m = validManifest();
+  m.prelude[0].id = 'CONFIG';
+  m.join[0].id = 'T1.con';
+  renameLane(m, 0, 'lpt10');
+  m.run_id = 'com10';
+  assert.deepEqual(validateManifest(m), []);
+  for (const id of ['CON', 'prn', 'Aux', 'nul.x', 'COM1', 'com9.md', 'LPT1', 'lpt9']) {
+    assert.equal(reservedName(id), true, id);
+  }
+  for (const id of ['CONFIG', 'T1.con', 'lpt10', 'COM0', 'xnul', 'NUL_']) {
+    assert.equal(reservedName(id), false, id);
   }
 });
 

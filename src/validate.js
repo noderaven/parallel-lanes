@@ -28,6 +28,13 @@ function taskIdPattern() {
   return laneIdPattern();
 }
 
+// True when id names a Windows device (CON, PRN, AUX, NUL, COM1-COM9,
+// LPT1-LPT9, any case) before its first '.': such a file name opens the
+// device instead of a file on Windows 10 (Windows 11 accepts it).
+function reservedName(id) {
+  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(id.split('.')[0].toUpperCase());
+}
+
 // An absolute path: '/...' or a Windows drive path ('C:/...' or 'C:\...').
 function isAbsolutePathText(path) {
   return typeof path === 'string' && (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path));
@@ -121,6 +128,8 @@ function validateManifest(m) {
   }
   if (isText(m.run_id) && !new RegExp(runIdPattern()).test(m.run_id)) {
     err('run_id: must use only a-z, 0-9 and - (it becomes part of branch names)');
+  } else if (isText(m.run_id) && reservedName(m.run_id)) {
+    err(`run_id: id ${m.run_id} is a reserved device name on Windows`);
   }
   for (const key of ['spec', 'sp_dir']) {
     if (key in m && !isTextOrNull(m[key])) err(`${key}: must be a non-empty string or null`);
@@ -172,9 +181,19 @@ function validateManifest(m) {
   };
   if ('commands' in m) checkCommands('commands', m.commands, true);
 
+  // Ids name files, so two that differ only in letter case would share them
+  // on a case-insensitive file system (Windows, macOS). firstSpelling maps a
+  // lower-cased id to the first spelling seen; it reports the later one.
+  const caseClash = (kind, firstSpelling, id) => {
+    const first = firstSpelling.get(id.toLowerCase());
+    if (first === undefined) firstSpelling.set(id.toLowerCase(), id);
+    else err(`${kind} ${id}: id differs from ${first} only in letter case (they would share files on Windows and macOS)`);
+  };
+
   // Tasks: shape, tier/security and batch rules, and id uniqueness across
   // all groups. allTasks collects every task object for the profile rules.
   const taskIds = new Set();
+  const taskSpelling = new Map();
   const allTasks = [];
   const checkTask = (where, t) => {
     if (!isObject(t)) {
@@ -187,7 +206,11 @@ function validateManifest(m) {
     else if (!new RegExp(taskIdPattern()).test(t.id)) {
       err(`${where}.id: task id ${JSON.stringify(t.id)} must match ${taskIdPattern()} (it names files)`);
     } else if (taskIds.has(t.id)) err(`task ${t.id}: id appears more than once`);
-    else taskIds.add(t.id);
+    else {
+      taskIds.add(t.id);
+      caseClash('task', taskSpelling, t.id);
+      if (reservedName(t.id)) err(`${where}: id ${t.id} is a reserved device name on Windows`);
+    }
     if (!isText(t.title)) err(`${name}: title must be a non-empty string`);
     if (!isTextList(t.files)) err(`${name}: files must be a list of non-empty strings`);
     else {
@@ -253,6 +276,7 @@ function validateManifest(m) {
   // Lanes: shape, unique lane ids, and no file claimed by two lanes unless an
   // overlaps entry records it.
   const laneIds = new Set();
+  const laneSpelling = new Map();
   const laneOfTask = new Map();
   if ('lanes' in m) {
     if (!Array.isArray(m.lanes)) {
@@ -270,7 +294,11 @@ function validateManifest(m) {
           err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
         } else if (lane.id === 'prelude' || lane.id === 'join') err(`lane ${lane.id}: id is reserved`);
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
-        else laneIds.add(lane.id);
+        else {
+          laneIds.add(lane.id);
+          caseClash('lane', laneSpelling, lane.id);
+          if (reservedName(lane.id)) err(`${where}: id ${lane.id} is a reserved device name on Windows`);
+        }
         if (!isText(lane.name)) err(`${where}.name: must be a non-empty string`);
         if ('setup_note' in lane && !isText(lane.setup_note)) err(`${where}.setup_note: must be a non-empty string`);
         checkTaskList(`${where}.tasks`, lane.tasks);
