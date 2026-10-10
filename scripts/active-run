@@ -14,7 +14,9 @@
 # Markers live in $PL_ACTIVE_DIR (default
 # ${CLAUDE_CONFIG_DIR:-~/.claude}/parallel-lanes/active) as <RUN_ID>.json
 # {run_id, manifest, started, status}; the lock is <RUN_ID>.lock holding the
-# owner token. The directory is created with mode 0700.
+# owner token. The directory is created with mode 0700. setup also writes
+# checkout locks there, checkout-<st_dev>-<st_ino>.lock holding
+# {"run_id", "checkout"}, one per feature checkout a git-mode run uses.
 #
 # acquire creates the lock atomically (it fails if the file exists), writes
 # the marker with status running, and prints the owner token, which setup
@@ -22,12 +24,13 @@
 # (exit 4): another session may still be running it. --takeover replaces an
 # existing lock; use it only when the user confirms the session that held it
 # has ended.
-# release removes the lock and either writes the marker with STATUS or, with
-# --remove, deletes the marker.
+# release removes the run's checkout locks and then its lock, and either
+# writes the marker with STATUS or, with --remove, deletes the marker.
 # write creates or replaces a marker: STATUS defaults to running, and
 # rewriting an existing marker keeps its started time and updates its status.
 # remove deletes a marker (a missing one is fine); a locked run is refused
-# (exit 4) unless --takeover, which deletes the lock too. list prints a
+# (exit 4) unless --takeover, which deletes the lock too; the run's checkout
+# locks are deleted before its lock. list prints a
 # JSON array of the markers sorted by run id, each with "locked": true when its
 # lock exists, skipping files that are not valid markers (a marker's run_id
 # must be a safe run id equal to its file name); a missing directory lists
@@ -90,6 +93,18 @@ write_marker() {
   fi
 }
 
+# Deletes the checkout locks (written by setup) that name run $1. Locks of
+# other runs and files that are not valid JSON are left alone.
+drop_checkout_locks() {
+  local f
+  for f in "$dir"/checkout-*.lock; do
+    [ -f "$f" ] || continue
+    if jq -e --arg id "$1" 'type == "object" and .run_id == $id' "$f" >/dev/null 2>&1; then
+      rm -f "$f" || fail 3 "cannot remove $f"
+    fi
+  done
+}
+
 [ "$#" -ge 1 ] || usage
 command -v jq >/dev/null 2>&1 || fail 3 "jq is required"
 
@@ -128,6 +143,7 @@ case "$1" in
       [ -n "$manifest" ] || fail 3 "no marker for run $run_id to release"
       write_marker "$run_id" "$manifest" "$what"
     fi
+    drop_checkout_locks "$run_id"
     rm -f "$dir/$run_id.lock" || fail 3 "cannot remove $dir/$run_id.lock"
     ;;
   write)
@@ -145,6 +161,7 @@ case "$1" in
     if [ -e "$dir/$2.lock" ] && [ "$#" -eq 2 ]; then
       fail 4 "run $2 is locked by a launch that may still be running; if that session has ended, remove it with --takeover"
     fi
+    drop_checkout_locks "$2"
     rm -f "$dir/$2.json" "$dir/$2.lock" || fail 3 "cannot remove $dir/$2.json"
     ;;
   list)

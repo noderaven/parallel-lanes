@@ -1,7 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -179,4 +179,52 @@ test('active-run: write tightens an existing wider marker directory to 0700', ()
   const w = activeRun(dir, 'write', 'run-c', M('/plans/c.json'));
   assert.equal(w.code, 0, w.stderr);
   if (!IS_WINDOWS) assert.equal(statSync(dir).mode & 0o777, 0o700);
+});
+
+// --- checkout locks (written by setup) ---------------------------------------
+
+// Two checkout locks of run r1, one of run r2, and a malformed one, as
+// setup would leave them.
+function writeCheckoutLocks(dir) {
+  writeFileSync(join(dir, 'checkout-1-2.lock'), JSON.stringify({ run_id: 'r1', checkout: M('/p') }));
+  writeFileSync(join(dir, 'checkout-1-3.lock'), JSON.stringify({ run_id: 'r1', checkout: M('/p2') }));
+  writeFileSync(join(dir, 'checkout-1-4.lock'), JSON.stringify({ run_id: 'r2', checkout: M('/q') }));
+  writeFileSync(join(dir, 'checkout-1-5.lock'), 'not json');
+}
+
+function assertOnlyOthersKept(dir) {
+  assert.equal(existsSync(join(dir, 'checkout-1-2.lock')), false);
+  assert.equal(existsSync(join(dir, 'checkout-1-3.lock')), false);
+  assert.equal(existsSync(join(dir, 'checkout-1-4.lock')), true, "another run's checkout lock is kept");
+  assert.equal(readFileSync(join(dir, 'checkout-1-5.lock'), 'utf8'), 'not json');
+}
+
+test("active-run: release removes the run's checkout lock", () => {
+  for (const what of ['stopped', '--remove']) {
+    const dir = markerDir();
+    assert.equal(activeRun(dir, 'acquire', 'r1', M('/m.json')).code, 0);
+    writeCheckoutLocks(dir);
+    const rel = activeRun(dir, 'release', 'r1', what);
+    assert.equal(rel.code, 0, rel.stderr);
+    assertOnlyOthersKept(dir);
+    assert.equal(existsSync(join(dir, 'r1.lock')), false);
+  }
+});
+
+test("active-run: remove --takeover removes the run's checkout lock", () => {
+  const dir = markerDir();
+  assert.equal(activeRun(dir, 'acquire', 'r1', M('/m.json')).code, 0);
+  writeCheckoutLocks(dir);
+  const res = activeRun(dir, 'remove', 'r1', '--takeover');
+  assert.equal(res.code, 0, res.stderr);
+  assertOnlyOthersKept(dir);
+  assert.equal(existsSync(join(dir, 'r1.lock')), false);
+});
+
+test("active-run: a refused remove keeps the run's checkout lock", () => {
+  const dir = markerDir();
+  assert.equal(activeRun(dir, 'acquire', 'r1', M('/m.json')).code, 0);
+  writeCheckoutLocks(dir);
+  assert.equal(activeRun(dir, 'remove', 'r1').code, 4);
+  assert.equal(existsSync(join(dir, 'checkout-1-2.lock')), true);
 });
