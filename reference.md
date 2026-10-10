@@ -359,7 +359,9 @@ and call out any agent whose `resolved_models` names a model other than the one 
 (a fallback).
 
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
-lines that are not valid JSON, such as a truncated write. An agent with any unreadable line is
+lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with invalid
+UTF-8 counts even when it still parses after the bad bytes are replaced (they may have been a
+key or a count), and what it holds is still read as far as it goes. An agent with any unreadable line is
 incomplete exactly as a mid-stream count makes it (`output_tokens` is `unavailable`,
 `output_tokens_min` holds the lower bound, and it counts in `output_incomplete`), since the lost
 line may have held a later count. Report a non-zero total, because the figures are then

@@ -39,9 +39,11 @@ counted in a tier (or in the run) is incomplete, that tier's (or totals')
 output_tokens is "unavailable" too, since the sum would be an undercount;
 output_tokens_min still sums every count there is.
 
-Unreadable lines: transcripts are read with errors="replace", so invalid
-UTF-8 never raises. A non-blank line that is not valid JSON (a truncated
-write) is counted in the agent's unreadable_lines (top level: the total). An
+Unreadable lines: a non-blank line that is not valid JSON (a truncated
+write) or not valid UTF-8 is counted in the agent's unreadable_lines (top
+level: the total). A line with invalid UTF-8 counts even when it parses after
+replacement (the damaged bytes may have been a key or a count), and what it
+still holds is read best-effort; invalid UTF-8 never raises. An
 agent with any unreadable line is incomplete exactly as a mid-stream message
 makes it: output_tokens "unavailable", output_tokens_min set, counted in
 output_incomplete, since the lost line may have held a later count. An agent
@@ -161,8 +163,9 @@ def read_usage(path):
     its id (and requestId when present); lines without an id count each.
     complete is False when a counted line has stop_reason null (its
     output_tokens is a mid-stream value) or when unreadable is above 0.
-    unreadable counts non-blank lines that are not valid JSON; the file is
-    read with errors="replace", so invalid UTF-8 never raises.
+    unreadable counts non-blank lines that are not valid JSON or not valid
+    UTF-8; a line with invalid UTF-8 is still parsed best-effort after
+    replacement, so invalid UTF-8 never raises.
     """
     model = None
     models = {}
@@ -171,15 +174,28 @@ def read_usage(path):
     anonymous = []
     unreadable = 0
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
+        # Bytes split on \n only, so a U+2028 inside a string stays in its line.
+        with open(path, "rb") as f:
+            for raw in f:
+                try:
+                    line = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Damaged bytes may have been a key or a count: the line is
+                    # unreadable (the totals are partial), but what it still
+                    # holds is read as far as it goes.
+                    unreadable += 1
+                    line = raw.decode("utf-8", errors="replace")
+                    damaged = True
+                else:
+                    damaged = False
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     obj = json.loads(line)
                 except ValueError:
-                    unreadable += 1
+                    if not damaged:
+                        unreadable += 1
                     continue
                 msg = obj.get("message") if isinstance(obj, dict) else None
                 if not isinstance(msg, dict):

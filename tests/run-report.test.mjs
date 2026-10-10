@@ -332,7 +332,9 @@ test('a truncated line makes the agent incomplete and is counted', () => {
   assert.equal(out.totals.output_tokens_min, 42);
 });
 
-test('invalid UTF-8 does not crash the report', () => {
+// A line with invalid UTF-8 is damaged even when it still parses after
+// replacement: the bytes may have been a key, so the totals are partial.
+test('invalid UTF-8 does not crash the report and counts as unreadable', () => {
   const dir = join(TMP, 'badutf8');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'agent-b1.meta.json'),
@@ -345,8 +347,30 @@ test('invalid UTF-8 does not crash the report', () => {
   const r = run([dir, MANIFEST]);
   assert.equal(r.code, 0, r.stderr);
   const a = JSON.parse(r.stdout).agents[0];
-  assert.equal(a.output_tokens, 9);
-  assert.equal(a.unreadable_lines, 0, 'replaced bytes inside a string still parse');
+  assert.equal(a.unreadable_lines, 1);
+  assert.equal(a.output_tokens, 'unavailable');
+  assert.equal(a.output_tokens_min, 9);
+});
+
+test('an invalid byte inside a usage key makes the totals partial, not complete', () => {
+  const dir = join(TMP, 'badkey');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent-k1.meta.json'),
+    JSON.stringify({ description: 'T1 implement', workflowPhase: 'Lane A', model: 'opus' }));
+  const good = Buffer.from(usageLine('m1', 'claude-opus-x', 5, 'end_turn'));
+  // The second message's output count sits under a key with an invalid byte:
+  // after replacement it parses, but the count is lost.
+  const [head, tail] = usageLine('m2', 'claude-opus-x', 9, 'end_turn').split('output_tokens');
+  const bad = Buffer.concat([Buffer.from(`${head}output_tok`), Buffer.from([0xff]), Buffer.from(`ens${tail}`)]);
+  writeFileSync(join(dir, 'agent-k1.jsonl'), Buffer.concat([good, bad]));
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const report = JSON.parse(r.stdout);
+  const a = report.agents[0];
+  assert.equal(a.unreadable_lines, 1);
+  assert.equal(a.output_tokens, 'unavailable', 'a lost count is never shown as a complete total');
+  assert.equal(report.output_incomplete, 1);
+  assert.equal(report.unreadable_lines, 1);
 });
 
 test('a line containing U+2028 inside a string is read whole', () => {
