@@ -667,7 +667,8 @@ test('audit writes through no planted link', { skip: !SYMLINKS && 'symlinks unav
 test('a run folder whose path holds glob characters', () => {
   const folder = makeRun(acceptedSpec(repoRun()));
   const odd = join(dirname(folder), 'run [1]');
-  cpSync(folder, odd, { recursive: true });
+  // Keep the mtimes: the verify evidence must stay inside the launch window.
+  cpSync(folder, odd, { recursive: true, preserveTimestamps: true });
   const { json } = view(odd);
   assert.equal(json.run.launches.latest, 'wf_aaaaaa');
   assert.equal(byTask(json).A1.status.committed.value, true);
