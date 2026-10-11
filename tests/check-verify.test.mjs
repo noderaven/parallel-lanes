@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
-import { tempDir } from './platform.mjs';
+import { IS_WINDOWS, tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
 const SCRIPT = join(SCRIPTS, 'check-verify');
@@ -42,8 +42,8 @@ function caseDir() {
   return dir;
 }
 
-function run(args) {
-  const res = spawnSync('python3', [SCRIPT, ...args], { encoding: 'utf8' });
+function run(args, env) {
+  const res = spawnSync('python3', [SCRIPT, ...args], { encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env });
   let out = null;
   try {
     out = JSON.parse(res.stdout);
@@ -57,12 +57,15 @@ function run(args) {
 // verify, acceptance, delivered_sha (each may be null), startTime (undefined
 // leaves it out), evidence (an object, a string written as is, or null for
 // no file), evidenceSha (the sha in the evidence file name), evidenceTime
-// (its modification time in ms).
+// (its modification time in ms), durationMs (undefined leaves it out; the
+// default ends the launch 60 s after now), archive (true adds --ledger with the
+// case's ledger dir), ledgerDir (the manifest's repo.ledger_dir; default the
+// case's ledger dir), env (added to the environment), dir (the case dir).
 function check(opts = {}) {
   const has = (k) => Object.prototype.hasOwnProperty.call(opts, k);
-  const dir = caseDir();
+  const dir = opts.dir || caseDir();
   const transcript = join(dir, 'wf_x');
-  mkdirSync(transcript);
+  mkdirSync(transcript, { recursive: true });
   const file = {
     result: {
       acceptance: has('acceptance') ? opts.acceptance : { status: 'accepted' },
@@ -72,9 +75,11 @@ function check(opts = {}) {
   };
   const startTime = has('startTime') ? opts.startTime : Date.now() - 60000;
   if (startTime !== undefined) file.startTime = startTime;
+  const durationMs = has('durationMs') ? opts.durationMs : 120000;
+  if (durationMs !== undefined) file.durationMs = durationMs;
   writeFileSync(join(dir, 'wf_x.json'), JSON.stringify(file).replace('"@@BIG@@"', '1' + '0'.repeat(400)));
   const ledger = join(dir, 'ledger');
-  writeFileSync(join(dir, 'm.json'), JSON.stringify({ repo: { ledger_dir: ledger } }));
+  writeFileSync(join(dir, 'm.json'), JSON.stringify({ repo: { ledger_dir: has('ledgerDir') ? opts.ledgerDir : ledger } }));
   const ev = has('evidence') ? opts.evidence : evidence();
   if (ev !== null) {
     const path = join(ledger, 'checks', `verify-${opts.evidenceSha || SHA}.json`);
@@ -82,7 +87,8 @@ function check(opts = {}) {
     writeFileSync(path, typeof ev === 'string' ? ev : JSON.stringify(ev));
     if (opts.evidenceTime !== undefined) utimesSync(path, opts.evidenceTime / 1000, opts.evidenceTime / 1000);
   }
-  return run([transcript, join(dir, 'm.json')]);
+  const args = [transcript, join(dir, 'm.json')];
+  return run(opts.archive ? [...args, '--ledger', ledger] : args, opts.env);
 }
 
 function expectStatus(res, status, reason, code) {
@@ -332,6 +338,117 @@ test('the output is one JSON line', () => {
     assert.ok(res.stdout.endsWith('\n'), JSON.stringify(res.stdout));
     assert.equal(res.stdout.indexOf('\n'), res.stdout.length - 1, JSON.stringify(res.stdout));
     assert.equal(typeof JSON.parse(res.stdout), 'object');
+  }
+});
+
+// ---- Archive mode (--ledger DIR) ----
+
+test('--ledger reads an archive with a POSIX ledger_dir and no cygpath', () => {
+  const env = { CLAUDE_CODE_GIT_BASH_PATH: join(TMP, 'no-such-bash.exe') };
+  const dir = caseDir();
+  let res = check({ dir, archive: true, ledgerDir: '/home/x/gone', env });
+  expectStatus(res, 'match', undefined, 0);
+  assert.ok(res.out.path.endsWith(`verify-${SHA}.json`), res.out.path);
+  // The live mode is unchanged: it converts and reads the manifest's ledger_dir.
+  res = check({ dir, ledgerDir: '/home/x/gone', env });
+  if (IS_WINDOWS) {
+    assert.equal(res.code, 3, res.stdout);
+    assert.equal(res.stdout, '');
+    assert.match(res.stderr, /CLAUDE_CODE_GIT_BASH_PATH/);
+  } else {
+    expectStatus(res, 'missing', 'verify_evidence_missing', 1);
+    assert.ok(res.out.path.startsWith('/home/x/gone/'), res.out.path);
+  }
+});
+
+test('late evidence is unavailable in archive mode only', () => {
+  // A start on a whole second, so the end is a whole second and an mtime set to it is exact.
+  const start = Math.floor(Date.now() / 1000) * 1000 - 60000;
+  const late = start + 120000 + 60000;
+  let res = check({ archive: true, startTime: start, durationMs: 120000, evidenceTime: late });
+  expectStatus(res, 'unavailable', 'verify_evidence_time_untrusted', 1);
+  assert.ok(res.out.path.endsWith(`verify-${SHA}.json`), res.out.path);
+  res = check({ startTime: start, durationMs: 120000, evidenceTime: late });
+  expectStatus(res, 'match', undefined, 0);
+  // Evidence dated exactly at the end is trusted.
+  res = check({ archive: true, startTime: start, durationMs: 120000, evidenceTime: start + 120000 });
+  expectStatus(res, 'match', undefined, 0);
+  // The stale rule still comes first.
+  res = check({ archive: true, startTime: start, evidenceTime: start - 60000 });
+  expectStatus(res, 'stale', 'verify_evidence_stale', 1);
+  // The time rule comes before the comparison.
+  res = check({ archive: true, verify: report({ ok: false }), startTime: start, durationMs: 120000, evidenceTime: late });
+  expectStatus(res, 'unavailable', 'verify_evidence_time_untrusted', 1);
+});
+
+test('a missing or malformed durationMs is unavailable', () => {
+  for (const durationMs of [undefined, 'x', -1, true, null]) {
+    let res = check({ archive: true, durationMs });
+    expectStatus(res, 'unavailable', 'verify_evidence_time_untrusted', 1);
+    assert.match(res.out.detail, /durationMs/);
+    res = check({ durationMs });
+    expectStatus(res, 'match', undefined, 0);
+  }
+  // A durationMs too large for a float: written as raw text.
+  const res = check({ archive: true, durationMs: '@@BIG@@' });
+  expectStatus(res, 'unavailable', 'verify_evidence_time_untrusted', 1);
+});
+
+test('a decoy session-level result is ignored', () => {
+  const session = join(caseDir(), 's');
+  const dir = join(session, 'subagents', 'workflows');
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(session, 'workflows'));
+  // The decoy: an accepted run that needs no verify evidence.
+  writeFileSync(join(session, 'workflows', 'wf_x.json'), JSON.stringify({
+    startTime: Date.now() - 60000, durationMs: 120000,
+    result: { acceptance: { status: 'accepted' }, delivered_sha: SHA, verify: null },
+  }));
+  // The archive's own result: unverified, with no verify result.
+  const opts = { dir, verify: null, acceptance: { status: 'unverified' }, evidence: null };
+  let res = check({ ...opts, archive: true });
+  expectStatus(res, 'missing', 'verify_evidence_missing', 1);
+  // The live mode prefers the session-level file.
+  res = check(opts);
+  expectStatus(res, 'not_required', undefined, 0);
+});
+
+test('archive mode needs neither the transcript dir nor a manifest ledger_dir', () => {
+  const dir = caseDir();
+  const ledger = join(dir, 'ledger');
+  const path = join(ledger, 'checks', `verify-${SHA}.json`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(evidence()));
+  writeFileSync(join(dir, 'wf_y.json'), JSON.stringify({
+    startTime: Date.now() - 60000, durationMs: 120000,
+    result: { acceptance: { status: 'accepted' }, delivered_sha: SHA, verify: report() },
+  }));
+  writeFileSync(join(dir, 'm.json'), JSON.stringify({ plan: 'p.md' }));
+  const res = run([join(dir, 'wf_y'), join(dir, 'm.json'), '--ledger', ledger]);
+  expectStatus(res, 'match', undefined, 0);
+  // No result file beside the transcript dir is still exit 2.
+  const none = run([join(dir, 'wf_z'), join(dir, 'm.json'), '--ledger', ledger]);
+  assert.equal(none.code, 2, none.stdout);
+  assert.match(none.stderr, /wf_z\.json/);
+});
+
+test('a usage error for --ledger without a value', () => {
+  const dir = caseDir();
+  mkdirSync(join(dir, 'wf_x'));
+  writeFileSync(join(dir, 'm.json'), JSON.stringify({ repo: { ledger_dir: join(dir, 'ledger') } }));
+  const base = [join(dir, 'wf_x'), join(dir, 'm.json')];
+  const cases = [
+    [...base, '--ledger'],
+    [...base, '--ledger', ''],
+    [...base, '--ledger', 'a', '--ledger', 'b'],
+    [base[0], '--ledger', join(dir, 'ledger')],
+    [...base, '--other', 'x'],
+  ];
+  for (const args of cases) {
+    const res = run(args);
+    assert.equal(res.code, 2, JSON.stringify(args));
+    assert.equal(res.stdout, '');
+    assert.match(res.stderr, /usage: check-verify TRANSCRIPT_DIR MANIFEST \[--ledger DIR\]/);
   }
 });
 
