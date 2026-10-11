@@ -55,6 +55,7 @@ The full-suite total counts the runs that ran, so it is a lower bound on
 full-suite runs: runs through a wrapper (bash -c, a script) are not seen,
 and the inferred runs, counted apart, may not have happened.
 """
+import functools
 import glob
 import hashlib
 import json
@@ -1506,15 +1507,17 @@ def _surest(certainties):
     return INFERRED if certainties else None
 
 
+@functools.lru_cache(maxsize=256)
 def _check_words(command):
     """The words of each simple command of a configured command, reduced as
-    a command line's are; None when there are none or its quoting does not
-    parse."""
+    a command line's are, as a tuple of tuples; None when there are none or
+    its quoting does not parse. Memoised by command text, so a run parses
+    each configured command once; the value is immutable."""
     try:
         simple, _every = _simple_commands(command)
     except ValueError:
         return None
-    parts = [words for _ops, _lead, words in simple]
+    parts = tuple(tuple(words) for _ops, _lead, words in simple)
     return parts if parts and all(parts) else None
 
 
@@ -1572,7 +1575,7 @@ def match_check(command, checks, exit_code=None):
             continue
         size = sum(len(p) for p in parts)
         for k in range(len(simple) - len(parts) + 1):
-            here = [words for _ops, _lead, words in simple[k:k + len(parts)]]
+            here = tuple(tuple(words) for _ops, _lead, words in simple[k:k + len(parts)])
             last = len(parts) - 1
             if here[:last] != parts[:last] or here[last][:len(parts[last])] != parts[last]:
                 continue

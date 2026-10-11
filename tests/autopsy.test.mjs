@@ -1038,6 +1038,25 @@ test('the r150 parser probes are not check runs', () => {
   assert.equal(chained("cd '/w' && python -c \"\nimport _autopsy as A\nprint(A.match_check('curl http://x/#a && python3 scripts/run-checks . --cmd test t', []))\n\""), null);
 });
 
+test('match_check parses a configured command once', () => {
+  const res = python([
+    'import _autopsy',
+    '_autopsy._check_words.cache_clear()',
+    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(chainedManifest))}))`,
+    'lines = ["npm test", "npm run lint && npm test -- a", "echo hi"]',
+    'found = [_autopsy.match_check(line, checks, 0) for line in lines]',
+    'print(json.dumps({"found": found, "misses": _autopsy._check_words.cache_info().misses}))',
+  ]);
+  assert.deepEqual(res, {
+    found: [
+      { check: 'test#1', certainty: 'ran', full_suite: 'ran' },
+      { check: 'a.test#1', certainty: 'ran', full_suite: null },
+      null,
+    ],
+    misses: 3,
+  });
+});
+
 test('configured commands with secrets never reach the outputs', () => {
   const dir = copyRun(RUN3);
   const path = join(dir, 'p.lanes.json');
