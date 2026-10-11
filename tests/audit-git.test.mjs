@@ -124,7 +124,8 @@ test('Unicode paths come back as written', () => {
   // macOS git would otherwise store the decomposed name precomposed.
   const r = spawnSync('git', ['config', 'core.precomposeunicode', 'false'], { cwd: dir, env: gitEnv() });
   assert.equal(r.status, 0);
-  const name = 'café.txt';
+  // cafe plus a combining acute accent (U+0301), kept out of the ASCII source.
+  const name = `cafe${String.fromCharCode(0x301)}.txt`;
   const head = commit(dir, name);
   const second = commit(dir, 'plain.txt');
   const out = pythonJSON([
