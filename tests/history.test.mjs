@@ -250,6 +250,45 @@ test('partial token totals are marked', () => {
   assert.ok(!mdRow(res.md, 'fa').includes('>='), mdRow(res.md, 'fa'));
 });
 
+test('a run without usage is left out of token trends', () => {
+  const { hist, a, b } = makeHistory();
+  // fb runs the same engine as fa, has no usage at all, and one of its
+  // calls lost its result (so its tool detectors are partial).
+  editJson(join(b, 'wf_1.json'), (w) => { w.result.version = '1.4.4'; });
+  for (const name of readdirSync(join(b, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(b, 'wf_1', name), (lines) => lines.flatMap((l) => {
+      const o = JSON.parse(l);
+      if (!o.message) return [l];
+      delete o.message.usage;
+      const content = Array.isArray(o.message.content) ? o.message.content : [];
+      if (content.some((c) => c.type === 'tool_result' && c.tool_use_id === 'tu_a2_1')) return [];
+      return [JSON.stringify(o)];
+    }));
+  }
+  const res = historyOk(hist);
+  const fb = rowOf(res, 'fb');
+  assert.deepEqual([fb.engine_version, fb.tokens_total, fb.tokens_per_task], ['1.4.4', 'unavailable', 'unavailable']);
+  assert.match(mdRow(res.md, 'fb'), /\| unavailable \| unavailable \|/);
+  // The 1.4.4 trend holds both runs, but only fa's tokens.
+  const fa = rowOf(res, 'fa');
+  const trend = res.json.token_trends['1.4.4'];
+  assert.deepEqual(trend.runs, ['fa', 'fb']);
+  assert.equal(trend.tokens_per_task, fa.tokens_per_task);
+  const roles = autopsyOf(a).tokens.by_role;
+  for (const [role, bucket] of Object.entries(trend.by_role)) {
+    assert.equal(bucket.agents, roles[role].agents, role);
+    assert.equal(bucket.tokens, roles[role].input_tokens + roles[role].cache_creation_input_tokens
+      + roles[role].output_tokens, role);
+  }
+  // fb's partial tool detectors still count: they are not insufficient data.
+  const B = autopsyOf(b);
+  for (const kind of TOOL_KINDS) {
+    assert.equal(B.detectors[kind], 'partial', kind);
+    assert.equal(res.json.insufficient_data[kind], undefined, kind);
+  }
+  assert.deepEqual(res.json.insufficient_data, {});
+});
+
 test('--since and --project filter runs', () => {
   const { hist } = makeHistory();
   editJson(join(hist, 'index.json'), (index) => {

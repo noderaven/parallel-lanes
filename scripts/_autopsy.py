@@ -393,21 +393,35 @@ def load(run_folder):
 def span_agent(agent):
     """Set an agent's start, end and tool time from its events. It starts at
     its earliest timed line, the prompt included, so the first model turn is
-    part of its time; it ends at its last event."""
+    part of its time; it ends at its last event. tool is the union of its
+    matched call spans (tool_use to the tool_result that answers it), and
+    unmatched_calls counts the tool_use events no tool_result answers
+    (their id unmatched or None); both are None for an untimed agent."""
     events = agent["events"]
     if not events:
-        agent["start"] = agent["end"] = agent["tool"] = None
+        agent["start"] = agent["end"] = agent["tool"] = agent["unmatched_calls"] = None
         return
     agent["start"] = min([e["ts"] for e in events] + [n["ts"] for n in agent.get("notes", [])])
     agent["end"] = max(e["ts"] for e in events)
     uses = {}
     spans = []
+    calls = 0
     for e in events:
-        if e["kind"] == "tool_use" and e["id"] is not None:
-            uses.setdefault(e["id"], e["ts"])
+        if e["kind"] == "tool_use":
+            calls += 1
+            if e["id"] is not None:
+                uses.setdefault(e["id"], e["ts"])
         elif e["kind"] == "tool_result" and e["id"] in uses and e["ts"] >= uses[e["id"]]:
             spans.append((uses.pop(e["id"]), e["ts"]))
     agent["tool"] = union_length(spans)
+    agent["unmatched_calls"] = calls - len(spans)
+
+
+def _agent_partial(agent):
+    """Whether an agent's tool calls are only partly known: a call has no
+    result (it may have run to the agent's end, or its result was lost), or
+    its transcript has unreadable lines (which may have held calls)."""
+    return (agent.get("unmatched_calls") or 0) > 0 or agent["entry"].get("unreadable_lines", 0) > 0
 
 
 def _all_agents(run):
@@ -550,11 +564,15 @@ def time_section(run):
     for a in _all_agents(run):
         e = a["entry"]
         wall = None if a["start"] is None else a["end"] - a["start"]
+        # A partial agent's tool time is only a minimum (a call without a
+        # result may have run to its end), so the rest is not known either.
+        tool = None if wall is None or _agent_partial(a) else a["tool"]
         agents.append({
             "label": e["label"], "launch": a["launch"], "phase": _phase_name(e), "task": e["task"],
             "role": e["role"], "start": iso(a["start"]), "end": iso(a["end"]),
-            "wall_s": seconds(wall), "tool_s": seconds(a["tool"]),
-            "other_s": seconds(None if wall is None else max(0.0, wall - a["tool"])),
+            "wall_s": seconds(wall), "tool_s": seconds(tool), "tool_s_min": seconds(a["tool"]),
+            "other_s": seconds(None if tool is None else max(0.0, wall - tool)),
+            "unmatched_calls": UNAVAILABLE if a["unmatched_calls"] is None else a["unmatched_calls"],
         })
     walls = [l["end"] - l["start"] if l["start"] is not None else None for l in run["launches"]]
     wall_s = seconds(sum(walls)) if walls and None not in walls else UNAVAILABLE
@@ -589,8 +607,20 @@ def critical_agents(run):
 
 _incomplete = _transcripts.is_output_incomplete
 
-# {key(entry): bucket}, summed by the same code and rules as run-report.
-buckets = _transcripts.token_buckets
+
+def buckets(entries, key):
+    """{key(entry): bucket}, summed by the same code and rules as run-report
+    (_transcripts.token_buckets), each with agents_with_usage: its agents
+    whose input_tokens is known. A bucket where no agent has usage has every
+    token field and output_tokens_min UNAVAILABLE, never 0; a partly covered
+    one keeps its sums as lower bounds."""
+    out = _transcripts.token_buckets(entries, key)
+    for k, b in out.items():
+        b["agents_with_usage"] = sum(1 for e in entries if key(e) == k and e["input_tokens"] != UNAVAILABLE)
+        if b["agents_with_usage"] == 0:
+            for field in TOKEN_FIELDS + ("output_tokens_min",):
+                b[field] = UNAVAILABLE
+    return out
 
 
 def _agent_tokens(e):
@@ -604,7 +634,12 @@ def tokens_section(run):
         e = dict(a["entry"])
         e["_launch"] = a["launch"]
         entries.append(e)
-    totals = buckets(entries, lambda e: "all").get("all", _transcripts.blank_bucket())
+    totals = buckets(entries, lambda e: "all").get("all")
+    if totals is None:
+        totals = _transcripts.blank_bucket()
+        totals["agents_with_usage"] = 0
+        for field in TOKEN_FIELDS + ("output_tokens_min",):
+            totals[field] = UNAVAILABLE
     known = [e for e in entries if e["input_tokens"] != UNAVAILABLE]
     ranked = sorted(enumerate(known), key=lambda ie: (-_agent_tokens(ie[1]), ie[0]))[:TOP_AGENTS]
     top = []
@@ -1135,10 +1170,13 @@ def _has_tool_events(run):
 
 
 def detector_status(run):
-    """{kind: 'ok' | 'not_available'}: a detector is not_available when its
-    inputs are missing from every agent or launch."""
+    """{kind: 'ok' | 'partial' | 'not_available'}: a detector is
+    not_available when its inputs are missing from every agent or launch.
+    The TOOL_KINDS are partial when any agent is (_agent_partial: a call
+    without a result, or unreadable lines): they may miss slowdowns."""
     agents = _all_agents(run)
     tool_events = _has_tool_events(run)
+    partial = tool_events and any(_agent_partial(a) for a in agents)
     labels = any(a["entry"]["label"] for a in agents)
     models = labels and any(_model(a["entry"]) != UNAVAILABLE for a in agents)
     available = {
@@ -1150,17 +1188,21 @@ def detector_status(run):
     }
     for kind in TOOL_KINDS:
         available[kind] = tool_events
-    return {k: "ok" if available[k] else "not_available" for k in KINDS}
+    status = {k: "ok" if available[k] else "not_available" for k in KINDS}
+    if partial:
+        for kind in TOOL_KINDS:
+            status[kind] = "partial"
+    return status
 
 
 def find_slowdowns(run, detectors):
-    """Internal slowdowns of every available detector, largest cost first
-    (unknown costs last), then by time and kind."""
+    """Internal slowdowns of every ok or partial detector, largest cost
+    first (unknown costs last), then by time and kind."""
     checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
         found += tool_slowdowns(a, checks)
-    found = [s for s in found if detectors[s["kind"]] == "ok"]
+    found = [s for s in found if detectors[s["kind"]] in ("ok", "partial")]
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
     return found
@@ -1972,6 +2014,13 @@ def _md_time(a):
     if gaps:
         lines += ["", "Idle gaps (no agent running): %d, %s in all." % (len(gaps), _secs(sum(g["s"] for g in gaps)))]
         lines += ["- %s to %s: %s" % (_when(g["start"]), _when(g["end"]), _secs(g["s"])) for g in gaps[:5]]
+    partial = [x for x in t["agents"] if x["tool_s"] == UNAVAILABLE and _is_num(x.get("tool_s_min"))]
+    if partial:
+        lines += ["", "Agents with tool calls missing a result or unreadable lines (tool time is a minimum, "
+                      "the rest unavailable):"]
+        lines += ["- %s: tool time >= %s; %s without a result" % (
+            _ascii(x["label"]), _secs(x["tool_s_min"]), _count_word(x["unmatched_calls"], "call"))
+            for x in partial]
     return lines
 
 
@@ -2006,34 +2055,45 @@ def _md_slowdowns(a):
         lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
                        [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
                          _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"], 1)])
-    missing = [k for k, v in a["detectors"].items() if v != "ok"]
+    partial = [k for k, v in a["detectors"].items() if v == "partial"]
+    if partial:
+        lines += ["", "Detectors with partial data (they may miss slowdowns): %s." % ", ".join(partial)]
+    missing = [k for k, v in a["detectors"].items() if v not in ("ok", "partial")]
     if missing:
         lines += ["", "Detectors without data (they add no slowdowns): %s." % ", ".join(missing)]
     return lines
+
+
+def _output_of(bucket):
+    """A bucket's output tokens: the count, '>= N' when only the minimum is
+    known, else unavailable."""
+    if _is_num(bucket["output_tokens"]):
+        return _tokens(bucket["output_tokens"])
+    if _is_num(bucket["output_tokens_min"]):
+        return ">= %s" % _tokens(bucket["output_tokens_min"])
+    return UNAVAILABLE
 
 
 def _md_tokens(a):
     t = a["tokens"]
     tot = t["totals"]
     lines = []
-    if t["partial"]:
-        lines.append("These totals are minimums: some agents have no usage data, incomplete output counts "
-                     "or unreadable lines, so the real totals are higher.")
-        lines.append("")
-    output = _tokens(tot["output_tokens"]) if _is_num(tot["output_tokens"]) else \
-        ">= %s" % _tokens(tot["output_tokens_min"])
-    lines.append("Totals over %s: input %s, output %s, cache read %s, cache creation %s." % (
-        _count_word(tot["agents"], "agent"), _tokens(tot["input_tokens"]), output,
-        _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
+    if tot.get("agents_with_usage") == 0:
+        lines.append("Totals: unavailable (no agent has usage data).")
+    else:
+        if t["partial"]:
+            lines.append("These totals are minimums: some agents have no usage data, incomplete output counts "
+                         "or unreadable lines, so the real totals are higher.")
+            lines.append("")
+        lines.append("Totals over %s: input %s, output %s, cache read %s, cache creation %s." % (
+            _count_word(tot["agents"], "agent"), _tokens(tot["input_tokens"]), _output_of(tot),
+            _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
     if t["unreadable_lines"] > 0:
         lines.append("Damaged transcript lines were skipped; unreadable lines: %d." % t["unreadable_lines"])
     if t["by_role"]:
-        def out_of(b):
-            return _tokens(b["output_tokens"]) if _is_num(b["output_tokens"]) else \
-                ">= %s" % _tokens(b["output_tokens_min"])
         lines += ["", "By role:", ""] + _table(
             ["Role", "Agents", "Input", "Output", "Cache read", "Cache creation"],
-            [[r, b["agents"], _tokens(b["input_tokens"]), out_of(b), _tokens(b["cache_read_input_tokens"]),
+            [[r, b["agents"], _tokens(b["input_tokens"]), _output_of(b), _tokens(b["cache_read_input_tokens"]),
               _tokens(b["cache_creation_input_tokens"])] for r, b in t["by_role"].items()])
     if t["top_agents"]:
         lines += ["", "Largest agents:", ""] + _table(
@@ -2101,7 +2161,9 @@ def render_summary(analysis, md_path):
     lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
         "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
     tot = a["tokens"]["totals"]
-    if a["tokens"]["partial"]:
+    if tot.get("agents_with_usage") == 0:
+        lines.append("tokens: unavailable (no agent has usage data)")
+    elif a["tokens"]["partial"]:
         lines.append("tokens (minimums: some usage is missing or unreadable): >= %s input, >= %s output, "
                      ">= %s cache read, >= %s cache creation" % (
                          _tokens(tot["input_tokens"]), _tokens(tot["output_tokens_min"]),

@@ -58,13 +58,17 @@ history.json:
 - token_trends: runs and partial_runs list run ids; tokens_per_task is the
   sum of tokens_total over the sum of tasks of the runs that have both;
   by_role is {<role>: {tokens, agents}} summed over the runs. A group with
-  partial runs holds lower bounds.
+  partial runs holds lower bounds. A run or role bucket whose token figures
+  are "unavailable" (no agent of it has usage data) is left out of these
+  sums, never counted as 0.
 - suggestions: one per suggestion kind of any run, ranked by total_s (the
   sum of the runs' known stake_s); text is the kind's generic wording.
 - insufficient_data: for each slowdown kind, the runs whose detector for it
-  is not "ok" (not_available, or missing from an older autopsy): they are
-  not counted in that kind's totals. "autopsy" lists the runs with no
-  autopsy. Sections with no run are left out.
+  is neither "ok" nor "partial" (not_available, or missing from an older
+  autopsy): they are not counted in that kind's totals. A partial detector
+  (some tool results or transcript lines were lost) is counted: its
+  slowdowns are real, though it may have missed some. "autopsy" lists the
+  runs with no autopsy. Sections with no run are left out.
 
 history.md is plain ASCII: the per-run table, recurring slowdowns, token
 trends, suggestions and the insufficient-data list. Neither file holds
@@ -342,7 +346,7 @@ def recurring_section(runs):
         found = []
         for row, analysis in runs:
             detectors = analysis.get("detectors")
-            if not isinstance(detectors, dict) or detectors.get(kind) != "ok":
+            if not isinstance(detectors, dict) or detectors.get(kind) not in ("ok", "partial"):
                 missing.setdefault(kind, []).append(row["run_id"])
                 continue
             slowdowns = analysis.get("slowdowns")

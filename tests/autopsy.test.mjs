@@ -181,13 +181,18 @@ test('tokens match run-report', () => {
     '    manifest = json.load(f)',
     `print(json.dumps(_transcripts.build_report(${JSON.stringify(join(RUN1, 'wf_1'))}, manifest)))`,
   ]);
-  assert.deepEqual(A.tokens.totals, report.totals);
+  // autopsy's buckets are run-report's plus agents_with_usage.
+  const { agents_with_usage: withUsage, ...totals } = A.tokens.totals;
+  assert.deepEqual(totals, report.totals);
+  assert.equal(withUsage, 4);
   assert.equal(A.tokens.totals.agents, 4);
   assert.equal(A.tokens.partial, false);
   assert.equal(A.tokens.unreadable_lines, 0);
   for (const [tier, bucket] of Object.entries(report.tiers)) {
     const { escalations, fix_rounds: fixRounds, ...fields } = bucket;
-    assert.deepEqual(A.tokens.by_tier[tier], fields);
+    const { agents_with_usage: tierWithUsage, ...mine } = A.tokens.by_tier[tier];
+    assert.deepEqual(mine, fields);
+    assert.equal(tierWithUsage, fields.agents);
   }
   assert.deepEqual(Object.keys(A.tokens.by_phase).sort(), ['Lane a', 'Lane beta', 'Verify']);
   assert.deepEqual(Object.keys(A.tokens.by_role).sort(), ['implement', 'review', 'verify']);
@@ -212,6 +217,12 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
     lines[2] = lines[2].slice(0, 60);
     return lines;
   });
+  // verify's lines lose their usage.
+  editLines(join(dir, 'wf_1', 'agent-v1.jsonl'), (lines) => lines.map((l) => {
+    const o = JSON.parse(l);
+    if (o.message) delete o.message.usage;
+    return JSON.stringify(o);
+  }));
   rmSync(join(dir, 'wf_1.json'));
   const manifestPath = join(dir, 'p.lanes.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -225,9 +236,23 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.equal(res.code, 0, res.stderr);
   const D = res.json;
   const b1 = agentOf(D, 'B1 implement');
-  for (const key of ['start', 'end', 'wall_s', 'tool_s', 'other_s']) {
+  for (const key of ['start', 'end', 'wall_s', 'tool_s', 'tool_s_min', 'other_s', 'unmatched_calls']) {
     assert.equal(b1[key], 'unavailable', `B1 implement ${key}`);
   }
+  // A1 review's unreadable line may have held a call: its tool time is a minimum.
+  const a2 = agentOf(D, 'A1 review');
+  assert.deepEqual([a2.tool_s, a2.other_s], ['unavailable', 'unavailable']);
+  assert.equal(typeof a2.tool_s_min, 'number');
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // verify has no usage: the totals count the three agents that have it, as minimums.
+  assert.deepEqual([D.tokens.totals.agents, D.tokens.totals.agents_with_usage], [4, 3]);
+  assert.ok(D.tokens.totals.input_tokens > 0);
+  assert.equal(typeof D.tokens.totals.cache_creation_input_tokens, 'number');
+  assert.deepEqual(D.tokens.by_phase.Verify, {
+    input_tokens: 'unavailable', output_tokens: 'unavailable', cache_read_input_tokens: 'unavailable',
+    cache_creation_input_tokens: 'unavailable', output_tokens_min: 'unavailable', agents: 1, agents_with_usage: 0,
+  });
+  assert.equal(D.tokens.by_phase['Lane a'].agents_with_usage, 2);
   const beta = D.time.phases.find((p) => p.phase === 'Lane beta');
   assert.deepEqual([beta.start, beta.end, beta.wall_s, beta.agents], ['unavailable', 'unavailable', 'unavailable', 1]);
   const laneB = D.time.lanes.find((l) => l.lane === 'b');
@@ -254,6 +279,101 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.deepEqual(D.time.idle_gaps, []);
   assert.equal(D.detectors.idle_gap, 'not_available');
   assert.ok(!D.slowdowns.some((s) => s.kind === 'idle_gap'));
+});
+
+const dropResults = (lines, keep) => lines.filter((l) => {
+  const o = JSON.parse(l);
+  const content = o.message && Array.isArray(o.message.content) ? o.message.content : [];
+  return !content.some((c) => c.type === 'tool_result' && !keep(c.tool_use_id));
+});
+
+test('lost tool results make an agent partial, not idle', () => {
+  const dir = copyRun(RUN3);
+  // A1 implement keeps its tool calls but loses every result, and a line is damaged.
+  const path = join(dir, 'wf_1', 'agent-a1.jsonl');
+  editLines(path, (lines) => [...dropResults(lines, () => false), '{not json']);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const a1 = agentOf(D, 'A1 implement');
+  assert.deepEqual([a1.tool_s, a1.other_s], ['unavailable', 'unavailable']);
+  assert.equal(typeof a1.tool_s_min, 'number');
+  assert.ok(a1.unmatched_calls > 0, `unmatched_calls ${a1.unmatched_calls}`);
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // B1 implement has all its results: its tool time is measured.
+  const b1 = agentOf(D, 'B1 implement');
+  assert.equal(typeof b1.tool_s, 'number');
+  assert.equal(b1.unmatched_calls, 0);
+  const time = res.md.split('## Where time went')[1].split('\n## ')[0];
+  assert.ok(time.includes(`A1 implement: tool time >= ${a1.tool_s_min.toFixed(1)} s`), time);
+  const slow = res.md.split('## Slowdowns')[1].split('\n## ')[0];
+  assert.ok(slow.includes(`Detectors with partial data (they may miss slowdowns): ${TOOL_KINDS.join(', ')}.`), slow);
+  assert.ok(!/Detectors without data/.test(slow), slow);
+});
+
+test('an agent stopped mid-call is the only partial one', () => {
+  const dir = copyRun(RUN3);
+  // A1 implement's last call (the test command at 10:03:10) has no result.
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => dropResults(lines, (id) => id !== 'tu_a1_4'));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = res.json;
+  const a1 = agentOf(D, 'A1 implement');
+  assert.deepEqual([a1.tool_s, a1.other_s, a1.unmatched_calls], ['unavailable', 'unavailable', 1]);
+  assert.equal(typeof a1.tool_s_min, 'number');
+  for (const a of D.time.agents.filter((x) => x.label !== 'A1 implement')) {
+    assert.equal(a.unmatched_calls, 0, a.label);
+    assert.equal(typeof a.tool_s, 'number', a.label);
+    assert.equal(typeof a.other_s, 'number', a.label);
+  }
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // A complete run is ok, and a timed agent with no calls has a measured zero.
+  for (const kind of TOOL_KINDS) assert.equal(C.detectors[kind], 'ok', kind);
+  assert.equal(agentOf(C, 'A1 implement').unmatched_calls, 0);
+});
+
+test('a timed agent with no calls has a measured zero tool time', () => {
+  const dir = copyRun();
+  // A1 review loses its one call and its result.
+  editLines(join(dir, 'wf_1', 'agent-a2.jsonl'), (lines) => lines.filter((l) => !l.includes('tu_a2_1')));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const a2 = agentOf(res.json, 'A1 review');
+  assert.deepEqual([a2.tool_s, a2.tool_s_min, a2.other_s, a2.unmatched_calls], [0, 0, 80, 0]);
+  for (const kind of TOOL_KINDS) assert.equal(res.json.detectors[kind], 'ok', kind);
+});
+
+test('a run without any usage has unavailable token totals', () => {
+  const dir = copyRun();
+  for (const name of readdirSync(join(dir, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(dir, 'wf_1', name), (lines) => lines.map((l) => {
+      const o = JSON.parse(l);
+      if (o.message) delete o.message.usage;
+      return JSON.stringify(o);
+    }));
+  }
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const tot = D.tokens.totals;
+  assert.deepEqual([tot.input_tokens, tot.output_tokens_min, tot.agents_with_usage], ['unavailable', 'unavailable', 0]);
+  for (const field of ['output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    assert.equal(tot[field], 'unavailable', field);
+  }
+  assert.equal(tot.agents, 4);
+  for (const group of ['by_phase', 'by_role', 'by_tier', 'per_task']) {
+    for (const [k, b] of Object.entries(D.tokens[group])) {
+      assert.deepEqual([b.input_tokens, b.output_tokens_min, b.agents_with_usage], ['unavailable', 'unavailable', 0],
+        `${group} ${k}`);
+    }
+  }
+  assert.deepEqual(D.tokens.top_agents, []);
+  const line = res.stdout.split('\n').find((l) => l.startsWith('tokens'));
+  assert.match(line, /^tokens: unavailable/);
+  assert.ok(!/\d/.test(line), line);
+  const tokens = res.md.split('## Tokens')[1].split('\n## ')[0];
+  assert.match(tokens, /Totals: unavailable \(no agent has usage data\)\./);
+  assert.ok(!res.md.includes('>= 0'), tokens);
 });
 
 test('a phase with an untimed agent has no wall time', () => {
