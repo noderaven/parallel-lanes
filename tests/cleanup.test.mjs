@@ -396,6 +396,74 @@ test('cleanup: keeps a dirty worktree and names it', () => {
   assert.match(res.stdout, /restore point: /);
 });
 
+// A case whose project hides untracked files from a plain git status.
+function hidingCase() {
+  const c = newCase();
+  git(c.project, 'config', 'status.showUntrackedFiles', 'no');
+  return c;
+}
+
+const planned = (plan, path) => {
+  const wt = plan.worktrees.find((w) => samePath(w.path, path));
+  assert.ok(wt, JSON.stringify(plan.worktrees));
+  return wt;
+};
+
+test('cleanup: an untracked file hidden by status.showUntrackedFiles=no keeps its worktree', () => {
+  const c = hidingCase();
+  const draft = join(c.lanes.a, 'private-draft.txt');
+  writeFileSync(draft, 'not committed\n');
+  const wt = planned(cleanupOk(c), c.lanes.a);
+  assert.equal(wt.action, 'keep');
+  assert.equal(wt.reason, 'it has uncommitted or untracked changes');
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(existsSync(draft));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'));
+  assert.ok(findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a)), JSON.stringify(out.kept));
+});
+
+test('cleanup: a hidden untracked file in the main checkout keeps the feature branch', () => {
+  const c = hidingCase();
+  mergeIntoOrigin(c);
+  const notes = join(c.project, 'private-notes.txt');
+  writeFileSync(notes, 'not committed\n');
+  assert.match(featureKept(c), /uncommitted or untracked/);
+  assert.ok(existsSync(notes));
+});
+
+test('cleanup: a failed git status keeps the worktree', () => {
+  const c = hidingCase();
+  writeFileSync(join(c.project, '.git', 'worktrees', 'lane-a', 'index'), 'garbage');
+  const wt = planned(cleanupOk(c), c.lanes.a);
+  assert.equal(wt.action, 'keep');
+  assert.match(wt.reason, /^git status failed/);
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(existsSync(c.lanes.a));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  const kept = findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a));
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /^git status failed/);
+});
+
+test('cleanup: a failed git status on the main checkout keeps the feature branch', () => {
+  const c = hidingCase();
+  mergeIntoOrigin(c);
+  writeFileSync(join(c.project, '.git', 'index'), 'garbage');
+  assert.match(featureKept(c), /^git status failed on the main checkout/);
+});
+
+test('cleanup: an ignored file does not block removal', () => {
+  const c = hidingCase();
+  commitFile(c.lanes.a, '.gitignore', '*.log\n');
+  writeFileSync(join(c.lanes.a, 'a.log'), 'ignored\n');
+  assert.equal(planned(cleanupOk(c), c.lanes.a).action, 'remove');
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(!existsSync(c.lanes.a));
+  assert.ok(!hasWorktree(c.project, c.lanes.a));
+  assert.ok(findItem(out.removed, 'worktree', (i) => samePath(i.path, c.lanes.a)), JSON.stringify(out.removed));
+});
+
 test('cleanup: before the PR merges the checkout stays on the feature branch', () => {
   const c = newCase();
   const tip = sha(c, 'feature/x');

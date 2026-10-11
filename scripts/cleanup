@@ -44,11 +44,17 @@ In shadow mode every repo command uses --git-dir=<repo.git_dir>; in git mode
 Removal (--yes, after the restore point), in this order; an item that
 cannot be removed safely is kept and named with the reason:
 1. run-owned worktrees the plan marks remove (clean and unlocked), with
-   git worktree remove (which itself refuses a dirty or locked worktree);
+   git -c status.showUntrackedFiles=all worktree remove (which itself
+   refuses a dirty or locked worktree). Clean means git status --porcelain
+   --untracked-files=all prints nothing: untracked files count even when
+   Git's configuration hides them, and ignored files do not count. A
+   worktree whose git status fails is kept;
 2. lane branches the plan marks remove, with git branch -d (git mode only);
 3. the feature branch (git mode only). It stops at the first failed
    condition, leaving the checkout and the branch as they are:
-   - the main checkout is on repo.branch and clean;
+   - the main checkout is on repo.branch and clean (as in 1: untracked
+     files count even when Git's configuration hides them, ignored files
+     do not, and a git status that fails keeps the branch);
    - base_ref is a local branch with an upstream;
    - git fetch <remote> <upstream branch> succeeds within 120 s (with
      GCM_INTERACTIVE=never and no terminal prompt; on a timeout its process
@@ -110,6 +116,9 @@ ENV["GIT_TERMINAL_PROMPT"] = "0"
 FETCH_TIMEOUT_S = 120
 STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NOT_OWNED = "not owned by this run"
+# The cleanliness check: every untracked file counts, even when Git's
+# configuration (status.showUntrackedFiles) hides them; ignored files do not.
+STATUS = ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"]
 
 
 class Failure(Exception):
@@ -273,7 +282,7 @@ def owned_worktree(repo, listing, path, branch):
 def worktree_item(repo, entry, path, branch):
     if entry["locked"]:
         return {"path": path, "branch": branch, "action": "keep", "reason": "the worktree is locked"}
-    res = run_git(["--no-optional-locks", "status", "--porcelain"], ["-C", path])
+    res = run_git(STATUS, ["-C", path])
     if res.returncode != 0:
         return {"path": path, "branch": branch, "action": "keep",
                 "reason": "git status failed: " + res.stderr.strip()}
@@ -327,9 +336,12 @@ def feature_precheck(repo, branch, base):
     remote = repo.git("config", "branch." + base + ".remote").stdout.strip()
     merge = repo.git("config", "branch." + base + ".merge").stdout.strip()
     reason = None
+    status = repo.git(*STATUS) if current == branch else None
     if current != branch:
         reason = "the main checkout is on " + (current or "a detached HEAD") + ", not " + branch
-    elif repo.git("--no-optional-locks", "status", "--porcelain").stdout.strip():
+    elif status.returncode != 0:
+        reason = "git status failed on the main checkout: " + status.stderr.strip()
+    elif status.stdout.strip():
         reason = "the main checkout has uncommitted or untracked changes"
     elif repo.sha("refs/heads/" + base) is None:
         reason = "base_ref " + base + " is not a local branch"
@@ -543,14 +555,15 @@ def remove_owned(repo, m, plan):
         (removed if ok else kept).append(dict(entry, reason=reason))
 
     # 1. Run-owned worktrees. git worktree remove checks again that each is
-    # clean and unlocked, and refuses otherwise.
+    # clean and unlocked, and refuses otherwise; its own git status would
+    # follow status.showUntrackedFiles, so it is told to show them all.
     still_out = {}
     for w in plan["worktrees"]:
         entry = {"kind": "worktree", "path": w["path"], "branch": w["branch"]}
         if w["action"] != "remove":
             note(False, entry, w["reason"])
             continue
-        res = repo.git("worktree", "remove", w["path"])
+        res = repo.git("-c", "status.showUntrackedFiles=all", "worktree", "remove", w["path"])
         if res.returncode != 0:
             note(False, entry, "git worktree remove refused: " + git_error(res))
             still_out[w["branch"]] = w["path"]
