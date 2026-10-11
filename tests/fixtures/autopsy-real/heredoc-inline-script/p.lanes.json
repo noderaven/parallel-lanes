@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "run_id": "r150",
+  "plan": "C:/u/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/u/project",
+    "branch": "release",
+    "base": "main",
+    "worktree_root": "C:/u/project-wt",
+    "ledger_dir": "C:/u/plans/p.r150.ledger"
+  },
+  "commands": {
+    "setup": [],
+    "test": [
+      "node tests/run-tests.mjs"
+    ],
+    "lint": [],
+    "build": []
+  },
+  "prelude": [],
+  "lanes": [
+    {
+      "id": "autopsy",
+      "name": "Lane autopsy",
+      "tasks": [
+        {
+          "id": "T3",
+          "title": "autopsy slowdowns, suggestions and unexplained time",
+          "tier": "standard"
+        }
+      ]
+    }
+  ],
+  "join": []
+}
