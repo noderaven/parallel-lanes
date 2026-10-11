@@ -40,10 +40,8 @@ after the marker is fixed).
 | Launching with tasks already done | `parallel-lanes: resuming run <run_id>: <K> tasks already committed` |
 | Relaunch after a transient stop | `parallel-lanes: relaunching run <run_id> after a transient stop` |
 
-`<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
-executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
-`<K>` = length of `done`. The dry run returns the launch and resume lines filled in
-(`notices`); the script logs the same line; you still print it.
+What each placeholder stands for: reference.md "Notices". The dry run returns the launch and
+resume lines filled in (`notices`); you still print them.
 
 ## Flow
 
@@ -107,11 +105,8 @@ Fields: reference.md "Manifest fields". In order:
      baseline commit, then a normal git run. Shadow details, existing-shadow check, `shadow
      init` (prints `git_dir`; exit 3 on size: tell the user, `--force` only on their yes):
      reference.md "Shadow repos".
-   - Git identity: `git -C <project> var GIT_COMMITTER_IDENT` must print one, because every
-     task agent commits and a commit without an identity fails partway through the run. If it
-     fails, ask the user to set one (`git config --global user.name` and `user.email`) or to
-     name one that `commit_rules` passes with `-c` (`git -c user.name=... -c user.email=...
-     commit`). `scripts/setup` does not check this, since a `-c` identity is legitimate.
+   - Git identity: `git -C <project> var GIT_COMMITTER_IDENT` must print one, or every task
+     commit fails partway through the run. If it fails: reference.md "Git identity".
 3. Lanes, prelude, join, hooks, `depends_on`, `overlaps`, `excluded`: reference.md "Building
    lanes" (`prelude` and `join` are not lane ids).
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
@@ -135,21 +130,18 @@ Fields: reference.md "Manifest fields". In order:
 
 ## Confirmation (every launch, no exceptions)
 
-Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file>`. Exit 2 or 3 stops the
-flow (show each failure and its fix, and wait); its warnings go in the table header. Each
-check and what it means: reference.md "Doctor".
+Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file> --save
+<scratchpad>/doctor-<run_id>.json` (`<run_dir>/doctor-<run_id>.json` with no scratchpad). Exit 2 or
+3 stops the flow (show each failure and its fix, and wait); its warnings go in the table header.
+Each check and what it means: reference.md "Doctor" and "Launch conditions".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
    `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
    spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
    with errors. Then set `limits.max_agents` = 2 x `agents.length` and `limits.max_rulings` =
    25 (reference.md "Budgets") so the table shows them.
-2. Show a header (mode, base and feature branch, worktree_root, `profile`, `autonomy`,
-   `limits.max_agents`, `limits.max_rulings`, lanes at once = `lanes_effective`, superpowers
-   or built-in prompts, agent type, commit_rules, overlaps, `excluded` with reasons, batches,
-   deferral allowed or not)
-   and this table, one row per task in run order (prelude, lanes, join), then one row for
-   the run-level agents and a total M:
+2. Show a header (the fields reference.md "Confirmation header" lists) and this table, one row per
+   task in run order (prelude, lanes, join), then one row for the run-level agents and a total M:
 
    | Lane | Task | Tier | Security | Agents |
    |---|---|---|---|---|
@@ -195,6 +187,10 @@ this. Say the table is the one required check, show it, and wait.
    `notices.resume` when `done` is non-empty, as it returned them.
 4. Call the Workflow tool with `args` = the manifest. Progress shows in `/workflows`; note
    the transcript directory it prints. Do not do lane work or touch the worktrees meanwhile.
+   Once it prints the transcript directory, bind the saved doctor result to this launch:
+   `<python> <skill_dir>/scripts/ledger conditions <ledger_dir> <wf id> <saved file>`. The
+   wf id is this launch's, never the dry run's. A refusal
+   never stops the run; keep the latest launch's refusal code for `tool-outcomes`.
 5. Record each launch's spend (reference.md "Budgets"), a relaunch included, never a dry run:
    `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned>
    <rulings_spent>` (`<status>`: the run status, `unaccepted` for a complete run that is not accepted or whose
@@ -212,14 +208,19 @@ this. Say the table is the one required check, show it, and wait.
 ## Transient stops (relaunch once, no prompt)
 
 A stop is transient when status is `stopped`, `reason` is not `budget`, and every cause is
-an agent error, a missing result, or setup-command retry exhaustion. The causes are every
-`stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
-stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
-`error:`, or `setup failed`, or reads `integration failed: no result from ...` or
-`post-integrate failed: no result from ...`. Every other cause (`review_rounds`, a supervised
+an agent error, a missing result, or setup-command retry exhaustion (reference.md "Transient
+stops" says how the causes are read and which texts count). Every other cause (`review_rounds`, a supervised
 blocked or question task, `adjudication_cap`, `adjudicator_stop`, `budget`, a failed
 integration or post-integrate on real failures) and status `invalid` or `preflight_conflicts`
 are NOT transient: never relaunch; stop and notify.
+
+Before recording the stopped launch's end, run doctor again with `--save` (Confirmation): the
+earlier snapshot belongs to the earlier launch.
+- Exit 0: record only the spend and relaunch, then run `ledger conditions` for the new launch
+  (Launch step 4).
+- Exit 2 or 3: a real stop. Record the spend and release the lock with status `stopped` in one
+  command line (Launch step 5), show the failures, notify, and keep the failed check names for
+  `--relaunch-blocked`.
 
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
@@ -254,19 +255,16 @@ The run returns `status`:
 
 Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` (Launch step 4's transcript dir) and append
-its output. Per task: status, commits (`skipped`:
-from the ledger's `committed` events), review rounds, tier and escalations, notes, cannot
-verify. "Rulings made on your behalf" and "Dependencies pre-flight added" (reference.md
-"Report"). Then integration and post-integrate notes, E2E PASS/FAIL and the revision it
-checked, final review (fixed, declined, open, cannot verify, and the task minors no final
-lens raised, `final.task_minors_open`), acceptance warnings,
-`agents_spawned`, `agent_type_fallback`, and the `undeclared` files of `ledger status
-<ledger_dir> --manifest <manifest file>` (changed outside their task's Files list).
+its output, with the contents reference.md "Report contents" lists.
 
 After the report, for every run that ends after a launch (never a dry run): `<python>
 <skill_dir>/scripts/archive-run <manifest file> <transcript dir>...`, then `<python>
-<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its
-summary. Details: reference.md "Run history" and "Autopsy".
+<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its summary.
+Details: reference.md "Run history" and "Autopsy". Last, after any other tool: `<python>
+<skill_dir>/scripts/tool-outcomes --run-folder <folder> --archive-exit N --autopsy-exit N
+[--conditions-refused CODE] [--relaunch-blocked CHECKS] --cleanup awaiting|none`. Show its line
+under its own label after the acceptance lead, and run it again after cleanup (reference.md
+"Report").
 
 Then, for accepted work (or reasons the user accepted), offer the next step; act only on an
 explicit yes:

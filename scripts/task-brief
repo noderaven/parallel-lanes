@@ -16,15 +16,19 @@ the next '#+ Task ' heading of the same or higher level, or before any heading
 of a strictly higher level. Headings inside fenced code blocks are ignored.
 Heading and section rules live in _plan.py; brief rules in _brief.py.
 
-Referenced tasks come from the section's Consumes bullet (the first
-'- Consumes:' line outside fenced code, plus its deeper-indented continuation
-lines) and from the --also ids. In the bullet, an id with both a letter and a
-digit (G1) matches as a whole word ('G1.5' does not name G1); any other id
-(4, 1.5) matches only after 'Task' or 'Tasks', including lists such as
-'Tasks 3, 6 and 9' or 'Tasks 2 and 3 outputs'. An id after a list separator
-counts unless a unit follows it ('Task 4 and 3 mi' names Task 4 only). Only
-ids with a heading in the plan count from the bullet; the task itself never
-counts.
+Referenced tasks come from the section's Consumes bullet (the first Consumes
+line outside fenced code, plus its deeper-indented continuation lines) and
+from the --also ids. Both bullets take the label plain or bold, as
+derive-lanes reads them (_plan.label_bullet): a '-', '*' or '+' bullet, any
+case, so '- Consumes:', '- **Consumes:**' and '* **Consumes**:' all work. The
+Consumes colon is optional; the Produces colon is required, inside or right
+after the bold, so a step such as '- produces a cache file' is not the block.
+In the bullet, an id with both a letter and a digit (G1) matches as a whole
+word ('G1.5' does not name G1); any other id (4, 1.5) matches only after
+'Task' or 'Tasks', including lists such as 'Tasks 3, 6 and 9' or 'Tasks 2 and
+3 outputs'. An id after a list separator counts unless a unit follows it
+('Task 4 and 3 mi' names Task 4 only). Only ids with a heading in the plan
+count from the bullet; the task itself never counts.
 
 After the section, for each referenced task in plan order:
 
@@ -32,8 +36,8 @@ After the section, for each referenced task in plan order:
 
     <the Produces block, verbatim>
 
-The Produces block is the first '- Produces:' line outside fenced code in that
-task's section and every following line up to the first non-blank line indented
+The Produces block is the first Produces bullet line outside fenced code in
+that task's section and every following line up to the first non-blank line indented
 no deeper than the bullet, except that a fenced code block opened inside the
 block (at any indent, or right after the bullet line) runs to its closing
 fence. A task without one gets its heading followed by

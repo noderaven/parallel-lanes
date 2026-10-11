@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "run_id": "r142",
+  "plan": "C:/u/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/u/project",
+    "branch": "release",
+    "base": "main",
+    "worktree_root": "C:/u/project-wt",
+    "ledger_dir": "C:/u/plans/p.r142.ledger"
+  },
+  "commands": {
+    "setup": [],
+    "test": [
+      "node tests/run-tests.mjs"
+    ],
+    "lint": [],
+    "build": []
+  },
+  "prelude": [],
+  "lanes": [
+    {
+      "id": "rules",
+      "name": "Lane rules",
+      "tasks": [
+        {
+          "id": "A1",
+          "title": "Every agent gets the check-execution and file-editing rules",
+          "tier": "sonnet"
+        }
+      ]
+    }
+  ],
+  "join": []
+}

@@ -499,3 +499,69 @@ test('SKILL.md stops on doctor exit 2 or 3 and starts Resume step 6 with Confirm
   assert.ok(raw.replace(/\s+/g, ' ').includes('6. Confirmation, doctor included'),
     'Resume step 6 does not start with Confirmation, doctor included');
 });
+
+// These tests check instructions to the session in SKILL.md and reference.md
+// (what they must say about launch conditions and the hand-back's run-tools
+// line), not behaviour the code enforces: scripts and the Workflow code are
+// tested elsewhere.
+const flat = (path) => read(path).toString('utf8').replace(/\s+/g, ' ');
+
+test("doctor's result is saved and bound to each launch", () => {
+  const raw = read(SKILL_MD).toString('utf8');
+  const confirmation = section(raw, 'Confirmation');
+  assert.match(confirmation, /scripts\/doctor <manifest file> --save /, confirmation);
+  const launch = section(raw, 'Launch');
+  const step4 = launch.slice(launch.indexOf('4. Call the Workflow tool'), launch.indexOf('5. Record'));
+  assert.ok(step4.includes('scripts/ledger conditions <ledger_dir> <wf id>'), step4);
+  assert.match(step4, /wf id is this launch's[^.]*never the dry run's/, step4);
+  assert.ok(/refusal never stops the run/.test(step4), step4);
+  const transient = section(raw, 'Transient stops');
+  assert.match(transient, /before recording the stopped launch's end, run doctor again/i, transient);
+  assert.ok(transient.includes('--save'), transient);
+  assert.match(transient, /exit 2 or 3[^.]*real stop/i, transient);
+  assert.ok(transient.includes('status `stopped`') && transient.includes('release the lock'), transient);
+  assert.ok(transient.includes('--relaunch-blocked'), transient);
+  assert.match(transient, /ledger conditions[^.]*new launch/, transient);
+});
+
+test('the hand-back keeps run tools apart from acceptance', () => {
+  const skill = flat(SKILL_MD);
+  const handBack = skill.slice(skill.indexOf('## Hand-back'), skill.indexOf('## Resume'));
+  const autopsy = handBack.indexOf('scripts/autopsy');
+  const tools = handBack.indexOf('scripts/tool-outcomes');
+  assert.ok(autopsy >= 0 && tools > autopsy, handBack);
+  const reference = flat(REFERENCE_MD);
+  assert.match(reference, /tool failure never changes `acceptance`/);
+  assert.match(reference, /`tool-outcomes` runs again after cleanup/);
+});
+
+test('reference.md documents launch conditions', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const wants = [
+    ['Run tools line', ['--run-folder', '--archive-exit', '--autopsy-exit', '--conditions-refused',
+      '--relaunch-blocked', '--cleanup', '--json']],
+    ['Doctor', ['--save', '`checks`', '`observed_at`', '`doctor_version`', 'not_recorded']],
+    ['Autopsy', ['`launch_conditions`', 'orphan_snapshots']],
+    ['Launch conditions', ['ledger conditions', 'wf_recorded', 'not_doctor', 'no_setup', 'setup_recorded',
+      'observation_reused', '`recorded`', '`unavailable`', '`inconsistent`', 'orphan_snapshots',
+      'could not be read', 'possible contributor', 'observed before launch',
+      'status.showUntrackedFiles=no']],
+  ];
+  for (const [heading, words] of wants) {
+    const text = section(ref, heading);
+    for (const word of words) {
+      assert.ok(text.includes(word), `reference.md "${heading}" lacks ${word}`);
+    }
+  }
+  assert.match(flat(REFERENCE_MD), /Consumes and Produces labels may be plain or bold/);
+});
+
+test('README names tool-outcomes among the scripts', () => {
+  const text = flat(README_MD);
+  assert.match(text, /\| `scripts\/` \|[^|]*tool-outcomes/);
+});
+
+test('SKILL.md leaves room for the next release', () => {
+  const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
+  assert.ok(words < 2950, `SKILL.md has ${words} words`);
+});

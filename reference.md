@@ -83,11 +83,49 @@ the run passes them to `start-task` and `task-brief` as `--also`). Tasks the pla
 after-merge, operator, or manual are left out of the manifest and listed in the confirmation
 header.
 
+## Flow details
+
+Details SKILL.md points to.
+
+### Notices
+
+`<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
+executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
+`<K>` = length of `done`. The dry run returns the launch and resume lines filled in
+(`notices`); the script logs the same line; you still print it.
+
+### Git identity
+
+`git -C <project> var GIT_COMMITTER_IDENT` must print one, because every task agent commits and
+a commit without an identity fails partway through the run. If it fails, ask the user to set
+one (`git config --global user.name` and `user.email`) or to name one that `commit_rules`
+passes with `-c` (`git -c user.name=... -c user.email=... commit`). `scripts/setup` does not
+check this, since a `-c` identity is legitimate.
+
+### Confirmation header
+
+The header shown with the dry-run table lists: mode, base and feature branch, worktree_root,
+`profile`, `autonomy`, `limits.max_agents`, `limits.max_rulings`, lanes at once =
+`lanes_effective`, superpowers or built-in prompts, agent type, commit_rules, overlaps,
+`excluded` with reasons, batches, and whether deferral is allowed. Doctor's warnings go in it
+too.
+
+### Transient stops
+
+SKILL.md gives the rule; this is how it reads the causes. The causes are every
+`stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
+stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
+`error:`, or `setup failed`, or reads `integration failed: no result from ...` or
+`post-integrate failed: no result from ...`. The doctor rerun before a relaunch is described
+under "Launch conditions".
+
 ## Building lanes
 
 `derive-lanes` reports facts; you decide. Its output:
 - `tasks`: `[{id, title, files, deps}]`; deps come from bracketed id lists on the heading and
-  `- Consumes:` lines.
+  `- Consumes:` lines. Consumes and Produces labels may be plain or bold, on a `-`, `*` or `+`
+  bullet (`- Consumes:`, `* **Produces:**`); Produces needs its colon, Consumes does not.
+  `derive-lanes` and `task-brief` read them the same way.
 - `groups`: tasks connected by shared files (each group in plan order).
 - `bridge_files`: files whose edits alone hold a group together, with the parts the group
   would split into without them.
@@ -509,6 +547,54 @@ partway through (see `agent_type` under Manifest fields). The run result's `agen
 lists the model and effort of every agent started, in start order (what `run-report` reads
 for effort).
 
+### Report contents
+
+The hand-back appends `run-report`'s output. Per task: status, commits (`skipped`: from the
+ledger's `committed` events), review rounds, tier and escalations, notes, cannot verify.
+"Rulings made on your behalf" and "Dependencies pre-flight added" (above). Then integration and
+post-integrate notes, E2E PASS/FAIL and the revision it checked, final review (fixed, declined,
+open, cannot verify, and the task minors no final lens raised, `final.task_minors_open`),
+acceptance warnings, `agents_spawned`, `agent_type_fallback`, and the `undeclared` files of
+`ledger status <ledger_dir> --manifest <manifest file>` (changed outside their task's Files
+list).
+
+### Run tools line
+
+After `archive-run` and `autopsy`, and after any other tool the hand-back runs, the session runs
+`<python> <skill_dir>/scripts/tool-outcomes`, last. It is read-only, needs no manifest, and
+prints one line, `Run tools: <doctor>; <archive>; <autopsy>; <cleanup>`; show it under its own
+label after the acceptance lead.
+- **Flags:** `--run-folder DIR` (the folder `archive-run` printed; it goes through the same
+  Git Bash path conversion as other paths), `--archive-exit N`, `--autopsy-exit N` (integers),
+  `--conditions-refused CODE` (the latest launch's `ledger conditions` refusal code, one of the
+  five in "Launch conditions"), `--relaunch-blocked CHECKS` (comma-separated failed check
+  names from a relaunch that doctor stopped), `--cleanup awaiting|done|declined|failed|none`
+  (`awaiting` when cleanup will be offered, else `none`), and `--json`. Any other value is
+  exit 2; it exits 0 whenever its arguments parse.
+- **The line:**
+  - doctor: from the last launch's entry in `autopsy.json`, read only with `--autopsy-exit 0`
+    and `--run-folder`. A recorded launch reads `doctor before <wf>: <status>` with the warned,
+    failed and not-read checks by name. Otherwise the line says launch conditions were not
+    recorded (with the refusal code), are inconsistent (with the reason), or were not checked
+    (autopsy not run, failed, unreadable or listing no launches). A run with several launches
+    adds "(earlier launches: see autopsy)", and `--relaunch-blocked` adds ", relaunch blocked by doctor
+    (<names>)".
+  - archive: `archived to <DIR>`, `archived`, `archive failed (exit N)` or `archive not run`.
+  - autopsy: `autopsy generated (<m> possible contributor(s))`, `autopsy generated
+    (contributors unavailable)`, `autopsy failed (exit N)` or `autopsy not run`.
+  - cleanup: `cleanup awaiting approval`, `cleanup done`, `cleanup declined`, `cleanup failed`
+    or `cleanup not offered`.
+- **`--json`** prints `{"doctor", "archive", "autopsy", "cleanup"}`, each `{"state",
+  "detail"}`, where `detail` is that tool's text in the line. States: doctor `recorded`,
+  `not_recorded`, `inconsistent` or `not_checked`; archive `archived`, `failed` or `not_run`;
+  autopsy `generated`, `failed` or `not_run`; cleanup `awaiting`, `done`, `declined`, `failed`
+  or `not_offered`.
+- **Separate from acceptance.** `acceptance` is the only verdict on the delivered work. A tool
+  failure never changes `acceptance`, and a clean tools line never stands in for it. Lead with
+  `acceptance`, then show this line under its own label.
+- **After cleanup.** `tool-outcomes` runs again after cleanup, with `--cleanup done`,
+  `declined` or `failed`, and the session shows the new line.
+
 ## Verify evidence
 
 `<python> <skill_dir>/scripts/check-verify <transcript_dir> <manifest>` compares the verify agent's
@@ -749,7 +835,13 @@ hand-back report.
 **Sections of `autopsy.json`:** `done` (per task status, commits, rounds, tier; acceptance;
 final-review counts; E2E), `time` (wall time per launch, phases, lanes with busy and idle time,
 agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `checks`,
-`slowdowns`, `detectors`, `suggestions` and `unexplained`.
+`slowdowns`, `detectors`, `suggestions`, `unexplained`, `launch_conditions` and
+`orphan_snapshots`.
+- `launch_conditions` has one entry per launch, from the doctor result saved for it, and
+  `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
+  "Launch conditions" section after "Where time went", and the summary one line after the
+  slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
+  `AUTOPSY_VERSION` is 4, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -856,11 +948,12 @@ exit 2 on a usage error, an unreadable history dir or `index.json`, or outputs i
 
 ## Doctor
 
-`<python> <skill_dir>/scripts/doctor <manifest> [--json]` checks the machine and the project
-before a launch, for a new run and for a resume. It is read-only: it never changes a file, ref,
-config value or setting, and it never runs `git fetch` (the upstream tip comes from `git
-ls-remote`, with a 15 s timeout). A hard failure blocks the launch: tell the user what failed
-and its fix, and wait. Warnings never block; show them in the dry-run table header.
+`<python> <skill_dir>/scripts/doctor <manifest> [--json] [--save FILE]` checks the machine and the
+project before a launch, for a new run, a resume and a transient relaunch. It is read-only apart
+from the `--save` file: it never changes another file, ref, config value or setting, and it never
+runs `git fetch` (the upstream tip comes from `git ls-remote`, with a 15 s timeout). A hard failure
+blocks the launch: tell the user what failed and its fix, and wait. Warnings never block; show them
+in the dry-run table header.
 
 Hard failures:
 
@@ -898,7 +991,133 @@ fails is a warning with detail `unknown`.
 Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: doctor itself could not run
 (a usage error or an unreadable manifest); it stops the flow like exit 3, since no check ran.
 `--json` prints `{"status": "ok" | "blocked", "failures": [...],
-"warnings": [...], "skipped": [...]}`.
+"warnings": [...], "skipped": [...], "checks": [...], "observed_at": ..., "doctor_version": ...,
+"run_id": ...}`.
+- **`checks`:** one entry `{"check", "outcome"}` for each of the twelve checks, in run order,
+  with outcome `passed`, `warning`, `failed` or `skipped`. A check that recorded nothing
+  is `skipped` and also appears in `skipped` with reason `not_recorded`; a check recorded more
+  than once keeps its worst outcome (failed, warning, skipped, passed).
+- **`observed_at`** is the UTC time of the run, `YYYY-MM-DDTHH:MM:SSZ`. **`doctor_version`** is
+  the skill's `VERSION` (`unavailable` when it cannot be read). **`run_id`** is the manifest's
+  `run_id`, or null.
+- **`--save FILE`** writes that JSON (indent 2, trailing newline) to FILE through a temp file
+  and a rename, whatever the checks found. It never blocks: the exit code is the checks'. It does
+  not write when FILE is inside the project (`repo.root`, symlinks resolved) or when the write
+  fails; either way it prints `doctor: result not saved: <why>` to stderr. `--save` without a
+  value is a usage error (exit 2). The `--save` file is the only file doctor writes. The session
+  passes a path outside the project (the scratchpad, else `<run_dir>`), in the form its shell
+  gives; doctor converts a Git Bash `/c/...` path on Windows like the manifest path.
+
+## Launch conditions
+
+Doctor's saved result, the conditions observed before launch, is bound to each launch and shown
+by `autopsy`. Everything here is worded as observed before launch: a condition may not have
+lasted through the run, and a warning beside a slowdown is a possible contributor, never a
+cause.
+
+**Saving.** Confirmation runs doctor with `--save` (see "Doctor"). Launch step 4 then runs
+`<python> <skill_dir>/scripts/ledger conditions <ledger_dir> <wf id> <saved file>` once the real
+launch's Workflow call has printed its transcript directory. The wf id is that launch's, never
+the dry run's: a dry run prints a transcript directory with a wf id of its own, and binding it
+would leave the real launch with no conditions (its snapshot would show as an orphan).
+
+**`ledger conditions`.** It writes `<ledger_dir>/doctor-<wf id>.json`:
+`{"launch": {"wf", "setup_event", "setup_head"}, "recorded_at", "doctor": <the saved result>}`.
+`setup_event` is the number of setup events in the ledger (events with task `_run`, event
+`run_started`, phase `setup`) and `setup_head` the head of the last one, since every launch
+follows exactly one setup. It appends no ledger event, so `ledger status`, backfill and resume
+are untouched, and it never creates the ledger dir. Exit 2: a wrong argument count, a wf id
+that does not match `^wf_[a-z0-9-]{6,64}$`, or a saved file that is not a readable JSON object.
+Exit 3: a malformed ledger, or a refusal. A refusal writes nothing and prints
+`{"refused": "<code>"}` on stdout and one line naming the code on stderr. Binding the same
+launch again with the same content is a no-op (exit 0). The codes, in the order they are
+checked:
+
+| Code | Refused when |
+|---|---|
+| `wf_recorded` | a snapshot for this wf id exists and differs |
+| `not_doctor` | the saved file has no `status`, or no valid `observed_at` |
+| `no_setup` | the ledger has no setup event |
+| `setup_recorded` | another snapshot already names the same `setup_event` |
+| `observation_reused` | another snapshot has the same `observed_at`: run doctor again |
+
+Success prints `{"recorded": "doctor-<wf id>.json", "setup_event": N}`. A refusal or an error
+never stops or relaunches the run. The session keeps the latest launch's refusal code for
+`tool-outcomes --conditions-refused`; a refusal for an earlier launch is dropped, and `autopsy`
+reports it as unavailable.
+
+**Transient relaunch.** Doctor runs again, with `--save`, before the stopped launch's end is
+recorded, because the earlier snapshot belongs to the earlier launch. Exit 0 (warnings
+included): record only the spend, then relaunch as before (setup, the Workflow call, `ledger
+conditions` for the new launch). Exit 2 or 3: the stop is real. Record the spend and release
+the lock with status `stopped` in one command line, show the failures and their fixes, notify,
+and keep the failed check names for `tool-outcomes --relaunch-blocked`.
+- What this adds: in git mode `repo.root` is the feature checkout, and setup already refuses it
+  with uncommitted changes; on a resume `base_not_current` is only a warning. So in the default
+  git configuration the new stops are `git_identity` and `python` (shadow mode: those and
+  `shadow_repo`; `dirty_checkout` is skipped there). A relaunch would fail on each anyway.
+- One exception, accepted: with `status.showUntrackedFiles=no`, setup's plain `git status
+  --porcelain` ignores untracked files but doctor does not. A relaunch with untracked,
+  non-ignored files left by the run's own checks now stops at doctor. That run would end
+  `unverified` (`checks_unclean`) anyway, so stopping earlier is the better outcome.
+
+**What `autopsy` shows.** A snapshot belongs to the launch named in its file name
+`doctor-<wf>.json`; only names with `<wf>` matching `^wf_[A-Za-z0-9_-]{1,64}$` count, and other
+files are ignored. Each launch in `launch_conditions` has a state:
+- `unavailable`: no snapshot names it (an older run, or a refused or forgotten `ledger
+  conditions`). Reason "launch conditions unavailable".
+- `inconsistent`: a snapshot names it but cannot be trusted for it; nothing from it is shown as
+  a condition. The reason is the first that applies: "snapshot unreadable"; "file name and
+  content name different launches"; "another snapshot names the same setup" (both are
+  inconsistent); "doctor result is for another run"; "launch time unavailable"; "observed after
+  the launch started"; "observed before the previous launch ended" (every flow runs doctor after
+  the previous launch returned).
+- `recorded`: otherwise. `before_start_s` is the launch's start minus the observation time.
+
+A snapshot whose wf is not one of the archived launches (a dry run's wf bound by mistake) goes
+in `orphan_snapshots`, sorted, and is not shown as a condition.
+
+**Entry fields.** `{wf, state, reason, observed_at, before_start_s, doctor_version, status,
+checks, possible_contributors}`. When the state is not `recorded`, `checks` and
+`possible_contributors` are `[]` and the other values null. Values copied from a snapshot are
+validated: a check entry needs a `check` matching `^[a-z_]{1,32}$` and one of the four outcomes
+or it is dropped; `status` must be `ok` or `blocked`; `doctor_version` must look like `1.5.1` or
+be `unavailable`; otherwise null. Each check is `{check, outcome, detail, read}`, from the
+snapshot's `checks` (else its failures, warnings and skipped entries, never a `passed` one); if
+the two disagree, the worst outcome wins.
+- **`read`** is false only for a `warning` with detail `unknown` from `memory`, `disk`,
+  `heavy_processes`, `active_runs` or `defender`, where doctor uses `unknown` for "could not be
+  read". Such a check is shown as "could not be read", is never a possible contributor, and is
+  not counted as a warning. `base_not_current`'s `unknown` is a real condition and stays `read`.
+- **Derived details.** `detail` is never copied as doctor wrote it; it is derived per check from
+  a fixed pattern, and null when nothing matches. `unknown` is kept. A skipped check keeps its
+  reason code (lowercase letters and `_`). `memory`, `heavy_processes` and `concurrency` keep
+  their text when it holds only letters, digits, spaces and `. , ; ( ) % ' _ -`. `disk` keeps
+  only `<N> GB free`. `defender` keeps only `covered` or `not covered`. Every other check,
+  `base_not_current` included (its detail can name a remote), has outcome only.
+- **Possible contributors.** A check with outcome `warning` or `failed` that was read is a
+  possible contributor when a slowdown of a related kind starts inside the launch (between its
+  start and end; a slowdown with no start is not counted). The related kinds are one constant,
+  `RELATED_SLOWDOWNS`, a first guess for 1.6.0 to tune:
+
+  | Check | Related slowdown kinds |
+  |---|---|
+  | `memory`, `heavy_processes`, `defender`, `active_runs` | `long_tool_call`, `timeout`, `background_check` |
+  | `disk`, `python_alias` | `repeated_failure` |
+
+  Every other check has none, `concurrency` included: no slowdown kind measures lanes waiting
+  for an agent slot. Each entry is `{check, slowdowns: {<kind>: <count>}}`, zero counts left
+  out; the number of possible contributors counts entries over all launches.
+
+**`autopsy.md`.** The "Launch conditions" section follows "Where time went". Its first line is
+"Observed before each launch. A condition may not have lasted through the run, and a warning
+beside a slowdown is a possible contributor, not a cause." A recorded launch gets "Observed
+before launch <wf> (<N> min before its start), doctor <version>: <status>", one line for each
+warned or failed check that was read, "<check>: could not be read" for each that was not, a
+"Skipped:" line, and "Possible contributors: ..." or "none". Other launches get "<wf>: <reason>"
+and each orphan "Snapshot for a launch not in this archive: <wf>". The chat summary adds
+`launch conditions: <n> check(s) warned or failed before launch[, <k> could not be read]; <m>
+possible contributor(s)` only when a recorded launch has a warned, failed or unread check.
 
 ## Cleanup
 

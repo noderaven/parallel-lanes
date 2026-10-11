@@ -99,14 +99,34 @@ function fixture() {
   };
 }
 
-function doctor(manifest, { env = ENV, json = true } = {}) {
-  const r = spawnSync('python3', [SCRIPT, manifest, ...(json ? ['--json'] : [])], { encoding: 'utf8', env });
+// Every check doctor runs, in run_checks order.
+const CHECK_NAMES = [
+  'git_identity', 'base_not_current', 'python', 'dirty_checkout', 'shadow_repo', 'memory',
+  'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
+];
+
+// No scenario may leave a check unrecorded: every result the helpers return
+// is checked for completeness.
+function assertComplete(result) {
+  const unrecorded = (result.skipped || []).filter((s) => s.reason === 'not_recorded');
+  assert.deepEqual(unrecorded, [], JSON.stringify(result));
+}
+
+function doctor(manifest, { env = ENV, json = true, save = null } = {}) {
+  const args = [SCRIPT, manifest, ...(json ? ['--json'] : []), ...(save ? ['--save', save] : [])];
+  const r = spawnSync('python3', args, { encoding: 'utf8', env });
   let out = null;
-  if (json && (r.status === 0 || r.status === 3)) out = JSON.parse(r.stdout);
+  if (json && (r.status === 0 || r.status === 3)) {
+    out = JSON.parse(r.stdout);
+    assertComplete(out);
+  }
   return { code: r.status, out, stdout: r.stdout, stderr: r.stderr };
 }
 
 const named = (list, check) => list.find((x) => x.check === check);
+
+// The outcome result's checks list gives check.
+const outcome = (result, check) => named(result.checks, check)?.outcome;
 
 test('a clean, current repo passes', () => {
   const f = fixture();
@@ -331,6 +351,67 @@ test('usage errors and unreadable manifests exit 2', () => {
   const noRepo = join(f.dir, 'no-repo.json');
   writeFileSync(noRepo, JSON.stringify({ run_id: 'd1' }));
   assert.equal(doctor(noRepo).code, 2);
+
+  // --save needs a value.
+  const manifest = f.manifest();
+  for (const args of [['--save'], ['--json', '--save'], ['--save', '--json']]) {
+    const r = spawnSync('python3', [SCRIPT, manifest, ...args], { encoding: 'utf8', env: ENV });
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+  }
+});
+
+test('--save writes the JSON result even when a check fails', () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'untracked.txt'), 'new\n');
+  const saved = join(f.dir, 'd.json');
+  const r = doctor(f.manifest(), { save: saved });
+  assert.equal(r.code, 3, r.stderr);
+  assert.equal(r.stderr, '');
+  const text = readFileSync(saved, 'utf8');
+  const file = JSON.parse(text);
+  assert.equal(file.status, 'blocked');
+  assert.deepEqual(file, r.out);
+  // The very JSON it printed: indent 2 and a trailing newline.
+  assert.equal(text, r.stdout);
+
+  // Without --json the file is still the JSON result, and stdout the text.
+  const plain = join(f.dir, 'plain.json');
+  const t = doctor(f.manifest(), { json: false, save: plain });
+  assert.equal(t.code, 3, t.stderr);
+  assert.match(t.stdout, /^doctor: blocked\n/);
+  assert.match(t.stdout, /FAIL dirty_checkout: /);
+  const result = JSON.parse(readFileSync(plain, 'utf8'));
+  assert.equal(result.status, 'blocked');
+  assert.equal(outcome(result, 'dirty_checkout'), 'failed');
+  assertComplete(result);
+
+  // On Windows a Git Bash path (/c/x), as a scratchpad path may be, is saved at C:/x.
+  if (IS_WINDOWS) {
+    const target = join(f.dir, 'msys.json');
+    const msys = target.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_m, d) => `/${d.toLowerCase()}`);
+    const m = doctor(f.manifest(), { save: msys });
+    assert.equal(m.code, 3, m.stderr);
+    assert.equal(m.stderr, '');
+    assert.equal(readFileSync(target, 'utf8'), m.stdout);
+  }
+});
+
+test('--save never blocks', () => {
+  const f = fixture();
+  const manifest = f.manifest();
+  const plain = doctor(manifest);
+  assert.equal(plain.code, 0, plain.stderr + plain.stdout);
+  writeFileSync(join(f.dir, 'afile'), 'a regular file\n');
+  for (const target of [join(f.root, 'd.json'), join(f.dir, 'afile', 'd.json')]) {
+    for (const json of [true, false]) {
+      const r = doctor(manifest, { json, save: target });
+      assert.equal(r.code, plain.code, `${target}: ${r.stderr}`);
+      assert.match(r.stderr, /^doctor: result not saved: .+\n$/);
+      assert.ok(!existsSync(target), `${target} was written`);
+    }
+  }
+  // Nothing at all was left in the project: a later doctor still sees it clean.
+  assert.equal(git(f.root, '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'), '');
 });
 
 test('doctor changes nothing', () => {
@@ -346,8 +427,11 @@ test('doctor changes nothing', () => {
   ];
   const before = snapshot();
   const manifest = f.manifest({}, { commit_rules: 'git -c user.name=a -c user.email=b commit' });
-  assert.equal(doctor(manifest).code, 3);
-  assert.equal(doctor(manifest, { json: false }).code, 3);
+  // The --save file, outside the repo, is the one file doctor writes.
+  const saved = join(f.dir, 'saved.json');
+  assert.equal(doctor(manifest, { save: saved }).code, 3);
+  assert.equal(doctor(manifest, { json: false, save: saved }).code, 3);
+  assert.ok(existsSync(saved), 'the --save file was not written');
   assert.deepEqual(snapshot(), before);
   assert.ok(!existsSync(join(f.root, '.git', 'FETCH_HEAD')), 'doctor fetched');
 });
@@ -406,8 +490,109 @@ function fakeDoctor(manifest, { fakes = {}, platform = process.platform, env = {
     { encoding: 'utf8', env: ENV });
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout);
+  assertComplete(out.result);
   return { ...out.result, called: out.called, stdout: r.stdout };
 }
+
+// Runs a Python snippet with _doctor imported; it prints JSON, returned parsed.
+function snippet(lines, ...args) {
+  const code = ['import json, sys', 'sys.dont_write_bytecode = True', 'sys.path.insert(0, sys.argv[1])',
+    'import _doctor', ...lines].join('\n');
+  const r = spawnSync('python3', ['-c', code, join(SKILL_DIR, 'scripts'), ...args], { encoding: 'utf8', env: ENV });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test('every check records exactly one outcome', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest());
+  assert.equal(r.checks.length, 12, JSON.stringify(r.checks));
+  assert.deepEqual(r.checks.map((c) => c.check), CHECK_NAMES);
+  const expected = {};
+  for (const x of r.failures) expected[x.check] = 'failed';
+  for (const x of r.warnings) expected[x.check] = 'warning';
+  for (const x of r.skipped) expected[x.check] = 'skipped';
+  // One entry per check across failures, warnings and skipped.
+  assert.equal(Object.keys(expected).length, r.failures.length + r.warnings.length + r.skipped.length,
+    JSON.stringify(r));
+  for (const { check, outcome: got } of r.checks) {
+    assert.equal(got, expected[check] || 'passed', `${check}: ${JSON.stringify(r)}`);
+  }
+  assert.equal(outcome(r, 'git_identity'), 'passed');
+  assert.equal(outcome(r, 'dirty_checkout'), 'passed');
+});
+
+test('outcomes follow each path', () => {
+  const f = fixture();
+  const low = fakeDoctor(f.manifest(), { fakes: { memory: { available: 3 * GB } } });
+  assert.equal(outcome(low, 'memory'), 'warning');
+
+  const linux = fakeDoctor(f.manifest(), { platform: 'linux' });
+  assert.equal(outcome(linux, 'defender'), 'skipped');
+  assert.equal(outcome(linux, 'python_alias'), 'skipped');
+
+  const plain = join(f.dir, 'plain');
+  mkdirSync(plain);
+  const shadow = fakeDoctor(f.manifest({ mode: 'shadow', root: plain, git_dir: join(f.dir, 'no-shadow') }));
+  assert.equal(outcome(shadow, 'shadow_repo'), 'failed');
+  assert.equal(outcome(shadow, 'dirty_checkout'), 'skipped');
+
+  writeFileSync(join(f.root, 'untracked.txt'), 'new\n');
+  const dirty = fakeDoctor(f.manifest());
+  assert.equal(outcome(dirty, 'dirty_checkout'), 'failed');
+});
+
+test('the result names its run, time and version', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest());
+  assert.equal(r.run_id, 'd1');
+  assert.match(r.observed_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  assert.ok(Math.abs(Date.parse(r.observed_at) - Date.now()) < 60 * 1000, r.observed_at);
+  assert.equal(r.doctor_version, readFileSync(join(SKILL_DIR, 'VERSION'), 'utf8').trim());
+
+  const anonymous = fakeDoctor(f.manifest({}, { run_id: undefined }));
+  assert.equal(anonymous.run_id, null);
+  const blank = fakeDoctor(f.manifest({}, { run_id: '' }));
+  assert.equal(blank.run_id, null);
+
+  const noVersion = join(f.dir, 'no-version');
+  mkdirSync(noVersion);
+  assert.equal(snippet(['print(json.dumps(_doctor.read_version(sys.argv[2])))'], noVersion), 'unavailable');
+});
+
+test('a check recorded twice keeps its worst outcome', () => {
+  const r = snippet([
+    'report = _doctor._Report()',
+    'report.warn("memory", "low")',
+    'report.passed("memory")',
+    'report.skip("disk", "no_worktree_root")',
+    'report.fail("disk", "full", "free some space")',
+    'print(json.dumps(report.result()))',
+  ]);
+  assert.equal(outcome(r, 'memory'), 'warning');
+  assert.equal(outcome(r, 'disk'), 'failed');
+  assert.equal(r.status, 'blocked');
+});
+
+test('an unrecorded check is never passed', () => {
+  const r = snippet([
+    'report = _doctor._Report()',
+    'report.passed("memory")',
+    'print(json.dumps(report.result()))',
+  ]);
+  assert.deepEqual(r.checks.map((c) => c.check), CHECK_NAMES);
+  for (const { check, outcome: got } of r.checks) {
+    if (check === 'memory') {
+      assert.equal(got, 'passed');
+      assert.equal(named(r.skipped, check), undefined);
+    } else {
+      assert.equal(got, 'skipped', check);
+      assert.deepEqual(r.skipped.filter((s) => s.check === check), [{ check, reason: 'not_recorded' }]);
+    }
+  }
+  assert.equal(r.skipped.length, 11);
+  assert.equal(r.status, 'ok');
+});
 
 test('low memory and low disk warn', () => {
   const f = fixture();

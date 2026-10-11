@@ -99,9 +99,10 @@ test('done lists each task and the acceptance', () => {
   assert.equal(base.code, 0, base.stderr);
   assert.deepEqual(Object.keys(A), [
     'autopsy_version', 'inputs_fingerprint', 'run_id', 'engine_version', 'launches', 'done', 'time',
-    'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained',
+    'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
+    'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 3);
+  assert.equal(A.autopsy_version, 4);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -1038,6 +1039,25 @@ test('the r150 parser probes are not check runs', () => {
   assert.equal(chained("cd '/w' && python -c \"\nimport _autopsy as A\nprint(A.match_check('curl http://x/#a && python3 scripts/run-checks . --cmd test t', []))\n\""), null);
 });
 
+test('match_check parses a configured command once', () => {
+  const res = python([
+    'import _autopsy',
+    '_autopsy._check_words.cache_clear()',
+    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(chainedManifest))}))`,
+    'lines = ["npm test", "npm run lint && npm test -- a", "echo hi"]',
+    'found = [_autopsy.match_check(line, checks, 0) for line in lines]',
+    'print(json.dumps({"found": found, "misses": _autopsy._check_words.cache_info().misses}))',
+  ]);
+  assert.deepEqual(res, {
+    found: [
+      { check: 'test#1', certainty: 'ran', full_suite: 'ran' },
+      { check: 'a.test#1', certainty: 'ran', full_suite: null },
+      null,
+    ],
+    misses: 3,
+  });
+});
+
 test('configured commands with secrets never reach the outputs', () => {
   const dir = copyRun(RUN3);
   const path = join(dir, 'p.lanes.json');
@@ -1083,8 +1103,8 @@ function runCli(dir, ...extra) {
 }
 
 const HEADINGS = [
-  'Summary', 'What got done', 'Where time went', 'Checks', 'Slowdowns', 'Tokens', 'Suggestions',
-  'Open questions',
+  'Summary', 'What got done', 'Where time went', 'Launch conditions', 'Checks', 'Slowdowns', 'Tokens',
+  'Suggestions', 'Open questions',
 ];
 
 test('autopsy.md has every section in order', () => {
@@ -1241,4 +1261,370 @@ test('render_markdown and render_summary work on an analysis alone', () => {
   ]);
   assert.match(out[0], /^# Autopsy: f1$/);
   assert.match(out[1], /\/x\/autopsy\.md$/);
+});
+
+// ---- launch conditions ----
+// A doctor-<wf>.json snapshot in the ledger (what ledger conditions writes)
+// binds a doctor result to one launch. run2's launches are wf_1
+// (08:00:00-08:05:00, stopped) and wf_2 (09:00:00-09:21:30).
+
+const OBS = (hms) => `2026-10-10T${hms}Z`;
+const FIRST_LINE = 'Observed before each launch. A condition may not have lasted through the run, and a warning '
+  + 'beside a slowdown is a possible contributor, not a cause.';
+const MEMORY_LOW = { check: 'memory', detail: '3.2 GB of physical memory available (under 4 GB)' };
+
+// Copies run2 to a temp dir and writes each {name: object or raw text} into
+// its ledger.
+function withSnapshots(files) {
+  const dir = copyRun(RUN2);
+  writeSnapshots(dir, files);
+  return dir;
+}
+
+function writeSnapshots(dir, files) {
+  for (const [name, content] of Object.entries(files)) {
+    const text = typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`;
+    writeFileSync(join(dir, 'p.f2.ledger', name), text);
+  }
+}
+
+function doctorResult({
+  observed_at, warnings = [], failures = [], skipped = [], checks, run_id = 'f2',
+  status = failures.length ? 'blocked' : 'ok', doctor_version = '1.5.1',
+} = {}) {
+  const doctor = { status, failures, warnings, skipped, observed_at, doctor_version, run_id };
+  if (checks !== undefined) doctor.checks = checks;
+  return doctor;
+}
+
+function snapshot(wf, setupEvent, doctor) {
+  return {
+    launch: { wf, setup_event: setupEvent, setup_head: 'a'.repeat(40) },
+    recorded_at: '2026-10-10T10:00:00Z',
+    doctor,
+  };
+}
+
+// wf_2's snapshot alone, observed two minutes before it started.
+function wf2Only(doctor = {}) {
+  return withSnapshots({ 'doctor-wf_2.json': snapshot('wf_2', 2, doctorResult({ observed_at: OBS('08:58:00'), ...doctor })) });
+}
+
+function analyse(dir) {
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const json = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const byWf = Object.fromEntries(json.launch_conditions.map((x) => [x.wf, x]));
+  return { ...res, json, byWf };
+}
+
+const section = (md) => md.split('## Launch conditions\n')[1].split('\n## ')[0];
+const withoutSection = (md) => md.replace(/## Launch conditions\n[\s\S]*?(?=\n## )/, '');
+const summaryLine = (stdout) => stdout.split('\n').find((l) => l.startsWith('launch conditions:'));
+
+function assertNotShown(entry, reason) {
+  assert.deepEqual(entry, {
+    wf: entry.wf, state: entry.state, reason, observed_at: null, before_start_s: null, doctor_version: null,
+    status: null, checks: [], possible_contributors: [],
+  });
+}
+
+test('older runs say launch conditions unavailable', () => {
+  for (const src of [RUN1, RUN2, RUN3]) {
+    const res = analyse(copyRun(src));
+    assert.deepEqual(res.json.launch_conditions.map((x) => x.wf), res.json.launches.map((l) => l.wf));
+    for (const entry of res.json.launch_conditions) {
+      assert.equal(entry.state, 'unavailable');
+      assertNotShown(entry, 'launch conditions unavailable');
+      assert.ok(section(res.md).includes(`${entry.wf}: launch conditions unavailable`), res.md);
+    }
+    assert.deepEqual(res.json.orphan_snapshots, []);
+    assert.equal(summaryLine(res.stdout), undefined);
+    assert.equal(section(res.md).split('\n').filter((l) => l !== '')[0], FIRST_LINE);
+  }
+});
+
+test('a snapshot changes only its own outputs', () => {
+  const dir = copyRun(RUN2);
+  const before = analyse(dir);
+  writeSnapshots(dir, {
+    'doctor-wf_2.json': snapshot('wf_2', 2, doctorResult({ observed_at: OBS('08:58:00'), warnings: [MEMORY_LOW] })),
+  });
+  const after = analyse(dir);
+  assert.equal(after.byWf.wf_2.state, 'recorded');
+  assert.notEqual(summaryLine(after.stdout), undefined);
+  const strip = (json) => {
+    const out = { ...json };
+    delete out.launch_conditions;
+    delete out.inputs_fingerprint;
+    return out;
+  };
+  assert.deepEqual(strip(after.json), strip(before.json));
+  assert.notEqual(after.md, before.md);
+  assert.equal(withoutSection(after.md), withoutSection(before.md));
+  const noLine = (stdout) => stdout.split('\n').filter((l) => !l.startsWith('launch conditions:')).join('\n');
+  assert.equal(noLine(after.stdout), noLine(before.stdout));
+});
+
+test('each launch shows its own snapshot', () => {
+  const res = analyse(withSnapshots({
+    'doctor-wf_1.json': snapshot('wf_1', 1, doctorResult({ observed_at: OBS('07:55:00'), warnings: [MEMORY_LOW] })),
+    'doctor-wf_2.json': snapshot('wf_2', 2, doctorResult({ observed_at: OBS('08:58:00') })),
+  }));
+  assert.deepEqual(res.byWf.wf_1, {
+    wf: 'wf_1', state: 'recorded', reason: null, observed_at: '2026-10-10T07:55:00.000Z', before_start_s: 300,
+    doctor_version: '1.5.1', status: 'ok',
+    checks: [{ check: 'memory', outcome: 'warning', detail: MEMORY_LOW.detail, read: true }],
+    possible_contributors: [],
+  });
+  assert.deepEqual(res.byWf.wf_2, {
+    wf: 'wf_2', state: 'recorded', reason: null, observed_at: '2026-10-10T08:58:00.000Z', before_start_s: 120,
+    doctor_version: '1.5.1', status: 'ok', checks: [], possible_contributors: [],
+  });
+  const text = section(res.md);
+  assert.ok(text.includes('Observed before launch wf_1 (5 min before its start), doctor 1.5.1: ok\n'
+    + `- memory: warning (${MEMORY_LOW.detail})\nPossible contributors: none`), text);
+  assert.ok(text.includes('Observed before launch wf_2 (2 min before its start), doctor 1.5.1: ok\n'
+    + 'Possible contributors: none'), text);
+  assert.equal(summaryLine(res.stdout), 'launch conditions: 1 check(s) warned or failed before launch; '
+    + '0 possible contributor(s)');
+});
+
+test('a warning beside a related slowdown is a possible contributor', () => {
+  const res = analyse(wf2Only({ warnings: [MEMORY_LOW] }));
+  const start = Date.parse('2026-10-10T09:00:00Z');
+  const end = Date.parse('2026-10-10T09:21:30Z');
+  const counts = {};
+  for (const kind of ['long_tool_call', 'timeout', 'background_check']) {
+    const n = res.json.slowdowns.filter((s) => s.kind === kind
+      && Date.parse(s.at) >= start && Date.parse(s.at) <= end).length;
+    if (n > 0) counts[kind] = n;
+  }
+  assert.deepEqual(Object.keys(counts).sort(), ['background_check', 'long_tool_call', 'timeout']);
+  assert.deepEqual(res.byWf.wf_2.possible_contributors, [{ check: 'memory', slowdowns: counts }]);
+  const lines = section(res.md).split('\n');
+  assert.ok(lines.includes(FIRST_LINE));
+  const contributors = lines.find((l) => l.startsWith('Possible contributors: memory ('));
+  for (const [kind, n] of Object.entries(counts)) assert.ok(contributors.includes(`${kind} x${n}`), contributors);
+  assert.ok(!res.md.includes('caused'));
+  assert.ok(!res.md.includes('because of'));
+  assert.equal(summaryLine(res.stdout), 'launch conditions: 1 check(s) warned or failed before launch; '
+    + '1 possible contributor(s)');
+});
+
+test('a reading that failed is not a condition', () => {
+  const res = analyse(wf2Only({
+    warnings: [{ check: 'defender', detail: 'unknown' }, { check: 'heavy_processes', detail: 'unknown' }],
+  }));
+  assert.deepEqual(res.byWf.wf_2.checks, [
+    { check: 'defender', outcome: 'warning', detail: 'unknown', read: false },
+    { check: 'heavy_processes', outcome: 'warning', detail: 'unknown', read: false },
+  ]);
+  assert.deepEqual(res.byWf.wf_2.possible_contributors, []);
+  const text = section(res.md);
+  assert.ok(text.includes('- defender: could not be read\n- heavy_processes: could not be read\n'), text);
+  assert.ok(!text.includes('defender: warning'));
+  assert.equal(summaryLine(res.stdout), 'launch conditions: 0 check(s) warned or failed before launch, '
+    + '2 could not be read; 0 possible contributor(s)');
+});
+
+test('an unknown base comparison is a real condition', () => {
+  const res = analyse(wf2Only({ warnings: [{ check: 'base_not_current', detail: 'unknown' }] }));
+  assert.deepEqual(res.byWf.wf_2.checks, [
+    { check: 'base_not_current', outcome: 'warning', detail: 'unknown', read: true },
+  ]);
+  assert.ok(section(res.md).includes('- base_not_current: warning (unknown)'));
+  assert.equal(summaryLine(res.stdout), 'launch conditions: 1 check(s) warned or failed before launch; '
+    + '0 possible contributor(s)');
+});
+
+test('a concurrency warning has no contributor', () => {
+  const detail = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS is unset, so the Workflow tool's own cap applies; "
+    + 'the run has 4 lane(s) at once';
+  const res = analyse(wf2Only({ warnings: [{ check: 'concurrency', detail }] }));
+  assert.deepEqual(res.byWf.wf_2.checks, [{ check: 'concurrency', outcome: 'warning', detail, read: true }]);
+  assert.deepEqual(res.byWf.wf_2.possible_contributors, []);
+  assert.ok(section(res.md).includes('Possible contributors: none'));
+});
+
+test('a launch without a snapshot does not inherit one', () => {
+  const res = analyse(withSnapshots({
+    'doctor-wf_1.json': snapshot('wf_1', 1, doctorResult({ observed_at: OBS('07:55:00'), warnings: [MEMORY_LOW] })),
+  }));
+  assert.equal(res.byWf.wf_1.state, 'recorded');
+  assert.equal(res.byWf.wf_2.state, 'unavailable');
+  assertNotShown(res.byWf.wf_2, 'launch conditions unavailable');
+  assert.ok(section(res.md).includes('wf_2: launch conditions unavailable'));
+});
+
+test('inconsistent snapshots are not shown', () => {
+  const at = (hms, more = {}) => doctorResult({ observed_at: OBS(hms), warnings: [MEMORY_LOW], ...more });
+  const cases = [
+    [{ 'doctor-wf_2.json': '{not json' }, ['wf_2'], 'snapshot unreadable'],
+    [{ 'doctor-wf_2.json': '[]' }, ['wf_2'], 'snapshot unreadable'],
+    [{ 'doctor-wf_2.json': { launch: { wf: 'wf_2', setup_event: 2 } } }, ['wf_2'], 'snapshot unreadable'],
+    [{ 'doctor-wf_2.json': snapshot('wf_2', 2, at('08:58:00', { observed_at: '2026-10-10 9am' })) }, ['wf_2'],
+      'snapshot unreadable'],
+    [{ 'doctor-wf_2.json': snapshot('wf_1', 2, at('08:58:00')) }, ['wf_2'],
+      'file name and content name different launches'],
+    [{ 'doctor-wf_1.json': snapshot('wf_1', 1, at('07:55:00')), 'doctor-wf_2.json': snapshot('wf_2', 1, at('08:58:00')) },
+      ['wf_1', 'wf_2'], 'another snapshot names the same setup'],
+    [{ 'doctor-wf_2.json': snapshot('wf_2', 2, at('08:58:00', { run_id: 'other' })) }, ['wf_2'],
+      'doctor result is for another run'],
+    [{ 'doctor-wf_2.json': snapshot('wf_2', 2, at('09:05:00')) }, ['wf_2'], 'observed after the launch started'],
+    [{ 'doctor-wf_2.json': snapshot('wf_2', 2, at('08:04:00')) }, ['wf_2'],
+      'observed before the previous launch ended'],
+  ];
+  for (const [files, wfs, reason] of cases) {
+    const res = analyse(withSnapshots(files));
+    for (const wf of wfs) {
+      assert.equal(res.byWf[wf].state, 'inconsistent', `${wf}: ${reason}`);
+      assertNotShown(res.byWf[wf], reason);
+      assert.ok(section(res.md).includes(`${wf}: ${reason}`), res.md);
+    }
+    assert.ok(!section(res.md).includes('memory'), reason);
+    assert.equal(summaryLine(res.stdout), undefined, reason);
+  }
+  // A launch without timing cannot be checked.
+  const dir = withSnapshots({ 'doctor-wf_3.json': snapshot('wf_3', 3, at('09:30:00')) });
+  mkdirSync(join(dir, 'wf_3'));
+  writeFileSync(join(dir, 'wf_3.json'), JSON.stringify({ runId: 'wf_3', status: 'running' }));
+  const late = analyse(dir);
+  assert.deepEqual(late.json.launch_conditions.map((x) => x.wf), ['wf_1', 'wf_2', 'wf_3']);
+  assert.equal(late.byWf.wf_3.state, 'inconsistent');
+  assertNotShown(late.byWf.wf_3, 'launch time unavailable');
+  // A run_id of null is recorded normally.
+  const unnamed = analyse(wf2Only({ run_id: null }));
+  assert.equal(unnamed.byWf.wf_2.state, 'recorded');
+});
+
+test('an orphan snapshot is listed', () => {
+  const res = analyse(withSnapshots({
+    'doctor-wf_9.json': snapshot('wf_9', 3, doctorResult({ observed_at: OBS('09:30:00'), warnings: [MEMORY_LOW] })),
+  }));
+  assert.deepEqual(res.json.orphan_snapshots, ['wf_9']);
+  assert.deepEqual(res.json.launch_conditions.map((x) => x.state), ['unavailable', 'unavailable']);
+  assert.ok(section(res.md).includes('Snapshot for a launch not in this archive: wf_9'), res.md);
+  assert.ok(!section(res.md).includes('memory'));
+});
+
+test('no doctor detail leaks', () => {
+  const variants = [
+    ['0.8 GB free on the drive of C:\\zqpath\\wt (under 5 GB)',
+      'unreachable: the upstream https://zqhost.example/r.git did not answer, so the base was not compared'],
+    ['0.8 GB free on the drive of C:/zqpath/wt (under 5 GB)', 'the upstream branch refs/heads/zqref is not on zqremote'],
+  ];
+  for (const [disk, base] of variants) {
+    const res = analyse(wf2Only({
+      warnings: [
+        { check: 'disk', detail: disk },
+        { check: 'base_not_current', detail: base },
+        { check: 'python_alias', detail: "the manifest's python is the WindowsApps alias, which is slow to start: "
+          + 'C:/zqalias/python3.exe' },
+      ],
+      failures: [{ check: 'dirty_checkout', detail: '1 uncommitted or untracked path(s): src/zqsecret.py',
+        fix: 'commit it' }],
+    }));
+    const entry = res.byWf.wf_2;
+    assert.equal(entry.status, 'blocked');
+    assert.deepEqual(entry.checks.map((c) => [c.check, c.outcome, c.detail]), [
+      ['dirty_checkout', 'failed', null], ['disk', 'warning', '0.8 GB free'],
+      ['base_not_current', 'warning', null], ['python_alias', 'warning', null],
+    ]);
+    const json = JSON.stringify(res.json.launch_conditions);
+    for (const text of [res.md, json, res.stdout]) {
+      for (const token of ['zqpath', 'zqhost', 'zqsecret', 'zqalias', 'zqref', 'zqremote']) {
+        assert.ok(!text.includes(token), token);
+      }
+    }
+    assert.ok(res.md.includes('0.8 GB free'));
+  }
+});
+
+test('a snapshot without outcomes never claims passed', () => {
+  const res = analyse(wf2Only({
+    warnings: [MEMORY_LOW],
+    failures: [{ check: 'git_identity', detail: 'no identity', fix: 'set one' }],
+    skipped: [{ check: 'defender', reason: 'not_applicable' }],
+  }));
+  assert.deepEqual(res.byWf.wf_2.checks, [
+    { check: 'git_identity', outcome: 'failed', detail: null, read: true },
+    { check: 'memory', outcome: 'warning', detail: MEMORY_LOW.detail, read: true },
+    { check: 'defender', outcome: 'skipped', detail: 'not_applicable', read: true },
+  ]);
+  assert.ok(!section(res.md).includes('passed'));
+});
+
+test('copied values are validated', () => {
+  const res = analyse(wf2Only({
+    checks: [
+      { check: 'memory', outcome: 'passed' },
+      { check: '../x', outcome: 'warning' },
+      { check: 'disk', outcome: 'great' },
+      { check: 'defender', outcome: 'passed' },
+    ],
+    warnings: [MEMORY_LOW, { check: '../x', detail: 'unknown' }],
+    doctor_version: 'v1 <b>',
+    status: 'fine',
+  }));
+  const entry = res.byWf.wf_2;
+  assert.equal(entry.state, 'recorded');
+  assert.equal(entry.doctor_version, null);
+  assert.equal(entry.status, null);
+  assert.deepEqual(entry.checks, [
+    { check: 'memory', outcome: 'warning', detail: MEMORY_LOW.detail, read: true },
+    { check: 'defender', outcome: 'passed', detail: null, read: true },
+  ]);
+  assert.ok(!res.md.includes('../x'));
+  assert.ok(!res.md.includes('<b>'));
+  assert.ok(section(res.md).includes('doctor unavailable: unavailable'), res.md);
+  // A doctor that could not read its own version says so.
+  const unversioned = analyse(wf2Only({ doctor_version: 'unavailable' }));
+  assert.equal(unversioned.byWf.wf_2.doctor_version, 'unavailable');
+});
+
+test('derive_detail keeps unknown and reason codes', () => {
+  const cases = [
+    ['memory', 'warning', 'unknown', 'unknown'],
+    ['defender', 'skipped', 'not_applicable', 'not_applicable'],
+    ['defender', 'skipped', 'Not Applicable', null],
+    ['base_not_current', 'warning', 'unknown', 'unknown'],
+    ['base_not_current', 'warning', 'the upstream branch refs/heads/x is not on origin', null],
+    ['memory', 'warning', MEMORY_LOW.detail, MEMORY_LOW.detail],
+    ['memory', 'warning', 'see C:/x', null],
+    ['heavy_processes', 'warning', 'line one\n', null],
+    ['disk', 'warning', '12.5 GB free on the drive of /x (under 5 GB)', '12.5 GB free'],
+    ['disk', 'warning', 'low', null],
+    ['defender', 'warning', 'not covered', 'not covered'],
+    ['defender', 'warning', 'not covered: C:/x', null],
+    ['git_identity', 'failed', 'no identity', null],
+    ['memory', 'passed', null, null],
+  ];
+  const got = python([
+    'import _autopsy',
+    `cases = json.loads(${JSON.stringify(JSON.stringify(cases.map((c) => c.slice(0, 3))))})`,
+    'print(json.dumps([_autopsy.derive_detail(c, o, t) for c, o, t in cases]))',
+  ]);
+  assert.deepEqual(got, cases.map((c) => c[3]));
+  const res = analyse(wf2Only({ skipped: [{ check: 'defender', reason: 'not_applicable' }] }));
+  assert.ok(section(res.md).includes('Skipped: defender (not_applicable)'), res.md);
+  // A skipped check alone puts no line in the summary.
+  assert.equal(summaryLine(res.stdout), undefined);
+});
+
+test('a file that is not a snapshot is ignored', () => {
+  const res = analyse(withSnapshots({
+    'doctor-notes.json': snapshot('wf_2', 2, doctorResult({ observed_at: OBS('08:58:00'), warnings: [MEMORY_LOW] })),
+  }));
+  assert.deepEqual(res.json.orphan_snapshots, []);
+  assert.deepEqual(res.json.launch_conditions.map((x) => x.state), ['unavailable', 'unavailable']);
+  assert.ok(!section(res.md).includes('notes'));
+  assert.ok(!section(res.md).includes('memory'));
+});
+
+test('a new snapshot changes the fingerprint', () => {
+  const dir = copyRun(RUN2);
+  const before = analyse(dir).json.inputs_fingerprint;
+  writeSnapshots(dir, { 'doctor-wf_2.json': snapshot('wf_2', 2, doctorResult({ observed_at: OBS('08:58:00') })) });
+  assert.notEqual(analyse(dir).json.inputs_fingerprint, before);
 });

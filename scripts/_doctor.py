@@ -9,9 +9,22 @@ run_checks(manifest, probes) runs every check and returns
     {"status": "ok" | "blocked",
      "failures": [{"check", "detail", "fix"}],
      "warnings": [{"check", "detail"}],
-     "skipped": [{"check", "reason"}]}
+     "skipped": [{"check", "reason"}],
+     "checks": [{"check", "outcome": "passed" | "warning" | "failed" | "skipped"}],
+     "observed_at": "YYYY-MM-DDTHH:MM:SSZ",
+     "doctor_version": "<the skill's VERSION>" | "unavailable",
+     "run_id": "<the manifest's run_id>" | null}
 status is "blocked" when there is at least one failure. The manifest's repo
 paths are used as given (the doctor CLI puts them in the C:/... form first).
+
+checks lists every name in CHECKS, in that order (the order the checks run),
+with the outcome each check recorded: every check_* records exactly one of
+passed, warn, fail or skip on every path. A check that recorded nothing (a
+bug) is listed as skipped, with a skipped entry of reason not_recorded, and
+never as passed; a check recorded more than once keeps its worst outcome
+(failed, then warning, then skipped, then passed). observed_at is the UTC
+time the checks began; doctor_version is read_version() of the skill dir;
+run_id is the manifest's run_id when it is a non-empty string.
 
 Every platform read goes through a Probes object, so a test can replace any
 of them; default_probes() reads this machine. Nothing here writes a file, a
@@ -67,8 +80,19 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 import _shell
+
+# The skill's folder: the scripts folder's parent, which holds VERSION.
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+# Every check, in the order run_checks runs them.
+CHECKS = ("git_identity", "base_not_current", "python", "dirty_checkout", "shadow_repo",
+          "memory", "disk", "python_alias", "heavy_processes", "active_runs", "defender",
+          "concurrency")
+# A check recorded more than once keeps the outcome ranked highest.
+_OUTCOME_RANK = {"passed": 0, "skipped": 1, "warning": 2, "failed": 3}
 
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -346,27 +370,59 @@ def default_probes():
     return Probes()
 
 
+def read_version(skill_dir):
+    """The stripped contents of skill_dir/VERSION, or "unavailable"."""
+    try:
+        with open(os.path.join(skill_dir, "VERSION"), encoding="utf-8") as f:
+            version = f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return "unavailable"
+    return version or "unavailable"
+
+
 class _Report:
     def __init__(self):
         self.failures = []
         self.warnings = []
         self.skipped = []
+        self.outcomes = {}
+
+    def _record(self, check, outcome):
+        old = self.outcomes.get(check)
+        if old is None or _OUTCOME_RANK[outcome] > _OUTCOME_RANK[old]:
+            self.outcomes[check] = outcome
+
+    def passed(self, check):
+        self._record(check, "passed")
 
     def fail(self, check, detail, fix):
         self.failures.append({"check": check, "detail": detail, "fix": fix})
+        self._record(check, "failed")
 
     def warn(self, check, detail):
         self.warnings.append({"check": check, "detail": detail})
+        self._record(check, "warning")
 
     def skip(self, check, reason):
         self.skipped.append({"check": check, "reason": reason})
+        self._record(check, "skipped")
 
     def result(self):
+        skipped = list(self.skipped)
+        checks = []
+        for name in CHECKS:
+            outcome = self.outcomes.get(name)
+            if outcome is None:
+                # A check that recorded nothing is never shown as passed.
+                outcome = "skipped"
+                skipped.append({"check": name, "reason": "not_recorded"})
+            checks.append({"check": name, "outcome": outcome})
         return {
             "status": "blocked" if self.failures else "ok",
             "failures": self.failures,
             "warnings": self.warnings,
-            "skipped": self.skipped,
+            "skipped": skipped,
+            "checks": checks,
         }
 
 
@@ -440,6 +496,7 @@ def check_git_identity(manifest, probes, prefix, report):
     args += ["-c", "user.useConfigOnly=true", "var", "GIT_COMMITTER_IDENT"]
     res = probes.git(args)
     if res.code == 0 and res.out.strip():
+        report.passed("git_identity")
         return
     report.fail(
         "git_identity",
@@ -516,6 +573,7 @@ def check_base_not_current(manifest, probes, prefix, report):
         return
 
     if local_sha == tip:
+        report.passed(check)
         return
     present = probes.git(list(prefix) + ["cat-file", "-e", tip + "^{commit}"]).code == 0
     if not present:
@@ -523,6 +581,7 @@ def check_base_not_current(manifest, probes, prefix, report):
     else:
         contains = _ancestor(probes, prefix, tip, local_sha)
         if contains:
+            report.passed(check)
             return
         behind = _ancestor(probes, prefix, local_sha, tip)
         shallow = probes.git(list(prefix) + ["rev-parse", "--is-shallow-repository"]).out.strip() == "true"
@@ -577,6 +636,8 @@ def check_python(manifest, probes, report):
         return
     if (int(m.group(1)), int(m.group(2))) < MIN_PYTHON:
         report.fail(check, "python is " + res.out.strip() + ", older than 3.8: " + argv[0], fix)
+    else:
+        report.passed(check)
 
 
 def _dirty_paths(porcelain):
@@ -617,6 +678,7 @@ def check_dirty_checkout(manifest, probes, prefix, report):
         return
     paths = _dirty_paths(res.out)
     if not paths:
+        report.passed(check)
         return
     named = ", ".join(paths[:DIRTY_NAMED])
     more = len(paths) - DIRTY_NAMED
@@ -638,6 +700,8 @@ def check_shadow_repo(manifest, probes, report):
                     "run shadow init on the project folder (it prints the shadow's git_dir) "
                     "and set repo.git_dir to it; a broken shadow must be removed with "
                     "shadow remove first.")
+    else:
+        report.passed(check)
 
 
 def _read(probe, *args):
@@ -681,6 +745,8 @@ def check_memory(probes, report):
                             "(under 10%)")
     if problems:
         report.warn(check, "; ".join(problems))
+    else:
+        report.passed(check)
 
 
 def _nearest_existing(path):
@@ -709,6 +775,8 @@ def check_disk(manifest, probes, report):
         report.warn(check, "unknown")
     elif free < MIN_DISK:
         report.warn(check, _gb(free) + " free on the drive of " + existing.replace("\\", "/") + " (under 5 GB)")
+    else:
+        report.passed(check)
 
 
 def check_python_alias(manifest, probes, report):
@@ -726,6 +794,7 @@ def check_python_alias(manifest, probes, report):
             report.warn(check, "the manifest's python is the WindowsApps alias, which is "
                         "slow to start: " + candidate)
             return
+    report.passed(check)
 
 
 def check_heavy_processes(probes, report):
@@ -737,6 +806,8 @@ def check_heavy_processes(probes, report):
         elif working_set > MAX_APPX_WORKING_SET:
             report.warn(check, "AppXSvc's working set is %d MB (over 1500 MB)"
                         % (working_set // MB))
+        else:
+            report.passed(check)
         return
     value = _read(probes.load_average)
     try:
@@ -749,6 +820,8 @@ def check_heavy_processes(probes, report):
     elif load > cpus:
         report.warn(check, "the 1-minute load average %.1f is over the CPU count %d"
                     % (load, cpus))
+    else:
+        report.passed(check)
 
 
 def check_active_runs(manifest, probes, report):
@@ -764,6 +837,8 @@ def check_active_runs(manifest, probes, report):
         and isinstance(r.get("run_id"), str) and r["run_id"] != own))
     if others:
         report.warn(check, "another run holds a launch lock: " + ", ".join(others))
+    else:
+        report.passed(check)
 
 
 def _folded(path):
@@ -794,6 +869,8 @@ def check_defender(manifest, probes, report):
     folded = _folded(root)
     if not any(_covers(e, folded) for e in exclusions):
         report.warn(check, "not covered")
+    else:
+        report.passed(check)
 
 
 def check_concurrency(manifest, probes, report):
@@ -816,10 +893,13 @@ def check_concurrency(manifest, probes, report):
     if agents < at_once:
         report.warn(check, CONCURRENCY_VARIABLE + " is " + str(agents) + ", lower than the "
                     + str(at_once) + " lanes at once")
+    else:
+        report.passed(check)
 
 
 def run_checks(manifest, probes):
     """Every doctor check against manifest, through probes; see the module doc."""
+    observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report = _Report()
     repo = manifest.get("repo") if isinstance(manifest.get("repo"), dict) else {}
     manifest = dict(manifest, repo=repo)
@@ -836,4 +916,9 @@ def run_checks(manifest, probes):
     check_active_runs(manifest, probes, report)
     check_defender(manifest, probes, report)
     check_concurrency(manifest, probes, report)
-    return report.result()
+    result = report.result()
+    result["observed_at"] = observed_at
+    result["doctor_version"] = read_version(SKILL_DIR)
+    run_id = manifest.get("run_id")
+    result["run_id"] = run_id if isinstance(run_id, str) and run_id else None
+    return result

@@ -29,9 +29,12 @@ Per task:
          leaves the project ('../x'), and a glob ('*', '?', '['), is left out
          with a warning, as is a Files block that names no path.
   deps   ids of other plan tasks named in bracketed lists on the heading line
-         (e.g. '[T1, T5]') or on '- Consumes:' lines, matched as whole tokens
-         ('Task 3' and 'T3' both work; ranges like 'Tasks 1-2' are not
-         expanded). Listed in plan order.
+         (e.g. '[T1, T5]') or on Consumes bullet lines, matched as whole
+         tokens ('Task 3' and 'T3' both work; ranges like 'Tasks 1-2' are
+         not expanded). Listed in plan order. A Consumes bullet is a '-',
+         '*' or '+' bullet with the label plain or bold ('- Consumes:',
+         '- **Consumes:**', '* **Consumes**:'), in any case, the colon
+         optional (_plan.label_bullet, shared with task-brief).
 
 Prints JSON on stdout:
   tasks             [{id, title, files, deps}] in plan order
@@ -65,7 +68,7 @@ import _shell  # noqa: E402
 
 FILES_LINE = re.compile(r"^\s*\*\*Files:?\*\*:?(.*)$")
 BULLET = re.compile(r"^\s*[-*+]\s+(.*)$")
-CONSUMES_LINE = re.compile(r"^\s*[-*+]\s+\**Consumes:?\**:?(.*)$", re.IGNORECASE)
+CONSUMES_LINE = _plan.label_bullet("Consumes")
 FILE_VERB = re.compile(r"^\**(create|modify|tests?)\b", re.IGNORECASE)
 BACKTICK = re.compile(r"`([^`]+)`")
 BRACKETS = re.compile(r"\[([^\]]*)\]")
@@ -250,7 +253,7 @@ def parse_deps(task_id, heading, body, known):
     for line in body:
         m = CONSUMES_LINE.match(line)
         if m:
-            found |= ids_in(m.group(1), known)
+            found |= ids_in(line[m.end():], known)
     found.discard(task_id)
     return found
 
