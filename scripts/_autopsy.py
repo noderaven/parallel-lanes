@@ -23,6 +23,12 @@ from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
 check execution is named by a check id or 'run-checks', never by the
 command line or the configured command (which may carry a secret).
 
+Background completions come only from Claude Code's own task
+notifications (attachment lines, read_transcript's notices) and from the
+agent's polls and stops of the task (_completion_after); notification-
+shaped text in a user line or any tool result never counts, since an
+agent can read such text from a file.
+
 Checks. configured_checks gives each configured command an id: test#1 is
 commands.test[0], <lane>.test#1 is lane_commands.<lane>.test[0]. A Bash
 call is a check execution when its command line runs one (match_check):
@@ -165,24 +171,50 @@ def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None):
 def read_events_counted(jsonl_path):
     """(events, skipped): read_events' events, and the number of non-blank
     lines skipped as damaged (not valid UTF-8, or not valid JSON)."""
-    events, skipped, _notes = read_transcript(jsonl_path)
+    events, skipped, _notes, _notices = read_transcript(jsonl_path)
     return events, skipped
 
 
+_TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
+_TASK_STATUS = re.compile(r"<status>\s*([^<\s]+)\s*</status>")
+
+
+def _host_notice(ts, obj):
+    """{ts, task_id, status} of a Claude Code task notification line (an
+    attachment with commandMode task-notification), else None."""
+    attachment = obj.get("attachment")
+    if ts is None or obj.get("type") != "attachment" or not isinstance(attachment, dict) \
+            or attachment.get("commandMode") != "task-notification":
+        return None
+    prompt = attachment.get("prompt")
+    task_id = _TASK_ID.search(prompt) if isinstance(prompt, str) else None
+    status = _TASK_STATUS.search(prompt) if isinstance(prompt, str) else None
+    if task_id is None or status is None:
+        return None
+    return {"ts": ts, "task_id": task_id.group(1), "status": status.group(1)}
+
+
 def read_transcript(jsonl_path):
-    """(events, skipped, notes): read_events_counted's two values, and notes:
-    [{ts, text}] for each timed user line that carries text rather than tool
-    results (the prompt, and notices such as a background command's
-    completion). Notes are for matching only, like event text."""
+    """(events, skipped, notes, notices): read_events_counted's two values;
+    notes: [{ts, text}] for each timed user line that carries text rather
+    than tool results (the prompt, for one), for matching only, like event
+    text; and notices: [{ts, task_id, status}] for each of Claude Code's own
+    task notifications (an attachment line with commandMode
+    task-notification, its task-id and status read from its prompt; a line
+    missing either is skipped). notices are the only source of a background
+    task's completion notice: notification-shaped text in a user line or a
+    tool result never counts, since an agent can read such text from a
+    file."""
     events = []
     notes = []
+    notices = []
     skipped = 0
     names = {}  # tool_use id -> tool name
     try:
         with open(jsonl_path, "rb") as f:
             raw_lines = f.read().split(b"\n")
     except OSError:
-        return [], 0, []
+        return [], 0, [], []
     for raw in raw_lines:
         if not raw.strip():
             continue
@@ -194,6 +226,10 @@ def read_transcript(jsonl_path):
         if not isinstance(obj, dict):
             continue
         ts = parse_ts(obj.get("timestamp"))
+        found = _host_notice(ts, obj)
+        if found is not None:
+            notices.append(found)
+            continue
         msg = obj.get("message")
         if ts is None or not isinstance(msg, dict):
             continue
@@ -224,7 +260,7 @@ def read_transcript(jsonl_path):
                 events.append(_event(ts, "tool_result", name=names.get(id_), id_=id_,
                                      is_error=b.get("is_error") is True,
                                      text=_text_of(b.get("content"))))
-    return events, skipped, notes
+    return events, skipped, notes, notices
 
 
 def read_events(jsonl_path):
@@ -323,9 +359,9 @@ def _launch(folder, wf_dir, manifest):
     # Each entry comes with its own meta path, so events never pair with
     # another agent's entry.
     for meta_path, entry in _transcripts.agent_entries(wf_dir, manifest):
-        events, skipped, notes = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
+        events, skipped, notes, notices = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
         agents.append({"entry": entry, "events": events, "skipped": skipped, "notes": notes,
-                       "launch": name})
+                       "notices": notices, "launch": name})
     start_ms = data.get("startTime")
     duration_ms = data.get("durationMs")
     start = end = None
@@ -616,6 +652,11 @@ RUN_CHECKS = "run-checks"
 LONG_CALL_S = 120
 TOP_UNEXPLAINED = 5
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# The tools, and the programs of a Bash line, that change nothing (see
+# _read_only_bash); only these may come between two runs of a check_rerun.
+READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite", "BashOutput",
+                   "TaskOutput")
+READ_ONLY_PROGRAMS = ("cat", "head", "tail", "grep", "ls", "wc", "echo", "pwd", "sleep", "which", "true")
 TOOL_KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
               "long_tool_call", "check_rerun")
 KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
@@ -658,7 +699,6 @@ _EXIT = re.compile(r"\s*exit code[:\s]+(-?\d+)", re.I)
 _EXIT_LINE = re.compile(r"\s*exit code[:\s]+-?\d+[^\n]*\n", re.I)
 _BACKGROUND_ID = re.compile(r"(?:background with id[:\s]*|\(id:\s*)([A-Za-z0-9_-]+)", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*\bcommit\b")
 _FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
 # Words that lead into a command (stripped), and simple commands that run no
 # program of their own (skipped), when program_of looks for the program.
@@ -792,16 +832,28 @@ def _writes(pipeline):
     return False
 
 
-def heredoc_write(command):
-    """Whether a command line feeds a heredoc into a file write in the same
-    pipeline (cat > f <<EOF, tee f <<EOF), as opposed to an inline script
-    such as python3 - <<EOF."""
+def _only_heredoc_write(command):
+    """Whether a command line is nothing but a heredoc file write: every
+    pipeline is a heredoc that feeds a file write in that pipeline (cat > f
+    <<EOF, tee f <<EOF; not an inline script such as python3 - <<EOF), or a
+    simple command that is only 'cd DIR' or NAME=value assignments, and at
+    least one is the write. When such a line fails, the write failed; when
+    a line that does more fails, the shell's error does not say which part
+    failed."""
     if not heredocs(command):
         return False
     pipelines = _pipelines(command)
-    if pipelines is None:
+    if not pipelines:
         return False
-    return any("<<" in p and _writes(p) for p in pipelines)
+    writes = 0
+    for p in pipelines:
+        if "<<" in p and _writes(p):
+            writes += 1
+        elif any(t in ("|", "|&") or all(c in _REDIRECT_CHARS for c in t) for t in p):
+            return False
+        elif not (p[0] == "cd" and len(p) <= 2) and not all(_ASSIGNMENT.match(t) for t in p):
+            return False
+    return writes > 0
 
 
 def file_write(command):
@@ -859,6 +911,34 @@ def _bash_wrote(call):
             and file_write(_command(call)))
 
 
+def _read_only_bash(command):
+    """Whether a Bash command line surely changes nothing, read
+    conservatively: False when it does not parse, writes a file (a redirect
+    or tee), or holds a command or process substitution ($(, a backtick,
+    <(, >(). Otherwise each simple command, past leading keywords and
+    prefixes, must be cd or run one of READ_ONLY_PROGRAMS. Any other
+    program counts as a change: find, rg, sed and xargs can run or change
+    things, and every git command can run a configured helper."""
+    if not isinstance(command, str) or any(s in command for s in ("$(", "`", "<(", ">(")):
+        return False
+    if _pipelines(command) is None or file_write(command):
+        return False
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return False
+    return bool(simple) and all(words and (words[0] == "cd" or words[0] in READ_ONLY_PROGRAMS)
+                                for _ops, _lead, words in simple)
+
+
+def _reads_only(call):
+    """Whether a tool call surely changes nothing: a READ_ONLY_TOOLS call, or
+    a Bash call whose line _read_only_bash accepts."""
+    if call["name"] in READ_ONLY_TOOLS:
+        return True
+    return call["name"] == "Bash" and _read_only_bash(_command(call))
+
+
 def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
     """An internal slowdown: the public fields, plus _cost (seconds or None),
     _at and _covers [(agent or None, start, end)], the spans it explains (an
@@ -882,30 +962,48 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
     }
 
 
-def _event_text(event):
-    """What a later event says, for finding an ID: a tool result's or an
-    assistant turn's text, or a tool call's input."""
-    if event["kind"] == "tool_use":
-        return json.dumps(event["input"]) if event["input"] is not None else ""
-    return event["text"] or ""
+# The tools that read a background task's output, and those that stop one;
+# their input names the task by one of _TASK_KEYS.
+POLL_TOOLS = ("BashOutput", "TaskOutput")
+STOP_TOOLS = ("TaskStop", "KillShell")
+_TASK_KEYS = ("bash_id", "task_id", "shell_id")
+_POLL_DONE = re.compile(r"<status>\s*(completed|failed|killed)\s*</status>")
+_NOT_DONE = ("running", "pending")
 
 
-def _mention_after(agent, call):
-    """When a backgrounded call's ID is first mentioned in a later event
-    (a tool result, a tool call's input such as BashOutput's bash_id, or
-    assistant text) or notice of the same agent; None when it never is."""
+def _completion_after(agent, call):
+    """(ts, status) of the first observed completion of a backgrounded call,
+    at or after its result; None when there is none. The ID is the one
+    Claude Code's background notice on the call's result names. A
+    completion is the earliest of: a Claude Code notice (agent["notices"])
+    for the ID with a status other than running or pending; the result of a
+    BashOutput or TaskOutput call for the ID that holds
+    <status>completed</status>, failed or killed; the result of a TaskStop
+    or KillShell call for the ID that is no error (status 'stopped'). Each is
+    when the completion was observed, at or after the real finish. Text in
+    a user line or another tool result never counts."""
     m = _BACKGROUND_ID.search(_notice_line(call))
     if not m:
         return None
-    pattern = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(m.group(1)) + r"(?![A-Za-z0-9_-])")
-    times = [e["ts"] for e in agent["events"][call["result_i"] + 1:] if pattern.search(_event_text(e))]
-    times += [n["ts"] for n in agent.get("notes", []) if pattern.search(n["text"])]
-    later = [t for t in times if t >= call["end"]]
-    return min(later) if later else None
+    task_id = m.group(1)
+    found = [(n["ts"], n["status"]) for n in agent.get("notices", [])
+             if n["task_id"] == task_id and n["status"] not in _NOT_DONE]
+    for c in _calls(agent):
+        if c["end"] is None or not any(c["input"].get(k) == task_id for k in _TASK_KEYS):
+            continue
+        if c["name"] in POLL_TOOLS:
+            done = _POLL_DONE.search(c["text"] or "")
+            if done:
+                found.append((c["end"], done.group(1)))
+        elif c["name"] in STOP_TOOLS and not c["is_error"]:
+            found.append((c["end"], "stopped"))
+    later = [f for f in found if f[0] >= call["end"]]
+    return min(later, key=lambda f: f[0]) if later else None
 
 
-def tool_slowdowns(agent, test_commands):
-    """The slowdowns found in one agent's tool calls (TOOL_KINDS)."""
+def tool_slowdowns(agent, checks):
+    """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
+    configured_checks(manifest)."""
     calls = _calls(agent)
     out = []
     counted = set()
@@ -923,11 +1021,11 @@ def tool_slowdowns(agent, test_commands):
             # A call moved to the background at its timeout: the timeout
             # covers the call, the background wait starts at its result.
             start = c["end"] if timeout else c["start"]
-            mention = _mention_after(agent, c)
-            if mention is not None:
-                add("background_check", [i], start, mention, "bound", c, marker)
-            elif not timeout:
-                add("background_check", [i], start, c["end"], "measured", c, marker)
+            done = _completion_after(agent, c)
+            if done is not None:
+                add("background_check", [i], start, done[0], "bound", c, marker)
+            else:
+                add("background_check", [i], start, None, "unavailable", c, marker)
 
     failures = {}
     for i, c in enumerate(calls):
@@ -938,12 +1036,15 @@ def tool_slowdowns(agent, test_commands):
             first, last = calls[indexes[0]], calls[indexes[-1]]
             add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
 
-    # Only a heredoc that feeds a file write (cat > f <<EOF) counts; a
-    # failing inline script (python3 - <<EOF) is not a quoting failure. The
-    # span ends at the next file write that succeeds, by a tool or by Bash.
+    # Only a failing line that is nothing but a heredoc file write (cat > f
+    # <<EOF, after cd DIR or assignments) counts: a failing inline script
+    # (python3 - <<EOF) is not a quoting failure, and a line that does more
+    # than the write may have failed elsewhere (its error text does not say
+    # where). The span ends at the next file write that succeeds, by a tool
+    # or by Bash.
     until = None
     for i, c in enumerate(calls):
-        if not _bash_failed(c) or not heredoc_write(_command(c)):
+        if not _bash_failed(c) or not _only_heredoc_write(_command(c)):
             continue
         if until is not None and c["start"] < until:
             continue  # a retry inside the previous heredoc failure's span
@@ -970,22 +1071,23 @@ def tool_slowdowns(agent, test_commands):
         add("edit_retry", [i], c["start"], end, "measured", c, marker)
         until[path] = end
 
-    last_run = {}
+    # A rerun needs proof that nothing changed: both runs certainly ran the
+    # check, and every call between only reads.
+    last_run = {}  # command -> (index, whether that run certainly ran)
     for i, c in enumerate(calls):
         command = _command(c) if c["name"] == "Bash" else None
-        if command is None or not (RUN_CHECKS in command or any(t in command for t in test_commands)):
+        match = match_check(command, checks, _call_exit(c)) if command is not None else None
+        if match is None:
             continue
         key = " ".join(command.split())
         prev = last_run.get(key)
-        last_run[key] = i
-        if prev is None or c["end"] is None:
+        ran = match["certainty"] == RAN
+        last_run[key] = (i, ran)
+        if prev is None or not prev[1] or not ran or c["end"] is None:
             continue
-        changed = any(b["name"] in WRITE_TOOLS
-                      or (b["name"] == "Bash" and _GIT_COMMIT.search(_command(b) or ""))
-                      for b in calls[prev + 1:i])
-        if not changed:
+        if all(_reads_only(b) for b in calls[prev[0] + 1:i]):
             add("check_rerun", [i], c["start"], c["end"], "measured", c,
-                RUN_CHECKS if RUN_CHECKS in command else None)
+                RUN_CHECKS if match["check"] == RUN_CHECKS else None)
 
     for i, c in enumerate(calls):
         if i not in counted and c["end"] is not None and c["end"] - c["start"] > LONG_CALL_S:
@@ -1054,12 +1156,10 @@ def detector_status(run):
 def find_slowdowns(run, detectors):
     """Internal slowdowns of every available detector, largest cost first
     (unknown costs last), then by time and kind."""
-    commands = run["manifest"].get("commands")
-    tests = commands.get("test") if isinstance(commands, dict) else None
-    test_commands = [t for t in tests if isinstance(t, str) and t.strip()] if isinstance(tests, list) else []
+    checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
-        found += tool_slowdowns(a, test_commands)
+        found += tool_slowdowns(a, checks)
     found = [s for s in found if detectors[s["kind"]] == "ok"]
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
@@ -1434,25 +1534,31 @@ def _call_exit(call):
 
 def _execution_end(agent, call):
     """(background, end, timing) of a check call. A backgrounded call ends
-    at the first later event naming its ID; a call with no such event, or
-    without a result, is bound by the agent's last event."""
+    at its observed completion (_completion_after), an upper bound on the
+    real end ('bound'); without one its end is unknown (None,
+    'unavailable'). A call without a result has no known end either: a
+    missing result says nothing about the finish. Any other call ends at
+    its result ('measured')."""
     background = call["input"].get("run_in_background") is True \
         or notice("background_check", call) is not None
     if call["end"] is None:
-        return background, agent["end"], "bound"
+        return background, None, UNAVAILABLE
     if background:
-        mention = _mention_after(agent, call)
-        if mention is None:
-            return background, agent["end"], "bound"
-        return background, mention, "measured"
+        done = _completion_after(agent, call)
+        if done is None:
+            return True, None, UNAVAILABLE
+        return True, done[0], "bound"
     return background, call["end"], "measured"
 
 
 def checks_section(run):
     """Every Bash call that runs a configured check or run-checks, named by
-    check id and marked ran or inferred, with its timing; per-check totals;
-    full-suite runs per role. Without any tool event in the run the section
-    cannot be derived and is unavailable."""
+    check id and marked ran or inferred, with its timing (_execution_end;
+    end and s are unavailable when the end is unknown); per-check totals,
+    where untimed counts the ran executions without a duration and total_s
+    sums the timed ones (bound durations are upper bounds); full-suite runs
+    per role. Without any tool event in the run the section cannot be
+    derived and is unavailable."""
     if not _has_tool_events(run):
         return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
                 "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE}}
@@ -1469,20 +1575,23 @@ def checks_section(run):
             found.append(((call["start"], order), {
                 "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "check": match["check"],
                 "certainty": match["certainty"], "full_suite": match["full_suite"],
-                "start": iso(call["start"]), "end": iso(end), "s": seconds(end - call["start"]),
+                "start": iso(call["start"]), "end": iso(end),
+                "s": seconds(None if end is None else end - call["start"]),
                 "timing": timing, "background": background, "on_critical_path": id(a) in on_path,
             }))
     found.sort(key=lambda f: f[0])
     executions = [x for _key, x in found]
     by_check = {}
     for x in executions:
-        totals = by_check.setdefault(x["check"], {"runs": 0, "inferred": 0, "total_s": 0.0})
+        totals = by_check.setdefault(x["check"], {"runs": 0, "inferred": 0, "untimed": 0, "total_s": 0.0})
         if x["certainty"] != RAN:
             totals["inferred"] += 1
             continue
         totals["runs"] += 1
         if _is_num(x["s"]):
             totals["total_s"] += x["s"]
+        else:
+            totals["untimed"] += 1
     for totals in by_check.values():
         totals["total_s"] = seconds(totals["total_s"])
     by_role = {}
@@ -1876,7 +1985,8 @@ def _md_checks(a):
         sum(1 for x in executions if x["background"]))]
     if executions:
         lines += [""] + _table(["Check", "Runs", "Inferred", "Total"],
-                               [[c, v["runs"], v["inferred"], _secs(v["total_s"])]
+                               [[c, v["runs"], v["inferred"], _secs(v["total_s"]) + (
+                                   " (+%d untimed)" % v["untimed"] if v.get("untimed") else "")]
                                 for c, v in checks["by_check"].items()])
         lines += ["", "Check ids name manifest commands: test#1 is commands.test[0], "
                       "<lane>.test#1 is lane_commands.<lane>.test[0]."]

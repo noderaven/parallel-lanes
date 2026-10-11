@@ -73,9 +73,23 @@ output, output_tokens_min when output is incomplete); unreadable_lines (as
 run-report counts them); partial: true when any agent is output-incomplete,
 has unreadable lines or has no usage at all, so the totals are lower bounds.
 
+Background runs. A Bash call went to the background when Claude Code's
+notice on the first line of its result says so ('Command running in
+background with ID x', or '... was moved to the background (ID: x)' at a
+timeout). Its completion is observed at the earliest of, at or after that
+result: Claude Code's own task notification for x (a transcript line of
+type attachment with commandMode task-notification, whose task-id is x and
+whose status is not running or pending); the result of a BashOutput or
+TaskOutput call for x that holds <status>completed</status>, failed or
+killed; the result of a TaskStop or KillShell call for x that is no error.
+That time is an upper bound on the real finish. Notification-shaped text
+in a user line or in any tool result never counts: an agent can read such
+text from a file.
+
 slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence}], largest
 cost_s first. agent is the label, or null for a run-wide kind (relaunch,
-idle_gap). cost_kind is measured, or bound when the end is an upper limit.
+idle_gap). cost_kind is measured, bound when the end is an upper limit,
+or unavailable when the end is not known (cost_s is then "unavailable").
 evidence is {tool, exit, marker, program}: the tool name, the exit code a
 result reports (or null), the marker string matched (from the table in
 _autopsy.py, or null) and the program a Bash command runs (in the first
@@ -85,22 +99,24 @@ prefix such as env or 'timeout DURATION', as a basename;
 null when that still holds '=', '@' or ':'). No command, output or prompt
 text is written. A call fails when its result is an error or starts with
 an 'Exit code N' line with N not 0. The kinds:
-- background_check: Claude Code's notice on the first line of a Bash
-  result says the command went to the background ('Command running in
-  background with ID', or '... was moved to the background (ID: x)' at a
-  timeout); from the call (from its result, after a timeout) to the first
-  later event or notice naming its ID (bound), else the call's span (none
-  after a timeout).
+- background_check: a Bash call went to the background (see Background
+  runs); from the call (from its result, after a timeout) to its observed
+  completion (bound). Without an observed completion its cost_s and
+  cost_kind are "unavailable".
 - timeout: Claude Code's notice starts a Bash result ('Command did not
   complete within its ...', 'Command timed out after'); the call's span.
   Text in command output, files read or other tools never counts.
 - repeated_failure: the same Bash command (whitespace-normalised) fails
   twice or more in one agent; first failing call to last failing result.
-- heredoc_failure: a failing Bash command whose heredoc feeds a file write
-  in the same pipeline (a > or >> redirect, or tee; a failing inline script
-  such as 'python3 - <<EOF' does not count); from it to the agent's next
-  successful file write, by Edit or Write or by a Bash redirect or tee
-  (bound), else its own span.
+- heredoc_failure: a failing Bash command that is nothing but a heredoc
+  file write: each pipeline is a heredoc feeding a file write in that
+  pipeline (a > or >> redirect, or tee), or only 'cd DIR' or NAME=value
+  assignments. A failing inline script such as 'python3 - <<EOF' does not
+  count, and neither does a line that does more than the write (cat > f
+  <<EOF then python3 f): its error text does not say which part failed,
+  so it is an unlocated failure. From it to the agent's next successful
+  file write, by Edit or Write or by a Bash redirect or tee (bound), else
+  its own span.
 - edit_retry: an Edit or Write fails as unread, changed, or text not
   found; from it to the next successful write of that file.
 - extra_review_round: a task's 'fix N' and 're-review N' agents; the sum
@@ -111,9 +127,16 @@ an 'Exit code N' line with N not 0. The kinds:
 - relaunch: every launch but the last; its wall time.
 - long_tool_call: a tool call over 120 s that no kind above counted.
 - idle_gap: each time.idle_gaps entry.
-- check_rerun: a Bash command holding a commands.test entry or run-checks
-  runs again in one agent with no Edit, Write or git commit between; the
-  second run's span.
+- check_rerun: the same Bash command (whitespace-normalised) runs again in
+  one agent, both runs certainly ran a check (certainty ran, see checks),
+  and every call between surely changed nothing: a Read, Grep, Glob, LS,
+  WebFetch, WebSearch, TodoWrite, BashOutput or TaskOutput call, or a Bash
+  line that parses, writes no file (no redirect or tee), holds no $(,
+  backtick, <( or >(, and whose every simple command (past leading
+  keywords and prefixes) is cd or runs cat, head, tail, grep, ls, wc,
+  echo, pwd, sleep, which or true. Any other program counts as a change
+  (find, rg, sed, xargs, and every git command, since git can run
+  configured helpers). The second run's span.
 A cost that cannot be timed is "unavailable".
 
 detectors: {<kind>: ok | not_available}. A detector is not_available when
@@ -136,8 +159,8 @@ agent covers any agent's.
 
 checks: executions [{agent, phase, role, check, certainty, full_suite,
 start, end, s, timing, background, on_critical_path}], by_check
-{<check id>: {runs, inferred, total_s}} and full_suite_runs {total,
-inferred, by_role: {<role>: n}}.
+{<check id>: {runs, inferred, untimed, total_s}} and full_suite_runs
+{total, inferred, by_role: {<role>: n}}.
 - A check id names a configured command: <group>#<n> is
   commands.<group>[n - 1] (test#1 is commands.test[0]) and
   <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1]; a command
@@ -168,12 +191,16 @@ inferred, by_role: {<role>: n}}.
 - full_suite is ran or inferred when a simple command that exactly matches
   a commands.test entry (or a run-checks call passing '--cmd test') ran or
   only may have run, else null.
-- start is the call; end is its result. A backgrounded call ends at the
-  first later result or notice naming its ID (measured); without one, or
-  for a call with no result, end is the agent's last event (bound).
+- start is the call. timing says how end was found: measured, the call's
+  result; bound, a backgrounded call's observed completion (see
+  Background runs), an upper bound on its real end; unavailable, a
+  backgrounded call without an observed completion or a call without a
+  result (a missing result says nothing about the finish), whose end and
+  s are "unavailable".
 - on_critical_path: the agent is on time.critical_path.
-- by_check: runs counts the executions that ran, inferred the others, and
-  total_s sums the timed ones that ran.
+- by_check: runs counts the executions that ran, inferred the others;
+  untimed counts the ran executions without a duration, and total_s sums
+  the timed ones that ran (bound durations in it are upper bounds).
 - full_suite_runs: total and by_role (run-report's roles) count the
   executions whose full_suite is ran, inferred those whose full_suite is
   inferred. total is a lower bound on full-suite runs: runs through a

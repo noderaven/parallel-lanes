@@ -2,7 +2,7 @@
 {"type":"assistant","timestamp":"2026-10-10T09:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Starting."}]}}
 {"type":"assistant","timestamp":"2026-10-10T09:00:10.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a1_1","name":"Bash","input":{"command":"node tests/run-tests.mjs","run_in_background":true}}]}}
 {"type":"user","timestamp":"2026-10-10T09:00:12.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_a1_1","content":"Command running in background with ID: b1"}]}}
-{"type":"user","timestamp":"2026-10-10T09:01:40.000Z","message":{"role":"user","content":"<task-notification>Background command b1 completed (exit code 0)</task-notification>"}}
+{"type":"attachment","timestamp":"2026-10-10T09:01:40.000Z","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"tests\" completed (exit code 0)</summary>\n</task-notification>"}}
 {"type":"assistant","timestamp":"2026-10-10T09:01:50.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a1_2","name":"Bash","input":{"command":"cat > src/a.js <<'EOF'\nconst a = 'it's';\nEOF"}}]}}
 {"type":"user","timestamp":"2026-10-10T09:01:52.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_a1_2","content":"Exit code 2\nbash: line 2: unexpected EOF while looking for matching quote","is_error":true}]}}
 {"type":"assistant","timestamp":"2026-10-10T09:02:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_a1_3","name":"Edit","input":{"file_path":"src/a.js","old_string":"x","new_string":"y"}}]}}
