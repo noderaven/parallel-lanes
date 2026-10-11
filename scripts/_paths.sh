@@ -8,6 +8,11 @@
 #                never from CDPATH. On Windows the path takes the C:/ form.
 # native PATH    print PATH as the host's tools expect it: the C:/ form on
 #                Windows, unchanged elsewhere.
+# pl_history_dir print the run history dir, resolved as _history.history_dir
+#                resolves it without an override: PL_HISTORY_DIR, else
+#                ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/history.
+#                A relative path is taken from the current directory; on
+#                Windows the result takes the C:/ form.
 
 pl_is_windows() {
   case "${PL_UNAME:-$(uname -s)}" in
@@ -30,5 +35,19 @@ abs_dir() {
   # An empty CDPATH keeps cd from resolving DIR elsewhere (and printing it);
   # -- lets DIR start with a dash.
   dir="$(CDPATH= cd -- "$1" && pwd -P)" || return 1
+  native "$dir"
+}
+
+pl_history_dir() {
+  local dir
+  if [ -n "${PL_HISTORY_DIR:-}" ]; then
+    dir="$PL_HISTORY_DIR"
+  else
+    dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/parallel-lanes/history"
+  fi
+  case "$dir" in
+    /* | [A-Za-z]:[\\/]* | \\\\*) ;;
+    *) dir="$(pwd -P)/$dir" ;;
+  esac
   native "$dir"
 }

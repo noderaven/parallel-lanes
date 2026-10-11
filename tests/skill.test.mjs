@@ -186,7 +186,7 @@ test('reference.md cleanup never runs git in a shadow project folder', () => {
   assert.ok(start >= 0, 'reference.md lacks a Cleanup section');
   const next = reference.indexOf('\n## ', start + 1);
   const cleanup = reference.slice(start, next === -1 ? undefined : next);
-  assert.ok(cleanup.includes('git --git-dir="<git_dir>" worktree remove'), cleanup);
+  assert.ok(cleanup.includes('git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove'), cleanup);
   assert.ok(cleanup.includes('git -C "<worktree_root>/feature" branch -d'), cleanup);
   assert.match(cleanup, /not a repo/);
 });
@@ -360,4 +360,142 @@ test('reference.md documents the 1.4.4 hardening', () => {
   assert.ok(text.includes('ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]'),
     'reference.md lacks the ledger reviewed usage');
   assert.ok(!text.includes('and the other texts as `also_reported`'), 'reference.md still has the old merge rule');
+});
+
+// These tests check instructions to the session in SKILL.md, reference.md and
+// README.md (what they must say about the 1.5.0 run tools), not behaviour the
+// code enforces.
+function docSection(text, heading) {
+  const start = text.indexOf(heading);
+  assert.ok(start >= 0, `lacks ${heading}`);
+  const next = text.indexOf('\n## ', start + heading.length);
+  return text.slice(start, next === -1 ? undefined : next);
+}
+
+test('SKILL.md runs doctor before every dry run and on resume', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const confirmation = text.slice(text.indexOf('## Confirmation'), text.indexOf('## Launch'));
+  const doctor = confirmation.indexOf('scripts/doctor');
+  assert.ok(doctor >= 0 && doctor < confirmation.indexOf('1. Dry run'), 'doctor runs before the dry run');
+  assert.ok(/Exit 2 or 3 stops the flow/.test(confirmation), 'doctor exit 2 or 3 must stop the flow');
+  assert.ok(/warnings[^.]*table header/.test(confirmation), 'doctor warnings go in the table header');
+  const resume = text.slice(text.indexOf('## Resume'), text.indexOf('## Red flags'));
+  assert.ok(resume.includes('doctor included'), resume);
+});
+
+test('the hand-back archives the run and appends the autopsy summary', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const handBack = text.slice(text.indexOf('## Hand-back'), text.indexOf('## Resume'));
+  const report = handBack.indexOf('scripts/run-report');
+  const archive = handBack.indexOf('scripts/archive-run');
+  const autopsy = handBack.indexOf('scripts/autopsy');
+  assert.ok(report >= 0 && archive > report && autopsy > archive, handBack);
+  assert.ok(/every run that ends after a launch/.test(handBack), 'hand-back must name every run that ends after a launch');
+  assert.ok(/appen\w+ its (summary|output)/.test(handBack.slice(autopsy)), 'autopsy summary is appended');
+});
+
+test('cleanup asks before it removes anything', () => {
+  const text = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const at = text.indexOf('Cleanup, only after');
+  assert.ok(at >= 0, 'SKILL.md lacks the Cleanup line');
+  const line = text.slice(at, text.indexOf('## Resume'));
+  assert.ok(line.includes('scripts/cleanup'), line);
+  const plain = line.indexOf('scripts/cleanup <manifest');
+  const yes = line.indexOf('--yes');
+  assert.ok(plain >= 0 && yes > plain, 'cleanup runs without --yes first');
+  assert.ok(/without `--yes`/.test(line) || line.slice(plain, yes).includes('plan'), line);
+  assert.ok(/(only after|on) the user'?s yes/.test(line.slice(yes - 60)), '--yes only after the user says yes');
+});
+
+test('reference.md documents the tools', () => {
+  const raw = read(REFERENCE_MD).toString('utf8');
+  const text = raw.replace(/\s+/g, ' ');
+  for (const heading of ['## Run history', '## Autopsy', '## Doctor']) {
+    assert.ok(raw.includes('\n' + heading + '\n'), `reference.md lacks ${heading}`);
+  }
+  const cleanup = docSection(raw, '## Cleanup').replace(/\s+/g, ' ');
+  for (const word of ['scripts/cleanup', 'run.bundle', 'restore.md', 'not owned by this run']) {
+    assert.ok(cleanup.includes(word), `the Cleanup section lacks ${word}`);
+  }
+  const words = ['PL_HISTORY_DIR', 'index.lock', 'unclean_checks', 'inputs_fingerprint', 'duration_s',
+    // doctor's checks
+    'git_identity', 'base_not_current', 'python', 'dirty_checkout', 'shadow_repo', 'memory', 'disk',
+    'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
+    // autopsy's detectors
+    'background_check', 'timeout', 'repeated_failure', 'heredoc_failure', 'edit_retry',
+    'extra_review_round', 'escalation', 'retry', 'relaunch', 'long_tool_call', 'idle_gap', 'check_rerun',
+    'not_available', 'unavailable', 'partial', '--reindex'];
+  for (const word of words) {
+    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  }
+  // Each tool's exit codes.
+  const exits = {
+    '## Run history': ['archive-run', 'exit 0', 'exit 2', 'exit 3'],
+    '## Autopsy': ['autopsy', 'exit 0', 'exit 2', 'exit 3'],
+    '## Doctor': ['doctor', 'exit 0', 'exit 2', 'exit 3'],
+    '## Cleanup': ['cleanup', 'exit 0', 'exit 1', 'exit 2', 'exit 3', 'exit 4'],
+  };
+  for (const [heading, terms] of Object.entries(exits)) {
+    const body = docSection(raw, heading).replace(/\s+/g, ' ').toLowerCase();
+    for (const term of terms) assert.ok(body.includes(term), `${heading} lacks ${term}`);
+  }
+  assert.ok(/history[^.]*exit 0[^.]*exit 2|exit 0[^.]*exit 2[^.]*history/i.test(docSection(raw, '## Autopsy').replace(/\s+/g, ' ')),
+    'the Autopsy section gives the history exit codes');
+});
+
+test('README lists the five run tools and points to reference.md', () => {
+  const text = read(README_MD).toString('utf8').replace(/\s+/g, ' ');
+  for (const tool of ['doctor', 'archive-run', 'autopsy', 'history', 'cleanup']) {
+    assert.ok(text.includes('`' + tool + '`'), `README lacks ${tool}`);
+  }
+  assert.ok(text.includes('reference.md'), 'README points to reference.md');
+});
+
+// These tests check instructions to the session in the docs, not enforced
+// behaviour: the scripts and the Workflow code are tested elsewhere.
+test('reference.md Autopsy documents check ids, certainty, completion timing and partial data', () => {
+  const autopsy = section(read(REFERENCE_MD).toString('utf8'), 'Autopsy');
+  for (const word of ['test#1', 'no command text', 'inferred', 'tool_s_min', 'A partial agent',
+    '`ok`, `partial` or `not_available`', 'agents_with_usage', 'upper bound', 'completion notice']) {
+    assert.ok(autopsy.includes(word), `the Autopsy section lacks ${word}`);
+  }
+  assert.ok(/completion notice[^.]*unavailable|unavailable[^.]*completion notice/.test(autopsy),
+    'the Autopsy section ties the completion notice to an unavailable end');
+});
+
+test('reference.md Cleanup documents untracked files, the locks and the rechecks', () => {
+  const cleanup = section(read(REFERENCE_MD).toString('utf8'), 'Cleanup');
+  for (const word of ['status.showUntrackedFiles', 'ignored files', 'checkout lock',
+    'changed after the plan', 'status --porcelain --untracked-files=all']) {
+    assert.ok(cleanup.includes(word), `the Cleanup section lacks ${word}`);
+  }
+  assert.ok(cleanup.includes('run lock') || cleanup.includes('active-run acquire'),
+    'the Cleanup section names neither the run lock nor active-run acquire');
+  const flat = cleanup.replace(/\s+/g, ' ');
+  assert.ok(/ignored files do not keep a worktree, and `git worktree remove` deletes them/.test(flat),
+    'the Cleanup section does not say that removal deletes ignored files');
+  assert.ok(flat.includes('before `--yes`'), 'the Cleanup section does not say to copy ignored files first');
+  // Every git worktree remove, scripted or manual, makes git's own check see untracked files.
+  assert.deepEqual(flat.match(/git (?:-C |--git-dir=)"[^"]*" worktree remove/g), null,
+    'a worktree remove in the Cleanup section lacks -c status.showUntrackedFiles=all');
+});
+
+test('reference.md Run history describes an OS lock released with its process', () => {
+  const history = section(read(REFERENCE_MD).toString('utf8'), 'Run history');
+  assert.ok(history.includes('OS lock'), history);
+  assert.ok(/released when its process ends/.test(history), 'the lock release is not described');
+  assert.ok(!/stale/i.test(history), 'the Run history section still mentions stale takeover');
+});
+
+test('reference.md Doctor says exit 2 stops the flow like exit 3', () => {
+  const doctor = section(read(REFERENCE_MD).toString('utf8'), 'Doctor');
+  assert.ok(/Exit 2:[^.]*could not run[^.]*stops the flow/.test(doctor), doctor);
+});
+
+test('SKILL.md stops on doctor exit 2 or 3 and starts Resume step 6 with Confirmation', () => {
+  const raw = read(SKILL_MD).toString('utf8');
+  assert.ok(section(raw, 'Confirmation').includes('Exit 2 or 3 stops the'),
+    'Confirmation lacks "Exit 2 or 3 stops the"');
+  assert.ok(raw.replace(/\s+/g, ' ').includes('6. Confirmation, doctor included'),
+    'Resume step 6 does not start with Confirmation, doctor included');
 });

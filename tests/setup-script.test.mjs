@@ -647,6 +647,19 @@ test('setup: an unreadable checkout lock is refused', () => {
   assert.equal(readFileSync(join(ownActiveDir(c), lock), 'utf8'), 'not json');
 });
 
+test('setup: a checkout lock without a valid run_id is refused', () => {
+  const c = newCase();
+  setupOk(c, runManifest(c, 'first'));
+  const [lock] = checkoutLocks(c);
+  writeFileSync(join(ownActiveDir(c), lock), JSON.stringify({ run_id: '../x', checkout: c.project }));
+  const res = setup(c, runManifest(c, 'second'));
+  assert.equal(res.code, 4, res.stderr);
+  assert.match(res.stderr, /malformed/);
+  assert.ok(res.stderr.includes(lock), res.stderr);
+  assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-first');
+  assert.equal(hasBranch(c.project, 'pl-second'), false);
+});
+
 test('setup: runs in separate worktrees of one repo do not block each other', () => {
   const c = newCase();
   const side = join(c.root, 'side checkout');

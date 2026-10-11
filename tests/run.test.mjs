@@ -326,7 +326,7 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
   const p = calls.find((c) => c.label === 'integrate').prompt;
   for (const lane of ['alpha', 'beta']) {
     assert.ok(p.includes(`git -C '/work/wt/feature' branch -d 'pl-run-1-${lane}'`), lane);
-    assert.ok(p.includes(`git --git-dir='/shadow/abc' worktree remove '/work/wt/lane-${lane}'`), lane);
+    assert.ok(p.includes(`git --git-dir='/shadow/abc' -c status.showUntrackedFiles=all worktree remove '/work/wt/lane-${lane}'`), lane);
   }
   assert.ok(!p.includes("git --git-dir='/shadow/abc' branch -d"), 'the bare shadow HEAD is pl-base, not the feature branch');
   assert.match(p, /first of steps 1-5 that fails/);
@@ -2165,6 +2165,37 @@ test('integratePrompt: a lane without a known tip falls back to its ledger; plan
   const heal = integratePrompt(m, H('T1-h'), { testFailure: 'heal' });
   assert.match(heal, /6\. Only when steps 1-5 passed and you return tests_failed false/);
   assert.match(heal, /When you return tests_failed true, skip this step entirely/);
+});
+
+test('integration checks every untracked file before removing a lane worktree', async () => {
+  const { integratePrompt, resolveConflictsPrompt } = await loadHelpers(['integratePrompt', 'resolveConflictsPrompt']);
+  for (const mode of ['git', 'shadow']) {
+    const m = manifest();
+    if (mode === 'shadow') {
+      m.repo.mode = 'shadow';
+      m.repo.git_dir = '/shadow/abc';
+    }
+    const prompts = [
+      integratePrompt(m, H('T1-h')),
+      integratePrompt(m, H('T1-h'), { testFailure: 'heal' }),
+      resolveConflictsPrompt(m, H('T1-h'), ['src/shared.js']),
+    ];
+    for (const p of prompts) {
+      const statuses = p.match(/status --porcelain(?: \S+)?/g) || [];
+      assert.ok(statuses.length > 0, `${mode}: a clean check is present`);
+      for (const s of statuses) assert.equal(s, 'status --porcelain --untracked-files=all', mode);
+      const removes = p.split('\n').filter((line) => line.includes('worktree remove'));
+      for (const line of removes) {
+        const at = line.indexOf('worktree remove');
+        assert.ok(line.slice(0, at).endsWith('-c status.showUntrackedFiles=all '), `${mode}: ${line}`);
+      }
+    }
+    const cleanup = prompts[0].split('\n').filter((line) => line.includes('worktree remove'));
+    assert.equal(cleanup.length, 2, `${mode}: one removal per lane`);
+    for (const line of cleanup) {
+      assert.match(line, /status --porcelain --untracked-files=all prints nothing, /, mode);
+    }
+  }
 });
 
 // --- review findings 1 and 2: acceptance, decided in code at the delivered revision

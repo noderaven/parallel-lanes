@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Analyse one archived run: what got done, where the time went, and tokens.
+
+usage:
+  python3 autopsy RUN_FOLDER [--quiet]
+
+RUN_FOLDER is a history run folder (archive-run's layout): a *.lanes.json
+manifest, wf_<id>/ transcript dirs each with its wf_<id>.json result file,
+the *.ledger dir and the run report (the first of *.report.json,
+*.run-report.json and report.json). autopsy reads only that folder, never a
+live path from the manifest, so imported runs and runs from another OS work.
+It writes RUN_FOLDER/autopsy.json and RUN_FOLDER/autopsy.md (replacing only
+those two files) and prints a summary of at most 15 lines to stdout:
+the wall time and slowest phase, the top three slowdowns with their cost,
+the full-suite runs, the total tokens (a minimum when some usage is missing,
+unavailable when no agent has usage), the top suggestion and the absolute
+path of autopsy.md. --quiet prints nothing.
+
+autopsy.md is plain ASCII with these sections, in order: Summary, What got
+done, Where time went (a phase table, a 40-column text timeline per lane
+and the critical path, marked as an estimate), Checks, Slowdowns, Tokens,
+Suggestions and Open questions (one line per unexplained entry). It holds no
+free text from the transcripts.
+
+autopsy.json:
+
+  {autopsy_version, inputs_fingerprint, run_id, engine_version,
+   launches: [{wf, start, end, wall_s, status}],
+   done, time, tokens, checks, slowdowns, detectors, suggestions,
+   unexplained}
+
+inputs_fingerprint: sha256 over the sorted [relative path, size, sha256] of
+every file autopsy reads (the manifest, report, wf_*.json, wf_*/* and the
+ledger files); it changes when any input changes.
+
+launches: one per wf_* dir, in startTime order. start and end come from the
+result file's startTime and durationMs; without them, from the launch's
+agents' first timed line and last event. status is the result's status.
+
+done (from the last launch's result): tasks {<id>: {status, commits,
+rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
+warnings: <count>}, final {fixed, declined, open} (counts) and e2e
+(pass, fail or none). Free text (notes, reason details, warnings,
+findings, evidence) is never copied.
+
+time: wall_s (the launches' sum), phases [{phase, launch, start, end,
+wall_s, agents}], lanes [{lane, launch, start, end, busy_s, idle_s}],
+agents [{label, launch, phase, task, role, start, end, wall_s, tool_s,
+tool_s_min, other_s, unmatched_calls}], critical_path {estimate: true,
+labels} and idle_gaps [{start, end, s}].
+- An agent's span is its first timed transcript line (the prompt
+  included) to its last event (assistant message, tool call or tool
+  result). tool_s_min is the union of its matched tool call spans
+  (tool_use to the tool_result that answers it), so overlapping calls
+  count once; unmatched_calls counts its tool calls that no tool_result
+  answers. tool_s is its tool time and other_s the rest (model time,
+  transport and scheduling). An agent is partial when it has an unmatched
+  call or unreadable transcript lines: a lost result may hide a call that
+  ran to the agent's end, so its tool_s and other_s are "unavailable" and
+  tool_s_min is a lower bound (autopsy.md shows '>= N'). Otherwise tool_s
+  is tool_s_min, and a timed agent with no calls has a measured tool_s of
+  0. An untimed agent has all four "unavailable", and unmatched_calls too.
+- Phases come from each agent's workflowPhase, per launch. A phase's start
+  and end are its timed agents'; its wall_s is "unavailable" unless every
+  agent of it is timed. A lane is a phase named as a manifest lane's name,
+  or 'Lane <id>'; busy_s is the union of its agents' spans and idle_s the
+  rest of its span (both "unavailable" unless every agent is timed).
+- The critical path is a timing-based estimate: from the last-ending agent,
+  walk back to the latest-ending agent that ended before it started.
+- An idle gap is a span over 60 s inside a launch where no agent of that
+  launch runs. A launch with an agent that has no timestamps has none
+  listed (and with no such launch the idle_gap detector is
+  not_available): its gaps cannot be told from missing timestamps.
+
+tokens: totals, by_phase, by_role, by_tier and per_task buckets in
+run-report's token-field shape (input_tokens, output_tokens,
+cache_read_input_tokens, cache_creation_input_tokens, output_tokens_min,
+agents) and rules, plus agents_with_usage: the bucket's agents whose usage
+is known. A bucket where no agent has usage (agents_with_usage 0) has every
+token field and output_tokens_min "unavailable", never 0; a partly covered
+bucket keeps its sums, which are lower bounds. top_agents (the five
+largest by input + cache creation + output, output_tokens_min when output
+is incomplete); unreadable_lines (as run-report counts them); partial:
+true when any agent is output-incomplete, has unreadable lines or has no
+usage at all, so the totals are lower bounds. With no usage in the whole
+run, autopsy.md and the summary say the totals are unavailable.
+
+Background runs. A Bash call went to the background when Claude Code's
+notice on the first line of its result says so ('Command running in
+background with ID x', or '... was moved to the background (ID: x)' at a
+timeout). Its completion is observed at the earliest of, at or after that
+result: Claude Code's own task notification for x (a transcript line of
+type attachment with commandMode task-notification, whose task-id is x and
+whose status is not running or pending); the result of a BashOutput or
+TaskOutput call for x whose first <status> element is completed, failed or
+killed (a later one is the task's own output); the result of a TaskStop or KillShell call for x that is no error.
+That time is an upper bound on the real finish. Notification-shaped text
+in a user line or in any tool result never counts: an agent can read such
+text from a file.
+
+slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence}], largest
+cost_s first. agent is the label, or null for a run-wide kind (relaunch,
+idle_gap). cost_kind is measured, bound when the end is an upper limit,
+or unavailable when the end is not known (cost_s is then "unavailable").
+evidence is {tool, exit, marker, program}: the tool name, the exit code a
+result reports (or null), the marker string matched (from the table in
+_autopsy.py, or null) and the program a Bash command runs (in the first
+simple command that is not 'cd DIR', 'export ...', a loop header or a
+closing keyword, the first word that is not a NAME=value assignment or a
+prefix such as env or 'timeout DURATION', as a basename;
+null when that still holds '=', '@' or ':'). No command, output or prompt
+text is written. A call fails when its result is an error or starts with
+an 'Exit code N' line with N not 0. The kinds:
+- background_check: a Bash call went to the background (see Background
+  runs); from the call (from its result, after a timeout) to its observed
+  completion (bound). Without an observed completion its cost_s and
+  cost_kind are "unavailable".
+- timeout: Claude Code's notice starts a Bash result ('Command did not
+  complete within its ...', 'Command timed out after'); the call's span.
+  Text in command output, files read or other tools never counts.
+- repeated_failure: the same Bash command (whitespace-normalised) fails
+  twice or more in one agent; first failing call to last failing result.
+- heredoc_failure: a failing Bash command that is nothing but a heredoc
+  file write: each pipeline is a heredoc feeding cat or tee, with no |
+  stage, that writes a file (a > or >> redirect, or tee), or only 'cd DIR'
+  or NAME=value assignments. A failing inline script such as 'python3 -
+  <<EOF', even with its output redirected (> out.json), does not count, and neither does a line that does more than the write (cat > f
+  <<EOF then python3 f): its error text does not say which part failed,
+  so it is an unlocated failure. From it to the agent's next successful
+  file write, by Edit or Write or by a Bash redirect or tee (bound), else
+  its own span.
+- edit_retry: an Edit or Write fails as unread, changed, or text not
+  found; from it to the next successful write of that file.
+- extra_review_round: a task's 'fix N' and 're-review N' agents; the sum
+  of their wall times.
+- escalation and retry: an agent run-report counts as one (the same label
+  again at another model tier in the same launch; a label ending ' retry');
+  that agent's wall time.
+- relaunch: every launch but the last; its wall time.
+- long_tool_call: a tool call over 120 s that no kind above counted.
+- idle_gap: each time.idle_gaps entry.
+- check_rerun: the same Bash command (whitespace-normalised) runs again in
+  one agent, both runs certainly ran a check (certainty ran, see checks),
+  and every call between surely changed nothing: a Read, Grep, Glob, LS,
+  WebFetch, WebSearch, TodoWrite, BashOutput or TaskOutput call, or a Bash
+  line that parses, writes no file (no redirect or tee), holds no $(,
+  backtick, <( or >(, and whose every simple command (past leading
+  keywords and prefixes) is cd or runs cat, head, tail, grep, ls, wc,
+  echo, pwd, sleep, which or true. Any other program counts as a change
+  (find, rg, sed, xargs, and every git command, since git can run
+  configured helpers). The second run's span.
+A cost that cannot be timed is "unavailable".
+
+detectors: {<kind>: ok | partial | not_available}. A detector is
+not_available when its inputs are missing (no timed tool events, no
+labels, no models, no timed launch); it then adds no slowdown. The tool
+detectors (background_check, timeout, repeated_failure, heredoc_failure,
+edit_retry, long_tool_call, check_rerun) are partial when any agent is
+partial (see time): their slowdowns are kept, but they may miss some.
+autopsy.md lists the partial detectors apart from those without data.
+
+suggestions: [{kind, text, stake_s, count, slowdowns}], one per kind with a
+slowdown, worded as a likely cause and a change to try; stake_s is the time
+its slowdowns with a known cost cover, per agent, with overlapping spans
+counted once (so it can be less than the sum of their cost_s), and
+slowdowns lists their indexes. Ranked by stake_s. When acceptance reports checks_unclean, an unclean_checks
+suggestion (stake_s 0, no slowdowns) names the untracked files from the
+saved verify evidence (<ledger>/checks/verify-*.json) by path and says to
+commit any file a check needs and gitignore only known generated output.
+
+unexplained: [{start, end, s, agent}], the five largest spans over 60 s of
+an agent's time, cut at its events (a model turn, a tool call), that no
+slowdown covers. A slowdown covers its own agent's time; one without an
+agent covers any agent's.
+
+checks: executions [{agent, phase, role, check, certainty, full_suite,
+start, end, s, timing, background, on_critical_path}], by_check
+{<check id>: {runs, inferred, untimed, total_s}} and full_suite_runs
+{total, inferred, by_role: {<role>: n}}.
+- A check id names a configured command: <group>#<n> is
+  commands.<group>[n - 1] (test#1 is commands.test[0]) and
+  <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1]; a command
+  string already listed keeps its first id. check is that id or
+  'run-checks', never the command line or the configured command.
+- An execution is a Bash call whose command line runs a configured command
+  (commands.test, lint and build, and the lane_commands overrides) or
+  run-checks (a word whose basename is run-checks, as the program of a
+  simple command or as the script of python, py, bash or sh, not given -c
+  or -m). The line is read as shell words (heredoc bodies left out, a
+  backslash before a path character read as '/') split into simple
+  commands at ; & | && || ( ) and newlines; an & inside a redirection
+  (2>&1, >&2, &>f) is no separator. A configured command runs where a
+  simple command's words start with its words, both without redirections,
+  leading keywords, NAME=value assignments and prefixes such as env,
+  timeout DURATION or npx. The match with the most words names the
+  execution (the first configured on a tie). Text that only mentions a
+  check (echo "npm test", a heredoc body, bash -c "npm test") and a line
+  whose quoting does not parse are not executions.
+- certainty is ran or inferred. A matched simple command ran when no if,
+  elif, else, then, while, until, for, case, do or function comes before
+  it or leads it, and either every operator before it is ;, a newline, |
+  or a background &, or the whole line is pipelines joined only by &&
+  (no ;, newline, background & or ||) and the call exited 0 (a successful
+  result without an 'Exit code N' line counts as 0). Anything else is
+  inferred: it may not have run (cd DIR && check that failed may have
+  failed at the cd).
+- full_suite is ran or inferred when a simple command that exactly matches
+  a commands.test entry (or a run-checks call passing '--cmd test') ran or
+  only may have run, else null.
+- start is the call. timing says how end was found: measured, the call's
+  result; bound, a backgrounded call's observed completion (see
+  Background runs), an upper bound on its real end; unavailable, a
+  backgrounded call without an observed completion or a call without a
+  result (a missing result says nothing about the finish), whose end and
+  s are "unavailable".
+- on_critical_path: the agent is on time.critical_path.
+- by_check: runs counts the executions that ran, inferred the others;
+  untimed counts the ran executions without a duration, and total_s sums
+  the timed ones that ran (bound durations in it are upper bounds).
+- full_suite_runs: total and by_role (run-report's roles) count the
+  executions whose full_suite is ran, inferred those whose full_suite is
+  inferred. total is a lower bound on full-suite runs: runs through a
+  wrapper (bash -c, a script) are not seen, and inferred runs may not have
+  happened.
+- With no tool event in the whole run, executions, by_check, total,
+  inferred and by_role are "unavailable".
+
+Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
+0.1. Anything that cannot be read or derived is "unavailable", never 0.
+
+Exit 0 on success; 2 on a usage error or when RUN_FOLDER has no *.lanes.json
+or no wf_* dir; 3 when a path needs converting on Windows and no Git Bash or
+cygpath is found.
+"""
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _autopsy  # noqa: E402
+import _shell  # noqa: E402
+
+
+def main(argv):
+    _shell.setup_io()
+    args = argv[1:]
+    quiet = "--quiet" in args
+    args = [a for a in args if a != "--quiet"]
+    if len(args) != 1:
+        print("usage: autopsy RUN_FOLDER [--quiet]", file=sys.stderr)
+        return 2
+    try:
+        folder = _shell.native_path(args[0])
+    except _shell.BashNotFound as e:
+        print(f"autopsy: {e}", file=sys.stderr)
+        return 3
+    if not os.path.isdir(folder):
+        print(f"autopsy: not a directory: {folder}", file=sys.stderr)
+        return 2
+    if _autopsy.find_manifest(folder) is None:
+        print(f"autopsy: no *.lanes.json manifest in {folder}", file=sys.stderr)
+        return 2
+    if not _autopsy.wf_dirs(folder):
+        print(f"autopsy: no wf_* transcript dir in {folder}", file=sys.stderr)
+        return 2
+    analysis = _autopsy.analyze(folder)
+    out = os.path.join(folder, "autopsy.json")
+    md_path = os.path.join(folder, "autopsy.md")
+    _shell.write_text(out, json.dumps(analysis, indent=2) + "\n")
+    _shell.write_text(md_path, _autopsy.render_markdown(analysis))
+    if not quiet:
+        shown = os.path.abspath(md_path).replace("\\", "/")
+        sys.stdout.write(_autopsy.render_summary(analysis, shown))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
