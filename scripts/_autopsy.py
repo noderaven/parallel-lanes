@@ -70,7 +70,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 3
+AUTOPSY_VERSION = 4
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -1784,6 +1784,207 @@ def unexplained_section(run, slowdowns):
             for s, e, label in found[:TOP_UNEXPLAINED]]
 
 
+# ---- launch conditions ----
+
+# A doctor-<wf>.json snapshot in the ledger (what 'ledger conditions' writes)
+# binds one doctor result to the launch its file name names.
+_SNAPSHOT_NAME = re.compile(r"doctor-(wf_[A-Za-z0-9_-]{1,64})\.json")
+_CHECK_NAME = re.compile(r"[a-z_]{1,32}")
+_DOCTOR_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_REASON_CODE = re.compile(r"[a-z_]+")
+_PLAIN_DETAIL = re.compile(r"[A-Za-z0-9 .,;()%'_-]+")
+_DISK_FREE = re.compile(r"([0-9]+(?:\.[0-9]+)?) GB free")
+OUTCOMES = ("passed", "skipped", "warning", "failed")  # best to worst
+DOCTOR_STATUSES = ("ok", "blocked")
+# The checks for which doctor writes 'unknown' when it could not read the
+# machine: such a warning is a failed reading, not a condition.
+DOCTOR_READ_CHECKS = ("memory", "disk", "heavy_processes", "active_runs", "defender")
+_PLAIN_DETAIL_CHECKS = ("memory", "heavy_processes", "concurrency")
+# The slowdown kinds a warned or failed check may have contributed to. A
+# check without an entry has no related kind.
+RELATED_SLOWDOWNS = {
+    "memory": ("long_tool_call", "timeout", "background_check"),
+    "heavy_processes": ("long_tool_call", "timeout", "background_check"),
+    "defender": ("long_tool_call", "timeout", "background_check"),
+    "active_runs": ("long_tool_call", "timeout", "background_check"),
+    "disk": ("repeated_failure",),
+    "python_alias": ("repeated_failure",),
+}
+CONDITIONS_UNAVAILABLE = "launch conditions unavailable"
+CONDITIONS_FIRST_LINE = ("Observed before each launch. A condition may not have lasted through the run, "
+                         "and a warning beside a slowdown is a possible contributor, not a cause.")
+
+
+def derive_detail(check, outcome, text):
+    """The detail autopsy shows for a check, derived from doctor's text (a
+    failure's or warning's detail, or a skipped entry's reason) by a fixed
+    pattern per check, or None. doctor's text itself is never copied: it
+    can name paths, remotes and URLs."""
+    if not isinstance(text, str):
+        return None
+    if text == "unknown":
+        return "unknown"
+    if outcome == "skipped":
+        return text if _REASON_CODE.fullmatch(text) else None
+    if check in _PLAIN_DETAIL_CHECKS:
+        return text if _PLAIN_DETAIL.fullmatch(text) else None
+    if check == "disk":
+        m = _DISK_FREE.match(text)
+        return "%s GB free" % m.group(1) if m else None
+    if check == "defender":
+        return text if text in ("covered", "not covered") else None
+    return None
+
+
+def _read_snapshot(path):
+    """A snapshot file's JSON value, or None when it does not read as JSON."""
+    try:
+        with open(path, "rb") as f:
+            return json.loads(f.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return None
+
+
+def read_snapshots(run_folder):
+    """{wf: JSON value or None} of the ledger's doctor-<wf>.json files; a
+    file with any other name is not a snapshot."""
+    ledger = find_ledger(run_folder)
+    found = {}
+    for path in _files(ledger, "doctor-*.json") if ledger else []:
+        m = _SNAPSHOT_NAME.fullmatch(os.path.basename(path))
+        if m:
+            found[m.group(1)] = _read_snapshot(path)
+    return found
+
+
+def _setup_event(data):
+    """A snapshot's launch.setup_event when it is an int, else None."""
+    launch = data.get("launch") if isinstance(data, dict) else None
+    event = launch.get("setup_event") if isinstance(launch, dict) else None
+    return event if isinstance(event, int) and not isinstance(event, bool) else None
+
+
+def _worse(a, b):
+    return a if OUTCOMES.index(a) >= OUTCOMES.index(b) else b
+
+
+def snapshot_checks(doctor):
+    """[{check, outcome, detail, read}] of a doctor result: its checks when
+    present, else its failures, warnings and skipped entries, so a passed
+    outcome is never made up. An entry whose check name or outcome is not
+    valid is dropped; when the lists disagree on a check, the worst outcome
+    wins, and its detail comes from the list entry with that outcome."""
+    outcome = {}  # check -> outcome, in first-seen order
+    texts = {}  # (check, outcome) -> doctor's text
+    listed = doctor.get("checks")
+    for entry in listed if isinstance(listed, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("check"), str) \
+                and _CHECK_NAME.fullmatch(entry["check"]) and entry.get("outcome") in OUTCOMES:
+            name = entry["check"]
+            outcome[name] = _worse(entry["outcome"], outcome.get(name, "passed"))
+    for key, kind, field in (("failures", "failed", "detail"), ("warnings", "warning", "detail"),
+                             ("skipped", "skipped", "reason")):
+        entries = doctor.get(key)
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("check"), str) \
+                    or not _CHECK_NAME.fullmatch(entry["check"]):
+                continue
+            name = entry["check"]
+            outcome[name] = _worse(kind, outcome.get(name, "passed"))
+            texts.setdefault((name, kind), entry.get(field))
+    out = []
+    for name, result in outcome.items():
+        text = texts.get((name, result))
+        read = not (result == "warning" and text == "unknown" and name in DOCTOR_READ_CHECKS)
+        out.append({"check": name, "outcome": result, "detail": derive_detail(name, result, text),
+                    "read": read})
+    return out
+
+
+def _contributors(checks, launch, slowdowns):
+    """[{check, slowdowns: {kind: count}}]: each warned or failed check that
+    was read, with the related slowdowns that start inside the launch."""
+    out = []
+    for c in checks:
+        if c["outcome"] not in ("warning", "failed") or not c["read"]:
+            continue
+        counts = {}
+        for kind in RELATED_SLOWDOWNS.get(c["check"], ()):
+            n = sum(1 for s in slowdowns if s["kind"] == kind and s["_at"] is not None
+                    and launch["start"] <= s["_at"] <= launch["end"])
+            if n:
+                counts[kind] = n
+        if counts:
+            out.append({"check": c["check"], "slowdowns": counts})
+    return out
+
+
+def _not_shown(wf, state, reason):
+    return {"wf": wf, "state": state, "reason": reason, "observed_at": None, "before_start_s": None,
+            "doctor_version": None, "status": None, "checks": [], "possible_contributors": []}
+
+
+def _inconsistency(wf, data, snapshots, run, previous, launch):
+    """(reason, observed seconds): reason is the first rule a snapshot
+    fails for its launch, with observed None; or reason None and the
+    observation's seconds when it can be trusted."""
+    doctor = data.get("doctor") if isinstance(data, dict) else None
+    named = data.get("launch") if isinstance(data, dict) else None
+    observed = parse_ts(doctor.get("observed_at")) if isinstance(doctor, dict) else None
+    if not isinstance(named, dict) or not isinstance(doctor, dict) or observed is None:
+        return "snapshot unreadable", None
+    if named.get("wf") != wf:
+        return "file name and content name different launches", None
+    setup = _setup_event(data)
+    if setup is not None and any(other != wf and _setup_event(value) == setup
+                                 for other, value in snapshots.items()):
+        return "another snapshot names the same setup", None
+    if doctor.get("run_id") is not None and doctor.get("run_id") != run["manifest"].get("run_id"):
+        return "doctor result is for another run", None
+    if launch["start"] is None or (previous is not None and previous["end"] is None):
+        return "launch time unavailable", None
+    if observed > launch["start"]:
+        return "observed after the launch started", None
+    if previous is not None and int(observed) < int(previous["end"]):
+        return "observed before the previous launch ended", None
+    return None, observed
+
+
+def launch_conditions_section(run, slowdowns):
+    """(launch_conditions, orphan_snapshots): per launch, in launches order,
+    the doctor result bound to it (recorded), or why none is shown
+    (unavailable, inconsistent); and the wf names of snapshots for launches
+    not in the run, sorted. slowdowns are the internal ones (find_slowdowns)."""
+    snapshots = read_snapshots(run["folder"])
+    out = []
+    previous = None
+    for launch in run["launches"]:
+        wf = launch["wf"]
+        if wf not in snapshots:
+            out.append(_not_shown(wf, "unavailable", CONDITIONS_UNAVAILABLE))
+        else:
+            data = snapshots[wf]
+            reason, observed = _inconsistency(wf, data, snapshots, run, previous, launch)
+            if reason is not None:
+                out.append(_not_shown(wf, "inconsistent", reason))
+            else:
+                doctor = data["doctor"]
+                version = doctor.get("doctor_version")
+                checks = snapshot_checks(doctor)
+                out.append({
+                    "wf": wf, "state": "recorded", "reason": None, "observed_at": iso(observed),
+                    "before_start_s": seconds(launch["start"] - observed),
+                    "doctor_version": version if isinstance(version, str) and (
+                        version == UNAVAILABLE or _DOCTOR_VERSION.fullmatch(version)) else None,
+                    "status": doctor.get("status") if doctor.get("status") in DOCTOR_STATUSES else None,
+                    "checks": checks,
+                    "possible_contributors": _contributors(checks, launch, slowdowns),
+                })
+        previous = launch
+    launched = set(l["wf"] for l in run["launches"])
+    return out, sorted(wf for wf in snapshots if wf not in launched)
+
+
 # ---- the whole analysis ----
 
 def _engine_version(run):
@@ -1814,6 +2015,7 @@ def analyze(run_folder):
     detectors = detector_status(run)
     found = find_slowdowns(run, detectors)
     slowdowns = [public_slowdown(s) for s in found]
+    conditions, orphans = launch_conditions_section(run, found)
     return {
         "autopsy_version": AUTOPSY_VERSION,
         "inputs_fingerprint": fingerprint(run_folder),
@@ -1828,6 +2030,8 @@ def analyze(run_folder):
         "detectors": detectors,
         "suggestions": suggestions_section(found, unclean_suggestion(run_folder, done)),
         "unexplained": unexplained_section(run, found),
+        "launch_conditions": conditions,
+        "orphan_snapshots": orphans,
     }
 
 
@@ -2053,6 +2257,48 @@ def _md_time(a):
     return lines
 
 
+def _md_conditions(a):
+    lines = [CONDITIONS_FIRST_LINE]
+    for c in a["launch_conditions"]:
+        lines.append("")
+        if c["state"] != "recorded":
+            lines.append("%s: %s" % (c["wf"], c["reason"]))
+            continue
+        before = c["before_start_s"]
+        lines.append("Observed before launch %s (%s before its start), doctor %s: %s" % (
+            c["wf"], "%d min" % int(before // 60) if _is_num(before) else UNAVAILABLE,
+            c["doctor_version"] or UNAVAILABLE, c["status"] or UNAVAILABLE))
+        for x in c["checks"]:
+            if x["outcome"] in ("warning", "failed") and x["read"]:
+                lines.append("- %s: %s%s" % (x["check"], x["outcome"],
+                                             "" if x["detail"] is None else " (%s)" % x["detail"]))
+        lines += ["- %s: could not be read" % x["check"] for x in c["checks"] if not x["read"]]
+        skipped = [x["check"] + ("" if x["detail"] is None else " (%s)" % x["detail"])
+                   for x in c["checks"] if x["outcome"] == "skipped"]
+        if skipped:
+            lines.append("Skipped: %s" % ", ".join(skipped))
+        contributors = ["%s (%s)" % (p["check"], ", ".join("%s x%d" % kv for kv in p["slowdowns"].items()))
+                        for p in c["possible_contributors"]]
+        lines.append("Possible contributors: %s" % (", ".join(contributors) or "none"))
+    for wf in a["orphan_snapshots"]:
+        lines += ["", "Snapshot for a launch not in this archive: %s" % wf]
+    return lines
+
+
+def _conditions_line(a):
+    """The summary's launch conditions line, or None when no recorded launch
+    has a warned, failed or unread check."""
+    recorded = [c for c in a["launch_conditions"] if c["state"] == "recorded"]
+    checks = [x for c in recorded for x in c["checks"]]
+    warned = sum(1 for x in checks if x["outcome"] in ("warning", "failed") and x["read"])
+    unread = sum(1 for x in checks if not x["read"])
+    if not warned and not unread:
+        return None
+    return "launch conditions: %d check(s) warned or failed before launch%s; %d possible contributor(s)" % (
+        warned, ", %d could not be read" % unread if unread else "",
+        sum(len(c["possible_contributors"]) for c in recorded))
+
+
 def _md_checks(a):
     checks = a["checks"]
     if checks["executions"] == UNAVAILABLE:
@@ -2159,6 +2405,7 @@ def render_markdown(analysis):
         ["## Summary", ""] + _md_summary(a),
         ["## What got done", ""] + _md_done(a),
         ["## Where time went", ""] + _md_time(a),
+        ["## Launch conditions", ""] + _md_conditions(a),
         ["## Checks", ""] + _md_checks(a),
         ["## Slowdowns", ""] + _md_slowdowns(a),
         ["## Tokens", ""] + _md_tokens(a),
@@ -2185,6 +2432,9 @@ def render_summary(analysis, md_path):
             lines.append("  %s (%s): %s" % (s["kind"], where, _slowdown_cost(s)))
     else:
         lines.append("slowdowns: none found")
+    conditions = _conditions_line(a)
+    if conditions is not None:
+        lines.append(conditions)
     full = a["checks"]["full_suite_runs"]
     by_role = full["by_role"]
     lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
