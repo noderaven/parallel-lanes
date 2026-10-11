@@ -6,7 +6,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
@@ -522,6 +522,18 @@ async function holdLock(hist) {
     },
   };
 }
+
+test('index_lock refuses a symlink at index.lock and leaves its target alone',
+  { skip: process.platform === 'win32' }, () => {
+    const base = freshDir('lock-symlink');
+    const hist = join(base, 'hist');
+    mkdirSync(hist);
+    const target = join(base, 'precious.txt');
+    writeFileSync(target, 'keep me\n');
+    symlinkSync(target, join(hist, 'index.lock'));
+    assert.equal(lockFree(hist), false);
+    assert.equal(readFileSync(target, 'utf8'), 'keep me\n');
+  });
 
 test('reindex exits 2 when the lock is not acquired', async () => {
   const hist = importedHistory();

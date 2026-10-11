@@ -243,6 +243,9 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   const a2 = agentOf(D, 'A1 review');
   assert.deepEqual([a2.tool_s, a2.other_s], ['unavailable', 'unavailable']);
   assert.equal(typeof a2.tool_s_min, 'number');
+  assert.equal(a2.unmatched_calls, 0);
+  const md = readFileSync(join(dir, 'autopsy.md'), 'utf8');
+  assert.ok(md.includes(`A1 review: tool time >= ${a2.tool_s_min.toFixed(1)} s; unreadable transcript lines`), md);
   for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
   // verify has no usage: the totals count the three agents that have it, as minimums.
   assert.deepEqual([D.tokens.totals.agents, D.tokens.totals.agents_with_usage], [4, 3]);
@@ -702,6 +705,13 @@ test('a poll that says running does not end a background run', () => {
     res(60, 'o2', 'TaskOutput', '<status>completed</status>\n<exit_code>0</exit_code>')], [], notices);
   assert.deepEqual(out.ends[0], [true, 60, 'bound']);
   assert.deepEqual(out.completions[0], [60, 'completed']);
+  // A running poll whose output prints a status tag does not end it.
+  out = detect([...polled,
+    use(60, 'o2', 'BashOutput', { bash_id: 'bx1' }),
+    res(60, 'o2', 'BashOutput', '<status>running</status>\n<stdout>fixture: <status>completed</status></stdout>')],
+  [], notices);
+  assert.deepEqual(out.ends[0], [true, 130, 'bound']);
+  assert.deepEqual(out.completions[0], [130, 'completed']);
 });
 
 test('notification text read from a file is not a completion', () => {
@@ -756,6 +766,10 @@ test('a failure after a successful heredoc write is not a heredoc failure', () =
   for (const [command, text] of [
     ["cat > /tmp/p.py <<'EOF'\nprint(\"x\")\nEOF\npython3 /tmp/p.py", "Exit code 1\nUnicodeEncodeError: 'charmap' codec"],
     ["cat > /tmp/a.txt <<'EOF'\nx\nEOF\nbash -c 'if'", 'Exit code 2\nbash: -c: line 1: syntax error: unexpected end of file'],
+    // An inline script that redirects its output is not the write.
+    ["python3 - <<'EOF' > out.json\nraise SystemExit(1)\nEOF", 'Exit code 1'],
+    ["node - <<'EOF' >> log.txt\nprocess.exit(1)\nEOF", 'Exit code 1'],
+    ["cat <<'EOF' | python3 > out.json\nraise SystemExit(1)\nEOF", 'Exit code 1'],
   ]) {
     const out = detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', text, true)]);
     assert.deepEqual(brief(out), [], command);

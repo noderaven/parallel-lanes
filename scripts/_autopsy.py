@@ -867,14 +867,35 @@ def _writes(pipeline):
     return False
 
 
+def _heredoc_write(pipeline):
+    """Whether a pipeline is a heredoc file write: a single command (no |
+    stage) whose program, past redirections, assignments and prefixes, is
+    cat or tee, fed by a heredoc and writing a file (cat > f <<EOF, tee f
+    <<EOF). An inline script that redirects its output (python3 - <<EOF >
+    f, cat <<EOF | python3 > f) is not: its failure may be the script's."""
+    if "<<" not in pipeline or any(t in ("|", "|&") for t in pipeline) or not _writes(pipeline):
+        return False
+    words = []
+    skip = False
+    for token in pipeline:
+        if skip:
+            skip = False
+        elif token and all(c in _REDIRECT_CHARS for c in token):
+            skip = True
+        else:
+            words.append(token)
+    i = _skip_prefixes(words)
+    return i < len(words) and _basename(words[i]) in ("cat", "tee")
+
+
 def _only_heredoc_write(command):
     """Whether a command line is nothing but a heredoc file write: every
-    pipeline is a heredoc that feeds a file write in that pipeline (cat > f
-    <<EOF, tee f <<EOF; not an inline script such as python3 - <<EOF), or a
-    simple command that is only 'cd DIR' or NAME=value assignments, and at
-    least one is the write. When such a line fails, the write failed; when
-    a line that does more fails, the shell's error does not say which part
-    failed."""
+    pipeline is a heredoc that feeds a file write in that pipeline
+    (_heredoc_write: cat > f <<EOF, tee f <<EOF; not an inline script such
+    as python3 - <<EOF > f), or a simple command that is only 'cd DIR' or
+    NAME=value assignments, and at least one is the write. When such a line
+    fails, the write failed; when a line that does more fails, the shell's
+    error does not say which part failed."""
     if not heredocs(command):
         return False
     pipelines = _pipelines(command)
@@ -882,7 +903,7 @@ def _only_heredoc_write(command):
         return False
     writes = 0
     for p in pipelines:
-        if "<<" in p and _writes(p):
+        if _heredoc_write(p):
             writes += 1
         elif any(t in ("|", "|&") or all(c in _REDIRECT_CHARS for c in t) for t in p):
             return False
@@ -1002,7 +1023,7 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
 POLL_TOOLS = ("BashOutput", "TaskOutput")
 STOP_TOOLS = ("TaskStop", "KillShell")
 _TASK_KEYS = ("bash_id", "task_id", "shell_id")
-_POLL_DONE = re.compile(r"<status>\s*(completed|failed|killed)\s*</status>")
+_POLL_DONE = ("completed", "failed", "killed")
 _NOT_DONE = ("running", "pending")
 
 
@@ -1012,8 +1033,9 @@ def _completion_after(agent, call):
     Claude Code's background notice on the call's result names. A
     completion is the earliest of: a Claude Code notice (agent["notices"])
     for the ID with a status other than running or pending; the result of a
-    BashOutput or TaskOutput call for the ID that holds
-    <status>completed</status>, failed or killed; the result of a TaskStop
+    BashOutput or TaskOutput call for the ID whose first <status> element
+    is completed, failed or killed (a later one is the task's output); the
+    result of a TaskStop
     or KillShell call for the ID that is no error (status 'stopped'). Each is
     when the completion was observed, at or after the real finish. Text in
     a user line or another tool result never counts."""
@@ -1027,8 +1049,10 @@ def _completion_after(agent, call):
         if c["end"] is None or not any(c["input"].get(k) == task_id for k in _TASK_KEYS):
             continue
         if c["name"] in POLL_TOOLS:
-            done = _POLL_DONE.search(c["text"] or "")
-            if done:
+            # Only the result's first <status> element is the task's status;
+            # a later one is in the task's output.
+            done = _TASK_STATUS.search(c["text"] or "")
+            if done and done.group(1) in _POLL_DONE:
                 found.append((c["end"], done.group(1)))
         elif c["name"] in STOP_TOOLS and not c["is_error"]:
             found.append((c["end"], "stopped"))
@@ -2018,8 +2042,10 @@ def _md_time(a):
     if partial:
         lines += ["", "Agents with tool calls missing a result or unreadable lines (tool time is a minimum, "
                       "the rest unavailable):"]
-        lines += ["- %s: tool time >= %s; %s without a result" % (
-            _ascii(x["label"]), _secs(x["tool_s_min"]), _count_word(x["unmatched_calls"], "call"))
+        lines += ["- %s: tool time >= %s; %s" % (
+            _ascii(x["label"]), _secs(x["tool_s_min"]),
+            _count_word(x["unmatched_calls"], "call") + " without a result"
+            if _is_num(x["unmatched_calls"]) and x["unmatched_calls"] > 0 else "unreadable transcript lines")
             for x in partial]
     return lines
 

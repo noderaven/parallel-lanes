@@ -44,6 +44,7 @@ import errno
 import json
 import os
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -285,7 +286,9 @@ def index_lock(hdir, wait_s=30):
     """
     os.makedirs(hdir, exist_ok=True)
     path = os.path.join(hdir, LOCK)
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    # O_NOFOLLOW (POSIX): a symlink at the lock path is refused, so the
+    # holder details never overwrite the file it points to.
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     deadline = time.monotonic() + wait_s
     waiting = False
     fd = None
@@ -299,6 +302,10 @@ def index_lock(hdir, wait_s=30):
                         raise HistoryError("cannot create " + path + ": " + str(e))
                 except OSError as e:
                     raise HistoryError("cannot create " + path + ": " + str(e))
+                if fd is not None and not stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.close(fd)
+                    fd = None
+                    raise HistoryError("cannot create " + path + ": not a regular file")
             if fd is not None:
                 try:
                     if _try_lock(fd):

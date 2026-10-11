@@ -186,7 +186,7 @@ test('reference.md cleanup never runs git in a shadow project folder', () => {
   assert.ok(start >= 0, 'reference.md lacks a Cleanup section');
   const next = reference.indexOf('\n## ', start + 1);
   const cleanup = reference.slice(start, next === -1 ? undefined : next);
-  assert.ok(cleanup.includes('git --git-dir="<git_dir>" worktree remove'), cleanup);
+  assert.ok(cleanup.includes('git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove'), cleanup);
   assert.ok(cleanup.includes('git -C "<worktree_root>/feature" branch -d'), cleanup);
   assert.match(cleanup, /not a repo/);
 });
@@ -455,8 +455,8 @@ test('README lists the five run tools and points to reference.md', () => {
 // behaviour: the scripts and the Workflow code are tested elsewhere.
 test('reference.md Autopsy documents check ids, certainty, completion timing and partial data', () => {
   const autopsy = section(read(REFERENCE_MD).toString('utf8'), 'Autopsy');
-  for (const word of ['test#1', 'no command text', 'inferred', 'tool_s_min', 'partial',
-    'agents_with_usage', 'upper bound', 'completion notice']) {
+  for (const word of ['test#1', 'no command text', 'inferred', 'tool_s_min', 'A partial agent',
+    '`ok`, `partial` or `not_available`', 'agents_with_usage', 'upper bound', 'completion notice']) {
     assert.ok(autopsy.includes(word), `the Autopsy section lacks ${word}`);
   }
   assert.ok(/completion notice[^.]*unavailable|unavailable[^.]*completion notice/.test(autopsy),
@@ -471,6 +471,13 @@ test('reference.md Cleanup documents untracked files, the locks and the rechecks
   }
   assert.ok(cleanup.includes('run lock') || cleanup.includes('active-run acquire'),
     'the Cleanup section names neither the run lock nor active-run acquire');
+  const flat = cleanup.replace(/\s+/g, ' ');
+  assert.ok(/ignored files do not keep a worktree, and `git worktree remove` deletes them/.test(flat),
+    'the Cleanup section does not say that removal deletes ignored files');
+  assert.ok(flat.includes('before `--yes`'), 'the Cleanup section does not say to copy ignored files first');
+  // Every git worktree remove, scripted or manual, makes git's own check see untracked files.
+  assert.deepEqual(flat.match(/git (?:-C |--git-dir=)"[^"]*" worktree remove/g), null,
+    'a worktree remove in the Cleanup section lacks -c status.showUntrackedFiles=all');
 });
 
 test('reference.md Run history describes an OS lock released with its process', () => {

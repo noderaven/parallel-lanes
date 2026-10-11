@@ -92,8 +92,8 @@ timeout). Its completion is observed at the earliest of, at or after that
 result: Claude Code's own task notification for x (a transcript line of
 type attachment with commandMode task-notification, whose task-id is x and
 whose status is not running or pending); the result of a BashOutput or
-TaskOutput call for x that holds <status>completed</status>, failed or
-killed; the result of a TaskStop or KillShell call for x that is no error.
+TaskOutput call for x whose first <status> element is completed, failed or
+killed (a later one is the task's own output); the result of a TaskStop or KillShell call for x that is no error.
 That time is an upper bound on the real finish. Notification-shaped text
 in a user line or in any tool result never counts: an agent can read such
 text from a file.
@@ -121,10 +121,10 @@ an 'Exit code N' line with N not 0. The kinds:
 - repeated_failure: the same Bash command (whitespace-normalised) fails
   twice or more in one agent; first failing call to last failing result.
 - heredoc_failure: a failing Bash command that is nothing but a heredoc
-  file write: each pipeline is a heredoc feeding a file write in that
-  pipeline (a > or >> redirect, or tee), or only 'cd DIR' or NAME=value
-  assignments. A failing inline script such as 'python3 - <<EOF' does not
-  count, and neither does a line that does more than the write (cat > f
+  file write: each pipeline is a heredoc feeding cat or tee, with no |
+  stage, that writes a file (a > or >> redirect, or tee), or only 'cd DIR'
+  or NAME=value assignments. A failing inline script such as 'python3 -
+  <<EOF', even with its output redirected (> out.json), does not count, and neither does a line that does more than the write (cat > f
   <<EOF then python3 f): its error text does not say which part failed,
   so it is an unlocated failure. From it to the agent's next successful
   file write, by Edit or Write or by a Bash redirect or tee (bound), else

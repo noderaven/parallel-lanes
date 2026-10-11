@@ -754,6 +754,42 @@ test('cleanup: a branch moved after the plan is kept', () => {
   assert.equal(sha(c, 'refs/heads/pl-r1-b'), moved);
 });
 
+test('cleanup: a branch deleted after the plan is named as gone, not moved', () => {
+  const c = newCase();
+  git(c.project, 'worktree', 'remove', c.lanes.b);
+  const file = makePlan(c);
+  git(c.project, 'branch', '-D', 'pl-r1-b');
+  const out = removeOwned(c, file);
+  const kept = findItem(out.kept, 'branch', (i) => i.branch === 'pl-r1-b');
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /^deleted after the plan/);
+  assert.ok(!/moved/.test(kept.reason), kept.reason);
+});
+
+// The recheck catches a file added after the plan, so it is bypassed here:
+// git worktree remove itself must still see an untracked file that
+// status.showUntrackedFiles=no hides, and refuse.
+test('cleanup: git worktree remove refuses a hidden untracked file by itself', () => {
+  const c = hidingCase();
+  const file = makePlan(c);
+  const draft = join(c.lanes.a, 'private-draft.txt');
+  writeFileSync(draft, 'not committed\n');
+  const out = JSON.parse(python(c, [
+    ...LOAD_CLEANUP,
+    "with open(sys.argv[3], encoding='utf-8') as f:",
+    '    plan = json.load(f)',
+    'mod.recheck_worktree = lambda *args, **kwargs: None',
+    'removed, kept = mod.remove_owned(repo, m, plan)',
+    "print(json.dumps({'removed': removed, 'kept': kept}))",
+  ], [file]));
+  const kept = findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a));
+  assert.ok(kept, JSON.stringify(out));
+  assert.match(kept.reason, /^git worktree remove refused/);
+  assert.ok(existsSync(draft));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'));
+});
+
 test('cleanup: --yes refuses while another session holds the run lock', () => {
   const c = newCase();
   mkdirSync(c.active, { recursive: true });

@@ -59,7 +59,10 @@ cannot be removed safely is kept and named with the reason:
    git -c status.showUntrackedFiles=all worktree remove (which itself
    refuses a dirty or locked worktree). Clean means git status --porcelain
    --untracked-files=all prints nothing: untracked files count even when
-   Git's configuration hides them, and ignored files do not count. A
+   Git's configuration hides them, and ignored files do not count. Ignored
+   files do not keep a worktree: git worktree remove deletes them with it
+   (build output, node_modules, an ignored .env), so copy any ignored file
+   still needed before --yes. A
    worktree whose git status fails, or whose HEAD cannot be read, is kept.
    Right before each removal it is checked again, with a fresh git
    worktree list: it is still a run-owned worktree on its branch, it is
@@ -68,7 +71,8 @@ cannot be removed safely is kept and named with the reason:
    cleanup again", and so is its planned branch;
 2. lane branches the plan marks remove, with git branch -d (git mode only),
    each only while its tip is still the planned sha; otherwise it is kept
-   with "moved after the plan; run cleanup again";
+   with "moved after the plan; run cleanup again", or named with "deleted
+   after the plan; nothing left to delete" when it no longer exists;
 3. the feature branch (git mode only). It stops at the first failed
    condition, leaving the checkout and the branch as they are:
    - the main checkout is on repo.branch and clean (as in 1: untracked
@@ -81,7 +85,8 @@ cannot be removed safely is kept and named with the reason:
    - repo.branch is an ancestor of the fetched tip (the PR is merged);
    - base_ref is an ancestor of the fetched tip (a fast-forward);
    - repo.branch is still at the planned sha (otherwise "moved after the
-     plan; run cleanup again").
+     plan; run cleanup again", or "deleted after the plan; nothing left to
+     delete" when it no longer exists).
    Then git switch <base_ref>, git merge --ff-only <fetched tip>,
    git branch -d <repo.branch>;
 4. worktree_root, with rmdir, only when it is empty.
@@ -142,6 +147,8 @@ STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NOT_OWNED = "not owned by this run"
 # The reason a branch whose tip is not the planned one is kept.
 MOVED = "moved after the plan; run cleanup again"
+# The reason given for a planned branch that no longer exists.
+GONE = "deleted after the plan; nothing left to delete"
 # The cleanliness check: every untracked file counts, even when Git's
 # configuration (status.showUntrackedFiles) hides them; ignored files do not.
 STATUS = ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"]
@@ -625,6 +632,8 @@ def remove_feature(repo, m, planned):
     the first failed condition, leaving the checkout and the branch. The
     branch must still be at planned, its tip in the plan."""
     branch, base = m["repo"]["branch"], m["repo"]["base_ref"]
+    if repo.sha("refs/heads/" + branch) is None:
+        return False, GONE
     reason, remote, merge = feature_precheck(repo, branch, base)
     if reason is not None:
         return False, reason
@@ -650,7 +659,10 @@ def remove_feature(repo, m, planned):
         return False, "git merge-base could not compare " + base + " with " + fetched
     if not ff:
         return False, base + " cannot fast-forward to " + fetched + ": it has commits the upstream does not"
-    if repo.sha("refs/heads/" + branch) != planned:
+    current = repo.sha("refs/heads/" + branch)
+    if current is None:
+        return False, GONE
+    if current != planned:
         return False, MOVED
     res = repo.git("switch", base)
     if res.returncode != 0:
@@ -708,6 +720,8 @@ def remove_owned(repo, m, plan):
             continue
         elif b["branch"] in still_out:
             note(False, entry, still_out[b["branch"]])
+        elif repo.sha("refs/heads/" + b["branch"]) is None:
+            note(False, entry, GONE)
         elif repo.sha("refs/heads/" + b["branch"]) != b["sha"]:
             note(False, entry, MOVED)
         else:

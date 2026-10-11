@@ -758,7 +758,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   least tool time that can be shown, a minimum and not the total.
 - `checks` lists every execution of a configured project command or of `run-checks` (agent,
   phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
-  critical path, and whether it `ran` or is `inferred`), the totals per command, and the
+  critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), and the
   full-suite runs in total, inferred and per role. See "Checks" below.
 - `tokens` has run-report's token fields per bucket, `unreadable_lines` and `partial`. Each
   bucket also has `agents_with_usage`, the number of its agents whose usage could be read; a
@@ -782,7 +782,8 @@ text, because a command may carry a secret.
 - **Wrappers are not counted:** a run through `bash -c` or a script is not seen, so the totals
   are lower bounds.
 - **Background timing:** a backgrounded command ends at the host's completion notice for it, or
-  a terminal poll result (`BashOutput` or `TaskOutput` showing completed, failed or killed) or
+  a terminal poll result (`BashOutput` or `TaskOutput` whose first `<status>`, the task's own,
+  is completed, failed or killed) or
   a stop result. That is an upper bound at the observed time (`bound`), since the command may
   have finished earlier. Without a completion notice or such a result the end and the seconds
   are `unavailable`; the agent's last event is not a bound. Text an agent reads, in a file or
@@ -799,7 +800,7 @@ text, because a command may carry a secret.
 | `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background |
 | `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
-| `heredoc_failure` | a failing Bash command whose heredoc feeds a file write (`>`, `>>` or `tee`; not an inline script such as `python3 - <<EOF`) |
+| `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
 | `extra_review_round` | a task's fix and re-review rounds |
 | `escalation` | an agent re-run at another model tier |
@@ -807,7 +808,7 @@ text, because a command may carry a secret.
 | `relaunch` | every launch but the last |
 | `long_tool_call` | a tool call over 120 s that no other kind counted |
 | `idle_gap` | over 60 s with no agent of the launch running |
-| `check_rerun` | a check run again with no edit or commit between |
+| `check_rerun` | the same check command ran twice (both `ran`) with only read-only calls between |
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
 exit code when known, the matched marker string, and the program name (in the first simple
@@ -816,8 +817,8 @@ that is not a `NAME=value` assignment or a prefix such as `env` or `timeout DURA
 basename; null when it still holds `=`, `@` or `:`). Markers in command output, files read or
 other tools' results never count. A suggestion's `stake_s` counts time that overlapping
 slowdowns of its kind share once. No command text, tool output or prompt text reaches
-`autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names the configured
-command, never the command line.
+`autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names a check id (or
+`run-checks`), never the command line or the configured command.
 
 **Unavailable data:**
 - A figure that cannot be read or derived is `unavailable`, never 0.
@@ -914,7 +915,9 @@ and changes nothing; show the plan, and run it with `--yes` only on the user's y
   under `worktree_root` is left and listed as `not owned by this run`. A worktree with
   uncommitted files, or a locked one, is kept and named. Untracked files count as uncommitted
   even when the Git configuration hides them (`status.showUntrackedFiles`): cleanup reads the
-  status with `--untracked-files=all`. Only ignored files are left out.
+  status with `--untracked-files=all`. But ignored files do not keep a worktree, and `git
+  worktree remove` deletes them with it (build output, `node_modules`, an ignored `.env` or
+  local config): copy any ignored file you still need out of the worktree before `--yes`.
 - **Locks, during `--yes`:** cleanup takes the run lock the way a resume does (`active-run
   acquire`), so no resume or second cleanup works on the run meanwhile, and in git mode the
   checkout lock of the main checkout, so no other run's setup switches it. A run lock held by
@@ -925,7 +928,8 @@ and changes nothing; show the plan, and run it with `--yes` only on the user's y
   HEAD and is still clean. If not, the worktree is kept with "changed after the plan (what
   changed); run cleanup again", and so is its branch. A lane branch is deleted only while its
   tip is still the planned one, and the feature branch the same; otherwise "moved after the
-  plan; run cleanup again". The reason for each is that a session may have used the worktree
+  plan; run cleanup again", or "deleted after the plan; nothing left to delete" when the
+  branch no longer exists. The reason for each is that a session may have used the worktree
   between the plan and the removal.
 - **Restore point,** written before anything is removed, into a new folder
   `<run folder>/cleanup/<YYYYMMDDTHHMMSSZ>[-N]/` (never reused or overwritten): `refs.json` (every
@@ -973,7 +977,7 @@ saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`)
 with `git -C <wt> checkout <commit> -- .`, and once the user no longer needs it, delete it
 with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
-`git --git-dir="<git_dir>" worktree remove`, then run `shadow remove` (it deletes the shadow
+`git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove`, then run `shadow remove` (it deletes the shadow
 repo with its remaining branches). Remove `worktree_root` if it is empty (`rmdir`).
 
 ## Uninstall
