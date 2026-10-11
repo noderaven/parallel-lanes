@@ -20,8 +20,34 @@ Transcript text is used only inside this module (to match markers); it is
 never written out. Event "text", notes and tool inputs stay internal: a
 slowdown's evidence holds only the tool name, an exit code, a marker string
 from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
-check execution's command is a configured string from the manifest or
-'run-checks', never the command line.
+check execution is named by a check id or 'run-checks', never by the
+command line or the configured command (which may carry a secret).
+
+Checks. configured_checks gives each configured command an id: test#1 is
+commands.test[0], <lane>.test#1 is lane_commands.<lane>.test[0]. A Bash
+call is a check execution when its command line runs one (match_check):
+- The line is read as shell words, without heredoc bodies, a backslash
+  before a path character read as '/', split into simple commands at ;
+  & | && || ( ) and newlines. An & inside a redirection (2>&1, >&2, &>f)
+  is no separator. A line whose quoting does not parse runs no check, and
+  text that only mentions one (echo "npm test", a heredoc body, bash -c
+  "npm test") is no execution.
+- A configured command matches a simple command whose words start with its
+  words, with redirections, leading keywords, NAME=value assignments and
+  prefixes such as env, timeout DURATION or npx left out of both. The
+  match with the most words names the execution; a full-suite run needs a
+  simple command that exactly matches a commands.test entry, or a
+  run-checks call passing --cmd test.
+- Certainty: a matched simple command 'ran' when no if, elif, else, then,
+  while, until, for, case, do or function comes before it or leads it, and
+  either every operator before it is ;, a newline, | or a background &, or
+  the whole line is pipelines joined only by && (no ;, newline, background
+  &, or ||) and the call exited 0 (an && list exits 0 only when every part
+  ran). Otherwise it is 'inferred': it may not have run (cd DIR && check
+  that failed may have failed at the cd).
+The full-suite total counts the runs that ran, so it is a lower bound on
+full-suite runs: runs through a wrapper (bash -c, a script) are not seen,
+and the inferred runs, counted apart, may not have happened.
 """
 import glob
 import hashlib
@@ -37,7 +63,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 2
+AUTOPSY_VERSION = 3
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -1048,6 +1074,8 @@ def public_slowdown(s):
 # ---- checks ----
 
 CHECK_GROUPS = ("test", "lint", "build")
+RAN = "ran"
+INFERRED = "inferred"
 
 
 def _squash(text):
@@ -1055,26 +1083,29 @@ def _squash(text):
 
 
 def configured_checks(manifest):
-    """[(command, full_suite)]: the manifest's commands.test, lint and build
-    entries, then each lane_commands override's, without repeats. full_suite
-    is True for a commands.test entry."""
+    """[(check_id, command, full_suite)]: the manifest's commands.test, lint
+    and build entries, then each lane_commands override's. check_id is
+    <group>#<n> for commands.<group>[n - 1] and <lane id>.<group>#<n> for
+    lane_commands.<lane id>.<group>[n - 1]; a command string already seen
+    keeps its first id and is not listed again. full_suite is True for a
+    commands.test entry."""
     out = []
     seen = set()
 
-    def add(commands, full_groups):
+    def add(commands, prefix, full_groups):
         if not isinstance(commands, dict):
             return
         for group in CHECK_GROUPS:
             entries = commands.get(group)
-            for command in entries if isinstance(entries, list) else []:
+            for n, command in enumerate(entries if isinstance(entries, list) else [], 1):
                 if isinstance(command, str) and _squash(command) and command not in seen:
                     seen.add(command)
-                    out.append((command, group in full_groups))
+                    out.append(("%s%s#%d" % (prefix, group, n), command, group in full_groups))
 
-    add(_manifest_commands(manifest), ("test",))
+    add(_manifest_commands(manifest), "", ("test",))
     lanes = manifest.get("lane_commands")
-    for commands in lanes.values() if isinstance(lanes, dict) else []:
-        add(commands, ())
+    for lane, commands in lanes.items() if isinstance(lanes, dict) else []:
+        add(commands, "%s." % lane, ())
     return out
 
 
@@ -1118,17 +1149,46 @@ def _shell_tokens(command, punctuation):
     return tokens
 
 
+def _is_operator(token):
+    return bool(token) and all(c in _SEPARATORS for c in token)
+
+
+def _merge_redirections(tokens):
+    """_shell_tokens(..., _SEPARATORS) with the & of each redirection joined
+    back into one word (2>&1, >&2, >&-, &>f, and &> or &>> standing alone)
+    and |& read as |. A & token left standing is the background operator."""
+    out = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if token == "&" and out and out[-1][-1:] in ("<", ">"):
+            word = out.pop() + "&"
+            if nxt is not None and not _is_operator(nxt):
+                word += nxt
+                i += 1
+            out.append(word)
+        elif token == "&" and nxt is not None and nxt.startswith(">"):
+            out.append("&" + nxt)
+            i += 1
+        else:
+            out.append("|" if token == "|&" else token)
+        i += 1
+    return out
+
+
 def _segments(command):
     """The simple commands of a line as word lists: shell words split at
-    ; & | ( ) and newlines, or, when the quoting does not parse, plain
-    whitespace words of each piece between those characters."""
+    ; & | ( ) and newlines (a & inside a redirection such as 2>&1 is no
+    separator), or, when the quoting does not parse, plain whitespace words
+    of each piece between those characters."""
     try:
-        tokens = _shell_tokens(command, _SEPARATORS)
+        tokens = _merge_redirections(_shell_tokens(command, _SEPARATORS))
     except ValueError:
         return _plain_segments(command)
     out = [[]]
     for token in tokens:
-        if token and all(c in _SEPARATORS for c in token):
+        if _is_operator(token):
             out.append([])
         else:
             out[-1].append(token)
@@ -1165,7 +1225,8 @@ def _skip_prefixes(words):
 def _run_checks_args(words):
     """The words after run-checks when a simple command runs it (as the
     program, or as the script of an interpreter such as python or bash),
-    else None."""
+    else None. An interpreter given -c or -m runs inline code, not a
+    script."""
     i = _skip_prefixes(words)
     if i >= len(words):
         return None
@@ -1175,64 +1236,200 @@ def _run_checks_args(words):
         return None
     i += 1
     while i < len(words) and words[i].startswith("-"):
+        if _INLINE_FLAG.match(words[i]):
+            return None
         i += 2 if words[i] in _ARG_FLAGS else 1
     if i < len(words) and _basename(words[i]) == RUN_CHECKS:
         return words[i + 1:]
     return None
 
 
-def _full_suite_in(line, checks):
-    """True when line runs a full-suite entry of checks: it holds one at a
-    place no longer matched command covers (so a lane override such as
-    'npm test -- a' does not count as 'npm test')."""
-    names = [(_squash(name), full) for name, full in checks if _squash(name) in line]
-    spans = []
-    for name, _ in names:
-        start = line.find(name)
-        while start != -1:
-            spans.append((start, start + len(name)))
-            start = line.find(name, start + 1)
-    for name, full in names:
-        if not full:
+# A backslash before a path character (a Windows path separator); shlex
+# would drop it.
+_WINDOWS_SEPARATOR = re.compile(r"\\(?=[A-Za-z0-9_.-])")
+_CONTINUATION = re.compile(r"\\\r?\n")
+# A redirection word: 2>, >>, <, >|, 2>&1, &>f ...
+_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<|>\|)")
+# The operators a run of separator characters holds.
+_OPERATOR = re.compile(r"&&|\|\||\|&|;;&?|;&|[;&|()\n]")
+_INLINE_FLAG = re.compile(r"^-[A-Za-z]*[cm]")
+# Operators after which a simple command runs whatever came before it, and
+# the only operators of a line read as one && list of pipelines.
+_UNCONDITIONAL = (";", "\n", "|", "&")
+_CHAIN = ("&&", "|")
+# Words before which a simple command may not run (if, loops, case, a
+# function body).
+_CONDITIONAL_WORDS = ("if", "elif", "else", "then", "while", "until", "for", "case", "do", "function")
+
+
+def _simple_commands(command):
+    """The simple commands of a command line as (operators, lead, words),
+    and every operator of the line. operators are those right before the
+    simple command; lead holds the leading _LEAD_WORDS stripped from it;
+    words are the rest, without redirections and with _skip_prefixes and
+    npx skipped. Heredoc bodies are left out, a backslash before a path
+    character is read as '/', so Windows paths survive, and as in the shell
+    a backslash-newline joins lines and a newline after &&, || or | is no
+    separator. Raises ValueError when the quoting does not parse."""
+    line = _CONTINUATION.sub("", without_heredoc_bodies(command))
+    line = _WINDOWS_SEPARATOR.sub("/", line).strip()
+    simple = []
+    every = []
+    ops = []
+    words = []
+    for token in _merge_redirections(_shell_tokens(line, _SEPARATORS)) + [";"]:
+        if not _is_operator(token):
+            words.append(token)
             continue
-        start = line.find(name)
-        while start != -1:
-            end = start + len(name)
-            if not any(a <= start and end <= b and b - a > end - start for a, b in spans):
-                return True
-            start = line.find(name, start + 1)
-    return False
+        if words:
+            simple.append((ops,) + _reduce(words))
+            ops = []
+            words = []
+        for op in _OPERATOR.findall(token):
+            if op == "\n" and ops and ops[-1] in ("&&", "||", "|"):
+                continue
+            op = "|" if op == "|&" else op
+            ops.append(op)
+            every.append(op)
+    return simple, every[:-1]
 
 
-def match_check(command, checks):
-    """(name, full_suite) when a Bash command line runs a check, else None.
+def _reduce(words):
+    """(lead, words) of a simple command's words: see _simple_commands."""
+    kept = []
+    i = 0
+    while i < len(words):
+        m = _REDIRECTION.match(words[i])
+        if m is None:
+            kept.append(words[i])
+        elif all(c in "<>-" for c in words[i][m.end():]):
+            i += 1  # the operator stands alone: its target is the next word
+        i += 1
+    i = 0
+    while i < len(kept) and kept[i] in _LEAD_WORDS:
+        i += 1
+    lead, rest = kept[:i], kept[i:]
+    while rest:
+        i = _skip_prefixes(rest)
+        if i < len(rest) and rest[i] == "npx":
+            i += 1
+        if i == 0:
+            break
+        rest = rest[i:]
+    return lead, rest
+
+
+def _certainties(simple, every, exit_code):
+    """RAN or INFERRED for each simple command of a line (see match_check)."""
+    chain = exit_code == 0 and all(op in _CHAIN for op in every)
+    out = []
+    unconditional = True
+    conditional_before = False
+    for ops, lead, words in simple:
+        unconditional = unconditional and all(op in _UNCONDITIONAL for op in ops)
+        conditional = conditional_before or any(w in _CONDITIONAL_WORDS for w in lead)
+        out.append(RAN if not conditional and (unconditional or chain) else INFERRED)
+        conditional_before = conditional or (bool(words) and words[0] in _CONDITIONAL_WORDS)
+    return out
+
+
+def _surest(certainties):
+    """RAN when any is RAN, INFERRED when there are only others, else None."""
+    if RAN in certainties:
+        return RAN
+    return INFERRED if certainties else None
+
+
+def _check_words(command):
+    """The words of each simple command of a configured command, reduced as
+    a command line's are; None when there are none or its quoting does not
+    parse."""
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return None
+    parts = [words for _ops, _lead, words in simple]
+    return parts if parts and all(parts) else None
+
+
+def match_check(command, checks, exit_code=None):
+    """{check, certainty, full_suite} when a Bash command line runs a check
+    of checks (configured_checks), else None. exit_code is the call's exit
+    code (0 for a successful call without an 'Exit code N' line), or None
+    when unknown.
+
+    The line is read as shell words (heredoc bodies left out, a backslash
+    before a path character read as '/') split into simple commands at
+    ; & | && || ( ) and newlines; a & inside a redirection (2>&1, >&2, &>f)
+    is no separator. A line whose quoting does not parse runs nothing.
 
     A line with a simple command that runs run-checks (as the program, or as
-    an interpreter's script, after prefixes such as env or timeout DURATION)
-    is a run-checks call: name 'run-checks', and a full-suite run when any
-    of its run-checks commands passes '--cmd test'. Otherwise name is the
-    longest of checks' commands the line holds (whitespace-normalised),
-    first in checks' order on a tie, and full_suite is True when the line
-    holds a full-suite entry anywhere (see _full_suite_in), so a chained
-    'lint && test' counts even when the lint string is the longer one."""
+    an interpreter's script, after prefixes such as env or timeout DURATION;
+    not an interpreter given -c or -m) is a run-checks call: check
+    'run-checks', and full_suite is the certainty of the run-checks command
+    passing '--cmd test', or None.
+
+    Otherwise a configured command matches a simple command whose words
+    start with its words (both without redirections, leading keywords,
+    NAME=value assignments and prefixes such as env, timeout DURATION or
+    npx), exactly when no words follow; a configured command of several
+    simple commands matches them in a row. The match with the most words
+    names the execution (the first in checks' order on a tie). full_suite
+    is RAN when a simple command that exactly matches a full-suite entry is
+    certain, INFERRED when only uncertain ones do, else None.
+
+    A matched simple command is certain (RAN) when no if, elif, else, then,
+    while, until, for, case, do or function comes before it or is stripped
+    from it, and either every operator before it is ;, a newline, | or a
+    background &, or the whole line is pipelines joined only by && and
+    exit_code is 0 (an && list exits 0 only when every part ran).
+    Otherwise it is INFERRED: it may not have run."""
     if not isinstance(command, str):
         return None
-    # Shell words, and plain words too when the line holds a backslash:
-    # shlex drops the backslashes of an unquoted Windows path.
-    passes = [_segments(command)] + ([_plain_segments(command)] if "\\" in command else [])
-    for segments in passes:
-        found = [args for args in (_run_checks_args(words) for words in segments) if args is not None]
-        if found:
-            return RUN_CHECKS, any(w == "--cmd" and args[i + 1:i + 2] == ["test"]
-                                   for args in found for i, w in enumerate(args))
-    line = _squash(command)
-    best = None
-    for name, full in checks:
-        if _squash(name) in line and (best is None or len(_squash(name)) > len(_squash(best[0]))):
-            best = (name, full)
+    try:
+        simple, every = _simple_commands(command)
+    except ValueError:
+        return None
+    certainty = _certainties(simple, every, exit_code)
+    runs = [(i, args) for i, args in enumerate(_run_checks_args(words) for _ops, _lead, words in simple)
+            if args is not None]
+    if runs:
+        tests = [certainty[i] for i, args in runs
+                 if any(w == "--cmd" and args[j + 1:j + 2] == ["test"] for j, w in enumerate(args))]
+        return {"check": RUN_CHECKS, "certainty": _surest([certainty[i] for i, _args in runs]),
+                "full_suite": _surest(tests)}
+    best = None  # (word count, check_id, certainties)
+    full = []
+    for check_id, configured, is_full in checks:
+        parts = _check_words(configured)
+        if parts is None:
+            continue
+        size = sum(len(p) for p in parts)
+        for k in range(len(simple) - len(parts) + 1):
+            here = [words for _ops, _lead, words in simple[k:k + len(parts)]]
+            last = len(parts) - 1
+            if here[:last] != parts[:last] or here[last][:len(parts[last])] != parts[last]:
+                continue
+            sure = RAN if all(c == RAN for c in certainty[k:k + len(parts)]) else INFERRED
+            if best is None or size > best[0]:
+                best = (size, check_id, [sure])
+            elif best[1] == check_id:
+                best[2].append(sure)
+            if is_full and here[last] == parts[last]:
+                full.append(sure)
     if best is None:
         return None
-    return best[0], _full_suite_in(line, checks)
+    return {"check": best[1], "certainty": _surest(best[2]), "full_suite": _surest(full)}
+
+
+def _call_exit(call):
+    """A call's exit code for match_check: its 'Exit code N' line, 0 for a
+    successful result without one, None for a failed call without one or
+    no result."""
+    code = exit_code(call["text"])
+    if code is None and call["end"] is not None and not call["is_error"]:
+        return 0
+    return code
 
 
 def _execution_end(agent, call):
@@ -1252,42 +1449,50 @@ def _execution_end(agent, call):
 
 
 def checks_section(run):
-    """Every Bash call that runs a configured check or run-checks, with its
-    timing; per-command totals; full-suite runs per role. Without any tool
-    event in the run the section cannot be derived and is unavailable."""
+    """Every Bash call that runs a configured check or run-checks, named by
+    check id and marked ran or inferred, with its timing; per-check totals;
+    full-suite runs per role. Without any tool event in the run the section
+    cannot be derived and is unavailable."""
     if not _has_tool_events(run):
-        return {"executions": UNAVAILABLE, "by_command": UNAVAILABLE,
-                "full_suite_runs": {"total": UNAVAILABLE, "by_role": UNAVAILABLE}}
+        return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
+                "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE}}
     checks = configured_checks(run["manifest"])
     on_path = set(id(a) for a in critical_agents(run))
     found = []
     for order, a in enumerate(_all_agents(run)):
         e = a["entry"]
         for call in _calls(a):
-            match = match_check(_command(call), checks) if call["name"] == "Bash" else None
+            match = match_check(_command(call), checks, _call_exit(call)) if call["name"] == "Bash" else None
             if match is None:
                 continue
             background, end, timing = _execution_end(a, call)
-            found.append(((call["start"], order), match[1], {
-                "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "command": match[0],
+            found.append(((call["start"], order), {
+                "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "check": match["check"],
+                "certainty": match["certainty"], "full_suite": match["full_suite"],
                 "start": iso(call["start"]), "end": iso(end), "s": seconds(end - call["start"]),
                 "timing": timing, "background": background, "on_critical_path": id(a) in on_path,
             }))
     found.sort(key=lambda f: f[0])
-    executions = [x for _key, _full, x in found]
-    by_command = {}
+    executions = [x for _key, x in found]
+    by_check = {}
     for x in executions:
-        totals = by_command.setdefault(x["command"], {"runs": 0, "total_s": 0.0})
+        totals = by_check.setdefault(x["check"], {"runs": 0, "inferred": 0, "total_s": 0.0})
+        if x["certainty"] != RAN:
+            totals["inferred"] += 1
+            continue
         totals["runs"] += 1
-        totals["total_s"] += x["s"]
-    for totals in by_command.values():
+        if _is_num(x["s"]):
+            totals["total_s"] += x["s"]
+    for totals in by_check.values():
         totals["total_s"] = seconds(totals["total_s"])
     by_role = {}
-    for _key, full, x in found:
-        if full:
+    for x in executions:
+        if x["full_suite"] == RAN:
             by_role[x["role"]] = by_role.get(x["role"], 0) + 1
-    return {"executions": executions, "by_command": by_command,
-            "full_suite_runs": {"total": sum(by_role.values()), "by_role": by_role}}
+    return {"executions": executions, "by_check": by_check,
+            "full_suite_runs": {"total": sum(by_role.values()),
+                                "inferred": sum(1 for x in executions if x["full_suite"] == INFERRED),
+                                "by_role": by_role}}
 
 
 # ---- suggestions ----
@@ -1670,10 +1875,15 @@ def _md_checks(a):
         _count_word(len(executions), "execution"), sum(1 for x in executions if x["on_critical_path"]),
         sum(1 for x in executions if x["background"]))]
     if executions:
-        lines += [""] + _table(["Command", "Runs", "Total"],
-                               [[c, v["runs"], _secs(v["total_s"])] for c, v in checks["by_command"].items()])
+        lines += [""] + _table(["Check", "Runs", "Inferred", "Total"],
+                               [[c, v["runs"], v["inferred"], _secs(v["total_s"])]
+                                for c, v in checks["by_check"].items()])
+        lines += ["", "Check ids name manifest commands: test#1 is commands.test[0], "
+                      "<lane>.test#1 is lane_commands.<lane>.test[0]."]
     full = checks["full_suite_runs"]
-    lines += ["", "Full-suite runs: %s" % full["total"]]
+    inferred = full.get("inferred")
+    lines += ["", "Full-suite runs: %s%s" % (full["total"], " (+%d inferred)" % inferred
+                                             if _is_num(inferred) and inferred else "")]
     if isinstance(full["by_role"], dict):
         lines += ["- %s: %d" % (_ascii(r), n) for r, n in full["by_role"].items()]
     return lines

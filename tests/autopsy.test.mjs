@@ -101,7 +101,7 @@ test('done lists each task and the acceptance', () => {
     'autopsy_version', 'inputs_fingerprint', 'run_id', 'engine_version', 'launches', 'done', 'time',
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained',
   ]);
-  assert.equal(A.autopsy_version, 2);
+  assert.equal(A.autopsy_version, 3);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -114,9 +114,9 @@ test('done lists each task and the acceptance', () => {
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
   // A1 implement and verify each run the test command once.
-  assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.command, x.s]),
-    [['A1 implement', 'node tests/run-tests.mjs', 30], ['verify', 'node tests/run-tests.mjs', 20]]);
-  assert.deepEqual(A.checks.full_suite_runs, { total: 2, by_role: { implement: 1, verify: 1 } });
+  assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.check, x.certainty, x.s]),
+    [['A1 implement', 'test#1', 'ran', 30], ['verify', 'test#1', 'ran', 20]]);
+  assert.deepEqual(A.checks.full_suite_runs, { total: 2, inferred: 0, by_role: { implement: 1, verify: 1 } });
   // Free text from the result, prompts and tool output is never copied.
   for (const marker of ['NOTES-TEXT-1', 'REASON-DETAIL-1', 'WARNING-TEXT-1', 'FINDING-TEXT-1',
     'E2E-EVIDENCE-1', 'PROMPT-MARKER-1', 'TOOL-OUTPUT-1', 'Reading the brief']) {
@@ -618,26 +618,45 @@ test('unclean checks are explained without suggesting to ignore source', () => {
 const run3 = autopsy(copyRun(RUN3));
 const C = run3.json;
 const TEST_CMD = 'node tests/run-tests.mjs';
+const run3Manifest = JSON.parse(readFileSync(join(RUN3, 'p.lanes.json'), 'utf8'));
+const chainedManifest = {
+  commands: { test: ['npm test'], lint: ['npm run lint'] },
+  lane_commands: { a: { test: ['npm test -- a'] } },
+};
+// match_check's dict for a command line under a manifest, given the call's
+// exit code (0 by default).
+const matcher = (manifest) => (command, exit = 0) => python([
+  'import _autopsy',
+  `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(manifest))}))`,
+  `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks, ${JSON.stringify(exit)})))`,
+]);
+const match = matcher(run3Manifest);
+const chained = matcher(chainedManifest);
+const R = (check, full_suite = null, certainty = 'ran') => ({ check, certainty, full_suite });
 
 test('every check execution is listed with its duration', () => {
   assert.equal(run3.code, 0, run3.stderr);
   const ex = C.checks.executions;
   assert.equal(ex.length, 4);
   for (const x of ex) {
-    assert.deepEqual(Object.keys(x), ['agent', 'phase', 'role', 'command', 'start', 'end', 's', 'timing',
-      'background', 'on_critical_path']);
+    assert.deepEqual(Object.keys(x), ['agent', 'phase', 'role', 'check', 'certainty', 'full_suite', 'start', 'end',
+      's', 'timing', 'background', 'on_critical_path']);
   }
   // The background run is timed to its completion line.
-  assert.deepEqual(ex.map((x) => [x.agent, x.phase, x.role, x.command, x.start, x.end, x.s, x.timing,
-    x.background]), [
-    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:00:10'), T('10:02:40'), 150, 'measured', true],
-    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:03:10'), T('10:03:55'), 45, 'measured', false],
-    ['verify', 'Verify', 'verify', 'run-checks', T('10:06:40'), T('10:08:10'), 90, 'measured', false],
-    ['final fix', 'Final review', 'final fix', TEST_CMD, T('10:10:10'), T('10:11:00'), 50, 'measured', false],
+  assert.deepEqual(ex.map((x) => [x.agent, x.phase, x.role, x.check, x.certainty, x.full_suite, x.start, x.end, x.s,
+    x.timing, x.background]), [
+    ['A1 implement', 'Lane a', 'implement', 'test#1', 'ran', 'ran', T('10:00:10'), T('10:02:40'), 150, 'measured',
+      true],
+    ['A1 implement', 'Lane a', 'implement', 'test#1', 'ran', 'ran', T('10:03:10'), T('10:03:55'), 45, 'measured',
+      false],
+    ['verify', 'Verify', 'verify', 'run-checks', 'ran', 'ran', T('10:06:40'), T('10:08:10'), 90, 'measured', false],
+    ['final fix', 'Final review', 'final fix', 'test#1', 'ran', 'ran', T('10:10:10'), T('10:11:00'), 50, 'measured',
+      false],
   ]);
-  assert.deepEqual(C.checks.by_command, {
-    [TEST_CMD]: { runs: 3, total_s: 245 },
-    'run-checks': { runs: 1, total_s: 90 },
+  assert.equal(C.checks.by_command, undefined);
+  assert.deepEqual(C.checks.by_check, {
+    'test#1': { runs: 3, inferred: 0, total_s: 245 },
+    'run-checks': { runs: 1, inferred: 0, total_s: 90 },
   });
   // Without a completion line the background run is bound by the agent's last event.
   const dir = copyRun(RUN3);
@@ -650,7 +669,8 @@ test('every check execution is listed with its duration', () => {
 });
 
 test('full-suite runs are counted per role', () => {
-  assert.deepEqual(C.checks.full_suite_runs, { total: 4, by_role: { implement: 2, verify: 1, 'final fix': 1 } });
+  assert.deepEqual(C.checks.full_suite_runs,
+    { total: 4, inferred: 0, by_role: { implement: 2, verify: 1, 'final fix': 1 } });
   // run-checks without the test group is an execution but not a full-suite run.
   const dir = copyRun(RUN3);
   const path = join(dir, 'wf_1', 'agent-v1.jsonl');
@@ -660,7 +680,9 @@ test('full-suite runs are counted per role', () => {
   const res = autopsy(dir);
   assert.equal(res.code, 0, res.stderr);
   assert.equal(res.json.checks.executions.length, 4);
-  assert.deepEqual(res.json.checks.full_suite_runs, { total: 3, by_role: { implement: 2, 'final fix': 1 } });
+  assert.deepEqual(res.json.checks.full_suite_runs,
+    { total: 3, inferred: 0, by_role: { implement: 2, 'final fix': 1 } });
+  assert.equal(res.json.checks.executions[2].full_suite, null);
 });
 
 test('critical-path executions are marked', () => {
@@ -677,20 +699,20 @@ test('a check command never appears in raw form', () => {
     'run-checks.test.mjs', 'git log']) {
     assert.ok(!run3.text.includes(raw), `autopsy.json holds ${raw}`);
   }
-  for (const x of C.checks.executions) assert.ok([TEST_CMD, 'run-checks'].includes(x.command), x.command);
-  // The longest configured command a line holds names it; a file named like
-  // run-checks is not a run-checks call.
-  const manifest = JSON.parse(readFileSync(join(RUN3, 'p.lanes.json'), 'utf8'));
-  const match = (command) => python([
+  for (const x of C.checks.executions) assert.ok(['test#1', 'run-checks'].includes(x.check), x.check);
+  // Checks are named by id: <group>#<n> for commands.<group>[n - 1], and
+  // <lane>.<group>#<n> for a lane_commands override.
+  assert.deepEqual(python([
     'import _autopsy',
-    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(manifest))}))`,
-    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
-  ]);
-  assert.deepEqual(match('cd /w && node tests/run-tests.mjs --only b'), ['node tests/run-tests.mjs --only b', false]);
-  assert.deepEqual(match('npx  eslint  .'), ['eslint .', false]);
-  assert.deepEqual(match('node tests/run-tests.mjs'), [TEST_CMD, true]);
-  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), ['run-checks', false]);
-  assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), ['run-checks', true]);
+    `print(json.dumps(_autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(run3Manifest))}))))`,
+  ]), [['test#1', TEST_CMD, true], ['lint#1', 'eslint .', false], ['b.test#1', `${TEST_CMD} --only b`, false]]);
+  // The configured command with the most words names the execution; a file
+  // named like run-checks is not a run-checks call.
+  assert.deepEqual(match('cd /w && node tests/run-tests.mjs --only b'), R('b.test#1'));
+  assert.deepEqual(match('npx  eslint  .'), R('lint#1'));
+  assert.deepEqual(match('node tests/run-tests.mjs'), R('test#1', 'ran'));
+  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), R('run-checks'));
+  assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), R('run-checks', 'ran'));
   assert.equal(match('node --test tests/run-checks.test.mjs'), null);
   // run-checks counts only in command position: as the program, or as the
   // script an interpreter runs, in any simple command of the line.
@@ -698,35 +720,106 @@ test('a check command never appears in raw form', () => {
   assert.equal(match('cat scripts/run-checks && grep -n cmd scripts/run-checks'), null);
   assert.equal(match('echo "python3 scripts/run-checks --cmd test x"'), null);
   assert.deepEqual(match("cd /w && PATH=/x:$PATH 'C:/py/python.exe' -X utf8 -B 'C:/s/run-checks' /w --cmd test t"),
-    ['run-checks', true]);
-  assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), ['run-checks', false]);
-  assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), ['run-checks', true]);
+    R('run-checks', 'ran'));
+  assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), R('run-checks'));
+  assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), R('run-checks', 'ran'));
   // A '#' inside a word starts no comment; a word that starts with '#' does.
-  assert.deepEqual(match('curl http://x/#a && python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
+  assert.deepEqual(match('curl http://x/#a && python3 scripts/run-checks . --cmd test t'), R('run-checks', 'ran'));
   assert.equal(match('echo hi # python3 scripts/run-checks . --cmd test t'), null);
   // Any run-checks command of the line with the test group counts, and
   // timeout DURATION is a prefix.
   assert.deepEqual(match('python3 scripts/run-checks . --cmd lint l && python3 scripts/run-checks . --cmd test t'),
-    ['run-checks', true]);
-  assert.deepEqual(match('timeout 600 python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
-  assert.deepEqual(match('timeout -k 5 600 scripts/run-checks . --cmd lint l'), ['run-checks', false]);
+    R('run-checks', 'ran'));
+  assert.deepEqual(match('timeout 600 python3 scripts/run-checks . --cmd test t'), R('run-checks', 'ran'));
+  assert.deepEqual(match('timeout -k 5 600 scripts/run-checks . --cmd lint l'), R('run-checks'));
   // A full-suite run counts wherever the test command sits in the line, even
-  // when a longer configured string names the execution; a lane override
-  // that only contains it does not.
-  const chainedManifest = {
-    commands: { test: ['npm test'], lint: ['npm run lint'] },
-    lane_commands: { a: { test: ['npm test -- a'] } },
-  };
-  const chained = (command) => python([
-    'import _autopsy',
-    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(chainedManifest))}))`,
-    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
-  ]);
-  assert.deepEqual(chained('npm run lint && npm test'), ['npm run lint', true]);
-  assert.deepEqual(chained('npm run lint'), ['npm run lint', false]);
-  assert.deepEqual(chained('npm test -- a'), ['npm test -- a', false]);
-  assert.deepEqual(chained('npm test -- a && npm test'), ['npm test -- a', true]);
-  assert.deepEqual(chained('npm run lint && npm test -- a'), ['npm test -- a', false]);
+  // when a longer configured command names the execution; a lane override
+  // that only starts with it does not.
+  assert.deepEqual(chained('npm run lint && npm test'), R('lint#1', 'ran'));
+  assert.deepEqual(chained('npm run lint'), R('lint#1'));
+  assert.deepEqual(chained('npm test -- a'), R('a.test#1'));
+  assert.deepEqual(chained('npm test -- a && npm test'), R('a.test#1', 'ran'));
+  assert.deepEqual(chained('npm run lint && npm test -- a'), R('a.test#1'));
+});
+
+test('text that only mentions a check is not an execution', () => {
+  for (const command of ['echo "npm test"', 'grep "npm test" README.md', "cat > f.sh <<'EOF'\nnpm test\nEOF",
+    'bash -c "npm test"', 'python3 -c "import subprocess; subprocess.run(\'npm test\')"']) {
+    assert.equal(chained(command), null, command);
+  }
+  assert.deepEqual(chained('npm test -- --grep one'), R('test#1'));
+  assert.deepEqual(chained('npm test 2>&1 | tail -5'), R('test#1', 'ran'));
+});
+
+test('a check that may not have run is inferred', () => {
+  assert.deepEqual(chained('false && npm test', 1), R('test#1', 'inferred', 'inferred'));
+  assert.equal(chained('if [ -f x ]; then npm test; fi').certainty, 'inferred');
+  assert.deepEqual(chained('npm run lint || npm test'), R('lint#1', 'inferred'));
+  assert.equal(chained('npm run lint && npm test', 1).full_suite, 'inferred');
+  assert.equal(chained('npm run lint && npm test', 0).full_suite, 'ran');
+  assert.deepEqual(chained('cd /w && npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test', 1), R('test#1', 'inferred', 'inferred'));
+  assert.equal(chained('cd /nonexistent-directory && npm test', 1).certainty, 'inferred');
+  // The ; breaks the proven chain.
+  assert.equal(chained('false && npm test; true', 0).certainty, 'inferred');
+  // An unconditional check ran, whatever the line's exit code.
+  assert.deepEqual(chained('npm run lint; npm test', 1), R('lint#1', 'ran'));
+  // An & inside a redirection is no separator; a background & still breaks
+  // the proven chain.
+  assert.deepEqual(chained('cd /w && npm test 2>&1 | tail -5', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test 2>&1 | tail -5', 1), R('test#1', 'inferred', 'inferred'));
+  assert.deepEqual(chained('cd /w && npm test &> out.log', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test & true', 0), R('test#1', 'inferred', 'inferred'));
+  // As in the shell, a backslash-newline joins lines and a newline after &&
+  // separates nothing.
+  assert.deepEqual(chained('cd /w && \\\n  npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w &&\n  npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('npm test \\\n  -- --grep one', 0), R('test#1'));
+  // Through a run: a full-suite run that may not have happened is inferred.
+  const dir = copyRun(RUN3);
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => lines.map((l) => {
+    const o = JSON.parse(l);
+    const block = Array.isArray(o.message.content) ? o.message.content[0] : null;
+    if (block && block.id === 'tu_a1_4') block.input.command = `false && ${TEST_CMD}`;
+    if (block && block.tool_use_id === 'tu_a1_4') {
+      block.content = 'Exit code 1\nTOOL-OUTPUT-9';
+      block.is_error = true;
+    }
+    return JSON.stringify(o);
+  }));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(res.json.checks.full_suite_runs,
+    { total: 3, inferred: 1, by_role: { implement: 1, verify: 1, 'final fix': 1 } });
+  const x = res.json.checks.executions[1];
+  assert.deepEqual([x.start, x.check, x.certainty, x.full_suite], [T('10:03:10'), 'test#1', 'inferred', 'inferred']);
+  assert.deepEqual(res.json.checks.by_check['test#1'], { runs: 2, inferred: 1, total_s: 200 });
+  const md = runCli(dir).md;
+  assert.match(md, /^\| test#1 \| 2 \| 1 \| 200\.0 s \|$/m);
+  assert.match(md, /^Full-suite runs: 3 \(\+1 inferred\)$/m);
+});
+
+test('the r150 parser probes are not check runs', () => {
+  assert.equal(chained("cd '/w' && cat > \"/tmp/t5.py\" <<'EOF'\nfor cmd in ['python3 scripts/run-checks . --cmd lint l\\npython3 scripts/run-checks . --cmd test t']:\n    print(cmd)\nEOF\n'C:/py/python.exe' \"/tmp/t5.py\""), null);
+  assert.equal(chained("cd '/w' && python -c \"\nimport _autopsy as A\nprint(A.match_check('curl http://x/#a && python3 scripts/run-checks . --cmd test t', []))\n\""), null);
+});
+
+test('configured commands with secrets never reach the outputs', () => {
+  const dir = copyRun(RUN3);
+  const path = join(dir, 'p.lanes.json');
+  const m = JSON.parse(readFileSync(path, 'utf8'));
+  m.commands.test = [`API_TOKEN=CANARY-PRIVATE-150 ${TEST_CMD}`];
+  m.lane_commands.b.test = [`SECRET=CANARY-LANE-7 ${TEST_CMD} --only b`];
+  writeFileSync(path, JSON.stringify(m, null, 2));
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const json = readFileSync(join(dir, 'autopsy.json'), 'utf8');
+  for (const text of [json, res.md, res.stdout]) {
+    for (const secret of ['CANARY-PRIVATE-150', 'CANARY-LANE-7', 'API_TOKEN']) assert.ok(!text.includes(secret), secret);
+  }
+  const checks = JSON.parse(json).checks;
+  assert.equal(checks.executions.length, 4);
+  assert.equal(checks.full_suite_runs.total, 4);
 });
 
 test('checks without tool events are unavailable, not zero', () => {
@@ -741,8 +834,8 @@ test('checks without tool events are unavailable, not zero', () => {
   const res = autopsy(dir);
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(res.json.checks, {
-    executions: 'unavailable', by_command: 'unavailable',
-    full_suite_runs: { total: 'unavailable', by_role: 'unavailable' },
+    executions: 'unavailable', by_check: 'unavailable',
+    full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
   });
 });
 
@@ -773,8 +866,12 @@ test('autopsy.md has every section in order', () => {
   assert.match(md, /\| Lane beta \| wf_2 \|/);
   assert.match(md, /^lane a +wf_2 +\|[.#]{40}\|/m);
   assert.match(md, /estimate/i);
-  // Checks: executions by command and full-suite runs by role.
-  assert.match(md, /node tests\/run-tests\.mjs \| 3 \| 160\.0/);
+  // Checks: executions by check id, what the ids name, and full-suite runs by role.
+  assert.match(md, /^\| Check \| Runs \| Inferred \| Total \|$/m);
+  assert.match(md, /^\| test#1 \| 3 \| 0 \| 160\.0 s \|$/m);
+  assert.ok(md.includes('Check ids name manifest commands: test#1 is commands.test[0], '
+    + '<lane>.test#1 is lane_commands.<lane>.test[0].'));
+  assert.match(md, /^Full-suite runs: 3$/m);
   assert.match(md, /implement: 3/);
   // One open-questions line per unexplained entry.
   const open = md.split('## Open questions')[1].split('\n').filter((l) => l.startsWith('- '));

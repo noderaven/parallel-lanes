@@ -134,25 +134,53 @@ an agent's time, cut at its events (a model turn, a tool call), that no
 slowdown covers. A slowdown covers its own agent's time; one without an
 agent covers any agent's.
 
-checks: executions [{agent, phase, role, command, start, end, s, timing,
-background, on_critical_path}], by_command {<command>: {runs, total_s}} and
-full_suite_runs {total, by_role: {<role>: n}}.
-- An execution is a Bash call whose command line holds a configured command
-  (commands.test, lint and build, and the lane_commands overrides) or runs
+checks: executions [{agent, phase, role, check, certainty, full_suite,
+start, end, s, timing, background, on_critical_path}], by_check
+{<check id>: {runs, inferred, total_s}} and full_suite_runs {total,
+inferred, by_role: {<role>: n}}.
+- A check id names a configured command: <group>#<n> is
+  commands.<group>[n - 1] (test#1 is commands.test[0]) and
+  <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1]; a command
+  string already listed keeps its first id. check is that id or
+  'run-checks', never the command line or the configured command.
+- An execution is a Bash call whose command line runs a configured command
+  (commands.test, lint and build, and the lane_commands overrides) or
   run-checks (a word whose basename is run-checks, as the program of a
-  simple command or as the script of python, py, bash or sh). command is
-  the configured string (the longest one the line holds,
-  whitespace-normalised) or 'run-checks', never the command line itself.
+  simple command or as the script of python, py, bash or sh, not given -c
+  or -m). The line is read as shell words (heredoc bodies left out, a
+  backslash before a path character read as '/') split into simple
+  commands at ; & | && || ( ) and newlines; an & inside a redirection
+  (2>&1, >&2, &>f) is no separator. A configured command runs where a
+  simple command's words start with its words, both without redirections,
+  leading keywords, NAME=value assignments and prefixes such as env,
+  timeout DURATION or npx. The match with the most words names the
+  execution (the first configured on a tie). Text that only mentions a
+  check (echo "npm test", a heredoc body, bash -c "npm test") and a line
+  whose quoting does not parse are not executions.
+- certainty is ran or inferred. A matched simple command ran when no if,
+  elif, else, then, while, until, for, case, do or function comes before
+  it or leads it, and either every operator before it is ;, a newline, |
+  or a background &, or the whole line is pipelines joined only by &&
+  (no ;, newline, background & or ||) and the call exited 0 (a successful
+  result without an 'Exit code N' line counts as 0). Anything else is
+  inferred: it may not have run (cd DIR && check that failed may have
+  failed at the cd).
+- full_suite is ran or inferred when a simple command that exactly matches
+  a commands.test entry (or a run-checks call passing '--cmd test') ran or
+  only may have run, else null.
 - start is the call; end is its result. A backgrounded call ends at the
   first later result or notice naming its ID (measured); without one, or
   for a call with no result, end is the agent's last event (bound).
 - on_critical_path: the agent is on time.critical_path.
-- A full-suite run is an execution whose line runs a commands.test entry
-  (anywhere in it, outside a longer configured command that contains it),
-  or a run-checks call passing '--cmd test'; by_role uses run-report's
-  roles.
-- With no tool event in the whole run, executions, by_command, total and
-  by_role are "unavailable".
+- by_check: runs counts the executions that ran, inferred the others, and
+  total_s sums the timed ones that ran.
+- full_suite_runs: total and by_role (run-report's roles) count the
+  executions whose full_suite is ran, inferred those whose full_suite is
+  inferred. total is a lower bound on full-suite runs: runs through a
+  wrapper (bash -c, a script) are not seen, and inferred runs may not have
+  happened.
+- With no tool event in the whole run, executions, by_check, total,
+  inferred and by_role are "unavailable".
 
 Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
 0.1. Anything that cannot be read or derived is "unavailable", never 0.
