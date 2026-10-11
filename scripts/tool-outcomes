@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Print the hand-back's one-line summary of the run tools.
+
+usage:
+  python3 tool-outcomes [--run-folder DIR] [--archive-exit N]
+                        [--autopsy-exit N] [--conditions-refused CODE]
+                        [--relaunch-blocked CHECKS]
+                        [--cleanup awaiting|done|declined|failed|none]
+                        [--json]
+
+DIR is the run's history folder (archive-run's layout, where autopsy wrote
+autopsy.json); a Git Bash /c/... path works on Windows. --archive-exit and
+--autopsy-exit are those tools' exit codes, left out when a tool did not
+run. --conditions-refused is the refusal code of the latest launch's
+`ledger conditions` (wf_recorded, not_doctor, no_setup, setup_recorded or
+observation_reused). --relaunch-blocked is a comma-separated list of the
+doctor checks that blocked a relaunch. --cleanup is the cleanup offer's
+state (none, the default, when no cleanup is offered).
+
+It prints one line:
+
+  Run tools: <doctor>; <archive>; <autopsy>; <cleanup>
+
+doctor comes from the last entry of launch_conditions in DIR/autopsy.json
+(autopsy's binding of a doctor result to its launch), read only with
+--autopsy-exit 0 and --run-folder; it never reads the ledger:
+  doctor before <wf>: <status>[, <n> warning(s) (<names>)]
+      [, <n> failed (<names>)][, <n> not read (<names>)]
+                          recorded ("status unavailable" for a null
+                          status); warnings and failures count the checks
+                          that were read, "not read" those that were not
+  launch conditions not recorded[ (<code>)]
+                          unavailable, with the --conditions-refused code
+  launch conditions inconsistent[ (<reason>)]
+                          inconsistent; the reason is shown only when it is
+                          one of autopsy's seven
+  launch conditions not checked (autopsy not run|autopsy failed|autopsy
+      unreadable)         no usable autopsy.json: no --autopsy-exit, a
+                          non-zero one, or a file that is missing, not
+                          JSON or older (without launch_conditions)
+followed by " (earlier launches: see autopsy)" when autopsy.json lists more
+than one launch, and ", relaunch blocked by doctor (<a>, <b>)" with
+--relaunch-blocked. Check names are shown only when they match
+^[a-z_]{1,32}$ (other entries are left out), and a wf id only when it
+matches ^wf_[A-Za-z0-9_-]{1,64}$ ("the launch" otherwise). No check detail,
+path or free text from autopsy.json is ever printed.
+
+archive: "archived to <DIR>" (DIR in its native form, C:/... on Windows),
+"archived" without --run-folder, "archive failed (exit N)" or "archive not
+run".
+
+autopsy: "autopsy generated (<m> possible contributor(s))", m summed over
+every launch's possible_contributors; "autopsy generated (contributors
+unavailable)" when autopsy.json is not usable; "autopsy failed (exit N)";
+"autopsy not run".
+
+cleanup: "cleanup awaiting approval", "cleanup done", "cleanup declined",
+"cleanup failed" or "cleanup not offered".
+
+The line never mentions implementation acceptance or any task's status.
+
+--json prints one JSON line instead:
+
+  {"doctor", "archive", "autopsy", "cleanup"}, each {"state", "detail"}
+
+detail is that tool's text in the line. The states: doctor recorded,
+not_recorded, inconsistent or not_checked; archive archived, failed or
+not_run; autopsy generated, failed or not_run; cleanup awaiting, done,
+declined, failed or not_offered. Readers ignore keys they do not know.
+
+It is read-only and needs no manifest. When DIR cannot be converted on
+Windows (no Git Bash or cygpath), DIR is shown as given and autopsy.json
+counts as unreadable.
+
+Exit 0 whenever the arguments parse; 2 on a usage error (an unknown flag or
+cleanup state, a refusal code that is not one of the five, a check name not
+matching ^[a-z_]{1,32}$, an exit code that is not an integer, or an empty
+DIR), with argparse's message on stderr.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
+
+REFUSAL_CODES = ("wf_recorded", "not_doctor", "no_setup", "setup_recorded", "observation_reused")
+INCONSISTENT_REASONS = (
+    "snapshot unreadable",
+    "file name and content name different launches",
+    "another snapshot names the same setup",
+    "doctor result is for another run",
+    "launch time unavailable",
+    "observed after the launch started",
+    "observed before the previous launch ended",
+)
+CLEANUP_WORDS = {
+    "awaiting": "cleanup awaiting approval",
+    "done": "cleanup done",
+    "declined": "cleanup declined",
+    "failed": "cleanup failed",
+    "not_offered": "cleanup not offered",
+}
+CHECK_NAME = re.compile(r"^[a-z_]{1,32}$")
+WF_ID = re.compile(r"^wf_[A-Za-z0-9_-]{1,64}$")
+EXIT_CODE = re.compile(r"^-?[0-9]+$")
+
+
+def exit_code(text):
+    if not EXIT_CODE.match(text):
+        raise argparse.ArgumentTypeError("not an integer: " + repr(text))
+    return int(text)
+
+
+def check_names(text):
+    names = text.split(",")
+    for name in names:
+        if not CHECK_NAME.match(name):
+            raise argparse.ArgumentTypeError(
+                "check names must match ^[a-z_]{1,32}$, comma-separated: " + repr(text))
+    return names
+
+
+def folder_arg(text):
+    if not text:
+        raise argparse.ArgumentTypeError("the run folder is empty")
+    return text
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="tool-outcomes", allow_abbrev=False,
+                                description="Print the hand-back's run-tools line.")
+    p.add_argument("--run-folder", type=folder_arg, metavar="DIR")
+    p.add_argument("--archive-exit", type=exit_code, metavar="N")
+    p.add_argument("--autopsy-exit", type=exit_code, metavar="N")
+    p.add_argument("--conditions-refused", choices=REFUSAL_CODES, metavar="CODE")
+    p.add_argument("--relaunch-blocked", type=check_names, metavar="CHECKS")
+    p.add_argument("--cleanup", choices=("awaiting", "done", "declined", "failed", "none"),
+                   default="none")
+    p.add_argument("--json", action="store_true")
+    return p.parse_args(argv)
+
+
+def read_autopsy(folder):
+    """autopsy.json's object when it has a non-empty launch_conditions list of
+    objects; else None (missing, not JSON, or an older autopsy)."""
+    if folder is None:
+        return None
+    try:
+        with open(os.path.join(folder, "autopsy.json"), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("launch_conditions")
+    if not isinstance(entries, list) or not entries:
+        return None
+    if not all(isinstance(e, dict) for e in entries):
+        return None
+    return data
+
+
+def named_checks(entry):
+    """The check entries with a printable name, in order."""
+    checks = entry.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return [c for c in checks
+            if isinstance(c, dict) and isinstance(c.get("check"), str) and CHECK_NAME.match(c["check"])]
+
+
+def recorded_text(entry):
+    wf = entry.get("wf")
+    wf = wf if isinstance(wf, str) and WF_ID.match(wf) else "the launch"
+    status = entry.get("status")
+    status = status if status in ("ok", "blocked") else "status unavailable"
+    checks = named_checks(entry)
+    groups = (
+        ("warning(s)", [c["check"] for c in checks if c.get("outcome") == "warning" and c.get("read") is True]),
+        ("failed", [c["check"] for c in checks if c.get("outcome") == "failed" and c.get("read") is True]),
+        ("not read", [c["check"] for c in checks if c.get("read") is False]),
+    )
+    text = "doctor before " + wf + ": " + status
+    for label, names in groups:
+        if names:
+            text += ", %d %s (%s)" % (len(names), label, ", ".join(names))
+    return text
+
+
+def doctor_part(args, data):
+    """(state, text) of the doctor part, before the relaunch suffix."""
+    if args.autopsy_exit is None:
+        return "not_checked", "launch conditions not checked (autopsy not run)"
+    if args.autopsy_exit != 0:
+        return "not_checked", "launch conditions not checked (autopsy failed)"
+    unreadable = ("not_checked", "launch conditions not checked (autopsy unreadable)")
+    if data is None:
+        return unreadable
+    last = data["launch_conditions"][-1]
+    state = last.get("state")
+    if state == "recorded":
+        out = ("recorded", recorded_text(last))
+    elif state == "unavailable":
+        text = "launch conditions not recorded"
+        if args.conditions_refused:
+            text += " (" + args.conditions_refused + ")"
+        out = ("not_recorded", text)
+    elif state == "inconsistent":
+        reason = last.get("reason")
+        text = "launch conditions inconsistent"
+        if reason in INCONSISTENT_REASONS:
+            text += " (" + reason + ")"
+        out = ("inconsistent", text)
+    else:
+        return unreadable
+    launches = data.get("launches")
+    if isinstance(launches, list) and len(launches) > 1:
+        out = (out[0], out[1] + " (earlier launches: see autopsy)")
+    return out
+
+
+def archive_part(args, shown_folder):
+    if args.archive_exit is None:
+        return "not_run", "archive not run"
+    if args.archive_exit != 0:
+        return "failed", "archive failed (exit %d)" % args.archive_exit
+    if shown_folder is not None:
+        return "archived", "archived to " + shown_folder
+    return "archived", "archived"
+
+
+def autopsy_part(args, data):
+    if args.autopsy_exit is None:
+        return "not_run", "autopsy not run"
+    if args.autopsy_exit != 0:
+        return "failed", "autopsy failed (exit %d)" % args.autopsy_exit
+    if data is None:
+        return "generated", "autopsy generated (contributors unavailable)"
+    m = sum(len(e["possible_contributors"]) for e in data["launch_conditions"]
+            if isinstance(e.get("possible_contributors"), list))
+    return "generated", "autopsy generated (%d possible contributor(s))" % m
+
+
+def outcomes(args):
+    folder = shown_folder = None
+    if args.run_folder is not None:
+        try:
+            folder = shown_folder = _shell.native_path(args.run_folder)
+        except _shell.BashNotFound:
+            shown_folder = args.run_folder
+    data = read_autopsy(folder) if args.autopsy_exit == 0 else None
+    doctor = doctor_part(args, data)
+    if args.relaunch_blocked:
+        doctor = (doctor[0], doctor[1] + ", relaunch blocked by doctor (" + ", ".join(args.relaunch_blocked) + ")")
+    cleanup = "not_offered" if args.cleanup == "none" else args.cleanup
+    parts = (
+        ("doctor", doctor),
+        ("archive", archive_part(args, shown_folder)),
+        ("autopsy", autopsy_part(args, data)),
+        ("cleanup", (cleanup, CLEANUP_WORDS[cleanup])),
+    )
+    return {key: {"state": state, "detail": detail} for key, (state, detail) in parts}
+
+
+def main(argv):
+    _shell.setup_io()
+    args = parse_args(argv[1:])
+    out = outcomes(args)
+    if args.json:
+        sys.stdout.write(json.dumps(out) + "\n")
+    else:
+        details = [out[k]["detail"] for k in ("doctor", "archive", "autopsy", "cleanup")]
+        sys.stdout.write("Run tools: " + "; ".join(details) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
