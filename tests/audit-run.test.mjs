@@ -492,7 +492,7 @@ test('checks never carry commands or tails', () => {
   assert.equal(none.acceptance.verdict_rule, 'not_required claimed while checks are configured');
 });
 
-test('the real check-verify flags late evidence', { todo: 'needs Task C1' }, () => {
+test('the real check-verify flags late evidence', () => {
   const verify = verifyAt(D);
   const evidence = `${LEDGER}/checks/verify-${D}.json`;
   const folder = makeRun({
