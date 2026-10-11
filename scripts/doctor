@@ -2,37 +2,54 @@
 """Check the machine and the project before a launch.
 
 usage:
-  python3 doctor MANIFEST [--json]
+  python3 doctor MANIFEST [--json] [--save FILE]
 
 Runs _doctor.run_checks on the run manifest with the machine's own probes.
 By default it prints text: each failure with its fix, then the warnings, then
 the skipped checks. With --json it prints run_checks' result:
   {"status": "ok"|"blocked", "failures": [{"check", "detail", "fix"}],
-   "warnings": [{"check", "detail"}], "skipped": [{"check", "reason"}]}
+   "warnings": [{"check", "detail"}], "skipped": [{"check", "reason"}],
+   "checks": [{"check", "outcome": "passed"|"warning"|"failed"|"skipped"}],
+   "observed_at": "YYYY-MM-DDTHH:MM:SSZ", "doctor_version": "<VERSION>"|"unavailable",
+   "run_id": "<the manifest's run_id>"|null}
+checks lists all twelve checks in the order they run, each with the outcome
+it recorded (see _doctor.py).
 
 The hard failures (git_identity, base_not_current, python, dirty_checkout,
 shadow_repo) are described in _doctor.py.
 
-doctor is read-only: it never writes a file, changes a ref or a config value,
-or fetches (the upstream tip comes from git ls-remote, with a 15 s timeout).
+--save FILE also writes that JSON result (indent 2, trailing newline) to
+FILE, whatever the checks found and whether or not --json is given, through
+a temp file in FILE's folder and a rename. FILE may be in any form on
+Windows, like the repo paths. It is never written inside repo.root (it would
+be an untracked file that the next setup or doctor sees as a dirty
+checkout). When FILE is inside repo.root, or the write fails, doctor prints
+"doctor: result not saved: <why>" to stderr and saves nothing. Saving never
+changes the exit code.
+
+doctor is read-only: the --save file is the only file it writes, and it never
+changes a ref or a config value, or fetches (the upstream tip comes from git
+ls-remote, with a 15 s timeout).
 
 On Windows repo.root, repo.git_dir and repo.worktree_root may be in any form
 (C:\\x, /c/x, /tmp/x); they are used, and printed, in the C:/... form.
 
 Exit 0 when nothing failed; 3 when at least one check failed; 2 on a usage
-error or an unreadable or malformed manifest.
+error (--save without a FILE among them) or an unreadable or malformed
+manifest.
 """
 
 import json
 import os
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _doctor  # noqa: E402
 import _shell  # noqa: E402
 
-USAGE = "usage: doctor MANIFEST [--json]"
+USAGE = "usage: doctor MANIFEST [--json] [--save FILE]"
 
 
 class UsageError(Exception):
@@ -85,24 +102,97 @@ def render_text(result):
     return "\n".join(lines) + "\n"
 
 
+def inside(path, root):
+    """True when path is root or under it, both resolved as run-checks' contained() does."""
+    root = os.path.normcase(os.path.realpath(root))
+    head, tail = os.path.abspath(path), []
+    # The nearest existing ancestor is resolved; the rest is joined on unresolved.
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.normcase(os.path.join(os.path.realpath(head), *tail))
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        # Different drives: not inside.
+        return False
+
+
+def write_atomic(path, text):
+    """Write text to path through a temp file in its folder; raises OSError."""
+    fd, tmp = tempfile.mkstemp(prefix=".doctor-", suffix=".tmp",
+                               dir=os.path.dirname(os.path.abspath(path)))
+    os.close(fd)
+    try:
+        _shell.write_text(tmp, text)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def save(path, text, root):
+    """Save text to path unless it is inside root; returns why it was not saved, or None."""
+    try:
+        path = _shell.native_path(path)
+    except _shell.BashNotFound as e:
+        return str(e)
+    if inside(path, root):
+        return path + " is inside repo.root " + root + ", where it would be an untracked file"
+    try:
+        write_atomic(path, text)
+    except OSError as e:
+        return "cannot write " + path + ": " + str(e)
+    return None
+
+
+def parse_args(args):
+    """(manifest, as_json, save_file); raises UsageError on a usage error."""
+    positional, as_json, save_file = [], False, None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--save":
+            if save_file is not None or i + 1 >= len(args) or not args[i + 1] \
+                    or args[i + 1].startswith("-"):
+                raise UsageError(USAGE)
+            save_file = args[i + 1]
+            i += 1
+        else:
+            positional.append(arg)
+        i += 1
+    if len(positional) != 1 or positional[0].startswith("-"):
+        raise UsageError(USAGE)
+    return positional[0], as_json, save_file
+
+
 def main(argv):
     _shell.setup_io()
-    args = argv[1:]
-    as_json = "--json" in args
-    args = [a for a in args if a != "--json"]
-    if len(args) != 1 or args[0].startswith("-"):
-        print(USAGE, file=sys.stderr)
+    try:
+        manifest_path, as_json, save_file = parse_args(argv[1:])
+    except UsageError as e:
+        print(str(e), file=sys.stderr)
         return 2
     try:
-        manifest = load_manifest(args[0])
+        manifest = load_manifest(manifest_path)
     except UsageError as e:
         print("doctor: " + str(e), file=sys.stderr)
         return 2
     result = _doctor.run_checks(manifest, _doctor.default_probes())
-    if as_json:
-        sys.stdout.write(json.dumps(result, indent=2) + "\n")
-    else:
-        sys.stdout.write(render_text(result))
+    text = json.dumps(result, indent=2) + "\n"
+    sys.stdout.write(text if as_json else render_text(result))
+    sys.stdout.flush()
+    if save_file is not None:
+        why = save(save_file, text, manifest["repo"]["root"])
+        if why is not None:
+            # One line, whatever the error text holds.
+            why = " ".join(why.splitlines())
+            print("doctor: result not saved: " + why, file=sys.stderr)
     return 3 if result["failures"] else 0
 
 
