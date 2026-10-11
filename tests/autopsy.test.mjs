@@ -101,7 +101,7 @@ test('done lists each task and the acceptance', () => {
     'autopsy_version', 'inputs_fingerprint', 'run_id', 'engine_version', 'launches', 'done', 'time',
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained',
   ]);
-  assert.equal(A.autopsy_version, 2);
+  assert.equal(A.autopsy_version, 3);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -114,9 +114,9 @@ test('done lists each task and the acceptance', () => {
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
   // A1 implement and verify each run the test command once.
-  assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.command, x.s]),
-    [['A1 implement', 'node tests/run-tests.mjs', 30], ['verify', 'node tests/run-tests.mjs', 20]]);
-  assert.deepEqual(A.checks.full_suite_runs, { total: 2, by_role: { implement: 1, verify: 1 } });
+  assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.check, x.certainty, x.s]),
+    [['A1 implement', 'test#1', 'ran', 30], ['verify', 'test#1', 'ran', 20]]);
+  assert.deepEqual(A.checks.full_suite_runs, { total: 2, inferred: 0, by_role: { implement: 1, verify: 1 } });
   // Free text from the result, prompts and tool output is never copied.
   for (const marker of ['NOTES-TEXT-1', 'REASON-DETAIL-1', 'WARNING-TEXT-1', 'FINDING-TEXT-1',
     'E2E-EVIDENCE-1', 'PROMPT-MARKER-1', 'TOOL-OUTPUT-1', 'Reading the brief']) {
@@ -181,13 +181,18 @@ test('tokens match run-report', () => {
     '    manifest = json.load(f)',
     `print(json.dumps(_transcripts.build_report(${JSON.stringify(join(RUN1, 'wf_1'))}, manifest)))`,
   ]);
-  assert.deepEqual(A.tokens.totals, report.totals);
+  // autopsy's buckets are run-report's plus agents_with_usage.
+  const { agents_with_usage: withUsage, ...totals } = A.tokens.totals;
+  assert.deepEqual(totals, report.totals);
+  assert.equal(withUsage, 4);
   assert.equal(A.tokens.totals.agents, 4);
   assert.equal(A.tokens.partial, false);
   assert.equal(A.tokens.unreadable_lines, 0);
   for (const [tier, bucket] of Object.entries(report.tiers)) {
     const { escalations, fix_rounds: fixRounds, ...fields } = bucket;
-    assert.deepEqual(A.tokens.by_tier[tier], fields);
+    const { agents_with_usage: tierWithUsage, ...mine } = A.tokens.by_tier[tier];
+    assert.deepEqual(mine, fields);
+    assert.equal(tierWithUsage, fields.agents);
   }
   assert.deepEqual(Object.keys(A.tokens.by_phase).sort(), ['Lane a', 'Lane beta', 'Verify']);
   assert.deepEqual(Object.keys(A.tokens.by_role).sort(), ['implement', 'review', 'verify']);
@@ -212,6 +217,12 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
     lines[2] = lines[2].slice(0, 60);
     return lines;
   });
+  // verify's lines lose their usage.
+  editLines(join(dir, 'wf_1', 'agent-v1.jsonl'), (lines) => lines.map((l) => {
+    const o = JSON.parse(l);
+    if (o.message) delete o.message.usage;
+    return JSON.stringify(o);
+  }));
   rmSync(join(dir, 'wf_1.json'));
   const manifestPath = join(dir, 'p.lanes.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -225,9 +236,23 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.equal(res.code, 0, res.stderr);
   const D = res.json;
   const b1 = agentOf(D, 'B1 implement');
-  for (const key of ['start', 'end', 'wall_s', 'tool_s', 'other_s']) {
+  for (const key of ['start', 'end', 'wall_s', 'tool_s', 'tool_s_min', 'other_s', 'unmatched_calls']) {
     assert.equal(b1[key], 'unavailable', `B1 implement ${key}`);
   }
+  // A1 review's unreadable line may have held a call: its tool time is a minimum.
+  const a2 = agentOf(D, 'A1 review');
+  assert.deepEqual([a2.tool_s, a2.other_s], ['unavailable', 'unavailable']);
+  assert.equal(typeof a2.tool_s_min, 'number');
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // verify has no usage: the totals count the three agents that have it, as minimums.
+  assert.deepEqual([D.tokens.totals.agents, D.tokens.totals.agents_with_usage], [4, 3]);
+  assert.ok(D.tokens.totals.input_tokens > 0);
+  assert.equal(typeof D.tokens.totals.cache_creation_input_tokens, 'number');
+  assert.deepEqual(D.tokens.by_phase.Verify, {
+    input_tokens: 'unavailable', output_tokens: 'unavailable', cache_read_input_tokens: 'unavailable',
+    cache_creation_input_tokens: 'unavailable', output_tokens_min: 'unavailable', agents: 1, agents_with_usage: 0,
+  });
+  assert.equal(D.tokens.by_phase['Lane a'].agents_with_usage, 2);
   const beta = D.time.phases.find((p) => p.phase === 'Lane beta');
   assert.deepEqual([beta.start, beta.end, beta.wall_s, beta.agents], ['unavailable', 'unavailable', 'unavailable', 1]);
   const laneB = D.time.lanes.find((l) => l.lane === 'b');
@@ -254,6 +279,101 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.deepEqual(D.time.idle_gaps, []);
   assert.equal(D.detectors.idle_gap, 'not_available');
   assert.ok(!D.slowdowns.some((s) => s.kind === 'idle_gap'));
+});
+
+const dropResults = (lines, keep) => lines.filter((l) => {
+  const o = JSON.parse(l);
+  const content = o.message && Array.isArray(o.message.content) ? o.message.content : [];
+  return !content.some((c) => c.type === 'tool_result' && !keep(c.tool_use_id));
+});
+
+test('lost tool results make an agent partial, not idle', () => {
+  const dir = copyRun(RUN3);
+  // A1 implement keeps its tool calls but loses every result, and a line is damaged.
+  const path = join(dir, 'wf_1', 'agent-a1.jsonl');
+  editLines(path, (lines) => [...dropResults(lines, () => false), '{not json']);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const a1 = agentOf(D, 'A1 implement');
+  assert.deepEqual([a1.tool_s, a1.other_s], ['unavailable', 'unavailable']);
+  assert.equal(typeof a1.tool_s_min, 'number');
+  assert.ok(a1.unmatched_calls > 0, `unmatched_calls ${a1.unmatched_calls}`);
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // B1 implement has all its results: its tool time is measured.
+  const b1 = agentOf(D, 'B1 implement');
+  assert.equal(typeof b1.tool_s, 'number');
+  assert.equal(b1.unmatched_calls, 0);
+  const time = res.md.split('## Where time went')[1].split('\n## ')[0];
+  assert.ok(time.includes(`A1 implement: tool time >= ${a1.tool_s_min.toFixed(1)} s`), time);
+  const slow = res.md.split('## Slowdowns')[1].split('\n## ')[0];
+  assert.ok(slow.includes(`Detectors with partial data (they may miss slowdowns): ${TOOL_KINDS.join(', ')}.`), slow);
+  assert.ok(!/Detectors without data/.test(slow), slow);
+});
+
+test('an agent stopped mid-call is the only partial one', () => {
+  const dir = copyRun(RUN3);
+  // A1 implement's last call (the test command at 10:03:10) has no result.
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => dropResults(lines, (id) => id !== 'tu_a1_4'));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = res.json;
+  const a1 = agentOf(D, 'A1 implement');
+  assert.deepEqual([a1.tool_s, a1.other_s, a1.unmatched_calls], ['unavailable', 'unavailable', 1]);
+  assert.equal(typeof a1.tool_s_min, 'number');
+  for (const a of D.time.agents.filter((x) => x.label !== 'A1 implement')) {
+    assert.equal(a.unmatched_calls, 0, a.label);
+    assert.equal(typeof a.tool_s, 'number', a.label);
+    assert.equal(typeof a.other_s, 'number', a.label);
+  }
+  for (const kind of TOOL_KINDS) assert.equal(D.detectors[kind], 'partial', kind);
+  // A complete run is ok, and a timed agent with no calls has a measured zero.
+  for (const kind of TOOL_KINDS) assert.equal(C.detectors[kind], 'ok', kind);
+  assert.equal(agentOf(C, 'A1 implement').unmatched_calls, 0);
+});
+
+test('a timed agent with no calls has a measured zero tool time', () => {
+  const dir = copyRun();
+  // A1 review loses its one call and its result.
+  editLines(join(dir, 'wf_1', 'agent-a2.jsonl'), (lines) => lines.filter((l) => !l.includes('tu_a2_1')));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const a2 = agentOf(res.json, 'A1 review');
+  assert.deepEqual([a2.tool_s, a2.tool_s_min, a2.other_s, a2.unmatched_calls], [0, 0, 80, 0]);
+  for (const kind of TOOL_KINDS) assert.equal(res.json.detectors[kind], 'ok', kind);
+});
+
+test('a run without any usage has unavailable token totals', () => {
+  const dir = copyRun();
+  for (const name of readdirSync(join(dir, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(dir, 'wf_1', name), (lines) => lines.map((l) => {
+      const o = JSON.parse(l);
+      if (o.message) delete o.message.usage;
+      return JSON.stringify(o);
+    }));
+  }
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  const tot = D.tokens.totals;
+  assert.deepEqual([tot.input_tokens, tot.output_tokens_min, tot.agents_with_usage], ['unavailable', 'unavailable', 0]);
+  for (const field of ['output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    assert.equal(tot[field], 'unavailable', field);
+  }
+  assert.equal(tot.agents, 4);
+  for (const group of ['by_phase', 'by_role', 'by_tier', 'per_task']) {
+    for (const [k, b] of Object.entries(D.tokens[group])) {
+      assert.deepEqual([b.input_tokens, b.output_tokens_min, b.agents_with_usage], ['unavailable', 'unavailable', 0],
+        `${group} ${k}`);
+    }
+  }
+  assert.deepEqual(D.tokens.top_agents, []);
+  const line = res.stdout.split('\n').find((l) => l.startsWith('tokens'));
+  assert.match(line, /^tokens: unavailable/);
+  assert.ok(!/\d/.test(line), line);
+  const tokens = res.md.split('## Tokens')[1].split('\n## ')[0];
+  assert.match(tokens, /Totals: unavailable \(no agent has usage data\)\./);
+  assert.ok(!res.md.includes('>= 0'), tokens);
 });
 
 test('a phase with an untimed agent has no wall time', () => {
@@ -506,17 +626,19 @@ test('evidence holds structured fields only', () => {
 const use = (ts, id, name, input) => ({ ts, kind: 'tool_use', name, id, is_error: false, text: '', input });
 const res = (ts, id, name, text, isError = false) => (
   { ts, kind: 'tool_result', name, id, is_error: isError, text, input: null });
-function detect(events, notes = []) {
+function detect(events, notes = [], notices = []) {
   return python([
     'import _autopsy',
     `agent = {"entry": {"label": "X"}, "events": json.loads(${JSON.stringify(JSON.stringify(events))}),`
-      + ` "notes": json.loads(${JSON.stringify(JSON.stringify(notes))})}`,
+      + ` "notes": json.loads(${JSON.stringify(JSON.stringify(notes))}),`
+      + ` "notices": json.loads(${JSON.stringify(JSON.stringify(notices))})}`,
     '_autopsy.span_agent(agent)',
-    'found = _autopsy.tool_slowdowns(agent, [])',
+    'found = _autopsy.tool_slowdowns(agent, _autopsy.configured_checks({"commands": {"test": ["npm test"]}}))',
     'calls = _autopsy._calls(agent)',
     'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in found],',
     '                  "suggestions": _autopsy.suggestions_section(found, None),',
-    '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls]}))',
+    '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
+    '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
   ]);
 }
 const at = (ts) => new Date(ts * 1000).toISOString();
@@ -525,7 +647,7 @@ const brief = (out) => out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.cost_
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
   const moved = 'Command did not complete within its 600s timeout and was moved to the background '
     + '(ID: b14yf1jq4). Output is being written to: /tmp/x/b14yf1jq4.output';
-  const out = detect([
+  const events = [
     // A file read and a passing test run that only mention the words.
     use(0, 'r1', 'Read', { file_path: 'src/api.js' }),
     res(1, 'r1', 'Read', '12  return [504, "Timed out"];\n13  // Command running in background with ID: zz'),
@@ -538,15 +660,74 @@ test('timeouts and background runs come only from Claude Code notices on Bash re
     res(700, 'b2', 'Bash', moved),
     use(760, 'o1', 'BashOutput', { bash_id: 'b14yf1jq4' }),
     res(761, 'o1', 'BashOutput', 'done'),
-  ]);
+  ];
+  // A poll that shows no status says nothing about the end.
+  let out = detect(events);
   assert.deepEqual(brief(out), [
     ['timeout', at(100), 600, 'measured', 'Command did not complete within its'],
-    ['background_check', at(700), 60, 'bound', 'was moved to the background'],
+    ['background_check', at(700), 'unavailable', 'unavailable', 'was moved to the background'],
   ]);
   assert.equal(out.slowdowns[0].evidence.program, 'npm');
-  // As a check execution the call runs until its ID is next named.
-  assert.deepEqual(out.ends[3], [true, 760, 'measured']);
+  assert.deepEqual(out.ends[3], [true, null, 'unavailable']);
   assert.deepEqual(out.ends[2], [false, 25, 'measured']);
+  // Claude Code's completion notice ends it, as an upper bound.
+  out = detect(events, [], [{ ts: 900, task_id: 'b14yf1jq4', status: 'completed' }]);
+  assert.deepEqual(out.ends[3], [true, 900, 'bound']);
+  assert.deepEqual(brief(out), [
+    ['timeout', at(100), 600, 'measured', 'Command did not complete within its'],
+    ['background_check', at(700), 200, 'bound', 'was moved to the background'],
+  ]);
+});
+
+// A test run sent to the background as bx1.
+const bxRun = [
+  use(0, 'b1', 'Bash', { command: 'npm test', run_in_background: true }),
+  res(1, 'b1', 'Bash', 'Command running in background with ID: bx1'),
+];
+const bxNotice = '<task-notification>\n<task-id>bx1</task-id>\n<status>completed</status>\n'
+  + '<summary>Background command "tests" completed (exit code 0)</summary>\n</task-notification>';
+
+test('a poll that says running does not end a background run', () => {
+  const polled = [...bxRun,
+    use(10, 'o1', 'BashOutput', { bash_id: 'bx1' }),
+    res(11, 'o1', 'BashOutput', '<status>running</status>\n<stdout>1 passed</stdout>')];
+  const notices = [{ ts: 130, task_id: 'bx1', status: 'completed' }];
+  let out = detect(polled, [], notices);
+  assert.deepEqual(out.ends[0], [true, 130, 'bound']);
+  assert.deepEqual(out.completions[0], [130, 'completed']);
+  assert.deepEqual(brief(out), [['background_check', at(0), 130, 'bound', 'Command running in background with ID']]);
+  // A poll whose result says completed ends it first.
+  out = detect([...polled,
+    use(60, 'o2', 'TaskOutput', { task_id: 'bx1' }),
+    res(60, 'o2', 'TaskOutput', '<status>completed</status>\n<exit_code>0</exit_code>')], [], notices);
+  assert.deepEqual(out.ends[0], [true, 60, 'bound']);
+  assert.deepEqual(out.completions[0], [60, 'completed']);
+});
+
+test('notification text read from a file is not a completion', () => {
+  const out = detect([...bxRun,
+    use(49, 'r1', 'Read', { file_path: 'notes.txt' }),
+    res(50, 'r1', 'Read', bxNotice)], [{ ts: 55, text: bxNotice }]);
+  assert.deepEqual(out.ends[0], [true, null, 'unavailable']);
+  assert.equal(out.completions[0], null);
+});
+
+test('a TaskStop ends a background run as stopped', () => {
+  const out = detect([...bxRun,
+    use(40, 'k1', 'TaskStop', { task_id: 'bx1' }),
+    res(41, 'k1', 'TaskStop', 'Successfully stopped task: bx1')]);
+  assert.deepEqual(out.ends[0], [true, 41, 'bound']);
+  assert.deepEqual(out.completions[0], [41, 'stopped']);
+  // A stop that failed ends nothing.
+  const failed = detect([...bxRun,
+    use(40, 'k1', 'KillShell', { shell_id: 'bx1' }),
+    res(41, 'k1', 'KillShell', '<tool_use_error>No shell found</tool_use_error>', true)]);
+  assert.deepEqual(failed.ends[0], [true, null, 'unavailable']);
+});
+
+test('a call without a result has no end', () => {
+  const out = detect([use(0, 'b1', 'Bash', { command: 'npm test' })]);
+  assert.deepEqual(out.ends[0], [false, null, 'unavailable']);
 });
 
 test('a heredoc failure is a failing file write, ended by the next write that works', () => {
@@ -569,6 +750,42 @@ test('a heredoc failure is a failing file write, ended by the next write that wo
   ]);
   assert.deepEqual(brief(out), [['heredoc_failure', at(10), 11, 'bound', '<<']]);
   assert.equal(out.slowdowns[0].evidence.exit, 2);
+});
+
+test('a failure after a successful heredoc write is not a heredoc failure', () => {
+  for (const [command, text] of [
+    ["cat > /tmp/p.py <<'EOF'\nprint(\"x\")\nEOF\npython3 /tmp/p.py", "Exit code 1\nUnicodeEncodeError: 'charmap' codec"],
+    ["cat > /tmp/a.txt <<'EOF'\nx\nEOF\nbash -c 'if'", 'Exit code 2\nbash: -c: line 1: syntax error: unexpected end of file'],
+  ]) {
+    const out = detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', text, true)]);
+    assert.deepEqual(brief(out), [], command);
+  }
+  // A heredoc write after cd DIR and assignments is still only the write.
+  const out = detect([use(0, 'h1', 'Bash', { command: "cd /w && A=1 && cat > a.txt <<'EOF'\nit's\nEOF" }),
+    res(2, 'h1', 'Bash', 'Exit code 2\nunexpected EOF', true)]);
+  assert.deepEqual(brief(out), [['heredoc_failure', at(0), 2, 'measured', '<<']]);
+});
+
+test('a rerun needs proof that nothing changed', () => {
+  const bash = (ts, id, command, text = 'ok', isError = false) => [
+    use(ts, id, 'Bash', { command }), res(ts + 5, id, 'Bash', text, isError)];
+  const reruns = (events) => brief(detect(events)).filter((s) => s[0] === 'check_rerun');
+  const around = (...middle) => [...bash(0, 't1', 'npm test'), ...middle, ...bash(100, 't2', 'npm test')];
+  // Not reported: something may have changed in between, or a run may not
+  // have happened.
+  assert.deepEqual(reruns([...bash(0, 't1', 'npm test', 'Exit code 1\n1 failed', true),
+    ...bash(20, 'w1', 'printf fixed > src.js'), ...bash(100, 't2', 'npm test')]), []);
+  for (const command of ['python fix.py', 'find . -type f -delete', 'find . -type f -exec python fix.py {} +',
+    'cat $(python fix.py)', 'git diff --output=p.txt', 'git diff', 'git status']) {
+    assert.deepEqual(reruns(around(...bash(20, 'm1', command))), [], command);
+  }
+  assert.deepEqual(reruns([...bash(0, 't1', 'false && npm test', 'Exit code 1', true),
+    ...bash(100, 't2', 'false && npm test', 'Exit code 1', true)]), []);
+  // Reported: only reads in between.
+  assert.deepEqual(reruns(around(use(20, 'r1', 'Read', { file_path: 'README.md' }), res(21, 'r1', 'Read', 'x'),
+    ...bash(30, 'c1', 'cat README.md'))), [['check_rerun', at(100), 5, 'measured', null]]);
+  assert.deepEqual(reruns(around(...bash(20, 'e1', 'echo "npm test"'))),
+    [['check_rerun', at(100), 5, 'measured', null]]);
 });
 
 test('slowdowns that overlap in time are counted once in the stake', () => {
@@ -618,39 +835,62 @@ test('unclean checks are explained without suggesting to ignore source', () => {
 const run3 = autopsy(copyRun(RUN3));
 const C = run3.json;
 const TEST_CMD = 'node tests/run-tests.mjs';
+const run3Manifest = JSON.parse(readFileSync(join(RUN3, 'p.lanes.json'), 'utf8'));
+const chainedManifest = {
+  commands: { test: ['npm test'], lint: ['npm run lint'] },
+  lane_commands: { a: { test: ['npm test -- a'] } },
+};
+// match_check's dict for a command line under a manifest, given the call's
+// exit code (0 by default).
+const matcher = (manifest) => (command, exit = 0) => python([
+  'import _autopsy',
+  `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(manifest))}))`,
+  `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks, ${JSON.stringify(exit)})))`,
+]);
+const match = matcher(run3Manifest);
+const chained = matcher(chainedManifest);
+const R = (check, full_suite = null, certainty = 'ran') => ({ check, certainty, full_suite });
 
 test('every check execution is listed with its duration', () => {
   assert.equal(run3.code, 0, run3.stderr);
   const ex = C.checks.executions;
   assert.equal(ex.length, 4);
   for (const x of ex) {
-    assert.deepEqual(Object.keys(x), ['agent', 'phase', 'role', 'command', 'start', 'end', 's', 'timing',
-      'background', 'on_critical_path']);
+    assert.deepEqual(Object.keys(x), ['agent', 'phase', 'role', 'check', 'certainty', 'full_suite', 'start', 'end',
+      's', 'timing', 'background', 'on_critical_path']);
   }
-  // The background run is timed to its completion line.
-  assert.deepEqual(ex.map((x) => [x.agent, x.phase, x.role, x.command, x.start, x.end, x.s, x.timing,
-    x.background]), [
-    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:00:10'), T('10:02:40'), 150, 'measured', true],
-    ['A1 implement', 'Lane a', 'implement', TEST_CMD, T('10:03:10'), T('10:03:55'), 45, 'measured', false],
-    ['verify', 'Verify', 'verify', 'run-checks', T('10:06:40'), T('10:08:10'), 90, 'measured', false],
-    ['final fix', 'Final review', 'final fix', TEST_CMD, T('10:10:10'), T('10:11:00'), 50, 'measured', false],
+  // The background run is timed to Claude Code's completion notice, an
+  // upper bound on its end.
+  assert.deepEqual(ex.map((x) => [x.agent, x.phase, x.role, x.check, x.certainty, x.full_suite, x.start, x.end, x.s,
+    x.timing, x.background]), [
+    ['A1 implement', 'Lane a', 'implement', 'test#1', 'ran', 'ran', T('10:00:10'), T('10:02:40'), 150, 'bound',
+      true],
+    ['A1 implement', 'Lane a', 'implement', 'test#1', 'ran', 'ran', T('10:03:10'), T('10:03:55'), 45, 'measured',
+      false],
+    ['verify', 'Verify', 'verify', 'run-checks', 'ran', 'ran', T('10:06:40'), T('10:08:10'), 90, 'measured', false],
+    ['final fix', 'Final review', 'final fix', 'test#1', 'ran', 'ran', T('10:10:10'), T('10:11:00'), 50, 'measured',
+      false],
   ]);
-  assert.deepEqual(C.checks.by_command, {
-    [TEST_CMD]: { runs: 3, total_s: 245 },
-    'run-checks': { runs: 1, total_s: 90 },
+  assert.equal(C.checks.by_command, undefined);
+  assert.deepEqual(C.checks.by_check, {
+    'test#1': { runs: 3, inferred: 0, untimed: 0, total_s: 245 },
+    'run-checks': { runs: 1, inferred: 0, untimed: 0, total_s: 90 },
   });
-  // Without a completion line the background run is bound by the agent's last event.
+  // Without the completion notice the background run has no end.
   const dir = copyRun(RUN3);
   editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => lines.filter((l) => !l.includes('task-notification')));
   const res = autopsy(dir);
   assert.equal(res.code, 0, res.stderr);
   const bg = res.json.checks.executions[0];
   assert.deepEqual([bg.background, bg.start, bg.end, bg.s, bg.timing],
-    [true, T('10:00:10'), T('10:05:00'), 290, 'bound']);
+    [true, T('10:00:10'), 'unavailable', 'unavailable', 'unavailable']);
+  assert.deepEqual(res.json.checks.by_check['test#1'], { runs: 3, inferred: 0, untimed: 1, total_s: 95 });
+  assert.match(runCli(dir).md, /^\| test#1 \| 3 \| 0 \| 95\.0 s \(\+1 untimed\) \|$/m);
 });
 
 test('full-suite runs are counted per role', () => {
-  assert.deepEqual(C.checks.full_suite_runs, { total: 4, by_role: { implement: 2, verify: 1, 'final fix': 1 } });
+  assert.deepEqual(C.checks.full_suite_runs,
+    { total: 4, inferred: 0, by_role: { implement: 2, verify: 1, 'final fix': 1 } });
   // run-checks without the test group is an execution but not a full-suite run.
   const dir = copyRun(RUN3);
   const path = join(dir, 'wf_1', 'agent-v1.jsonl');
@@ -660,7 +900,9 @@ test('full-suite runs are counted per role', () => {
   const res = autopsy(dir);
   assert.equal(res.code, 0, res.stderr);
   assert.equal(res.json.checks.executions.length, 4);
-  assert.deepEqual(res.json.checks.full_suite_runs, { total: 3, by_role: { implement: 2, 'final fix': 1 } });
+  assert.deepEqual(res.json.checks.full_suite_runs,
+    { total: 3, inferred: 0, by_role: { implement: 2, 'final fix': 1 } });
+  assert.equal(res.json.checks.executions[2].full_suite, null);
 });
 
 test('critical-path executions are marked', () => {
@@ -677,20 +919,20 @@ test('a check command never appears in raw form', () => {
     'run-checks.test.mjs', 'git log']) {
     assert.ok(!run3.text.includes(raw), `autopsy.json holds ${raw}`);
   }
-  for (const x of C.checks.executions) assert.ok([TEST_CMD, 'run-checks'].includes(x.command), x.command);
-  // The longest configured command a line holds names it; a file named like
-  // run-checks is not a run-checks call.
-  const manifest = JSON.parse(readFileSync(join(RUN3, 'p.lanes.json'), 'utf8'));
-  const match = (command) => python([
+  for (const x of C.checks.executions) assert.ok(['test#1', 'run-checks'].includes(x.check), x.check);
+  // Checks are named by id: <group>#<n> for commands.<group>[n - 1], and
+  // <lane>.<group>#<n> for a lane_commands override.
+  assert.deepEqual(python([
     'import _autopsy',
-    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(manifest))}))`,
-    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
-  ]);
-  assert.deepEqual(match('cd /w && node tests/run-tests.mjs --only b'), ['node tests/run-tests.mjs --only b', false]);
-  assert.deepEqual(match('npx  eslint  .'), ['eslint .', false]);
-  assert.deepEqual(match('node tests/run-tests.mjs'), [TEST_CMD, true]);
-  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), ['run-checks', false]);
-  assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), ['run-checks', true]);
+    `print(json.dumps(_autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(run3Manifest))}))))`,
+  ]), [['test#1', TEST_CMD, true], ['lint#1', 'eslint .', false], ['b.test#1', `${TEST_CMD} --only b`, false]]);
+  // The configured command with the most words names the execution; a file
+  // named like run-checks is not a run-checks call.
+  assert.deepEqual(match('cd /w && node tests/run-tests.mjs --only b'), R('b.test#1'));
+  assert.deepEqual(match('npx  eslint  .'), R('lint#1'));
+  assert.deepEqual(match('node tests/run-tests.mjs'), R('test#1', 'ran'));
+  assert.deepEqual(match('python3 scripts/run-checks . --cmd lint "eslint ."'), R('run-checks'));
+  assert.deepEqual(match("py C:\\skill\\scripts\\run-checks C:\\w --cmd 'test' 'npm test'"), R('run-checks', 'ran'));
   assert.equal(match('node --test tests/run-checks.test.mjs'), null);
   // run-checks counts only in command position: as the program, or as the
   // script an interpreter runs, in any simple command of the line.
@@ -698,35 +940,106 @@ test('a check command never appears in raw form', () => {
   assert.equal(match('cat scripts/run-checks && grep -n cmd scripts/run-checks'), null);
   assert.equal(match('echo "python3 scripts/run-checks --cmd test x"'), null);
   assert.deepEqual(match("cd /w && PATH=/x:$PATH 'C:/py/python.exe' -X utf8 -B 'C:/s/run-checks' /w --cmd test t"),
-    ['run-checks', true]);
-  assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), ['run-checks', false]);
-  assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), ['run-checks', true]);
+    R('run-checks', 'ran'));
+  assert.deepEqual(match('git status; ./scripts/run-checks . --cmd lint l'), R('run-checks'));
+  assert.deepEqual(match('bash C:\\s\\run-checks C:\\w --cmd test t | tail -1'), R('run-checks', 'ran'));
   // A '#' inside a word starts no comment; a word that starts with '#' does.
-  assert.deepEqual(match('curl http://x/#a && python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
+  assert.deepEqual(match('curl http://x/#a && python3 scripts/run-checks . --cmd test t'), R('run-checks', 'ran'));
   assert.equal(match('echo hi # python3 scripts/run-checks . --cmd test t'), null);
   // Any run-checks command of the line with the test group counts, and
   // timeout DURATION is a prefix.
   assert.deepEqual(match('python3 scripts/run-checks . --cmd lint l && python3 scripts/run-checks . --cmd test t'),
-    ['run-checks', true]);
-  assert.deepEqual(match('timeout 600 python3 scripts/run-checks . --cmd test t'), ['run-checks', true]);
-  assert.deepEqual(match('timeout -k 5 600 scripts/run-checks . --cmd lint l'), ['run-checks', false]);
+    R('run-checks', 'ran'));
+  assert.deepEqual(match('timeout 600 python3 scripts/run-checks . --cmd test t'), R('run-checks', 'ran'));
+  assert.deepEqual(match('timeout -k 5 600 scripts/run-checks . --cmd lint l'), R('run-checks'));
   // A full-suite run counts wherever the test command sits in the line, even
-  // when a longer configured string names the execution; a lane override
-  // that only contains it does not.
-  const chainedManifest = {
-    commands: { test: ['npm test'], lint: ['npm run lint'] },
-    lane_commands: { a: { test: ['npm test -- a'] } },
-  };
-  const chained = (command) => python([
-    'import _autopsy',
-    `checks = _autopsy.configured_checks(json.loads(${JSON.stringify(JSON.stringify(chainedManifest))}))`,
-    `print(json.dumps(_autopsy.match_check(${JSON.stringify(command)}, checks)))`,
-  ]);
-  assert.deepEqual(chained('npm run lint && npm test'), ['npm run lint', true]);
-  assert.deepEqual(chained('npm run lint'), ['npm run lint', false]);
-  assert.deepEqual(chained('npm test -- a'), ['npm test -- a', false]);
-  assert.deepEqual(chained('npm test -- a && npm test'), ['npm test -- a', true]);
-  assert.deepEqual(chained('npm run lint && npm test -- a'), ['npm test -- a', false]);
+  // when a longer configured command names the execution; a lane override
+  // that only starts with it does not.
+  assert.deepEqual(chained('npm run lint && npm test'), R('lint#1', 'ran'));
+  assert.deepEqual(chained('npm run lint'), R('lint#1'));
+  assert.deepEqual(chained('npm test -- a'), R('a.test#1'));
+  assert.deepEqual(chained('npm test -- a && npm test'), R('a.test#1', 'ran'));
+  assert.deepEqual(chained('npm run lint && npm test -- a'), R('a.test#1'));
+});
+
+test('text that only mentions a check is not an execution', () => {
+  for (const command of ['echo "npm test"', 'grep "npm test" README.md', "cat > f.sh <<'EOF'\nnpm test\nEOF",
+    'bash -c "npm test"', 'python3 -c "import subprocess; subprocess.run(\'npm test\')"']) {
+    assert.equal(chained(command), null, command);
+  }
+  assert.deepEqual(chained('npm test -- --grep one'), R('test#1'));
+  assert.deepEqual(chained('npm test 2>&1 | tail -5'), R('test#1', 'ran'));
+});
+
+test('a check that may not have run is inferred', () => {
+  assert.deepEqual(chained('false && npm test', 1), R('test#1', 'inferred', 'inferred'));
+  assert.equal(chained('if [ -f x ]; then npm test; fi').certainty, 'inferred');
+  assert.deepEqual(chained('npm run lint || npm test'), R('lint#1', 'inferred'));
+  assert.equal(chained('npm run lint && npm test', 1).full_suite, 'inferred');
+  assert.equal(chained('npm run lint && npm test', 0).full_suite, 'ran');
+  assert.deepEqual(chained('cd /w && npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test', 1), R('test#1', 'inferred', 'inferred'));
+  assert.equal(chained('cd /nonexistent-directory && npm test', 1).certainty, 'inferred');
+  // The ; breaks the proven chain.
+  assert.equal(chained('false && npm test; true', 0).certainty, 'inferred');
+  // An unconditional check ran, whatever the line's exit code.
+  assert.deepEqual(chained('npm run lint; npm test', 1), R('lint#1', 'ran'));
+  // An & inside a redirection is no separator; a background & still breaks
+  // the proven chain.
+  assert.deepEqual(chained('cd /w && npm test 2>&1 | tail -5', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test 2>&1 | tail -5', 1), R('test#1', 'inferred', 'inferred'));
+  assert.deepEqual(chained('cd /w && npm test &> out.log', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w && npm test & true', 0), R('test#1', 'inferred', 'inferred'));
+  // As in the shell, a backslash-newline joins lines and a newline after &&
+  // separates nothing.
+  assert.deepEqual(chained('cd /w && \\\n  npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('cd /w &&\n  npm test', 0), R('test#1', 'ran'));
+  assert.deepEqual(chained('npm test \\\n  -- --grep one', 0), R('test#1'));
+  // Through a run: a full-suite run that may not have happened is inferred.
+  const dir = copyRun(RUN3);
+  editLines(join(dir, 'wf_1', 'agent-a1.jsonl'), (lines) => lines.map((l) => {
+    const o = JSON.parse(l);
+    const block = o.message && Array.isArray(o.message.content) ? o.message.content[0] : null;
+    if (block && block.id === 'tu_a1_4') block.input.command = `false && ${TEST_CMD}`;
+    if (block && block.tool_use_id === 'tu_a1_4') {
+      block.content = 'Exit code 1\nTOOL-OUTPUT-9';
+      block.is_error = true;
+    }
+    return JSON.stringify(o);
+  }));
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(res.json.checks.full_suite_runs,
+    { total: 3, inferred: 1, by_role: { implement: 1, verify: 1, 'final fix': 1 } });
+  const x = res.json.checks.executions[1];
+  assert.deepEqual([x.start, x.check, x.certainty, x.full_suite], [T('10:03:10'), 'test#1', 'inferred', 'inferred']);
+  assert.deepEqual(res.json.checks.by_check['test#1'], { runs: 2, inferred: 1, untimed: 0, total_s: 200 });
+  const md = runCli(dir).md;
+  assert.match(md, /^\| test#1 \| 2 \| 1 \| 200\.0 s \|$/m);
+  assert.match(md, /^Full-suite runs: 3 \(\+1 inferred\)$/m);
+});
+
+test('the r150 parser probes are not check runs', () => {
+  assert.equal(chained("cd '/w' && cat > \"/tmp/t5.py\" <<'EOF'\nfor cmd in ['python3 scripts/run-checks . --cmd lint l\\npython3 scripts/run-checks . --cmd test t']:\n    print(cmd)\nEOF\n'C:/py/python.exe' \"/tmp/t5.py\""), null);
+  assert.equal(chained("cd '/w' && python -c \"\nimport _autopsy as A\nprint(A.match_check('curl http://x/#a && python3 scripts/run-checks . --cmd test t', []))\n\""), null);
+});
+
+test('configured commands with secrets never reach the outputs', () => {
+  const dir = copyRun(RUN3);
+  const path = join(dir, 'p.lanes.json');
+  const m = JSON.parse(readFileSync(path, 'utf8'));
+  m.commands.test = [`API_TOKEN=CANARY-PRIVATE-150 ${TEST_CMD}`];
+  m.lane_commands.b.test = [`SECRET=CANARY-LANE-7 ${TEST_CMD} --only b`];
+  writeFileSync(path, JSON.stringify(m, null, 2));
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const json = readFileSync(join(dir, 'autopsy.json'), 'utf8');
+  for (const text of [json, res.md, res.stdout]) {
+    for (const secret of ['CANARY-PRIVATE-150', 'CANARY-LANE-7', 'API_TOKEN']) assert.ok(!text.includes(secret), secret);
+  }
+  const checks = JSON.parse(json).checks;
+  assert.equal(checks.executions.length, 4);
+  assert.equal(checks.full_suite_runs.total, 4);
 });
 
 test('checks without tool events are unavailable, not zero', () => {
@@ -741,8 +1054,8 @@ test('checks without tool events are unavailable, not zero', () => {
   const res = autopsy(dir);
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(res.json.checks, {
-    executions: 'unavailable', by_command: 'unavailable',
-    full_suite_runs: { total: 'unavailable', by_role: 'unavailable' },
+    executions: 'unavailable', by_check: 'unavailable',
+    full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
   });
 });
 
@@ -773,8 +1086,12 @@ test('autopsy.md has every section in order', () => {
   assert.match(md, /\| Lane beta \| wf_2 \|/);
   assert.match(md, /^lane a +wf_2 +\|[.#]{40}\|/m);
   assert.match(md, /estimate/i);
-  // Checks: executions by command and full-suite runs by role.
-  assert.match(md, /node tests\/run-tests\.mjs \| 3 \| 160\.0/);
+  // Checks: executions by check id, what the ids name, and full-suite runs by role.
+  assert.match(md, /^\| Check \| Runs \| Inferred \| Total \|$/m);
+  assert.match(md, /^\| test#1 \| 3 \| 0 \| 160\.0 s \|$/m);
+  assert.ok(md.includes('Check ids name manifest commands: test#1 is commands.test[0], '
+    + '<lane>.test#1 is lane_commands.<lane>.test[0].'));
+  assert.match(md, /^Full-suite runs: 3$/m);
   assert.match(md, /implement: 3/);
   // One open-questions line per unexplained entry.
   const open = md.split('## Open questions')[1].split('\n').filter((l) => l.startsWith('- '));

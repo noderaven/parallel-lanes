@@ -20,8 +20,40 @@ Transcript text is used only inside this module (to match markers); it is
 never written out. Event "text", notes and tool inputs stay internal: a
 slowdown's evidence holds only the tool name, an exit code, a marker string
 from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
-check execution's command is a configured string from the manifest or
-'run-checks', never the command line.
+check execution is named by a check id or 'run-checks', never by the
+command line or the configured command (which may carry a secret).
+
+Background completions come only from Claude Code's own task
+notifications (attachment lines, read_transcript's notices) and from the
+agent's polls and stops of the task (_completion_after); notification-
+shaped text in a user line or any tool result never counts, since an
+agent can read such text from a file.
+
+Checks. configured_checks gives each configured command an id: test#1 is
+commands.test[0], <lane>.test#1 is lane_commands.<lane>.test[0]. A Bash
+call is a check execution when its command line runs one (match_check):
+- The line is read as shell words, without heredoc bodies, a backslash
+  before a path character read as '/', split into simple commands at ;
+  & | && || ( ) and newlines. An & inside a redirection (2>&1, >&2, &>f)
+  is no separator. A line whose quoting does not parse runs no check, and
+  text that only mentions one (echo "npm test", a heredoc body, bash -c
+  "npm test") is no execution.
+- A configured command matches a simple command whose words start with its
+  words, with redirections, leading keywords, NAME=value assignments and
+  prefixes such as env, timeout DURATION or npx left out of both. The
+  match with the most words names the execution; a full-suite run needs a
+  simple command that exactly matches a commands.test entry, or a
+  run-checks call passing --cmd test.
+- Certainty: a matched simple command 'ran' when no if, elif, else, then,
+  while, until, for, case, do or function comes before it or leads it, and
+  either every operator before it is ;, a newline, | or a background &, or
+  the whole line is pipelines joined only by && (no ;, newline, background
+  &, or ||) and the call exited 0 (an && list exits 0 only when every part
+  ran). Otherwise it is 'inferred': it may not have run (cd DIR && check
+  that failed may have failed at the cd).
+The full-suite total counts the runs that ran, so it is a lower bound on
+full-suite runs: runs through a wrapper (bash -c, a script) are not seen,
+and the inferred runs, counted apart, may not have happened.
 """
 import glob
 import hashlib
@@ -37,7 +69,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 2
+AUTOPSY_VERSION = 3
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -139,24 +171,50 @@ def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None):
 def read_events_counted(jsonl_path):
     """(events, skipped): read_events' events, and the number of non-blank
     lines skipped as damaged (not valid UTF-8, or not valid JSON)."""
-    events, skipped, _notes = read_transcript(jsonl_path)
+    events, skipped, _notes, _notices = read_transcript(jsonl_path)
     return events, skipped
 
 
+_TASK_ID = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
+_TASK_STATUS = re.compile(r"<status>\s*([^<\s]+)\s*</status>")
+
+
+def _host_notice(ts, obj):
+    """{ts, task_id, status} of a Claude Code task notification line (an
+    attachment with commandMode task-notification), else None."""
+    attachment = obj.get("attachment")
+    if ts is None or obj.get("type") != "attachment" or not isinstance(attachment, dict) \
+            or attachment.get("commandMode") != "task-notification":
+        return None
+    prompt = attachment.get("prompt")
+    task_id = _TASK_ID.search(prompt) if isinstance(prompt, str) else None
+    status = _TASK_STATUS.search(prompt) if isinstance(prompt, str) else None
+    if task_id is None or status is None:
+        return None
+    return {"ts": ts, "task_id": task_id.group(1), "status": status.group(1)}
+
+
 def read_transcript(jsonl_path):
-    """(events, skipped, notes): read_events_counted's two values, and notes:
-    [{ts, text}] for each timed user line that carries text rather than tool
-    results (the prompt, and notices such as a background command's
-    completion). Notes are for matching only, like event text."""
+    """(events, skipped, notes, notices): read_events_counted's two values;
+    notes: [{ts, text}] for each timed user line that carries text rather
+    than tool results (the prompt, for one), for matching only, like event
+    text; and notices: [{ts, task_id, status}] for each of Claude Code's own
+    task notifications (an attachment line with commandMode
+    task-notification, its task-id and status read from its prompt; a line
+    missing either is skipped). notices are the only source of a background
+    task's completion notice: notification-shaped text in a user line or a
+    tool result never counts, since an agent can read such text from a
+    file."""
     events = []
     notes = []
+    notices = []
     skipped = 0
     names = {}  # tool_use id -> tool name
     try:
         with open(jsonl_path, "rb") as f:
             raw_lines = f.read().split(b"\n")
     except OSError:
-        return [], 0, []
+        return [], 0, [], []
     for raw in raw_lines:
         if not raw.strip():
             continue
@@ -168,6 +226,10 @@ def read_transcript(jsonl_path):
         if not isinstance(obj, dict):
             continue
         ts = parse_ts(obj.get("timestamp"))
+        found = _host_notice(ts, obj)
+        if found is not None:
+            notices.append(found)
+            continue
         msg = obj.get("message")
         if ts is None or not isinstance(msg, dict):
             continue
@@ -198,7 +260,7 @@ def read_transcript(jsonl_path):
                 events.append(_event(ts, "tool_result", name=names.get(id_), id_=id_,
                                      is_error=b.get("is_error") is True,
                                      text=_text_of(b.get("content"))))
-    return events, skipped, notes
+    return events, skipped, notes, notices
 
 
 def read_events(jsonl_path):
@@ -297,9 +359,9 @@ def _launch(folder, wf_dir, manifest):
     # Each entry comes with its own meta path, so events never pair with
     # another agent's entry.
     for meta_path, entry in _transcripts.agent_entries(wf_dir, manifest):
-        events, skipped, notes = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
+        events, skipped, notes, notices = read_transcript(meta_path[:-len(".meta.json")] + ".jsonl")
         agents.append({"entry": entry, "events": events, "skipped": skipped, "notes": notes,
-                       "launch": name})
+                       "notices": notices, "launch": name})
     start_ms = data.get("startTime")
     duration_ms = data.get("durationMs")
     start = end = None
@@ -331,21 +393,35 @@ def load(run_folder):
 def span_agent(agent):
     """Set an agent's start, end and tool time from its events. It starts at
     its earliest timed line, the prompt included, so the first model turn is
-    part of its time; it ends at its last event."""
+    part of its time; it ends at its last event. tool is the union of its
+    matched call spans (tool_use to the tool_result that answers it), and
+    unmatched_calls counts the tool_use events no tool_result answers
+    (their id unmatched or None); both are None for an untimed agent."""
     events = agent["events"]
     if not events:
-        agent["start"] = agent["end"] = agent["tool"] = None
+        agent["start"] = agent["end"] = agent["tool"] = agent["unmatched_calls"] = None
         return
     agent["start"] = min([e["ts"] for e in events] + [n["ts"] for n in agent.get("notes", [])])
     agent["end"] = max(e["ts"] for e in events)
     uses = {}
     spans = []
+    calls = 0
     for e in events:
-        if e["kind"] == "tool_use" and e["id"] is not None:
-            uses.setdefault(e["id"], e["ts"])
+        if e["kind"] == "tool_use":
+            calls += 1
+            if e["id"] is not None:
+                uses.setdefault(e["id"], e["ts"])
         elif e["kind"] == "tool_result" and e["id"] in uses and e["ts"] >= uses[e["id"]]:
             spans.append((uses.pop(e["id"]), e["ts"]))
     agent["tool"] = union_length(spans)
+    agent["unmatched_calls"] = calls - len(spans)
+
+
+def _agent_partial(agent):
+    """Whether an agent's tool calls are only partly known: a call has no
+    result (it may have run to the agent's end, or its result was lost), or
+    its transcript has unreadable lines (which may have held calls)."""
+    return (agent.get("unmatched_calls") or 0) > 0 or agent["entry"].get("unreadable_lines", 0) > 0
 
 
 def _all_agents(run):
@@ -488,11 +564,15 @@ def time_section(run):
     for a in _all_agents(run):
         e = a["entry"]
         wall = None if a["start"] is None else a["end"] - a["start"]
+        # A partial agent's tool time is only a minimum (a call without a
+        # result may have run to its end), so the rest is not known either.
+        tool = None if wall is None or _agent_partial(a) else a["tool"]
         agents.append({
             "label": e["label"], "launch": a["launch"], "phase": _phase_name(e), "task": e["task"],
             "role": e["role"], "start": iso(a["start"]), "end": iso(a["end"]),
-            "wall_s": seconds(wall), "tool_s": seconds(a["tool"]),
-            "other_s": seconds(None if wall is None else max(0.0, wall - a["tool"])),
+            "wall_s": seconds(wall), "tool_s": seconds(tool), "tool_s_min": seconds(a["tool"]),
+            "other_s": seconds(None if tool is None else max(0.0, wall - tool)),
+            "unmatched_calls": UNAVAILABLE if a["unmatched_calls"] is None else a["unmatched_calls"],
         })
     walls = [l["end"] - l["start"] if l["start"] is not None else None for l in run["launches"]]
     wall_s = seconds(sum(walls)) if walls and None not in walls else UNAVAILABLE
@@ -527,8 +607,20 @@ def critical_agents(run):
 
 _incomplete = _transcripts.is_output_incomplete
 
-# {key(entry): bucket}, summed by the same code and rules as run-report.
-buckets = _transcripts.token_buckets
+
+def buckets(entries, key):
+    """{key(entry): bucket}, summed by the same code and rules as run-report
+    (_transcripts.token_buckets), each with agents_with_usage: its agents
+    whose input_tokens is known. A bucket where no agent has usage has every
+    token field and output_tokens_min UNAVAILABLE, never 0; a partly covered
+    one keeps its sums as lower bounds."""
+    out = _transcripts.token_buckets(entries, key)
+    for k, b in out.items():
+        b["agents_with_usage"] = sum(1 for e in entries if key(e) == k and e["input_tokens"] != UNAVAILABLE)
+        if b["agents_with_usage"] == 0:
+            for field in TOKEN_FIELDS + ("output_tokens_min",):
+                b[field] = UNAVAILABLE
+    return out
 
 
 def _agent_tokens(e):
@@ -542,7 +634,12 @@ def tokens_section(run):
         e = dict(a["entry"])
         e["_launch"] = a["launch"]
         entries.append(e)
-    totals = buckets(entries, lambda e: "all").get("all", _transcripts.blank_bucket())
+    totals = buckets(entries, lambda e: "all").get("all")
+    if totals is None:
+        totals = _transcripts.blank_bucket()
+        totals["agents_with_usage"] = 0
+        for field in TOKEN_FIELDS + ("output_tokens_min",):
+            totals[field] = UNAVAILABLE
     known = [e for e in entries if e["input_tokens"] != UNAVAILABLE]
     ranked = sorted(enumerate(known), key=lambda ie: (-_agent_tokens(ie[1]), ie[0]))[:TOP_AGENTS]
     top = []
@@ -590,6 +687,11 @@ RUN_CHECKS = "run-checks"
 LONG_CALL_S = 120
 TOP_UNEXPLAINED = 5
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# The tools, and the programs of a Bash line, that change nothing (see
+# _read_only_bash); only these may come between two runs of a check_rerun.
+READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite", "BashOutput",
+                   "TaskOutput")
+READ_ONLY_PROGRAMS = ("cat", "head", "tail", "grep", "ls", "wc", "echo", "pwd", "sleep", "which", "true")
 TOOL_KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
               "long_tool_call", "check_rerun")
 KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
@@ -632,7 +734,6 @@ _EXIT = re.compile(r"\s*exit code[:\s]+(-?\d+)", re.I)
 _EXIT_LINE = re.compile(r"\s*exit code[:\s]+-?\d+[^\n]*\n", re.I)
 _BACKGROUND_ID = re.compile(r"(?:background with id[:\s]*|\(id:\s*)([A-Za-z0-9_-]+)", re.I)
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_GIT_COMMIT = re.compile(r"\bgit\b[^\n;&|]*\bcommit\b")
 _FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
 # Words that lead into a command (stripped), and simple commands that run no
 # program of their own (skipped), when program_of looks for the program.
@@ -766,16 +867,28 @@ def _writes(pipeline):
     return False
 
 
-def heredoc_write(command):
-    """Whether a command line feeds a heredoc into a file write in the same
-    pipeline (cat > f <<EOF, tee f <<EOF), as opposed to an inline script
-    such as python3 - <<EOF."""
+def _only_heredoc_write(command):
+    """Whether a command line is nothing but a heredoc file write: every
+    pipeline is a heredoc that feeds a file write in that pipeline (cat > f
+    <<EOF, tee f <<EOF; not an inline script such as python3 - <<EOF), or a
+    simple command that is only 'cd DIR' or NAME=value assignments, and at
+    least one is the write. When such a line fails, the write failed; when
+    a line that does more fails, the shell's error does not say which part
+    failed."""
     if not heredocs(command):
         return False
     pipelines = _pipelines(command)
-    if pipelines is None:
+    if not pipelines:
         return False
-    return any("<<" in p and _writes(p) for p in pipelines)
+    writes = 0
+    for p in pipelines:
+        if "<<" in p and _writes(p):
+            writes += 1
+        elif any(t in ("|", "|&") or all(c in _REDIRECT_CHARS for c in t) for t in p):
+            return False
+        elif not (p[0] == "cd" and len(p) <= 2) and not all(_ASSIGNMENT.match(t) for t in p):
+            return False
+    return writes > 0
 
 
 def file_write(command):
@@ -833,6 +946,34 @@ def _bash_wrote(call):
             and file_write(_command(call)))
 
 
+def _read_only_bash(command):
+    """Whether a Bash command line surely changes nothing, read
+    conservatively: False when it does not parse, writes a file (a redirect
+    or tee), or holds a command or process substitution ($(, a backtick,
+    <(, >(). Otherwise each simple command, past leading keywords and
+    prefixes, must be cd or run one of READ_ONLY_PROGRAMS. Any other
+    program counts as a change: find, rg, sed and xargs can run or change
+    things, and every git command can run a configured helper."""
+    if not isinstance(command, str) or any(s in command for s in ("$(", "`", "<(", ">(")):
+        return False
+    if _pipelines(command) is None or file_write(command):
+        return False
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return False
+    return bool(simple) and all(words and (words[0] == "cd" or words[0] in READ_ONLY_PROGRAMS)
+                                for _ops, _lead, words in simple)
+
+
+def _reads_only(call):
+    """Whether a tool call surely changes nothing: a READ_ONLY_TOOLS call, or
+    a Bash call whose line _read_only_bash accepts."""
+    if call["name"] in READ_ONLY_TOOLS:
+        return True
+    return call["name"] == "Bash" and _read_only_bash(_command(call))
+
+
 def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
     """An internal slowdown: the public fields, plus _cost (seconds or None),
     _at and _covers [(agent or None, start, end)], the spans it explains (an
@@ -856,30 +997,48 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
     }
 
 
-def _event_text(event):
-    """What a later event says, for finding an ID: a tool result's or an
-    assistant turn's text, or a tool call's input."""
-    if event["kind"] == "tool_use":
-        return json.dumps(event["input"]) if event["input"] is not None else ""
-    return event["text"] or ""
+# The tools that read a background task's output, and those that stop one;
+# their input names the task by one of _TASK_KEYS.
+POLL_TOOLS = ("BashOutput", "TaskOutput")
+STOP_TOOLS = ("TaskStop", "KillShell")
+_TASK_KEYS = ("bash_id", "task_id", "shell_id")
+_POLL_DONE = re.compile(r"<status>\s*(completed|failed|killed)\s*</status>")
+_NOT_DONE = ("running", "pending")
 
 
-def _mention_after(agent, call):
-    """When a backgrounded call's ID is first mentioned in a later event
-    (a tool result, a tool call's input such as BashOutput's bash_id, or
-    assistant text) or notice of the same agent; None when it never is."""
+def _completion_after(agent, call):
+    """(ts, status) of the first observed completion of a backgrounded call,
+    at or after its result; None when there is none. The ID is the one
+    Claude Code's background notice on the call's result names. A
+    completion is the earliest of: a Claude Code notice (agent["notices"])
+    for the ID with a status other than running or pending; the result of a
+    BashOutput or TaskOutput call for the ID that holds
+    <status>completed</status>, failed or killed; the result of a TaskStop
+    or KillShell call for the ID that is no error (status 'stopped'). Each is
+    when the completion was observed, at or after the real finish. Text in
+    a user line or another tool result never counts."""
     m = _BACKGROUND_ID.search(_notice_line(call))
     if not m:
         return None
-    pattern = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(m.group(1)) + r"(?![A-Za-z0-9_-])")
-    times = [e["ts"] for e in agent["events"][call["result_i"] + 1:] if pattern.search(_event_text(e))]
-    times += [n["ts"] for n in agent.get("notes", []) if pattern.search(n["text"])]
-    later = [t for t in times if t >= call["end"]]
-    return min(later) if later else None
+    task_id = m.group(1)
+    found = [(n["ts"], n["status"]) for n in agent.get("notices", [])
+             if n["task_id"] == task_id and n["status"] not in _NOT_DONE]
+    for c in _calls(agent):
+        if c["end"] is None or not any(c["input"].get(k) == task_id for k in _TASK_KEYS):
+            continue
+        if c["name"] in POLL_TOOLS:
+            done = _POLL_DONE.search(c["text"] or "")
+            if done:
+                found.append((c["end"], done.group(1)))
+        elif c["name"] in STOP_TOOLS and not c["is_error"]:
+            found.append((c["end"], "stopped"))
+    later = [f for f in found if f[0] >= call["end"]]
+    return min(later, key=lambda f: f[0]) if later else None
 
 
-def tool_slowdowns(agent, test_commands):
-    """The slowdowns found in one agent's tool calls (TOOL_KINDS)."""
+def tool_slowdowns(agent, checks):
+    """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
+    configured_checks(manifest)."""
     calls = _calls(agent)
     out = []
     counted = set()
@@ -897,11 +1056,11 @@ def tool_slowdowns(agent, test_commands):
             # A call moved to the background at its timeout: the timeout
             # covers the call, the background wait starts at its result.
             start = c["end"] if timeout else c["start"]
-            mention = _mention_after(agent, c)
-            if mention is not None:
-                add("background_check", [i], start, mention, "bound", c, marker)
-            elif not timeout:
-                add("background_check", [i], start, c["end"], "measured", c, marker)
+            done = _completion_after(agent, c)
+            if done is not None:
+                add("background_check", [i], start, done[0], "bound", c, marker)
+            else:
+                add("background_check", [i], start, None, "unavailable", c, marker)
 
     failures = {}
     for i, c in enumerate(calls):
@@ -912,12 +1071,15 @@ def tool_slowdowns(agent, test_commands):
             first, last = calls[indexes[0]], calls[indexes[-1]]
             add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
 
-    # Only a heredoc that feeds a file write (cat > f <<EOF) counts; a
-    # failing inline script (python3 - <<EOF) is not a quoting failure. The
-    # span ends at the next file write that succeeds, by a tool or by Bash.
+    # Only a failing line that is nothing but a heredoc file write (cat > f
+    # <<EOF, after cd DIR or assignments) counts: a failing inline script
+    # (python3 - <<EOF) is not a quoting failure, and a line that does more
+    # than the write may have failed elsewhere (its error text does not say
+    # where). The span ends at the next file write that succeeds, by a tool
+    # or by Bash.
     until = None
     for i, c in enumerate(calls):
-        if not _bash_failed(c) or not heredoc_write(_command(c)):
+        if not _bash_failed(c) or not _only_heredoc_write(_command(c)):
             continue
         if until is not None and c["start"] < until:
             continue  # a retry inside the previous heredoc failure's span
@@ -944,22 +1106,23 @@ def tool_slowdowns(agent, test_commands):
         add("edit_retry", [i], c["start"], end, "measured", c, marker)
         until[path] = end
 
-    last_run = {}
+    # A rerun needs proof that nothing changed: both runs certainly ran the
+    # check, and every call between only reads.
+    last_run = {}  # command -> (index, whether that run certainly ran)
     for i, c in enumerate(calls):
         command = _command(c) if c["name"] == "Bash" else None
-        if command is None or not (RUN_CHECKS in command or any(t in command for t in test_commands)):
+        match = match_check(command, checks, _call_exit(c)) if command is not None else None
+        if match is None:
             continue
         key = " ".join(command.split())
         prev = last_run.get(key)
-        last_run[key] = i
-        if prev is None or c["end"] is None:
+        ran = match["certainty"] == RAN
+        last_run[key] = (i, ran)
+        if prev is None or not prev[1] or not ran or c["end"] is None:
             continue
-        changed = any(b["name"] in WRITE_TOOLS
-                      or (b["name"] == "Bash" and _GIT_COMMIT.search(_command(b) or ""))
-                      for b in calls[prev + 1:i])
-        if not changed:
+        if all(_reads_only(b) for b in calls[prev[0] + 1:i]):
             add("check_rerun", [i], c["start"], c["end"], "measured", c,
-                RUN_CHECKS if RUN_CHECKS in command else None)
+                RUN_CHECKS if match["check"] == RUN_CHECKS else None)
 
     for i, c in enumerate(calls):
         if i not in counted and c["end"] is not None and c["end"] - c["start"] > LONG_CALL_S:
@@ -1007,10 +1170,13 @@ def _has_tool_events(run):
 
 
 def detector_status(run):
-    """{kind: 'ok' | 'not_available'}: a detector is not_available when its
-    inputs are missing from every agent or launch."""
+    """{kind: 'ok' | 'partial' | 'not_available'}: a detector is
+    not_available when its inputs are missing from every agent or launch.
+    The TOOL_KINDS are partial when any agent is (_agent_partial: a call
+    without a result, or unreadable lines): they may miss slowdowns."""
     agents = _all_agents(run)
     tool_events = _has_tool_events(run)
+    partial = tool_events and any(_agent_partial(a) for a in agents)
     labels = any(a["entry"]["label"] for a in agents)
     models = labels and any(_model(a["entry"]) != UNAVAILABLE for a in agents)
     available = {
@@ -1022,19 +1188,21 @@ def detector_status(run):
     }
     for kind in TOOL_KINDS:
         available[kind] = tool_events
-    return {k: "ok" if available[k] else "not_available" for k in KINDS}
+    status = {k: "ok" if available[k] else "not_available" for k in KINDS}
+    if partial:
+        for kind in TOOL_KINDS:
+            status[kind] = "partial"
+    return status
 
 
 def find_slowdowns(run, detectors):
-    """Internal slowdowns of every available detector, largest cost first
-    (unknown costs last), then by time and kind."""
-    commands = run["manifest"].get("commands")
-    tests = commands.get("test") if isinstance(commands, dict) else None
-    test_commands = [t for t in tests if isinstance(t, str) and t.strip()] if isinstance(tests, list) else []
+    """Internal slowdowns of every ok or partial detector, largest cost
+    first (unknown costs last), then by time and kind."""
+    checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
-        found += tool_slowdowns(a, test_commands)
-    found = [s for s in found if detectors[s["kind"]] == "ok"]
+        found += tool_slowdowns(a, checks)
+    found = [s for s in found if detectors[s["kind"]] in ("ok", "partial")]
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
     return found
@@ -1048,6 +1216,8 @@ def public_slowdown(s):
 # ---- checks ----
 
 CHECK_GROUPS = ("test", "lint", "build")
+RAN = "ran"
+INFERRED = "inferred"
 
 
 def _squash(text):
@@ -1055,26 +1225,29 @@ def _squash(text):
 
 
 def configured_checks(manifest):
-    """[(command, full_suite)]: the manifest's commands.test, lint and build
-    entries, then each lane_commands override's, without repeats. full_suite
-    is True for a commands.test entry."""
+    """[(check_id, command, full_suite)]: the manifest's commands.test, lint
+    and build entries, then each lane_commands override's. check_id is
+    <group>#<n> for commands.<group>[n - 1] and <lane id>.<group>#<n> for
+    lane_commands.<lane id>.<group>[n - 1]; a command string already seen
+    keeps its first id and is not listed again. full_suite is True for a
+    commands.test entry."""
     out = []
     seen = set()
 
-    def add(commands, full_groups):
+    def add(commands, prefix, full_groups):
         if not isinstance(commands, dict):
             return
         for group in CHECK_GROUPS:
             entries = commands.get(group)
-            for command in entries if isinstance(entries, list) else []:
+            for n, command in enumerate(entries if isinstance(entries, list) else [], 1):
                 if isinstance(command, str) and _squash(command) and command not in seen:
                     seen.add(command)
-                    out.append((command, group in full_groups))
+                    out.append(("%s%s#%d" % (prefix, group, n), command, group in full_groups))
 
-    add(_manifest_commands(manifest), ("test",))
+    add(_manifest_commands(manifest), "", ("test",))
     lanes = manifest.get("lane_commands")
-    for commands in lanes.values() if isinstance(lanes, dict) else []:
-        add(commands, ())
+    for lane, commands in lanes.items() if isinstance(lanes, dict) else []:
+        add(commands, "%s." % lane, ())
     return out
 
 
@@ -1118,17 +1291,46 @@ def _shell_tokens(command, punctuation):
     return tokens
 
 
+def _is_operator(token):
+    return bool(token) and all(c in _SEPARATORS for c in token)
+
+
+def _merge_redirections(tokens):
+    """_shell_tokens(..., _SEPARATORS) with the & of each redirection joined
+    back into one word (2>&1, >&2, >&-, &>f, and &> or &>> standing alone)
+    and |& read as |. A & token left standing is the background operator."""
+    out = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if token == "&" and out and out[-1][-1:] in ("<", ">"):
+            word = out.pop() + "&"
+            if nxt is not None and not _is_operator(nxt):
+                word += nxt
+                i += 1
+            out.append(word)
+        elif token == "&" and nxt is not None and nxt.startswith(">"):
+            out.append("&" + nxt)
+            i += 1
+        else:
+            out.append("|" if token == "|&" else token)
+        i += 1
+    return out
+
+
 def _segments(command):
     """The simple commands of a line as word lists: shell words split at
-    ; & | ( ) and newlines, or, when the quoting does not parse, plain
-    whitespace words of each piece between those characters."""
+    ; & | ( ) and newlines (a & inside a redirection such as 2>&1 is no
+    separator), or, when the quoting does not parse, plain whitespace words
+    of each piece between those characters."""
     try:
-        tokens = _shell_tokens(command, _SEPARATORS)
+        tokens = _merge_redirections(_shell_tokens(command, _SEPARATORS))
     except ValueError:
         return _plain_segments(command)
     out = [[]]
     for token in tokens:
-        if token and all(c in _SEPARATORS for c in token):
+        if _is_operator(token):
             out.append([])
         else:
             out[-1].append(token)
@@ -1165,7 +1367,8 @@ def _skip_prefixes(words):
 def _run_checks_args(words):
     """The words after run-checks when a simple command runs it (as the
     program, or as the script of an interpreter such as python or bash),
-    else None."""
+    else None. An interpreter given -c or -m runs inline code, not a
+    script."""
     i = _skip_prefixes(words)
     if i >= len(words):
         return None
@@ -1175,119 +1378,272 @@ def _run_checks_args(words):
         return None
     i += 1
     while i < len(words) and words[i].startswith("-"):
+        if _INLINE_FLAG.match(words[i]):
+            return None
         i += 2 if words[i] in _ARG_FLAGS else 1
     if i < len(words) and _basename(words[i]) == RUN_CHECKS:
         return words[i + 1:]
     return None
 
 
-def _full_suite_in(line, checks):
-    """True when line runs a full-suite entry of checks: it holds one at a
-    place no longer matched command covers (so a lane override such as
-    'npm test -- a' does not count as 'npm test')."""
-    names = [(_squash(name), full) for name, full in checks if _squash(name) in line]
-    spans = []
-    for name, _ in names:
-        start = line.find(name)
-        while start != -1:
-            spans.append((start, start + len(name)))
-            start = line.find(name, start + 1)
-    for name, full in names:
-        if not full:
+# A backslash before a path character (a Windows path separator); shlex
+# would drop it.
+_WINDOWS_SEPARATOR = re.compile(r"\\(?=[A-Za-z0-9_.-])")
+_CONTINUATION = re.compile(r"\\\r?\n")
+# A redirection word: 2>, >>, <, >|, 2>&1, &>f ...
+_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<|>\|)")
+# The operators a run of separator characters holds.
+_OPERATOR = re.compile(r"&&|\|\||\|&|;;&?|;&|[;&|()\n]")
+_INLINE_FLAG = re.compile(r"^-[A-Za-z]*[cm]")
+# Operators after which a simple command runs whatever came before it, and
+# the only operators of a line read as one && list of pipelines.
+_UNCONDITIONAL = (";", "\n", "|", "&")
+_CHAIN = ("&&", "|")
+# Words before which a simple command may not run (if, loops, case, a
+# function body).
+_CONDITIONAL_WORDS = ("if", "elif", "else", "then", "while", "until", "for", "case", "do", "function")
+
+
+def _simple_commands(command):
+    """The simple commands of a command line as (operators, lead, words),
+    and every operator of the line. operators are those right before the
+    simple command; lead holds the leading _LEAD_WORDS stripped from it;
+    words are the rest, without redirections and with _skip_prefixes and
+    npx skipped. Heredoc bodies are left out, a backslash before a path
+    character is read as '/', so Windows paths survive, and as in the shell
+    a backslash-newline joins lines and a newline after &&, || or | is no
+    separator. Raises ValueError when the quoting does not parse."""
+    line = _CONTINUATION.sub("", without_heredoc_bodies(command))
+    line = _WINDOWS_SEPARATOR.sub("/", line).strip()
+    simple = []
+    every = []
+    ops = []
+    words = []
+    for token in _merge_redirections(_shell_tokens(line, _SEPARATORS)) + [";"]:
+        if not _is_operator(token):
+            words.append(token)
             continue
-        start = line.find(name)
-        while start != -1:
-            end = start + len(name)
-            if not any(a <= start and end <= b and b - a > end - start for a, b in spans):
-                return True
-            start = line.find(name, start + 1)
-    return False
+        if words:
+            simple.append((ops,) + _reduce(words))
+            ops = []
+            words = []
+        for op in _OPERATOR.findall(token):
+            if op == "\n" and ops and ops[-1] in ("&&", "||", "|"):
+                continue
+            op = "|" if op == "|&" else op
+            ops.append(op)
+            every.append(op)
+    return simple, every[:-1]
 
 
-def match_check(command, checks):
-    """(name, full_suite) when a Bash command line runs a check, else None.
+def _reduce(words):
+    """(lead, words) of a simple command's words: see _simple_commands."""
+    kept = []
+    i = 0
+    while i < len(words):
+        m = _REDIRECTION.match(words[i])
+        if m is None:
+            kept.append(words[i])
+        elif all(c in "<>-" for c in words[i][m.end():]):
+            i += 1  # the operator stands alone: its target is the next word
+        i += 1
+    i = 0
+    while i < len(kept) and kept[i] in _LEAD_WORDS:
+        i += 1
+    lead, rest = kept[:i], kept[i:]
+    while rest:
+        i = _skip_prefixes(rest)
+        if i < len(rest) and rest[i] == "npx":
+            i += 1
+        if i == 0:
+            break
+        rest = rest[i:]
+    return lead, rest
+
+
+def _certainties(simple, every, exit_code):
+    """RAN or INFERRED for each simple command of a line (see match_check)."""
+    chain = exit_code == 0 and all(op in _CHAIN for op in every)
+    out = []
+    unconditional = True
+    conditional_before = False
+    for ops, lead, words in simple:
+        unconditional = unconditional and all(op in _UNCONDITIONAL for op in ops)
+        conditional = conditional_before or any(w in _CONDITIONAL_WORDS for w in lead)
+        out.append(RAN if not conditional and (unconditional or chain) else INFERRED)
+        conditional_before = conditional or (bool(words) and words[0] in _CONDITIONAL_WORDS)
+    return out
+
+
+def _surest(certainties):
+    """RAN when any is RAN, INFERRED when there are only others, else None."""
+    if RAN in certainties:
+        return RAN
+    return INFERRED if certainties else None
+
+
+def _check_words(command):
+    """The words of each simple command of a configured command, reduced as
+    a command line's are; None when there are none or its quoting does not
+    parse."""
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return None
+    parts = [words for _ops, _lead, words in simple]
+    return parts if parts and all(parts) else None
+
+
+def match_check(command, checks, exit_code=None):
+    """{check, certainty, full_suite} when a Bash command line runs a check
+    of checks (configured_checks), else None. exit_code is the call's exit
+    code (0 for a successful call without an 'Exit code N' line), or None
+    when unknown.
+
+    The line is read as shell words (heredoc bodies left out, a backslash
+    before a path character read as '/') split into simple commands at
+    ; & | && || ( ) and newlines; a & inside a redirection (2>&1, >&2, &>f)
+    is no separator. A line whose quoting does not parse runs nothing.
 
     A line with a simple command that runs run-checks (as the program, or as
-    an interpreter's script, after prefixes such as env or timeout DURATION)
-    is a run-checks call: name 'run-checks', and a full-suite run when any
-    of its run-checks commands passes '--cmd test'. Otherwise name is the
-    longest of checks' commands the line holds (whitespace-normalised),
-    first in checks' order on a tie, and full_suite is True when the line
-    holds a full-suite entry anywhere (see _full_suite_in), so a chained
-    'lint && test' counts even when the lint string is the longer one."""
+    an interpreter's script, after prefixes such as env or timeout DURATION;
+    not an interpreter given -c or -m) is a run-checks call: check
+    'run-checks', and full_suite is the certainty of the run-checks command
+    passing '--cmd test', or None.
+
+    Otherwise a configured command matches a simple command whose words
+    start with its words (both without redirections, leading keywords,
+    NAME=value assignments and prefixes such as env, timeout DURATION or
+    npx), exactly when no words follow; a configured command of several
+    simple commands matches them in a row. The match with the most words
+    names the execution (the first in checks' order on a tie). full_suite
+    is RAN when a simple command that exactly matches a full-suite entry is
+    certain, INFERRED when only uncertain ones do, else None.
+
+    A matched simple command is certain (RAN) when no if, elif, else, then,
+    while, until, for, case, do or function comes before it or is stripped
+    from it, and either every operator before it is ;, a newline, | or a
+    background &, or the whole line is pipelines joined only by && and
+    exit_code is 0 (an && list exits 0 only when every part ran).
+    Otherwise it is INFERRED: it may not have run."""
     if not isinstance(command, str):
         return None
-    # Shell words, and plain words too when the line holds a backslash:
-    # shlex drops the backslashes of an unquoted Windows path.
-    passes = [_segments(command)] + ([_plain_segments(command)] if "\\" in command else [])
-    for segments in passes:
-        found = [args for args in (_run_checks_args(words) for words in segments) if args is not None]
-        if found:
-            return RUN_CHECKS, any(w == "--cmd" and args[i + 1:i + 2] == ["test"]
-                                   for args in found for i, w in enumerate(args))
-    line = _squash(command)
-    best = None
-    for name, full in checks:
-        if _squash(name) in line and (best is None or len(_squash(name)) > len(_squash(best[0]))):
-            best = (name, full)
+    try:
+        simple, every = _simple_commands(command)
+    except ValueError:
+        return None
+    certainty = _certainties(simple, every, exit_code)
+    runs = [(i, args) for i, args in enumerate(_run_checks_args(words) for _ops, _lead, words in simple)
+            if args is not None]
+    if runs:
+        tests = [certainty[i] for i, args in runs
+                 if any(w == "--cmd" and args[j + 1:j + 2] == ["test"] for j, w in enumerate(args))]
+        return {"check": RUN_CHECKS, "certainty": _surest([certainty[i] for i, _args in runs]),
+                "full_suite": _surest(tests)}
+    best = None  # (word count, check_id, certainties)
+    full = []
+    for check_id, configured, is_full in checks:
+        parts = _check_words(configured)
+        if parts is None:
+            continue
+        size = sum(len(p) for p in parts)
+        for k in range(len(simple) - len(parts) + 1):
+            here = [words for _ops, _lead, words in simple[k:k + len(parts)]]
+            last = len(parts) - 1
+            if here[:last] != parts[:last] or here[last][:len(parts[last])] != parts[last]:
+                continue
+            sure = RAN if all(c == RAN for c in certainty[k:k + len(parts)]) else INFERRED
+            if best is None or size > best[0]:
+                best = (size, check_id, [sure])
+            elif best[1] == check_id:
+                best[2].append(sure)
+            if is_full and here[last] == parts[last]:
+                full.append(sure)
     if best is None:
         return None
-    return best[0], _full_suite_in(line, checks)
+    return {"check": best[1], "certainty": _surest(best[2]), "full_suite": _surest(full)}
+
+
+def _call_exit(call):
+    """A call's exit code for match_check: its 'Exit code N' line, 0 for a
+    successful result without one, None for a failed call without one or
+    no result."""
+    code = exit_code(call["text"])
+    if code is None and call["end"] is not None and not call["is_error"]:
+        return 0
+    return code
 
 
 def _execution_end(agent, call):
     """(background, end, timing) of a check call. A backgrounded call ends
-    at the first later event naming its ID; a call with no such event, or
-    without a result, is bound by the agent's last event."""
+    at its observed completion (_completion_after), an upper bound on the
+    real end ('bound'); without one its end is unknown (None,
+    'unavailable'). A call without a result has no known end either: a
+    missing result says nothing about the finish. Any other call ends at
+    its result ('measured')."""
     background = call["input"].get("run_in_background") is True \
         or notice("background_check", call) is not None
     if call["end"] is None:
-        return background, agent["end"], "bound"
+        return background, None, UNAVAILABLE
     if background:
-        mention = _mention_after(agent, call)
-        if mention is None:
-            return background, agent["end"], "bound"
-        return background, mention, "measured"
+        done = _completion_after(agent, call)
+        if done is None:
+            return True, None, UNAVAILABLE
+        return True, done[0], "bound"
     return background, call["end"], "measured"
 
 
 def checks_section(run):
-    """Every Bash call that runs a configured check or run-checks, with its
-    timing; per-command totals; full-suite runs per role. Without any tool
-    event in the run the section cannot be derived and is unavailable."""
+    """Every Bash call that runs a configured check or run-checks, named by
+    check id and marked ran or inferred, with its timing (_execution_end;
+    end and s are unavailable when the end is unknown); per-check totals,
+    where untimed counts the ran executions without a duration and total_s
+    sums the timed ones (bound durations are upper bounds); full-suite runs
+    per role. Without any tool event in the run the section cannot be
+    derived and is unavailable."""
     if not _has_tool_events(run):
-        return {"executions": UNAVAILABLE, "by_command": UNAVAILABLE,
-                "full_suite_runs": {"total": UNAVAILABLE, "by_role": UNAVAILABLE}}
+        return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
+                "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE}}
     checks = configured_checks(run["manifest"])
     on_path = set(id(a) for a in critical_agents(run))
     found = []
     for order, a in enumerate(_all_agents(run)):
         e = a["entry"]
         for call in _calls(a):
-            match = match_check(_command(call), checks) if call["name"] == "Bash" else None
+            match = match_check(_command(call), checks, _call_exit(call)) if call["name"] == "Bash" else None
             if match is None:
                 continue
             background, end, timing = _execution_end(a, call)
-            found.append(((call["start"], order), match[1], {
-                "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "command": match[0],
-                "start": iso(call["start"]), "end": iso(end), "s": seconds(end - call["start"]),
+            found.append(((call["start"], order), {
+                "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "check": match["check"],
+                "certainty": match["certainty"], "full_suite": match["full_suite"],
+                "start": iso(call["start"]), "end": iso(end),
+                "s": seconds(None if end is None else end - call["start"]),
                 "timing": timing, "background": background, "on_critical_path": id(a) in on_path,
             }))
     found.sort(key=lambda f: f[0])
-    executions = [x for _key, _full, x in found]
-    by_command = {}
+    executions = [x for _key, x in found]
+    by_check = {}
     for x in executions:
-        totals = by_command.setdefault(x["command"], {"runs": 0, "total_s": 0.0})
+        totals = by_check.setdefault(x["check"], {"runs": 0, "inferred": 0, "untimed": 0, "total_s": 0.0})
+        if x["certainty"] != RAN:
+            totals["inferred"] += 1
+            continue
         totals["runs"] += 1
-        totals["total_s"] += x["s"]
-    for totals in by_command.values():
+        if _is_num(x["s"]):
+            totals["total_s"] += x["s"]
+        else:
+            totals["untimed"] += 1
+    for totals in by_check.values():
         totals["total_s"] = seconds(totals["total_s"])
     by_role = {}
-    for _key, full, x in found:
-        if full:
+    for x in executions:
+        if x["full_suite"] == RAN:
             by_role[x["role"]] = by_role.get(x["role"], 0) + 1
-    return {"executions": executions, "by_command": by_command,
-            "full_suite_runs": {"total": sum(by_role.values()), "by_role": by_role}}
+    return {"executions": executions, "by_check": by_check,
+            "full_suite_runs": {"total": sum(by_role.values()),
+                                "inferred": sum(1 for x in executions if x["full_suite"] == INFERRED),
+                                "by_role": by_role}}
 
 
 # ---- suggestions ----
@@ -1658,6 +2014,13 @@ def _md_time(a):
     if gaps:
         lines += ["", "Idle gaps (no agent running): %d, %s in all." % (len(gaps), _secs(sum(g["s"] for g in gaps)))]
         lines += ["- %s to %s: %s" % (_when(g["start"]), _when(g["end"]), _secs(g["s"])) for g in gaps[:5]]
+    partial = [x for x in t["agents"] if x["tool_s"] == UNAVAILABLE and _is_num(x.get("tool_s_min"))]
+    if partial:
+        lines += ["", "Agents with tool calls missing a result or unreadable lines (tool time is a minimum, "
+                      "the rest unavailable):"]
+        lines += ["- %s: tool time >= %s; %s without a result" % (
+            _ascii(x["label"]), _secs(x["tool_s_min"]), _count_word(x["unmatched_calls"], "call"))
+            for x in partial]
     return lines
 
 
@@ -1670,10 +2033,16 @@ def _md_checks(a):
         _count_word(len(executions), "execution"), sum(1 for x in executions if x["on_critical_path"]),
         sum(1 for x in executions if x["background"]))]
     if executions:
-        lines += [""] + _table(["Command", "Runs", "Total"],
-                               [[c, v["runs"], _secs(v["total_s"])] for c, v in checks["by_command"].items()])
+        lines += [""] + _table(["Check", "Runs", "Inferred", "Total"],
+                               [[c, v["runs"], v["inferred"], _secs(v["total_s"]) + (
+                                   " (+%d untimed)" % v["untimed"] if v.get("untimed") else "")]
+                                for c, v in checks["by_check"].items()])
+        lines += ["", "Check ids name manifest commands: test#1 is commands.test[0], "
+                      "<lane>.test#1 is lane_commands.<lane>.test[0]."]
     full = checks["full_suite_runs"]
-    lines += ["", "Full-suite runs: %s" % full["total"]]
+    inferred = full.get("inferred")
+    lines += ["", "Full-suite runs: %s%s" % (full["total"], " (+%d inferred)" % inferred
+                                             if _is_num(inferred) and inferred else "")]
     if isinstance(full["by_role"], dict):
         lines += ["- %s: %d" % (_ascii(r), n) for r, n in full["by_role"].items()]
     return lines
@@ -1686,34 +2055,45 @@ def _md_slowdowns(a):
         lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
                        [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
                          _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"], 1)])
-    missing = [k for k, v in a["detectors"].items() if v != "ok"]
+    partial = [k for k, v in a["detectors"].items() if v == "partial"]
+    if partial:
+        lines += ["", "Detectors with partial data (they may miss slowdowns): %s." % ", ".join(partial)]
+    missing = [k for k, v in a["detectors"].items() if v not in ("ok", "partial")]
     if missing:
         lines += ["", "Detectors without data (they add no slowdowns): %s." % ", ".join(missing)]
     return lines
+
+
+def _output_of(bucket):
+    """A bucket's output tokens: the count, '>= N' when only the minimum is
+    known, else unavailable."""
+    if _is_num(bucket["output_tokens"]):
+        return _tokens(bucket["output_tokens"])
+    if _is_num(bucket["output_tokens_min"]):
+        return ">= %s" % _tokens(bucket["output_tokens_min"])
+    return UNAVAILABLE
 
 
 def _md_tokens(a):
     t = a["tokens"]
     tot = t["totals"]
     lines = []
-    if t["partial"]:
-        lines.append("These totals are minimums: some agents have no usage data, incomplete output counts "
-                     "or unreadable lines, so the real totals are higher.")
-        lines.append("")
-    output = _tokens(tot["output_tokens"]) if _is_num(tot["output_tokens"]) else \
-        ">= %s" % _tokens(tot["output_tokens_min"])
-    lines.append("Totals over %s: input %s, output %s, cache read %s, cache creation %s." % (
-        _count_word(tot["agents"], "agent"), _tokens(tot["input_tokens"]), output,
-        _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
+    if tot.get("agents_with_usage") == 0:
+        lines.append("Totals: unavailable (no agent has usage data).")
+    else:
+        if t["partial"]:
+            lines.append("These totals are minimums: some agents have no usage data, incomplete output counts "
+                         "or unreadable lines, so the real totals are higher.")
+            lines.append("")
+        lines.append("Totals over %s: input %s, output %s, cache read %s, cache creation %s." % (
+            _count_word(tot["agents"], "agent"), _tokens(tot["input_tokens"]), _output_of(tot),
+            _tokens(tot["cache_read_input_tokens"]), _tokens(tot["cache_creation_input_tokens"])))
     if t["unreadable_lines"] > 0:
         lines.append("Damaged transcript lines were skipped; unreadable lines: %d." % t["unreadable_lines"])
     if t["by_role"]:
-        def out_of(b):
-            return _tokens(b["output_tokens"]) if _is_num(b["output_tokens"]) else \
-                ">= %s" % _tokens(b["output_tokens_min"])
         lines += ["", "By role:", ""] + _table(
             ["Role", "Agents", "Input", "Output", "Cache read", "Cache creation"],
-            [[r, b["agents"], _tokens(b["input_tokens"]), out_of(b), _tokens(b["cache_read_input_tokens"]),
+            [[r, b["agents"], _tokens(b["input_tokens"]), _output_of(b), _tokens(b["cache_read_input_tokens"]),
               _tokens(b["cache_creation_input_tokens"])] for r, b in t["by_role"].items()])
     if t["top_agents"]:
         lines += ["", "Largest agents:", ""] + _table(
@@ -1781,7 +2161,9 @@ def render_summary(analysis, md_path):
     lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
         "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
     tot = a["tokens"]["totals"]
-    if a["tokens"]["partial"]:
+    if tot.get("agents_with_usage") == 0:
+        lines.append("tokens: unavailable (no agent has usage data)")
+    elif a["tokens"]["partial"]:
         lines.append("tokens (minimums: some usage is missing or unreadable): >= %s input, >= %s output, "
                      ">= %s cache read, >= %s cache creation" % (
                          _tokens(tot["input_tokens"]), _tokens(tot["output_tokens_min"]),
