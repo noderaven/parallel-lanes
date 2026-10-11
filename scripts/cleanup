@@ -16,7 +16,19 @@ Preconditions (otherwise it refuses, exit 3, and changes nothing):
   that entry's folder exists;
 - no active-run marker for its run_id is listed by
   bash <skill_dir>/scripts/active-run list (a marker means the run can still
-  be resumed; a list that fails is a refusal too).
+  be resumed; a list that fails is a refusal too);
+- with --yes only: cleanup takes the run's launch lock, as a resume of the
+  run does (active-run acquire <run_id> <manifest>). A lock another session
+  holds (a resume or another cleanup) is a refusal. Then, in git mode, it
+  takes the checkout lock of the main checkout for the run (as setup does,
+  through _locks.checkout_lock), so no other run's setup can switch it
+  meanwhile; a checkout another live run holds is a refusal naming that run,
+  and so is an unreadable or malformed checkout lock. Both locks are given
+  back when cleanup ends, whatever happened (active-run release <run_id>
+  --remove --owner <token>, which also removes the marker acquire wrote and
+  the run's checkout locks); when that fails, cleanup warns on stderr and
+  names active-run remove <run_id> --takeover, and its exit code stays.
+  Shadow mode takes no checkout lock. Without --yes no lock is taken.
 
 Run-owned items:
 - <worktree_root>/lane-<id> for each manifest lane, on branch pl-<run_id>-<id>;
@@ -48,8 +60,15 @@ cannot be removed safely is kept and named with the reason:
    refuses a dirty or locked worktree). Clean means git status --porcelain
    --untracked-files=all prints nothing: untracked files count even when
    Git's configuration hides them, and ignored files do not count. A
-   worktree whose git status fails is kept;
-2. lane branches the plan marks remove, with git branch -d (git mode only);
+   worktree whose git status fails, or whose HEAD cannot be read, is kept.
+   Right before each removal it is checked again, with a fresh git
+   worktree list: it is still a run-owned worktree on its branch, it is
+   not locked, its HEAD is still the planned head, and it is still clean.
+   Otherwise it is kept with "changed after the plan (<what changed>); run
+   cleanup again", and so is its planned branch;
+2. lane branches the plan marks remove, with git branch -d (git mode only),
+   each only while its tip is still the planned sha; otherwise it is kept
+   with "moved after the plan; run cleanup again";
 3. the feature branch (git mode only). It stops at the first failed
    condition, leaving the checkout and the branch as they are:
    - the main checkout is on repo.branch and clean (as in 1: untracked
@@ -60,7 +79,9 @@ cannot be removed safely is kept and named with the reason:
      GCM_INTERACTIVE=never and no terminal prompt; on a timeout its process
      tree is killed);
    - repo.branch is an ancestor of the fetched tip (the PR is merged);
-   - base_ref is an ancestor of the fetched tip (a fast-forward).
+   - base_ref is an ancestor of the fetched tip (a fast-forward);
+   - repo.branch is still at the planned sha (otherwise "moved after the
+     plan; run cleanup again").
    Then git switch <base_ref>, git merge --ff-only <fetched tip>,
    git branch -d <repo.branch>;
 4. worktree_root, with rmdir, only when it is empty.
@@ -73,10 +94,12 @@ the history folder (other than writing the restore point).
 
 Output: the plan, as text or (--json) one JSON object:
   {"run_id", "mode", "run_folder",
-   "worktrees": [{"path", "branch", "action", "reason"}],
+   "worktrees": [{"path", "branch", "head", "action", "reason"}],
    "branches": [{"branch", "sha", "action", "reason"}],
    "feature_steps": [...], "refs": [{"ref", "sha", "action", "reason"}],
    "foreign": [{"path", "reason"}], "restore_point": <path or null>}
+A worktree's head is its git rev-parse HEAD when the plan was made (null
+when it cannot be read; the worktree is then kept).
 With --yes the object also has "removed" and "kept": lists of
   {"kind", ..., "reason"}, where kind is worktree (with path, branch),
   branch (branch, sha), ref (ref, sha), path (a foreign item under
@@ -103,6 +126,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _doctor  # noqa: E402
 import _history  # noqa: E402
+import _locks  # noqa: E402
 import _shell  # noqa: E402
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +140,8 @@ ENV["GIT_TERMINAL_PROMPT"] = "0"
 FETCH_TIMEOUT_S = 120
 STAMP = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NOT_OWNED = "not owned by this run"
+# The reason a branch whose tip is not the planned one is kept.
+MOVED = "moved after the plan; run cleanup again"
 # The cleanliness check: every untracked file counts, even when Git's
 # configuration (status.showUntrackedFiles) hides them; ignored files do not.
 STATUS = ["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"]
@@ -246,12 +272,18 @@ def ensure_archived(m, hdir):
     return folder
 
 
+def active_run(*args):
+    """bash <scripts>/active-run args...: the completed process. Raises
+    _shell.BashNotFound when there is no bash to run it with."""
+    argv = _shell.bash_argv(os.path.join(SCRIPTS, "active-run"), *args)
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
 def ensure_inactive(run_id):
     try:
-        argv = _shell.bash_argv(os.path.join(SCRIPTS, "active-run"), "list")
+        res = active_run("list")
     except _shell.BashNotFound as e:
         raise Failure(3, "cannot check the active-run markers: " + str(e))
-    res = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
     try:
         markers = json.loads(res.stdout) if res.returncode == 0 else None
     except ValueError:
@@ -264,6 +296,51 @@ def ensure_inactive(run_id):
             raise Failure(3, "run " + run_id + " has an active-run marker (status "
                           + str(marker.get("status")) + "): it can still be resumed. Remove the"
                           " marker only when the run is finished for good.")
+
+
+def acquire_run_lock(m, manifest_path):
+    """Take the run's launch lock, as a resume of the run does (active-run
+    acquire <run_id> <manifest_path>); return its owner token."""
+    run_id = m["run_id"]
+    try:
+        res = active_run("acquire", run_id, manifest_path)
+    except _shell.BashNotFound as e:
+        raise Failure(3, "cannot take the run lock of run " + run_id + ": " + str(e) + "; nothing was changed")
+    if res.returncode == 4:
+        raise Failure(3, "run " + run_id + " is held by another session (a resume or another cleanup);"
+                      " nothing was changed")
+    if res.returncode != 0:
+        raise Failure(3, "cannot take the run lock of run " + run_id + ": active-run acquire exited "
+                      + str(res.returncode) + ": " + res.stderr.strip() + "; nothing was changed")
+    return res.stdout.strip()
+
+
+def release_run_lock(run_id, token):
+    """Give the run lock back and remove the marker acquire wrote (active-run
+    release <run_id> --remove, which also deletes the run's checkout locks).
+    A failure is only a warning: what cleanup did stands."""
+    try:
+        res = active_run("release", run_id, "--remove", "--owner", token)
+        problem = None if res.returncode == 0 else ("active-run release exited " + str(res.returncode)
+                                                    + ": " + res.stderr.strip())
+    except _shell.BashNotFound as e:
+        problem = str(e)
+    if problem is not None:
+        sys.stderr.write("cleanup: warning: cannot release the run lock of run " + run_id + " (" + problem
+                         + "); once no session runs it, remove it with active-run remove " + run_id
+                         + " --takeover\n")
+
+
+def take_checkout_lock(repo, run_id):
+    """Take the checkout lock of the main checkout for run_id (git mode), so
+    no other run's setup can switch it while cleanup works."""
+    try:
+        _locks.checkout_lock(repo.root, run_id)
+    except _locks.LockError as e:
+        if e.code == 4 and e.run_id:
+            raise Failure(3, "the checkout " + slash(repo.root) + " is in use by run " + e.run_id
+                          + "; nothing was changed")
+        raise Failure(3 if e.code == 4 else e.code, str(e))
 
 
 def owned_worktree(repo, listing, path, branch):
@@ -279,17 +356,56 @@ def owned_worktree(repo, listing, path, branch):
     return entry
 
 
+def worktree_head(path):
+    """(sha, None) for the worktree's HEAD, or (None, the git error)."""
+    res = run_git(["rev-parse", "--verify", "HEAD"], ["-C", path])
+    if res.returncode != 0 or not res.stdout.strip():
+        return None, git_error(res)
+    return res.stdout.strip(), None
+
+
 def worktree_item(repo, entry, path, branch):
+    head, error = worktree_head(path)
+    item = {"path": path, "branch": branch, "head": head}
+    if head is None:
+        return dict(item, action="keep", reason="cannot read its HEAD: " + error)
     if entry["locked"]:
-        return {"path": path, "branch": branch, "action": "keep", "reason": "the worktree is locked"}
+        return dict(item, action="keep", reason="the worktree is locked")
     res = run_git(STATUS, ["-C", path])
     if res.returncode != 0:
-        return {"path": path, "branch": branch, "action": "keep",
-                "reason": "git status failed: " + res.stderr.strip()}
+        return dict(item, action="keep", reason="git status failed: " + res.stderr.strip())
     if res.stdout.strip():
-        return {"path": path, "branch": branch, "action": "keep",
-                "reason": "it has uncommitted or untracked changes"}
-    return {"path": path, "branch": branch, "action": "remove", "reason": "clean and unlocked"}
+        return dict(item, action="keep", reason="it has uncommitted or untracked changes")
+    return dict(item, action="remove", reason="clean and unlocked")
+
+
+def recheck_worktree(repo, w):
+    """Why the planned worktree w must be kept now, or None: called right
+    before it is removed, it checks again that it is still this run's
+    worktree on its branch, unlocked, at the planned HEAD and clean."""
+    def changed(what):
+        return "changed after the plan (" + what + "); run cleanup again"
+
+    try:
+        listing = repo.worktrees()
+    except Failure as e:
+        return changed(str(e))
+    entry = owned_worktree(repo, listing, w["path"], w["branch"])
+    if entry is None:
+        return changed("it is no longer a worktree of this repo on " + w["branch"])
+    if entry["locked"]:
+        return changed("it is locked now")
+    head, error = worktree_head(w["path"])
+    if head is None:
+        return changed("cannot read its HEAD: " + error)
+    if head != w.get("head"):
+        return changed("its HEAD moved from " + str(w.get("head"))[:12] + " to " + head[:12])
+    res = run_git(STATUS, ["-C", w["path"]])
+    if res.returncode != 0:
+        return changed("git status failed: " + git_error(res))
+    if res.stdout.strip():
+        return changed("it has uncommitted or untracked changes")
+    return None
 
 
 def lane_branch_item(repo, branch, sha, kept_at, head):
@@ -503,10 +619,11 @@ def fetch(repo, remote, merge):
     return subprocess.CompletedProcess(argv, proc.returncode, out or "", err or "")
 
 
-def remove_feature(repo, m):
+def remove_feature(repo, m, planned):
     """Switch the main checkout to the base, fast-forward it to the fetched
     upstream tip and delete the feature branch: (removed, reason). Stops at
-    the first failed condition, leaving the checkout and the branch."""
+    the first failed condition, leaving the checkout and the branch. The
+    branch must still be at planned, its tip in the plan."""
     branch, base = m["repo"]["branch"], m["repo"]["base_ref"]
     reason, remote, merge = feature_precheck(repo, branch, base)
     if reason is not None:
@@ -533,6 +650,8 @@ def remove_feature(repo, m):
         return False, "git merge-base could not compare " + base + " with " + fetched
     if not ff:
         return False, base + " cannot fast-forward to " + fetched + ": it has commits the upstream does not"
+    if repo.sha("refs/heads/" + branch) != planned:
+        return False, MOVED
     res = repo.git("switch", base)
     if res.returncode != 0:
         return False, "git switch " + base + " failed: " + git_error(res)
@@ -557,16 +676,23 @@ def remove_owned(repo, m, plan):
     # 1. Run-owned worktrees. git worktree remove checks again that each is
     # clean and unlocked, and refuses otherwise; its own git status would
     # follow status.showUntrackedFiles, so it is told to show them all.
+    # Each is checked again first (recheck_worktree); one that changed
+    # after the plan is kept, and so is its planned branch.
     still_out = {}
     for w in plan["worktrees"]:
         entry = {"kind": "worktree", "path": w["path"], "branch": w["branch"]}
         if w["action"] != "remove":
             note(False, entry, w["reason"])
             continue
+        reason = recheck_worktree(repo, w)
+        if reason is not None:
+            note(False, entry, reason)
+            still_out[w["branch"]] = "its worktree " + w["path"] + " " + reason
+            continue
         res = repo.git("-c", "status.showUntrackedFiles=all", "worktree", "remove", w["path"])
         if res.returncode != 0:
             note(False, entry, "git worktree remove refused: " + git_error(res))
-            still_out[w["branch"]] = w["path"]
+            still_out[w["branch"]] = "it is checked out in the kept worktree " + w["path"]
         else:
             note(True, entry, w["reason"])
     for f in plan["foreign"]:
@@ -581,7 +707,9 @@ def remove_owned(repo, m, plan):
         elif b["branch"] == feature:
             continue
         elif b["branch"] in still_out:
-            note(False, entry, "it is checked out in the kept worktree " + still_out[b["branch"]])
+            note(False, entry, still_out[b["branch"]])
+        elif repo.sha("refs/heads/" + b["branch"]) != b["sha"]:
+            note(False, entry, MOVED)
         else:
             res = repo.git("branch", "-d", b["branch"])
             if res.returncode != 0:
@@ -590,7 +718,7 @@ def remove_owned(repo, m, plan):
                 note(True, entry, b["reason"])
     for b in plan["branches"]:
         if b["branch"] == feature and b["action"] == "remove":
-            ok, reason = remove_feature(repo, m)
+            ok, reason = remove_feature(repo, m, b["sha"])
             note(ok, {"kind": "branch", "branch": b["branch"], "sha": b["sha"]}, reason)
     for r in plan["refs"]:
         note(False, {"kind": "ref", "ref": r["ref"], "sha": r["sha"]}, r["reason"])
@@ -677,8 +805,16 @@ def main():
         repo = Repo(m)
         plan = make_plan(repo, m, run_folder)
         if args.yes:
-            plan["restore_point"] = write_restore_point(repo, plan, run_folder)
-            plan["removed"], plan["kept"] = remove_owned(repo, m, plan)
+            # What changes between the plan and the locks is caught by the
+            # rechecks right before each removal.
+            token = acquire_run_lock(m, args.manifest)
+            try:
+                if repo.mode == "git":
+                    take_checkout_lock(repo, m["run_id"])
+                plan["restore_point"] = write_restore_point(repo, plan, run_folder)
+                plan["removed"], plan["kept"] = remove_owned(repo, m, plan)
+            finally:
+                release_run_lock(m["run_id"], token)
     except Failure as e:
         sys.stderr.write("cleanup: " + str(e) + "\n")
         return e.code

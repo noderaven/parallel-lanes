@@ -660,3 +660,173 @@ test('cleanup: shadow mode removes worktrees and keeps branches', () => {
   assert.ok(!existsSync(c.worktreeRoot));
   assert.deepEqual(readdirSync(c.project), ['README.md']);
 });
+
+// --- F8: cleanup holds the run and checkout locks and rechecks each item ---
+
+// cleanup loaded as a module (its main does not run), for the seam tests.
+const LOAD_CLEANUP = [
+  'import importlib.machinery, importlib.util, json, os, sys',
+  'sys.dont_write_bytecode = True',
+  "loader = importlib.machinery.SourceFileLoader('cleanup', sys.argv[1])",
+  'mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))',
+  'loader.exec_module(mod)',
+  'm = mod.load_manifest(sys.argv[2])',
+  'repo = mod.Repo(m)',
+];
+
+function python(c, lines, args) {
+  const res = sh('python3', ['-c', lines.join('\n'), CLEANUP, c.manifest, ...args], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(res.code, 0, res.stderr);
+  return res.stdout;
+}
+
+// make_plan, written to a file, so the repo can change before removeOwned.
+function makePlan(c) {
+  const file = join(c.root, 'plan.json');
+  python(c, [
+    ...LOAD_CLEANUP,
+    "plan = mod.make_plan(repo, m, 'unused')",
+    "with open(sys.argv[3], 'w', encoding='utf-8') as f:",
+    '    json.dump(plan, f)',
+  ], [file]);
+  return file;
+}
+
+// remove_owned on the plan makePlan wrote: {removed, kept}.
+function removeOwned(c, file) {
+  return JSON.parse(python(c, [
+    ...LOAD_CLEANUP,
+    "with open(sys.argv[3], encoding='utf-8') as f:",
+    '    plan = json.load(f)',
+    'removed, kept = mod.remove_owned(repo, m, plan)',
+    "print(json.dumps({'removed': removed, 'kept': kept}))",
+  ], [file]));
+}
+
+test('cleanup: worktree items name the HEAD they were planned at', () => {
+  const c = newCase();
+  const plan = cleanupOk(c);
+  for (const id of ['a', 'b']) assert.equal(planned(plan, c.lanes[id]).head, sha(c, `pl-r1-${id}`));
+});
+
+test('cleanup: a worktree switched to another branch after the plan is kept', () => {
+  const c = newCase();
+  const file = makePlan(c);
+  git(c.lanes.a, 'switch', '-q', '-c', 'foreign-work');
+  commitFile(c.lanes.a, 'foreign.txt', 'foreign work\n');
+  const commit = sha(c, 'foreign-work');
+  const out = removeOwned(c, file);
+  const kept = findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a));
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /changed after the plan/);
+  assert.ok(existsSync(join(c.lanes.a, 'foreign.txt')));
+  assert.ok(hasWorktree(c.project, c.lanes.a));
+  assert.equal(sha(c, 'refs/heads/foreign-work'), commit);
+  assert.ok(hasRef(c.project, 'refs/heads/pl-r1-a'), 'the planned branch of a kept worktree is kept');
+  // The other lane is still cleaned up.
+  assert.ok(!existsSync(c.lanes.b));
+});
+
+test('cleanup: a worktree with a new commit after the plan is kept', () => {
+  const c = newCase();
+  const file = makePlan(c);
+  commitFile(c.lanes.a, 'late.txt', 'late work\n');
+  const tip = sha(c, 'pl-r1-a');
+  const out = removeOwned(c, file);
+  const kept = findItem(out.kept, 'worktree', (i) => samePath(i.path, c.lanes.a));
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /changed after the plan/);
+  assert.ok(existsSync(join(c.lanes.a, 'late.txt')));
+  assert.ok(findItem(out.kept, 'branch', (i) => i.branch === 'pl-r1-a'), JSON.stringify(out.kept));
+  assert.equal(sha(c, 'refs/heads/pl-r1-a'), tip);
+});
+
+test('cleanup: a branch moved after the plan is kept', () => {
+  const c = newCase();
+  git(c.project, 'worktree', 'remove', c.lanes.b);
+  const file = makePlan(c);
+  const moved = git(c.project, 'commit-tree', 'pl-r1-b^{tree}', '-p', 'pl-r1-b', '-m', 'moved');
+  git(c.project, 'update-ref', 'refs/heads/pl-r1-b', moved);
+  const out = removeOwned(c, file);
+  const kept = findItem(out.kept, 'branch', (i) => i.branch === 'pl-r1-b');
+  assert.ok(kept, JSON.stringify(out.kept));
+  assert.match(kept.reason, /moved after the plan/);
+  assert.equal(sha(c, 'refs/heads/pl-r1-b'), moved);
+});
+
+test('cleanup: --yes refuses while another session holds the run lock', () => {
+  const c = newCase();
+  mkdirSync(c.active, { recursive: true });
+  writeFileSync(join(c.active, 'r1.lock'), 'othertoken\n');
+  const before = state(c);
+  const res = cleanup(c, ['--yes']);
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /another session/);
+  assert.deepEqual(state(c), before);
+  assert.ok(!existsSync(join(c.runFolder, 'cleanup')));
+});
+
+const checkoutLockFiles = (c) => readdirSync(c.active).filter((f) => /^checkout-.*\.lock$/.test(f));
+
+test('cleanup: --yes leaves no marker or lock behind', () => {
+  const c = newCase();
+  cleanupOk(c, ['--yes']);
+  const list = sh(BASH, [join(SCRIPTS, 'active-run'), 'list'], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(list.code, 0, list.stderr);
+  assert.equal(list.stdout.trim(), '[]');
+  assert.ok(!existsSync(join(c.active, 'r1.lock')));
+  assert.deepEqual(checkoutLockFiles(c), []);
+});
+
+// Run r2 holds the case's checkout, as its setup leaves it.
+function holdCheckoutForR2(c) {
+  mkdirSync(c.active, { recursive: true });
+  writeFileSync(join(c.active, 'r2.lock'), 'r2token\n');
+  const res = sh('python3', ['-c', [
+    'import sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import _locks',
+    "_locks.checkout_lock(sys.argv[1], 'r2')",
+  ].join('\n'), c.project], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(checkoutLockFiles(c).length, 1);
+}
+
+test('cleanup: --yes refuses while another run holds the checkout', () => {
+  const c = newCase();
+  holdCheckoutForR2(c);
+  const before = state(c);
+  const res = cleanup(c, ['--yes']);
+  assert.equal(res.code, 3, res.stderr);
+  assert.match(res.stderr, /\br2\b/);
+  assert.deepEqual(state(c), before);
+});
+
+test('cleanup: another run cannot take the checkout while cleanup holds it', () => {
+  const c = newCase();
+  const out = JSON.parse(python(c, [
+    ...LOAD_CLEANUP,
+    'token = mod.acquire_run_lock(m, sys.argv[2])',
+    'try:',
+    "    mod.take_checkout_lock(repo, m['run_id'])",
+    "    with open(os.path.join(os.environ['PL_ACTIVE_DIR'], 'r2.lock'), 'w', encoding='utf-8') as f:",
+    "        f.write('r2token\\n')",
+    '    try:',
+    "        mod._locks.checkout_lock(m['repo']['root'], 'r2')",
+    "        result = {'code': None}",
+    '    except mod._locks.LockError as e:',
+    "        result = {'code': e.code, 'message': str(e)}",
+    'finally:',
+    "    mod.release_run_lock(m['run_id'], token)",
+    'print(json.dumps(result))',
+  ], []));
+  assert.equal(out.code, 4, JSON.stringify(out));
+  assert.match(out.message, /\br1\b/);
+});
+
+test('cleanup: the plan alone takes no lock', () => {
+  const c = newCase();
+  cleanupOk(c);
+  assert.ok(!existsSync(c.active) || readdirSync(c.active).length === 0, 'the active dir holds no file');
+});
