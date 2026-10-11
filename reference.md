@@ -576,8 +576,8 @@ label after the acceptance lead.
     and `--run-folder`. A recorded launch reads `doctor before <wf>: <status>` with the warned,
     failed and not-read checks by name. Otherwise the line says launch conditions were not
     recorded (with the refusal code), are inconsistent (with the reason), or were not checked
-    (autopsy not run, failed or unreadable). A run with several launches adds "(earlier
-    launches: see autopsy)", and `--relaunch-blocked` adds ", relaunch blocked by doctor
+    (autopsy not run, failed, unreadable or listing no launches). A run with several launches
+    adds "(earlier launches: see autopsy)", and `--relaunch-blocked` adds ", relaunch blocked by doctor
     (<names>)".
   - archive: `archived to <DIR>`, `archived`, `archive failed (exit N)` or `archive not run`.
   - autopsy: `autopsy generated (<m> possible contributor(s))`, `autopsy generated
@@ -950,9 +950,10 @@ exit 2 on a usage error, an unreadable history dir or `index.json`, or outputs i
 
 `<python> <skill_dir>/scripts/doctor <manifest> [--json] [--save FILE]` checks the machine and the
 project before a launch, for a new run, a resume and a transient relaunch. It is read-only apart
-from the `--save` file: it never changes another file, ref, config value or setting, and it never runs `git fetch` (the upstream tip comes from `git
-ls-remote`, with a 15 s timeout). A hard failure blocks the launch: tell the user what failed
-and its fix, and wait. Warnings never block; show them in the dry-run table header.
+from the `--save` file: it never changes another file, ref, config value or setting, and it never
+runs `git fetch` (the upstream tip comes from `git ls-remote`, with a 15 s timeout). A hard failure
+blocks the launch: tell the user what failed and its fix, and wait. Warnings never block; show them
+in the dry-run table header.
 
 Hard failures:
 

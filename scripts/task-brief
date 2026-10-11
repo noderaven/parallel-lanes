@@ -22,13 +22,13 @@ from the --also ids. Both bullets take the label plain or bold, as
 derive-lanes reads them (_plan.label_bullet): a '-', '*' or '+' bullet, any
 case, so '- Consumes:', '- **Consumes:**' and '* **Consumes**:' all work. The
 Consumes colon is optional; the Produces colon is required, inside or right
-after the bold, so a step such as '- produces a cache file' is not the block. In the bullet, an id with both a letter and a
-digit (G1) matches as a whole word ('G1.5' does not name G1); any other id
-(4, 1.5) matches only after 'Task' or 'Tasks', including lists such as
-'Tasks 3, 6 and 9' or 'Tasks 2 and 3 outputs'. An id after a list separator
-counts unless a unit follows it ('Task 4 and 3 mi' names Task 4 only). Only
-ids with a heading in the plan count from the bullet; the task itself never
-counts.
+after the bold, so a step such as '- produces a cache file' is not the block.
+In the bullet, an id with both a letter and a digit (G1) matches as a whole
+word ('G1.5' does not name G1); any other id (4, 1.5) matches only after
+'Task' or 'Tasks', including lists such as 'Tasks 3, 6 and 9' or 'Tasks 2 and
+3 outputs'. An id after a list separator counts unless a unit follows it
+('Task 4 and 3 mi' names Task 4 only). Only ids with a heading in the plan
+count from the bullet; the task itself never counts.
 
 After the section, for each referenced task in plan order:
 

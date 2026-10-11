@@ -126,6 +126,8 @@ test('each refusal prints its code', () => {
     recorded(ledger('conditions', dir, 'wf_aaaaaa', first), 'wf_aaaaaa', 1);
     // A second wf after the same setup: that launch already has its snapshot.
     check(dir, ['wf_bbbbbb', second], 'setup_recorded');
+    // The same wf and launch with a different doctor result: only the doctor differs.
+    check(dir, ['wf_aaaaaa', second], 'wf_recorded');
     // A new setup with the old doctor result: the observation is reused.
     setup(dir, 'b2');
     check(dir, ['wf_cccccc', first], 'observation_reused');

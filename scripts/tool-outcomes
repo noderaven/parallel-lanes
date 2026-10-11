@@ -104,9 +104,9 @@ CLEANUP_WORDS = {
     "failed": "cleanup failed",
     "not_offered": "cleanup not offered",
 }
-CHECK_NAME = re.compile(r"^[a-z_]{1,32}$")
-WF_ID = re.compile(r"^wf_[A-Za-z0-9_-]{1,64}$")
-EXIT_CODE = re.compile(r"^-?[0-9]+$")
+CHECK_NAME = re.compile(r"[a-z_]{1,32}\Z")
+WF_ID = re.compile(r"wf_[A-Za-z0-9_-]{1,64}\Z")
+EXIT_CODE = re.compile(r"-?[0-9]+\Z")
 
 
 def exit_code(text):
@@ -145,8 +145,9 @@ def parse_args(argv):
 
 
 def read_autopsy(folder):
-    """autopsy.json's object when it has a non-empty launch_conditions list of
-    objects; else None (missing, not JSON, or an older autopsy)."""
+    """autopsy.json's object when it has a launch_conditions list of objects
+    (empty for a run with no launches); else None (missing, not JSON, or an
+    older autopsy)."""
     if folder is None:
         return None
     try:
@@ -157,7 +158,7 @@ def read_autopsy(folder):
     if not isinstance(data, dict):
         return None
     entries = data.get("launch_conditions")
-    if not isinstance(entries, list) or not entries:
+    if not isinstance(entries, list):
         return None
     if not all(isinstance(e, dict) for e in entries):
         return None
@@ -200,6 +201,8 @@ def doctor_part(args, data):
     unreadable = ("not_checked", "launch conditions not checked (autopsy unreadable)")
     if data is None:
         return unreadable
+    if not data["launch_conditions"]:
+        return "not_checked", "launch conditions not checked (no launches)"
     last = data["launch_conditions"][-1]
     state = last.get("state")
     if state == "recorded":

@@ -536,16 +536,24 @@ test('the hand-back keeps run tools apart from acceptance', () => {
 });
 
 test('reference.md documents launch conditions', () => {
-  const text = flat(REFERENCE_MD);
-  for (const word of ['--save', '`checks`', '`observed_at`', '`doctor_version`', 'not_recorded',
-    'ledger conditions', 'wf_recorded', 'not_doctor', 'no_setup', 'setup_recorded', 'observation_reused',
-    'launch_conditions', '`recorded`', '`unavailable`', '`inconsistent`', 'orphan_snapshots',
-    'could not be read', 'possible contributor', 'observed before launch',
-    '--run-folder', '--archive-exit', '--autopsy-exit', '--conditions-refused', '--relaunch-blocked',
-    '--cleanup', '--json', 'status.showUntrackedFiles=no']) {
-    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const wants = [
+    ['Run tools line', ['--run-folder', '--archive-exit', '--autopsy-exit', '--conditions-refused',
+      '--relaunch-blocked', '--cleanup', '--json']],
+    ['Doctor', ['--save', '`checks`', '`observed_at`', '`doctor_version`', 'not_recorded']],
+    ['Autopsy', ['`launch_conditions`', 'orphan_snapshots']],
+    ['Launch conditions', ['ledger conditions', 'wf_recorded', 'not_doctor', 'no_setup', 'setup_recorded',
+      'observation_reused', '`recorded`', '`unavailable`', '`inconsistent`', 'orphan_snapshots',
+      'could not be read', 'possible contributor', 'observed before launch',
+      'status.showUntrackedFiles=no']],
+  ];
+  for (const [heading, words] of wants) {
+    const text = section(ref, heading);
+    for (const word of words) {
+      assert.ok(text.includes(word), `reference.md "${heading}" lacks ${word}`);
+    }
   }
-  assert.match(text, /Consumes and Produces labels may be plain or bold/);
+  assert.match(flat(REFERENCE_MD), /Consumes and Produces labels may be plain or bold/);
 });
 
 test('README names tool-outcomes among the scripts', () => {

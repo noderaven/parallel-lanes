@@ -131,18 +131,17 @@ Fields: reference.md "Manifest fields". In order:
 ## Confirmation (every launch, no exceptions)
 
 Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file> --save
-<scratchpad>/doctor-<run_id>.json` (`<run_dir>/doctor-<run_id>.json` with no scratchpad). Exit 2
-or 3 stops the flow (show each failure and its fix, and wait); its warnings go in the table
-header. Each check and what it means: reference.md
-"Doctor" and "Launch conditions".
+<scratchpad>/doctor-<run_id>.json` (`<run_dir>/doctor-<run_id>.json` with no scratchpad). Exit 2 or
+3 stops the flow (show each failure and its fix, and wait); its warnings go in the table header.
+Each check and what it means: reference.md "Doctor" and "Launch conditions".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
    `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
    spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
    with errors. Then set `limits.max_agents` = 2 x `agents.length` and `limits.max_rulings` =
    25 (reference.md "Budgets") so the table shows them.
-2. Show a header (the fields reference.md "Confirmation header" lists) and this table, one row per task in run order (prelude, lanes, join), then one row for
-   the run-level agents and a total M:
+2. Show a header (the fields reference.md "Confirmation header" lists) and this table, one row per
+   task in run order (prelude, lanes, join), then one row for the run-level agents and a total M:
 
    | Lane | Task | Tier | Security | Agents |
    |---|---|---|---|---|
@@ -260,8 +259,8 @@ its output, with the contents reference.md "Report contents" lists.
 
 After the report, for every run that ends after a launch (never a dry run): `<python>
 <skill_dir>/scripts/archive-run <manifest file> <transcript dir>...`, then `<python>
-<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its
-summary. Details: reference.md "Run history" and "Autopsy". Last, after any other tool: `<python>
+<skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its summary.
+Details: reference.md "Run history" and "Autopsy". Last, after any other tool: `<python>
 <skill_dir>/scripts/tool-outcomes --run-folder <folder> --archive-exit N --autopsy-exit N
 [--conditions-refused CODE] [--relaunch-blocked CHECKS] --cleanup awaiting|none`. Show its line
 under its own label after the acceptance lead, and run it again after cleanup (reference.md

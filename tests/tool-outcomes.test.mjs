@@ -138,6 +138,10 @@ test('missing pieces are named', () => {
     assert.ok(out.startsWith('Run tools: launch conditions not checked (autopsy unreadable); '), out);
     assert.ok(out.includes('; autopsy generated (contributors unavailable); '), out);
   }
+  const noLaunches = runFolder(autopsy([]));
+  assert.ok(line(...ok(noLaunches)).startsWith(
+    'Run tools: launch conditions not checked (no launches); '), 'no launches');
+  assert.ok(line(...ok(noLaunches)).includes('; autopsy generated (0 possible contributor(s)); '));
   const noFolder = line('--autopsy-exit', '0', '--archive-exit', '0');
   assert.equal(
     noFolder,
@@ -205,6 +209,12 @@ test('no doctor details appear', () => {
   assert.match(out, /^Run tools: doctor before wf_abc123: ok, 1 warning\(s\) \(disk\), 1 failed \(git\); /);
   const badWf = runFolder(autopsy([entry({ wf: 'wf_../zqpath' })]));
   const badOut = line(...ok(badWf));
+  // A name or id ending in a newline is not a name: it would split the line.
+  const nl = runFolder(autopsy([entry({
+    wf: 'wf_abc123\n',
+    checks: [check('disk\n', 'warning', true, 'x'), check('git', 'failed', true, 'x')],
+  })]));
+  assert.match(line(...ok(nl)), /^Run tools: doctor before the launch: ok, 1 failed \(git\); /);
   for (const text of [out, badOut, JSON.stringify(JSON.parse(run('--json', ...ok(dir)).stdout))]) {
     assert.doesNotMatch(text, /zqpath|zqhost/);
   }
@@ -216,6 +226,9 @@ test('usage errors exit 2', () => {
     ['--conditions-refused', 'not_a_code'],
     ['--relaunch-blocked', 'python,a/b'],
     ['--relaunch-blocked', ''],
+    ['--relaunch-blocked', 'python\n'],
+    ['--archive-exit', '2\n'],
+    ['--autopsy-exit', '0\n'],
     ['--archive-exit', 'x'],
     ['--autopsy-exit', '1.5'],
     ['--run-folder', ''],
