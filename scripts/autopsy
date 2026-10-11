@@ -12,22 +12,35 @@ live path from the manifest, so imported runs and runs from another OS work.
 It writes RUN_FOLDER/autopsy.json and RUN_FOLDER/autopsy.md (replacing only
 those two files) and prints a summary of at most 15 lines to stdout:
 the wall time and slowest phase, the top three slowdowns with their cost,
-the full-suite runs, the total tokens (a minimum when some usage is missing,
+when a recorded launch has a warned, failed or unread check the line
+'launch conditions: <n> check(s) warned or failed before launch[, <k> could
+not be read]; <m> possible contributor(s)' (see launch_conditions), the
+full-suite runs, the total tokens (a minimum when some usage is missing,
 unavailable when no agent has usage), the top suggestion and the absolute
 path of autopsy.md. --quiet prints nothing.
 
 autopsy.md is plain ASCII with these sections, in order: Summary, What got
 done, Where time went (a phase table, a 40-column text timeline per lane
-and the critical path, marked as an estimate), Checks, Slowdowns, Tokens,
-Suggestions and Open questions (one line per unexplained entry). It holds no
-free text from the transcripts.
+and the critical path, marked as an estimate), Launch conditions, Checks,
+Slowdowns, Tokens, Suggestions and Open questions (one line per unexplained
+entry). It holds no free text from the transcripts or doctor's details.
+Launch conditions opens with 'Observed before each launch. A condition may
+not have lasted through the run, and a warning beside a slowdown is a
+possible contributor, not a cause.' A recorded launch gets 'Observed before
+launch <wf> (<N> min before its start), doctor <version>: <status>' (N in
+whole minutes, rounded down), a '- <check>: <outcome>[ (<detail>)]' line
+per warned or failed check that was read, '- <check>: could not be read'
+per unread one, 'Skipped: <check> (<reason>), ...' and 'Possible
+contributors: <check> (<kind> xN, ...), ...' or 'none'. Any other launch
+gets '<wf>: <reason>', and each orphan snapshot 'Snapshot for a launch not
+in this archive: <wf>'.
 
 autopsy.json:
 
   {autopsy_version, inputs_fingerprint, run_id, engine_version,
    launches: [{wf, start, end, wall_s, status}],
    done, time, tokens, checks, slowdowns, detectors, suggestions,
-   unexplained}
+   unexplained, launch_conditions, orphan_snapshots}
 
 inputs_fingerprint: sha256 over the sorted [relative path, size, sha256] of
 every file autopsy reads (the manifest, report, wf_*.json, wf_*/* and the
@@ -172,6 +185,57 @@ unexplained: [{start, end, s, agent}], the five largest spans over 60 s of
 an agent's time, cut at its events (a model turn, a tool call), that no
 slowdown covers. A slowdown covers its own agent's time; one without an
 agent covers any agent's.
+
+launch_conditions: one entry per launch, in launches order: {wf, state,
+reason, observed_at, before_start_s, doctor_version, status, checks:
+[{check, outcome, detail, read}], possible_contributors: [{check,
+slowdowns: {<kind>: <count>}}]}. It comes from the ledger's
+doctor-<wf>.json snapshots (what 'ledger conditions' writes: {launch: {wf,
+setup_event, setup_head}, recorded_at, doctor: <doctor's --json result>}).
+Only a file named doctor-<wf>.json with <wf> matching
+^wf_[A-Za-z0-9_-]{1,64}$ is a snapshot, and it belongs to the launch its
+file name names.
+- state unavailable: no snapshot names the launch; reason 'launch
+  conditions unavailable'.
+- state inconsistent, with the first reason that applies: 'snapshot
+  unreadable' (not a JSON object, no launch or doctor object, or an
+  observed_at that does not parse); 'file name and content name different
+  launches'; 'another snapshot names the same setup' (the same
+  launch.setup_event; both are inconsistent); 'doctor result is for another
+  run' (doctor.run_id is set and is not the manifest's run_id); 'launch
+  time unavailable' (no launch start, or no end for the previous launch);
+  'observed after the launch started'; 'observed before the previous
+  launch ended' (in whole seconds).
+- state recorded otherwise: reason is null, observed_at the doctor's
+  observation and before_start_s the launch's start minus it.
+For a launch that is not recorded, checks and possible_contributors are []
+and the other values null: nothing from its snapshot is shown.
+- Values copied from a snapshot are validated: a check entry is dropped
+  unless its name matches ^[a-z_]{1,32}$ and its outcome is passed,
+  warning, failed or skipped; status is ok or blocked, else null;
+  doctor_version is N.N.N or 'unavailable', else null.
+- checks come from doctor's checks list when present, else from its
+  failures, warnings and skipped entries (so a passed outcome is never
+  made up); when they disagree, the worst outcome wins.
+- detail is derived per check, never copied: 'unknown' stays; a skipped
+  check keeps its reason code ([a-z_]+); memory, heavy_processes and
+  concurrency keep a detail of only letters, digits, spaces and . , ; ( )
+  % ' _ -; disk keeps only '<N> GB free'; defender only 'covered' or 'not
+  covered'; anything else is null.
+- read is false for a warning whose detail is 'unknown' from memory,
+  disk, heavy_processes, active_runs or defender: doctor could not read
+  the machine, so it is no condition, never a contributor and not counted
+  as a warning.
+- possible_contributors: each warned or failed check that was read, with
+  the count of each related slowdown kind (RELATED_SLOWDOWNS in
+  _autopsy.py: memory, heavy_processes, defender and active_runs to
+  long_tool_call, timeout and background_check; disk and python_alias to
+  repeated_failure) whose start is inside the launch; zero counts are left
+  out, and a check with none is not listed. A possible contributor is not
+  a cause.
+
+orphan_snapshots: the wf names of snapshots for launches not in this
+archive, sorted.
 
 checks: executions [{agent, phase, role, check, certainty, full_suite,
 start, end, s, timing, background, on_critical_path}], by_check
