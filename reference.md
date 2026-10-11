@@ -717,9 +717,12 @@ copies a run that ended after a launch into the run history (never a dry run). R
   read is `unavailable` (an older run has `engine_version: "unavailable"`; it is never inferred).
   Stored paths use `/`, and `C:/...` on Windows; a Linux path from another machine stays as
   written.
-- **`index.lock`:** archive-run and `--reindex` change `index.json` only while they hold
-  `<history dir>/index.lock` (created exclusively). They wait up to 30 s; a lock older than 10
-  minutes is left over from a crash and is taken over, with a notice.
+- **`index.lock`:** archive-run and `--reindex` change `index.json` only while they hold an OS
+  lock on `<history dir>/index.lock`. They wait up to 30 s for it. The lock is released when its
+  process ends, however it ends, so a crashed run leaves nothing to take over and the file's age
+  means nothing. The file stays after the run; never delete it by hand. Before
+  relying on this lock, ensure no unreleased old writers (an archive-run from an old checkout)
+  are running: the old and the new lock do not guard each other.
 - **`--reindex`:** `archive-run --reindex [--history-dir DIR]` rebuilds `index.json` from the
   folders already there (imported runs, hand-archived runs). Every folder holding a
   `*.lanes.json` is one run; the report is the first of `*.report.json`, `*.run-report.json`
@@ -750,12 +753,43 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
+- A partial agent (a tool call with no result, or unreadable lines) has `tool_s` and `other_s`
+  `unavailable`: a call without a result may have run to the end. `tool_s_min` is then the
+  least tool time that can be shown, a minimum and not the total.
 - `checks` lists every execution of a configured project command or of `run-checks` (agent,
   phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
-  critical path), the totals per command, and the full-suite runs in total and per role. A
-  backgrounded command is timed to its completion notice when the transcript has one
-  (`measured`), else bounded by the agent's last event (`bound`).
-- `tokens` has run-report's token fields per bucket, `unreadable_lines` and `partial`.
+  critical path, and whether it `ran` or is `inferred`), the totals per command, and the
+  full-suite runs in total, inferred and per role. See "Checks" below.
+- `tokens` has run-report's token fields per bucket, `unreadable_lines` and `partial`. Each
+  bucket also has `agents_with_usage`, the number of its agents whose usage could be read; a
+  bucket where it is 0 is `unavailable`, never 0 tokens.
+
+**Checks:** a check is named by its id, never by its command line. `test#1` is
+`commands.test[0]` of the manifest and `<lane>.test#1` is `lane_commands.<lane>.test[0]`; a
+`run-checks` call is `run-checks`. The commands stay in the manifest: a check shows no command
+text, because a command may carry a secret.
+- **Matching:** a Bash call counts only when a command in command position runs the check.
+  The line is read as shell words and split into simple commands; a redirection such as
+  `2>&1` or `&>f` is no separator, and a line whose quoting does not parse counts as no check.
+  Text that only mentions a check (`echo "npm test"`, a heredoc body, `bash -c "npm test"`) never
+  counts. A full-suite run is a command that exactly matches a `commands.test` entry, or
+  `run-checks` with `--cmd test`.
+- **`ran` versus `inferred`:** a command is `ran` when it certainly ran: no `if`, `then`, loop
+  or function around it, and either every operator before it is `;`, a newline, `|` or a
+  background `&`, or the whole line is pipelines joined only by `&&` and the call exited 0.
+  Otherwise it is `inferred`: it may not have run (`cd DIR && check` that failed may have failed
+  at the `cd`). The full-suite total counts `ran` only, and `inferred` runs are counted apart.
+- **Wrappers are not counted:** a run through `bash -c` or a script is not seen, so the totals
+  are lower bounds.
+- **Background timing:** a backgrounded command ends at the host's completion notice for it, or
+  a terminal poll result (`BashOutput` or `TaskOutput` showing completed, failed or killed) or
+  a stop result. That is an upper bound at the observed time (`bound`), since the command may
+  have finished earlier. Without a completion notice or such a result the end and the seconds
+  are `unavailable`; the agent's last event is not a bound. Text an agent reads, in a file or
+  another result, never counts.
+- **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
+  heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
+  reading calls between them; an `inferred` run never proves a rerun.
 
 **Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and
 `evidence`):
@@ -787,9 +821,12 @@ command, never the command line.
 
 **Unavailable data:**
 - A figure that cannot be read or derived is `unavailable`, never 0.
-- `detectors` maps each kind to `ok` or `not_available`. A detector whose inputs are missing
-  (no timed tool events, no labels, no timed launch) is `not_available` and adds no slowdown; it
-  never reports zero.
+- `detectors` maps each kind to `ok`, `partial` or `not_available`. A detector whose inputs are
+  missing (no timed tool events, no labels, no timed launch) is `not_available` and adds no
+  slowdown; it never reports zero. A tool-call detector is `partial` when some agent is partial
+  (see `tool_s_min`): it may miss slowdowns, and the summary says so.
+- A call that moved to the background with no completion notice or terminal poll result is
+  still a `background_check` slowdown, with cost `unavailable`, never 0.
 - `partial: true` means some agent's output is incomplete, has unreadable lines or has no usage,
   so the token totals are lower bounds (`output_tokens_min`), never complete totals.
 
@@ -857,8 +894,9 @@ fails is a warning with detail `unknown`.
   root. Reading the exclusion list needs elevation, so without it the answer is `unknown`. It
   never prints the exclusion list and never suggests excluding `AppData\Local\Temp`.
 
-Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: a usage error or an
-unreadable manifest. `--json` prints `{"status": "ok" | "blocked", "failures": [...],
+Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: doctor itself could not run
+(a usage error or an unreadable manifest); it stops the flow like exit 3, since no check ran.
+`--json` prints `{"status": "ok" | "blocked", "failures": [...],
 "warnings": [...], "skipped": [...]}`.
 
 ## Cleanup
@@ -874,7 +912,21 @@ and changes nothing; show the plan, and run it with `--yes` only on the user's y
   `<worktree_root>/feature` in shadow mode), each a worktree of the same repository on its
   expected branch (`pl-<run_id>-<id>`, or `repo.branch`), plus those branches. Anything else
   under `worktree_root` is left and listed as `not owned by this run`. A worktree with
-  uncommitted files, or a locked one, is kept and named.
+  uncommitted files, or a locked one, is kept and named. Untracked files count as uncommitted
+  even when the Git configuration hides them (`status.showUntrackedFiles`): cleanup reads the
+  status with `--untracked-files=all`. Only ignored files are left out.
+- **Locks, during `--yes`:** cleanup takes the run lock the way a resume does (`active-run
+  acquire`), so no resume or second cleanup works on the run meanwhile, and in git mode the
+  checkout lock of the main checkout, so no other run's setup switches it. A run lock held by
+  another session, or a checkout in use by another run, refuses with exit 3 and nothing
+  changed. It releases both when it ends. Without `--yes` it takes no lock.
+- **Rechecks:** right before each removal cleanup checks again, from a fresh `git worktree
+  list`, that the worktree is still this run's on its branch, is not locked, is at the planned
+  HEAD and is still clean. If not, the worktree is kept with "changed after the plan (what
+  changed); run cleanup again", and so is its branch. A lane branch is deleted only while its
+  tip is still the planned one, and the feature branch the same; otherwise "moved after the
+  plan; run cleanup again". The reason for each is that a session may have used the worktree
+  between the plan and the removal.
 - **Restore point,** written before anything is removed, into a new folder
   `<run folder>/cleanup/<YYYYMMDDTHHMMSSZ>[-N]/` (never reused or overwritten): `refs.json` (every
   run branch and every `refs/parallel-lanes/<run_id>/` ref with its tip), `run.bundle` (a `git
@@ -902,14 +954,14 @@ remove are listed in its notes. After the user confirms the result:
 
 ```bash
 # git mode
-git -C "<wt>" status --porcelain          # must print nothing
-git -C "<root>" worktree remove "<wt>"
+git -C "<wt>" status --porcelain --untracked-files=all   # must print nothing
+git -C "<root>" -c status.showUntrackedFiles=all worktree remove "<wt>"
 git -C "<root>" branch -d "<branch>"       # merged branches only; never -D
 
 # shadow mode: <root> is not a repo, so never run git -C "<root>"
-git -C "<wt>" status --porcelain                        # must print nothing
+git -C "<wt>" status --porcelain --untracked-files=all  # must print nothing
 git -C "<worktree_root>/feature" branch -d "<branch>"   # lane branches, while feature exists
-git --git-dir="<git_dir>" worktree remove "<wt>"
+git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove "<wt>"
 ```
 
 `shadow writeback` exit 3, by its message: conflicts = files edited in the folder during the

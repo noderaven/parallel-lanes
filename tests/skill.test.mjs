@@ -377,10 +377,10 @@ test('SKILL.md runs doctor before every dry run and on resume', () => {
   const confirmation = text.slice(text.indexOf('## Confirmation'), text.indexOf('## Launch'));
   const doctor = confirmation.indexOf('scripts/doctor');
   assert.ok(doctor >= 0 && doctor < confirmation.indexOf('1. Dry run'), 'doctor runs before the dry run');
-  assert.ok(/Exit 3 stops the flow/.test(confirmation), 'doctor exit 3 must stop the flow');
+  assert.ok(/Exit 2 or 3 stops the flow/.test(confirmation), 'doctor exit 2 or 3 must stop the flow');
   assert.ok(/warnings[^.]*table header/.test(confirmation), 'doctor warnings go in the table header');
   const resume = text.slice(text.indexOf('## Resume'), text.indexOf('## Red flags'));
-  assert.ok(resume.includes('scripts/doctor'), resume);
+  assert.ok(resume.includes('doctor included'), resume);
 });
 
 test('the hand-back archives the run and appends the autopsy summary', () => {
@@ -449,4 +449,46 @@ test('README lists the five run tools and points to reference.md', () => {
     assert.ok(text.includes('`' + tool + '`'), `README lacks ${tool}`);
   }
   assert.ok(text.includes('reference.md'), 'README points to reference.md');
+});
+
+// These tests check instructions to the session in the docs, not enforced
+// behaviour: the scripts and the Workflow code are tested elsewhere.
+test('reference.md Autopsy documents check ids, certainty, completion timing and partial data', () => {
+  const autopsy = section(read(REFERENCE_MD).toString('utf8'), 'Autopsy');
+  for (const word of ['test#1', 'no command text', 'inferred', 'tool_s_min', 'partial',
+    'agents_with_usage', 'upper bound', 'completion notice']) {
+    assert.ok(autopsy.includes(word), `the Autopsy section lacks ${word}`);
+  }
+  assert.ok(/completion notice[^.]*unavailable|unavailable[^.]*completion notice/.test(autopsy),
+    'the Autopsy section ties the completion notice to an unavailable end');
+});
+
+test('reference.md Cleanup documents untracked files, the locks and the rechecks', () => {
+  const cleanup = section(read(REFERENCE_MD).toString('utf8'), 'Cleanup');
+  for (const word of ['status.showUntrackedFiles', 'ignored files', 'checkout lock',
+    'changed after the plan', 'status --porcelain --untracked-files=all']) {
+    assert.ok(cleanup.includes(word), `the Cleanup section lacks ${word}`);
+  }
+  assert.ok(cleanup.includes('run lock') || cleanup.includes('active-run acquire'),
+    'the Cleanup section names neither the run lock nor active-run acquire');
+});
+
+test('reference.md Run history describes an OS lock released with its process', () => {
+  const history = section(read(REFERENCE_MD).toString('utf8'), 'Run history');
+  assert.ok(history.includes('OS lock'), history);
+  assert.ok(/released when its process ends/.test(history), 'the lock release is not described');
+  assert.ok(!/stale/i.test(history), 'the Run history section still mentions stale takeover');
+});
+
+test('reference.md Doctor says exit 2 stops the flow like exit 3', () => {
+  const doctor = section(read(REFERENCE_MD).toString('utf8'), 'Doctor');
+  assert.ok(/Exit 2:[^.]*could not run[^.]*stops the flow/.test(doctor), doctor);
+});
+
+test('SKILL.md stops on doctor exit 2 or 3 and starts Resume step 6 with Confirmation', () => {
+  const raw = read(SKILL_MD).toString('utf8');
+  assert.ok(section(raw, 'Confirmation').includes('Exit 2 or 3 stops the'),
+    'Confirmation lacks "Exit 2 or 3 stops the"');
+  assert.ok(raw.replace(/\s+/g, ' ').includes('6. Confirmation, doctor included'),
+    'Resume step 6 does not start with Confirmation, doctor included');
 });

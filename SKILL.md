@@ -135,7 +135,7 @@ Fields: reference.md "Manifest fields". In order:
 
 ## Confirmation (every launch, no exceptions)
 
-Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file>`. Exit 3 stops the
+Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file>`. Exit 2 or 3 stops the
 flow (show each failure and its fix, and wait); its warnings go in the table header. Each
 check and what it means: reference.md "Doctor".
 
@@ -297,7 +297,7 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
    Record an answer in `notes` as `{"<task id>": "<answer>"}`; a plan fix needs
    nothing more.
 5. Keep `run_id`, `branch`, and `worktree_root`; `scripts/setup` reuses the worktrees (and the shadow).
-6. `scripts/doctor` as in Confirmation, then Confirmation (same rules; `spent` lowers
+6. Confirmation, doctor included (same rules; `spent` lowers
    `limits.max_rulings`: reference.md "Budgets"), then, after the yes, Launch step 2 again (setup and `start_points`), the resume notice,
    and launch.
 
