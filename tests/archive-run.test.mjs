@@ -134,7 +134,7 @@ test('archives every run file into a dated folder', () => {
   assert.deepEqual(filesUnder(folder), pairs.map(([, rel]) => rel).sort());
   assert.deepEqual([...out.added].sort(), pairs.map(([, rel]) => rel).sort());
   assert.deepEqual(out.updated, []);
-  assert.ok(!existsSync(join(r.hist, 'index.lock')), 'the lock is released');
+  assert.ok(lockFree(r.hist), 'the lock is released');
 });
 
 test('writes an index entry', () => {
@@ -183,7 +183,7 @@ test('a second launch from a new session lands in the same folder', () => {
   assert.ok(existsSync(join(folder, 'wf_1', 'agent-a.jsonl')));
   assert.ok(existsSync(join(folder, 'wf_1.json')));
   assert.ok(existsSync(join(folder, 'wf_2', 'agent-b.jsonl')));
-  assert.deepEqual(readdirSync(r.hist).sort(), ['2026-10-10-x1', 'index.json']);
+  assert.deepEqual(readdirSync(r.hist).sort(), ['2026-10-10-x1', 'index.json', 'index.lock']);
 });
 
 test('rerunning refreshes changed files and never deletes', () => {
@@ -241,7 +241,7 @@ test('two archive-runs at once lose no entry', async () => {
   const index = readIndex(hist);
   assert.deepEqual(index.runs.map((e) => e.run_id).sort(), ['x1', 'y1']);
   assert.deepEqual(index.runs.map((e) => e.folder).sort(), ['2026-10-10-x1', '2026-10-10-y1']);
-  assert.ok(!existsSync(join(hist, 'index.lock')));
+  assert.ok(lockFree(hist));
 });
 
 test('refuses a history dir inside the project', () => {
@@ -390,7 +390,7 @@ test('reindex reads the imported layouts', () => {
     assert.equal(e.machine, 'unavailable', e.folder);
     assert.equal(e.platform, 'unavailable', e.folder);
   }
-  assert.ok(!existsSync(join(hist, 'index.lock')));
+  assert.ok(lockFree(hist));
 });
 
 test('reindex keeps the machine and platform of an old entry', () => {
@@ -439,16 +439,20 @@ test('reindex changes no file but index.json', () => {
   writeFileSync(join(hist, 'misc', 'notes.txt'), 'hello\n');
   const before = hashes(hist);
   reindexOk(hist);
+  // index.lock, the lock file, stays and holds its last holder's details.
   const mid = hashes(hist);
   assert.ok('index.json' in mid);
+  assert.ok('index.lock' in mid);
   delete mid['index.json'];
+  delete mid['index.lock'];
   assert.deepEqual(mid, before);
   // A second run over an existing index changes only index.json again.
   reindexOk(hist);
   const after = hashes(hist);
   delete after['index.json'];
+  delete after['index.lock'];
   assert.deepEqual(after, before);
-  assert.deepEqual(readdirSync(hist).sort(), ['addendum-1', 'index.json', 'l131', 'misc', 'r140']);
+  assert.deepEqual(readdirSync(hist).sort(), ['addendum-1', 'index.json', 'index.lock', 'l131', 'misc', 'r140']);
 });
 
 test('reindex rebuilds from the folders and exits 2 on a missing dir', () => {
@@ -461,14 +465,67 @@ test('reindex rebuilds from the folders and exits 2 on a missing dir', () => {
   assert.ok(!existsSync(join(hist, 'nope')));
 });
 
-// A lock held by someone else, as index_lock writes it (fresh, so not stale).
-function holdLock(hist) {
-  writeJson(join(hist, 'index.lock'), { pid: 1, time: new Date().toISOString(), host: 'other', token: 'held' });
+const HISTORY_PRELUDE = [
+  'import json, os, sys',
+  'sys.dont_write_bytecode = True',
+  `sys.path.insert(0, ${JSON.stringify(join(SKILL_DIR, 'scripts'))})`,
+  'import _history',
+  '',
+].join('\n');
+
+// Whether the index lock of hist is free: index_lock(hist, wait_s=0) succeeds.
+function lockFree(hist) {
+  const code = HISTORY_PRELUDE + [
+    'try:',
+    '    with _history.index_lock(sys.argv[1], wait_s=0):',
+    '        pass',
+    'except _history.HistoryError:',
+    '    sys.exit(1)',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, hist], { encoding: 'utf8', env: cleanEnv() });
+  assert.ok(res.status === 0 || res.status === 1, `python failed: ${res.stderr}`);
+  return res.status === 0;
 }
 
-test('reindex exits 2 when the lock is not acquired', () => {
+// A Python child that holds the index lock of hist until release() closes
+// its stdin, as another archive-run would. Resolves once the child prints held.
+async function holdLock(hist) {
+  const code = HISTORY_PRELUDE + [
+    'with _history.index_lock(sys.argv[1]):',
+    "    print('held', flush=True)",
+    '    sys.stdin.read()',
+  ].join('\n');
+  const child = spawn('python3', ['-c', code, hist], { env: cleanEnv() });
+  let stdout = '';
+  let stderr = '';
+  let exited = false;
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const closed = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (status) => { exited = true; resolve(status); });
+  });
+  const deadline = Date.now() + 60000;
+  while (!stdout.includes('held') && !exited && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!stdout.includes('held')) {
+    child.kill();
+    assert.fail(`the holder did not take the lock: ${stderr}`);
+  }
+  return {
+    child,
+    closed,
+    release() {
+      child.stdin.end();
+      return closed;
+    },
+  };
+}
+
+test('reindex exits 2 when the lock is not acquired', async () => {
   const hist = importedHistory();
-  holdLock(hist);
+  const holder = await holdLock(hist);
   // archive-run's main with index_lock waiting 0.5 s instead of 30 s.
   const code = [
     'import importlib.machinery, importlib.util, sys',
@@ -480,17 +537,22 @@ test('reindex exits 2 when the lock is not acquired', () => {
     'mod._history.index_lock = lambda hdir: held(hdir, wait_s=0.5)',
     "sys.exit(mod.main(['archive-run', '--reindex', '--history-dir', sys.argv[2]]))",
   ].join('\n');
-  const res = spawnSync('python3', ['-c', code, SCRIPT, hist], { encoding: 'utf8', env: cleanEnv() });
-  assert.equal(res.status, 2, res.stderr);
-  assert.match(res.stderr, /index\.lock is held/);
-  assert.equal(res.stdout, '');
-  assert.ok(!existsSync(join(hist, 'index.json')), 'no index is written');
-  assert.ok(existsSync(join(hist, 'index.lock')), 'the other lock is left alone');
+  try {
+    const res = spawnSync('python3', ['-c', code, SCRIPT, hist], { encoding: 'utf8', env: cleanEnv() });
+    assert.equal(res.status, 2, res.stderr);
+    assert.match(res.stderr, /index\.lock is held/);
+    assert.equal(res.stdout, '');
+    assert.ok(!existsSync(join(hist, 'index.json')), 'no index is written');
+    assert.ok(!lockFree(hist), 'the other holder still holds the lock');
+  } finally {
+    await holder.release();
+  }
+  assert.ok(lockFree(hist), 'the lock is free once its holder releases it');
 });
 
 test('reindex keeps a run archived while it waited for the lock', async () => {
   const hist = importedHistory();
-  holdLock(hist);
+  const holder = await holdLock(hist);
   const child = spawn('python3', [SCRIPT, '--reindex', '--history-dir', hist], { env: cleanEnv() });
   let stdout = '';
   let stderr = '';
@@ -504,27 +566,30 @@ test('reindex keeps a run archived while it waited for the lock', async () => {
   // do what an archive-run holding the lock does: add a run folder and its
   // entry. A reindex that listed the folders before taking the lock would
   // miss it, however slowly Python starts.
-  const deadline = Date.now() + 60000;
-  while (!stderr.includes('waiting for') && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    const deadline = Date.now() + 60000;
+    while (!stderr.includes('waiting for') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.match(stderr, /waiting for .*index\.lock/);
+    const late = importedFolder(hist, 'late', {
+      report: 'p.late.report.json',
+      reportBody: { engine_version: '1.5.0', agents: [] },
+      manifest: { version: 1, run_id: 'late', plan: 'C:/work/p.md', repo: { mode: 'git', root: 'C:/work/proj', ledger_dir: 'C:/work/run/p.late.ledger' } },
+    });
+    addLaunch(late, '', 'wf_l', DAY2);
+    writeJson(join(hist, 'index.json'), {
+      version: 1,
+      runs: [{ run_id: 'late', folder: 'late', ledger_dir: 'C:/work/run/p.late.ledger', machine: 'box2', platform: 'linux' }],
+    });
+  } finally {
+    await holder.release();
   }
-  assert.match(stderr, /waiting for .*index\.lock/);
-  const late = importedFolder(hist, 'late', {
-    report: 'p.late.report.json',
-    reportBody: { engine_version: '1.5.0', agents: [] },
-    manifest: { version: 1, run_id: 'late', plan: 'C:/work/p.md', repo: { mode: 'git', root: 'C:/work/proj', ledger_dir: 'C:/work/run/p.late.ledger' } },
-  });
-  addLaunch(late, '', 'wf_l', DAY2);
-  writeJson(join(hist, 'index.json'), {
-    version: 1,
-    runs: [{ run_id: 'late', folder: 'late', ledger_dir: 'C:/work/run/p.late.ledger', machine: 'box2', platform: 'linux' }],
-  });
-  rmSync(join(hist, 'index.lock'));
   const code = await done;
   assert.equal(code, 0, stderr);
   assert.equal(JSON.parse(stdout).runs, 4);
   const late1 = readIndex(hist).runs.find((e) => e.folder === 'late');
   assert.ok(late1, 'the late run is indexed');
   assert.equal(late1.machine, 'box2');
-  assert.ok(!existsSync(join(hist, 'index.lock')));
+  assert.ok(lockFree(hist));
 });

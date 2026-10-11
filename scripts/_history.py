@@ -20,16 +20,33 @@ archived on Linux keeps its /home/... paths on Windows.
 run, with the keys in ENTRY_KEYS. Change it only inside index_lock(), which
 holds <history dir>/index.lock: read_index, choose a folder, update the entry,
 then write_index.
+
+The index lock is an OS lock on <history dir>/index.lock, a file that is
+created once and never deleted (do not delete it by hand either: a holder
+keeps its lock on the old file). On POSIX it is fcntl.flock(LOCK_EX) on the
+whole file; on Windows it is msvcrt.locking on one byte at _WIN_LOCK_OFFSET
+(1 GiB, past the end of the file), so the text stays readable. The OS
+releases the lock when the holder's process ends, however it ends, so there
+is no stale lock to take over and the file's age means nothing. The holder
+writes its pid, time and host into the file for people reading it; the
+contents are never part of the protocol.
+
+An unreleased branch (release-1.5.0) used another protocol: an index.lock
+created with O_EXCL, holding JSON with a token, and deleted on exit. That
+lock was never released. This lock ignores a leftover file from it and
+takes the lock at once. Before using this lock, ensure no unreleased old
+writers (archive-run run from an old checkout) are running: mixing the two
+protocols is unsupported, and there is no guard against it.
 """
 
 import contextlib
+import errno
 import json
 import os
 import socket
 import sys
 import tempfile
 import time
-import uuid
 
 import _shell
 
@@ -50,6 +67,16 @@ ENTRY_KEYS = (
 
 # How often index_lock retries while another process holds the lock.
 _RETRY_S = 0.2
+
+# On Windows index_lock locks the one byte at this offset, past the holder
+# details at the start of the file: msvcrt.locking locks are mandatory, so a
+# lock on the text itself would keep others from reading who holds it.
+_WIN_LOCK_OFFSET = 2 ** 30
+
+if _shell._is_windows(sys.platform):
+    import msvcrt
+else:
+    import fcntl
 
 
 class HistoryError(Exception):
@@ -211,113 +238,94 @@ def _read_lock(path):
         return ""
 
 
-def _put_back(moved, path):
-    """Return a lock moved away by mistake to path, only while path is free
-    (os.link never replaces a file; neither does os.rename on Windows)."""
-    try:
-        os.link(moved, path)
-    except OSError:
-        if not _shell._is_windows(sys.platform):
-            return
-        with contextlib.suppress(OSError):
-            os.rename(moved, path)
-        return
-    with contextlib.suppress(OSError):
-        os.remove(moved)
+def _held(e):
+    """Whether OSError e from a non-blocking lock means another holder."""
+    return e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK)
 
 
-def _take_over(path, age, stale_s):
-    """Move a stale lock out of the way; whether the lock path is free now.
-
-    The rename is atomic, so of several processes taking over the same stale
-    lock only one moves it. The staleness was judged before the rename: if
-    the stale lock was released and a fresh one created in between, the
-    moved file is fresh, so it is put back (while the lock path is still
-    free) and the lock counts as held. A gap remains: when a third process
-    creates a lock in the moment between the rename and the put-back, the
-    fresh lock cannot go back, and its holder and the next one may both
-    hold the lock."""
-    moved = path + ".stale-" + uuid.uuid4().hex
+def _try_lock(fd):
+    """Take the lock on fd without waiting; whether it was taken. Raises
+    OSError for any failure but another holder."""
     try:
-        os.rename(path, moved)
-    except OSError:
-        return False
-    try:
-        fresh = time.time() - os.stat(moved).st_mtime <= stale_s
-    except OSError:
-        fresh = False
-    if fresh:
-        _put_back(moved, path)
-        return False
-    holder = _read_lock(moved)
-    with contextlib.suppress(OSError):
-        os.remove(moved)
-    sys.stderr.write(
-        "parallel-lanes: taking over the stale lock " + path + " ("
-        + str(int(age)) + " s old, over the " + str(int(stale_s)) + " s limit; held by "
-        + (holder or "an unknown process") + ")\n"
-    )
+        if _shell._is_windows(sys.platform):
+            # msvcrt.locking locks from the current position.
+            os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if _held(e):
+            return False
+        raise
     return True
 
 
-@contextlib.contextmanager
-def index_lock(hdir, wait_s=30, stale_s=600):
-    """Hold <hdir>/index.lock, an exclusive lock on index.json.
+def _unlock(fd):
+    if _shell._is_windows(sys.platform):
+        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
-    The lock file is created with O_CREAT | O_EXCL and holds the pid and the
-    time (for people reading it); it is removed on exit. While another
-    process holds it, the lock is retried every 0.2 s for up to wait_s
-    seconds, then HistoryError is raised. A lock file whose mtime is more
-    than stale_s seconds old is left over from a crash: it is taken over,
-    with a notice on stderr. The first time the lock is found held, a
-    notice that it waits goes to stderr. A history dir that refuses the
-    lock file (PermissionError outside Windows) raises HistoryError at once.
+
+@contextlib.contextmanager
+def index_lock(hdir, wait_s=30):
+    """Hold <hdir>/index.lock, an exclusive lock on index.json; yields its path.
+
+    The lock is an OS lock on the file (see the module docstring), released
+    when the holder exits or its process ends; the file is never deleted.
+    While another process holds it, the lock is retried every _RETRY_S
+    seconds for up to wait_s seconds (wait_s=0 tries once), then
+    HistoryError is raised; the first time it is found held, a notice that
+    it waits goes to stderr. Once held, the file is rewritten with the
+    holder's pid, time and host (for people reading it). A history dir where
+    the lock file cannot be created raises HistoryError at once (on Windows
+    a PermissionError is retried as held, as a file being deleted refuses
+    it there).
     """
     os.makedirs(hdir, exist_ok=True)
     path = os.path.join(hdir, LOCK)
-    token = uuid.uuid4().hex
-    content = json.dumps({"pid": os.getpid(), "time": _utc_now(), "host": socket.gethostname(),
-                          "token": token})
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
     deadline = time.monotonic() + wait_s
     waiting = False
-    while True:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            break
-        except FileExistsError:
-            pass
-        except PermissionError as e:
-            # Windows refuses (PermissionError) to create a file while
-            # another process is still deleting it: treat it as held there.
-            # Elsewhere it means the dir cannot be written.
-            if not _shell._is_windows(sys.platform):
-                raise HistoryError("cannot create " + path + ": " + str(e))
-        try:
-            age = time.time() - os.stat(path).st_mtime
-        except OSError:
-            # Released in between (retried after the pause below), or a
-            # folder that refuses the lock: never a stale lock.
-            age = 0
-        if age > stale_s and _take_over(path, age, stale_s):
-            continue
-        if time.monotonic() >= deadline:
-            raise HistoryError(
-                path + " is held by another process (" + (_read_lock(path) or "no details")
-                + "); waited " + str(wait_s) + " s. If no archive-run or reindex is running,"
-                " remove " + path + "."
-            )
-        if not waiting:
-            waiting = True
-            sys.stderr.write("parallel-lanes: waiting for " + path + ", held by another process\n")
-            sys.stderr.flush()
-        time.sleep(_RETRY_S)
+    fd = None
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
-        yield path
-    finally:
-        # Remove only our own lock: one taken over as stale belongs to its
-        # new holder now.
-        if token in _read_lock(path):
+        while True:
+            if fd is None:
+                try:
+                    fd = os.open(path, flags, 0o644)
+                except PermissionError as e:
+                    if not _shell._is_windows(sys.platform):
+                        raise HistoryError("cannot create " + path + ": " + str(e))
+                except OSError as e:
+                    raise HistoryError("cannot create " + path + ": " + str(e))
+            if fd is not None:
+                try:
+                    if _try_lock(fd):
+                        break
+                except OSError as e:
+                    raise HistoryError("cannot lock " + path + ": " + str(e))
+            if time.monotonic() >= deadline:
+                raise HistoryError(
+                    path + " is held by another process (" + (_read_lock(path) or "no details")
+                    + "); waited " + str(wait_s) + " s"
+                )
+            if not waiting:
+                waiting = True
+                sys.stderr.write("parallel-lanes: waiting for " + path + ", held by another process\n")
+                sys.stderr.flush()
+            time.sleep(_RETRY_S)
+        try:
+            details = json.dumps({"pid": os.getpid(), "time": _utc_now(), "host": socket.gethostname()})
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, details.encode("utf-8"))
+            yield path
+        finally:
+            # Closing the file releases the lock too; unlocking first ends
+            # it before anything else this process does on the way out.
             with contextlib.suppress(OSError):
-                os.remove(path)
+                _unlock(fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
