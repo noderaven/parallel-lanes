@@ -5,12 +5,12 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { SKILL_DIR } from './harness.mjs';
+import { SKILL_DIR, holdLock } from './harness.mjs';
 import { BASH, IS_WINDOWS, lf, mergeEnv, tempDir } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -162,42 +162,6 @@ const TAKE = [
   '        return True',
   '',
 ].join('\n');
-
-// A Python child that holds the index lock of hdir until release() closes
-// its stdin. Resolves once the child prints held.
-async function holdLock(hdir) {
-  const code = PRELUDE + [
-    'with _history.index_lock(sys.argv[1]):',
-    "    print('held', flush=True)",
-    '    sys.stdin.read()',
-  ].join('\n');
-  const child = spawn('python3', ['-c', code, hdir], { env: cleanEnv() });
-  let stdout = '';
-  let stderr = '';
-  let exited = false;
-  child.stdout.on('data', (d) => { stdout += d; });
-  child.stderr.on('data', (d) => { stderr += d; });
-  const closed = new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', (status) => { exited = true; resolve(status); });
-  });
-  const deadline = Date.now() + 60000;
-  while (!stdout.includes('held') && !exited && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  if (!stdout.includes('held')) {
-    child.kill();
-    assert.fail(`the holder did not take the lock: ${stderr}`);
-  }
-  return {
-    child,
-    closed,
-    release() {
-      child.stdin.end();
-      return closed;
-    },
-  };
-}
 
 test('the index lock excludes a second holder until it is released', () => {
   const hdir = freshDir('lock');

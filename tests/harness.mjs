@@ -6,10 +6,11 @@
 // script is built from src/ in memory (scripts/build --out -), so tests run
 // the modules as they are, not the committed run.workflow.js.
 
-import { execFileSync } from 'node:child_process';
+import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BASH } from './platform.mjs';
+import { BASH, mergeEnv } from './platform.mjs';
 
 export const SKILL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The committed build output: the file the Workflow tool runs.
@@ -83,3 +84,53 @@ export async function loadHelpers(names) {
 // the hex of name, padded to 12 digits (unique per name, always 12 to 40
 // lowercase hex, so the run accepts it as a reported head).
 export const H = (name) => Buffer.from(String(name)).toString('hex').padEnd(12, '0').slice(0, 40);
+
+// The environment without the history variables a developer may have set.
+function historyEnv() {
+  const env = mergeEnv(process.env);
+  for (const key of Object.keys(env)) {
+    if (['PL_HISTORY_DIR', 'CLAUDE_CONFIG_DIR'].includes(key.toUpperCase())) delete env[key];
+  }
+  return env;
+}
+
+// A Python child that holds the index lock of historyDir until release()
+// closes its stdin, as another archive-run would. Resolves once the child
+// prints held.
+export async function holdLock(historyDir) {
+  const code = [
+    'import sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(join(SKILL_DIR, 'scripts'))})`,
+    'import _history',
+    'with _history.index_lock(sys.argv[1]):',
+    "    print('held', flush=True)",
+    '    sys.stdin.read()',
+  ].join('\n');
+  const child = spawn('python3', ['-c', code, historyDir], { env: historyEnv() });
+  let stdout = '';
+  let stderr = '';
+  let exited = false;
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const closed = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (status) => { exited = true; resolve(status); });
+  });
+  const deadline = Date.now() + 60000;
+  while (!stdout.includes('held') && !exited && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!stdout.includes('held')) {
+    child.kill();
+    assert.fail(`the holder did not take the lock: ${stderr}`);
+  }
+  return {
+    child,
+    closed,
+    release() {
+      child.stdin.end();
+      return closed;
+    },
+  };
+}

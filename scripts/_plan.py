@@ -26,6 +26,19 @@ TASK_HEADING = re.compile(
 TaskSection = namedtuple("TaskSection", "id level start end title")
 
 
+def label_bullet(label, colon=False):
+    """A regex (any case) for a bullet line carrying label, such as
+    '- Consumes:' or '* **Produces**:'.
+
+    The bullet is '-', '*' or '+'; the label may be bold. With colon=False
+    the colon is optional; with colon=True it is required, inside or right
+    after the bold. Group 1 is the indent; the match ends where the bullet's
+    text starts.
+    """
+    tail = r"(?::\**|\**:)" if colon else r":?\**:?"
+    return re.compile(rf"^(\s*)[-*+]\s+\**{re.escape(label)}{tail}", re.IGNORECASE)
+
+
 def unfenced_mask(lines):
     """Return a list of booleans: True where a line is outside fenced code.
 

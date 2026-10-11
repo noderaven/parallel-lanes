@@ -9,7 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { SKILL_DIR } from './harness.mjs';
+import { SKILL_DIR, holdLock } from './harness.mjs';
 import { mergeEnv, tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'archive-run');
@@ -485,42 +485,6 @@ function lockFree(hist) {
   const res = spawnSync('python3', ['-c', code, hist], { encoding: 'utf8', env: cleanEnv() });
   assert.ok(res.status === 0 || res.status === 1, `python failed: ${res.stderr}`);
   return res.status === 0;
-}
-
-// A Python child that holds the index lock of hist until release() closes
-// its stdin, as another archive-run would. Resolves once the child prints held.
-async function holdLock(hist) {
-  const code = HISTORY_PRELUDE + [
-    'with _history.index_lock(sys.argv[1]):',
-    "    print('held', flush=True)",
-    '    sys.stdin.read()',
-  ].join('\n');
-  const child = spawn('python3', ['-c', code, hist], { env: cleanEnv() });
-  let stdout = '';
-  let stderr = '';
-  let exited = false;
-  child.stdout.on('data', (d) => { stdout += d; });
-  child.stderr.on('data', (d) => { stderr += d; });
-  const closed = new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', (status) => { exited = true; resolve(status); });
-  });
-  const deadline = Date.now() + 60000;
-  while (!stdout.includes('held') && !exited && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  if (!stdout.includes('held')) {
-    child.kill();
-    assert.fail(`the holder did not take the lock: ${stderr}`);
-  }
-  return {
-    child,
-    closed,
-    release() {
-      child.stdin.end();
-      return closed;
-    },
-  };
 }
 
 test('index_lock refuses a symlink at index.lock and leaves its target alone',

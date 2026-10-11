@@ -50,15 +50,15 @@ def _fence_closes(line, marker):
         and not line.strip()[len(m.group(1)):]
 
 
-def bullet_span(lines, mask, label):
-    """(start, end) of the first '- <label>:' bullet outside fenced code and
-    its continuation, trailing blank lines excluded; None if absent.
+def bullet_span(lines, mask, bullet):
+    """(start, end) of the first line outside fenced code that the regex
+    bullet (from _plan.label_bullet; group 1 is the indent) matches, and its
+    continuation, trailing blank lines excluded; None if absent.
 
     The continuation is every line indented deeper than the bullet. A fence
     opened inside the block, at any indent, or right after the bullet line
     (even at the bullet's indent) runs to its closing fence.
     """
-    bullet = re.compile(rf"^(\s*)- {re.escape(label)}:")
     for i, line in enumerate(lines):
         m = bullet.match(line) if mask[i] else None
         if not m:
@@ -91,9 +91,16 @@ def bullet_span(lines, mask, label):
     return None
 
 
-def bullet_block(lines, mask, label):
-    span = bullet_span(lines, mask, label)
+def bullet_block(lines, mask, bullet):
+    span = bullet_span(lines, mask, bullet)
     return lines[span[0]:span[1]] if span else None
+
+
+# A Consumes bullet takes every form derive-lanes reads (colon optional). A
+# Produces bullet needs the colon, so a step such as '- produces a cache
+# file' is not taken for the block.
+CONSUMES_BULLET = _plan.label_bullet("Consumes")
+PRODUCES_BULLET = _plan.label_bullet("Produces", colon=True)
 
 
 def has_letter_and_digit(task_id):
@@ -190,7 +197,7 @@ def build(text, task_id, also):
 
     referenced = set()
     own_mask = mask[own.start:own.end]
-    span = bullet_span(section, own_mask, "Consumes")
+    span = bullet_span(section, own_mask, CONSUMES_BULLET)
     if span:
         # Only text outside fenced code inside the bullet names tasks.
         named = [section[i] for i in range(*span) if own_mask[i]]
@@ -207,7 +214,7 @@ def build(text, task_id, also):
     parts = ["\n".join(section)]
     for s in sorted((first[i] for i in referenced), key=lambda s: s.start):
         heading = f"## Produces of Task {s.id}: {s.title.strip()} (consumed by this task)"
-        block = bullet_block(lines[s.start:s.end], mask[s.start:s.end], "Produces")
+        block = bullet_block(lines[s.start:s.end], mask[s.start:s.end], PRODUCES_BULLET)
         body = "\n".join(block) if block else f"Task {s.id} has no Produces block in the plan."
         parts.append(f"{heading}\n\n{body}")
     parts.extend(f"Task {m} has no heading in the plan." for m in missing)
