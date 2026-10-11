@@ -280,7 +280,7 @@ def agent_entries(transcript_dir, manifest):
     (the label without ' retry') and retried; build_report drops those two."""
     ids = manifest_task_ids(manifest)
     efforts = agent_efforts(workflow_result(transcript_dir))
-    metas = sorted(glob.glob(os.path.join(transcript_dir, "agent-*.meta.json")), key=start_key)
+    metas = sorted(glob.glob(os.path.join(glob.escape(transcript_dir), "agent-*.meta.json")), key=start_key)
     agents = []
     for meta_path in metas:
         stem = meta_path[:-len(".meta.json")]

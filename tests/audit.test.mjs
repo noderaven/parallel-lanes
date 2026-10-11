@@ -299,6 +299,10 @@ test('an accepted run with a repo', () => {
   const res = audit(folder, ['--repo', r.dir, '--json']);
   assert.equal(res.code, 0, res.stderr);
   assert.deepEqual(JSON.parse(res.stdout), json);
+  // The hand-back's --head at the delivered sha adds no gap.
+  const atTip = view(folder, ['--repo', r.dir, '--head', r.fix]).json;
+  assert.deepEqual(atTip.gaps, []);
+  assert.deepEqual([atTip.run.after_delivery.state, atTip.run.after_delivery.value.commits], ['present', []]);
 });
 
 test('every source resolves', () => {
@@ -445,8 +449,15 @@ test('Unicode survives', () => {
   const name = `na${u(0xef)}ve-${u(0xe9)}t${u(0xe9)}-${u(0x4e2d)}.txt`;
   const ruling = `keep the caf${u(0xe9)} ${u(0xfc)}ber-rule ${u(0x2013)} ${u(0x4e2d, 0x6587)}`;
   const r = repoRun({ a1File: name });
-  const folder = makeRun(acceptedSpec(r, { taskEvents: [{ task: 'A1', event: 'ruling', by: 'adjudicator', text: ruling }] }));
+  // Written as the ledger writes it: ASCII, with \u escapes.
+  const event = JSON.stringify({ task: 'A1', event: 'ruling', by: 'adjudicator', text: ruling })
+    .replace(/[^\x00-\x7f]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  assert.match(event, /^[\x20-\x7e]+$/);
+  const folder = makeRun(acceptedSpec(r, { taskEvents: [event] }));
   const { json, jsonText, md } = view(folder, ['--repo', r.dir]);
+  // The real path: ledger status reads the ledger, so the run is not degraded.
+  assert.deepEqual(json.gaps.filter((g) => /ledger status/.test(g.note || '')), []);
+  assert.deepEqual(json.gaps, []);
   const a1 = byTask(json).A1;
   assert.deepEqual(a1.commits.entries[0].files.value, [name]);
   assert.equal(a1.changes.rulings[0].value.text.quote, ruling);
@@ -578,7 +589,9 @@ test('--out is refused inside the sources', () => {
   const folder = makeRun(spec);
   const holder = fresh('pl-audit-holder-');
   writeFileSync(join(holder, 'q.lanes.json'), '{}\n');
-  for (const out of [folder, join(folder, LEDGER, 'checks'), join(folder, 'wf_x'), join(folder, 'wf_x', 'sub'), holder]) {
+  // Dirs not made yet that would read as a launch or a ledger are refused too.
+  const unmade = [join(folder, 'wf_new'), join(folder, 'wf_new', 'sub'), join(folder, 'q.ledger')];
+  for (const out of [folder, join(folder, LEDGER, 'checks'), join(folder, 'wf_x'), join(folder, 'wf_x', 'sub'), holder, ...unmade]) {
     const res = audit(folder, ['--out', out]);
     assert.equal(res.code, 2, `${out}: ${res.stdout}`);
     assert.match(res.stderr, /--out/);
@@ -586,6 +599,14 @@ test('--out is refused inside the sources', () => {
     assert.equal(existsSync(join(out, 'audit.md')), false, out);
     assert.equal(existsSync(join(folder, 'audit')), false, out);
   }
+  for (const out of unmade) assert.equal(existsSync(out), false, out);
+  // An --out that cannot be made is exit 2 with the reason, not a traceback.
+  const file = join(fresh('pl-audit-file-'), 'a-file');
+  writeFileSync(file, 'x\n');
+  const blocked = audit(folder, ['--out', join(file, 'sub')]);
+  assert.equal(blocked.code, 2, blocked.stderr);
+  assert.match(blocked.stderr, /^audit: cannot write /);
+  assert.doesNotMatch(blocked.stderr, /Traceback/);
   // Elsewhere it writes there, and only there.
   const elsewhere = join(fresh('pl-audit-out-'), 'out');
   const res = audit(folder, ['--out', elsewhere]);
@@ -622,6 +643,35 @@ test('an input outside the run folder is refused', { skip: !SYMLINKS && 'symlink
   assert.match(res.stderr, /outside the run folder/);
   assert.match(res.stderr, /a\.jsonl/);
   assert.equal(existsSync(join(folder, 'audit')), false);
+});
+
+test('audit writes through no planted link', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {
+  const folder = makeRun(acceptedSpec(repoRun()));
+  const outside = join(dirname(folder), 'victim.txt');
+  writeFileSync(outside, 'keep me\n');
+  mkdirSync(join(folder, 'audit'));
+  for (const name of ['.audit.json.tmp', '.audit.md.tmp']) symlinkSync(outside, join(folder, 'audit', name));
+  view(folder);
+  assert.equal(readFileSync(outside, 'utf8'), 'keep me\n');
+  for (const name of ['audit.json', 'audit.md']) assert.ok(lstatSync(join(folder, 'audit', name)).isFile(), name);
+  // A default audit/ that resolves outside the run folder is refused.
+  const linked = makeRun({});
+  const elsewhere = fresh('pl-audit-elsewhere-');
+  symlinkSync(elsewhere, join(linked, 'audit'), 'junction');
+  const res = audit(linked);
+  assert.equal(res.code, 2, res.stderr);
+  assert.match(res.stderr, /resolves outside the run folder/);
+  assert.deepEqual(readdirSync(elsewhere), []);
+});
+
+test('a run folder whose path holds glob characters', () => {
+  const folder = makeRun(acceptedSpec(repoRun()));
+  const odd = join(dirname(folder), 'run [1]');
+  cpSync(folder, odd, { recursive: true });
+  const { json } = view(odd);
+  assert.equal(json.run.launches.latest, 'wf_aaaaaa');
+  assert.equal(byTask(json).A1.status.committed.value, true);
+  assert.equal(json.run.checks.gate.value, 'match');
 });
 
 test('a repo without the start point', () => {

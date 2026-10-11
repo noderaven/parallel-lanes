@@ -50,7 +50,9 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                events' commits lists beside the result's [base, head], which
                agree when the last recorded commit is the result's head and,
                with git, every recorded commit lies in rev_list(head, [base]).
-  review       reviews (one per reviewed event, with spec_match), packages
+  review       reviews (one per reviewed event, with brief_match: its
+               brief_sha256 against section_hash, in brief_hash's states,
+               and spec_match), packages
                (<ledger>/reviews/<id>-*), verdicts (from the journal's
                '<id> review' and '<id> re-review <n>' structured results, a
                trailing ' retry' being the same round with the later result
@@ -62,9 +64,12 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                in the spec's table.
 
 spec_match compares a review's spec_sha256 with the sha256 of the archived
-spec copy, else with the spec_sha256 of the latest setup run_started event
-before the review in ledger order; it is unavailable when the review
-recorded none ("recorded before 1.4.4") or there is nothing to compare.
+spec copy, else with the spec_sha256 of a setup run_started event: the
+latest before the review in the same ledger file, else the only one, else
+the latest one with a note that the launch order relative to the review is
+not established (lines in different ledger files have no chronological
+order). It is unavailable when the review recorded none ("recorded before
+1.4.4") or there is nothing to compare.
 """
 
 import hashlib
@@ -217,7 +222,11 @@ def _section_hash(ctx, task_id):
 def _brief_hash(section, reviews):
     if not reviews:
         return ref(None, "unavailable", [], "no review recorded")
-    le = reviews[-1]
+    return _brief_match(section, reviews[-1])
+
+
+def _brief_match(section, le):
+    """One reviewed event's brief_sha256 against the plan section's hash."""
     recorded = le["event"].get("brief_sha256")
     sources = [_line_src(le)]
     if not isinstance(recorded, str):
@@ -472,9 +481,25 @@ def _commits(ctx, task_id, events, is_legacy, result_launch):
 
 # ---- review ----
 
-def _ledger_order(le):
-    """Ledger order: files by name, then physical lines (load_run's order)."""
-    return (le["file"], le["line"])
+def _launch_spec(ctx, le):
+    """(setup line, note) of the launch spec hash to compare a review with,
+    or (None, None). Lines are ordered only within one ledger file: the
+    order of lines in different files (run_started events live in
+    _run.jsonl, reviews in the lane files) is not chronological. So the
+    latest setup before the review in the same file is taken; else the only
+    setup; else the latest one, with a note that the launch order relative
+    to the review is not established."""
+    setups = [s for s in ctx.setups if "spec_sha256" in s["event"]]
+    same = [s for s in setups if s["file"] == le["file"] and s["line"] < le["line"]]
+    if same:
+        return same[-1], None
+    others = [s for s in setups if s["file"] != le["file"]]
+    if len(others) == 1:
+        return others[0], None
+    if others:
+        return others[-1], ("compared with the latest launch's spec hash: the launch order relative to "
+                            "the review is not established")
+    return None, None
 
 
 def _spec_match(ctx, le):
@@ -483,17 +508,18 @@ def _spec_match(ctx, le):
     if "spec_sha256" not in ev:
         return ref(None, "unavailable", at, "recorded before 1.4.4")
     recorded = ev["spec_sha256"]
+    note = None
     if ctx.spec_sha is not None:
         want, sources = ctx.spec_sha, at + [src(ctx.spec_path)]
     else:
-        before = [s for s in ctx.setups
-                  if _ledger_order(s) < _ledger_order(le) and "spec_sha256" in s["event"]]
-        if not before:
+        setup, note = _launch_spec(ctx, le)
+        if setup is None:
             return ref(recorded, "unavailable", at, "no archived spec copy and no launch spec hash to compare")
-        want, sources = before[-1]["event"]["spec_sha256"], at + [_line_src(before[-1])]
+        want, sources = setup["event"]["spec_sha256"], at + [_line_src(setup)]
     if recorded == want:
-        return ref(recorded, "present", sources)
-    return ref(recorded, "stale", sources, "the review read another spec than the run's")
+        return ref(recorded, "present", sources, note)
+    stale = "the review read another spec than the run's"
+    return ref(recorded, "stale", sources, "%s (%s)" % (stale, note) if note else stale)
 
 
 def _review_label(task_id):
@@ -568,7 +594,7 @@ def _approval(events):
     return approval
 
 
-def _review(ctx, task_id, events):
+def _review(ctx, task_id, events, section):
     reviews = []
     for le in events:
         ev = le["event"]
@@ -580,6 +606,7 @@ def _review(ctx, task_id, events):
             "brief_sha256": ev.get("brief_sha256"),
             "spec_sha256": ev.get("spec_sha256"),
             "line": _line_src(le),
+            "brief_match": _brief_match(section, le),
             "spec_match": _spec_match(ctx, le),
         })
     return {
@@ -742,7 +769,8 @@ def task_sections(run, git, facts, pairs, git_note=None):
             any(le["event"].get("event") == "committed" and "base" not in le["event"] for le in events)
         carry_text = (ctx.status.get("carry") or {}).get(task_id) if ctx.status is not None else None
         result_status = _result_status(ctx, task_id, events, is_legacy)
-        review = _review(ctx, task_id, events)
+        requirement = _requirement(ctx, task_id, events)
+        review = _review(ctx, task_id, events, requirement["section_hash"])
 
         transitions = [le for le in events if le["event"].get("event") in TRANSITIONS]
         task_head = _event_head(transitions[-1]["event"]) if transitions else None
@@ -750,7 +778,7 @@ def task_sections(run, git, facts, pairs, git_note=None):
         out.append({
             "id": task_id,
             "lane": lane,
-            "requirement": _requirement(ctx, task_id, events),
+            "requirement": requirement,
             "placement": _placement(ctx, task, lane, _task_pointer(ctx.manifest, task_id)),
             "changes": _changes(ctx, task_id, events, carry_text),
             "commits": _commits(ctx, task_id, events, is_legacy, core.task_launch(run, task_id)),

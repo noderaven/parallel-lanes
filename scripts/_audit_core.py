@@ -238,7 +238,7 @@ def _copy(folder, value):
 
 def _ledger_lines(folder, ledger_dir):
     out = []
-    for path in sorted(glob.glob(os.path.join(ledger_dir, "*.jsonl"))):
+    for path in sorted(glob.glob(os.path.join(glob.escape(ledger_dir), "*.jsonl"))):
         if not os.path.isfile(path):
             continue
         rel = _rel(folder, path)
@@ -297,7 +297,7 @@ def _launch(folder, wf):
         "result": result if isinstance(result, dict) else None,
         "start": start,
         "end": end,
-        "has_transcripts": has_dir and bool(glob.glob(os.path.join(wf_dir, "agent-*.meta.json"))),
+        "has_transcripts": has_dir and bool(glob.glob(os.path.join(glob.escape(wf_dir), "agent-*.meta.json"))),
     }
 
 
@@ -325,7 +325,7 @@ def load_run(folder):
     if ledger_dir:
         _guard_tree(folder, ledger_dir)
     names = set(os.path.basename(d) for d in _autopsy.wf_dirs(folder))
-    for path in glob.glob(os.path.join(folder, "wf_*.json")):
+    for path in glob.glob(os.path.join(glob.escape(folder), "wf_*.json")):
         if os.path.isfile(path):
             _guard(folder, path)
             names.add(os.path.basename(path)[:-len(".json")])

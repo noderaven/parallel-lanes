@@ -276,12 +276,6 @@ def parse_args(args):
     return positional, ledger
 
 
-def archive_result_path(transcript_dir):
-    """<TRANSCRIPT_DIR>.json: the last of _shell.result_paths, and the only
-    place archive mode looks."""
-    return os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir) + ".json"
-
-
 def main(argv):
     _shell.setup_io()
     parsed = parse_args(argv[1:])
@@ -301,7 +295,7 @@ def main(argv):
             candidates = _shell.result_paths(transcript_dir)
         else:
             ledger_dir = _shell.native_path(ledger_arg)
-            candidates = [archive_result_path(transcript_dir)]
+            candidates = [_shell.sibling_result_path(transcript_dir)]
         found = next((p for p in candidates if os.path.isfile(p)), None)
         if found is None:
             raise Usage("no workflow result file at " + " or ".join(candidates))

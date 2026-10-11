@@ -35,21 +35,28 @@ line saying it holds local paths and recorded text and is not meant to be
 shared as-is. The same inputs give the same bytes.
 
 An --out that is RUN_FOLDER, is equal to or inside any *.ledger or wf_* dir
-of the run, or holds a *.lanes.json is refused.
+of the run, would make one (its first part under RUN_FOLDER matches *.ledger
+or wf_*, whether or not that dir exists yet), or holds a *.lanes.json is
+refused, and so is a default RUN_FOLDER/audit that resolves outside
+RUN_FOLDER. Each file is written through a temp file that mkstemp creates
+in --out, so an existing file or link there is never followed.
 
 Exit 0 whenever the view is written (a folder with no launch, or a repo
 without the run's start point, included); 2 on a usage error (--head without
 --repo, an empty value), a RUN_FOLDER that is no directory or holds no
 *.lanes.json, a refused --out, or an input that resolves outside RUN_FOLDER
-(nothing is written); 3 when a path needs converting on Windows and no Git
+(nothing is written), and when --out cannot be made or written ("cannot
+write <out>: <error>"); 3 when a path needs converting on Windows and no Git
 Bash or cygpath is found.
 """
 
 import argparse
+import fnmatch
 import glob
 import json
 import os
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -65,26 +72,57 @@ def _shown(path):
     return path.replace("\\", "/") if os.sep == "\\" else path
 
 
+SOURCE_PATTERNS = ("*.ledger", "wf_*")
+
+
+def _first_part(folder, out):
+    """The first path component of out under folder (both resolved), or
+    None when out does not lie inside folder."""
+    if not _audit_core.inside(folder, out):
+        return None
+    try:
+        rel = os.path.relpath(os.path.realpath(out), os.path.realpath(folder))
+    except ValueError:
+        return None
+    return rel.split(os.sep)[0]
+
+
 def refused_out(folder, out):
     """Why out may not be written to, or None."""
     if _audit_core.inside(folder, out) and _audit_core.inside(out, folder):
         return "--out %s is the run folder" % _shown(out)
-    sources = [p for p in glob.glob(os.path.join(folder, "*.ledger")) + glob.glob(os.path.join(folder, "wf_*"))
+    pattern = glob.escape(folder)
+    sources = [p for p in glob.glob(os.path.join(pattern, "*.ledger")) + glob.glob(os.path.join(pattern, "wf_*"))
                if os.path.isdir(p)]
     for path in sorted(sources):
         if _audit_core.inside(path, out):
             return "--out %s lies in the run's %s" % (_shown(out), os.path.basename(path))
+    # A dir not made yet would be read as a launch or a ledger by the next
+    # audit, autopsy or archive-run.
+    first = _first_part(folder, out)
+    if first is not None and any(fnmatch.fnmatch(first, p) for p in SOURCE_PATTERNS):
+        return "--out %s would make %s in the run folder, which reads as a run source" % (_shown(out), first)
     if os.path.exists(out) and not os.path.isdir(out):
         return "--out %s is not a directory" % _shown(out)
-    if os.path.isdir(out) and glob.glob(os.path.join(out, "*.lanes.json")):
+    if os.path.isdir(out) and glob.glob(os.path.join(glob.escape(out), "*.lanes.json")):
         return "--out %s holds a *.lanes.json" % _shown(out)
     return None
 
 
 def write(out, name, text):
-    tmp = os.path.join(out, ".%s.tmp" % name)
-    _shell.write_text(tmp, text)
-    os.replace(tmp, os.path.join(out, name))
+    """Write out/name through a new temp file in out: mkstemp creates it
+    exclusively, so an existing file or link there is never followed."""
+    fd, tmp = tempfile.mkstemp(dir=out, prefix=".audit-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(out, name))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class Parser(argparse.ArgumentParser):
@@ -124,6 +162,10 @@ def main(argv):
         return 2
     if out is None:
         out = os.path.join(folder, "audit")
+        if os.path.lexists(out) and not _audit_core.inside(folder, out):
+            print("audit: --out %s resolves outside the run folder; nothing written" % _shown(out),
+                  file=sys.stderr)
+            return 2
     reason = refused_out(folder, out)
     if reason is not None:
         print("audit: %s; nothing written" % reason, file=sys.stderr)
@@ -136,9 +178,13 @@ def main(argv):
         return 2
     json_text = json.dumps(audit, indent=2, ensure_ascii=False) + "\n"
     md_text = _audit.render_md(audit)
-    os.makedirs(out, exist_ok=True)
-    write(out, "audit.json", json_text)
-    write(out, "audit.md", md_text)
+    try:
+        os.makedirs(out, exist_ok=True)
+        write(out, "audit.json", json_text)
+        write(out, "audit.md", md_text)
+    except OSError as e:
+        print("audit: cannot write %s: %s" % (_shown(out), e), file=sys.stderr)
+        return 2
     if args.json:
         sys.stdout.write(json_text)
     else:

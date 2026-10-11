@@ -399,6 +399,7 @@ def _md_task(t, out):
     for r in rv["reviews"]:
         out.append(_with_sources("- reviewed at %s, %s round(s)" % (_scalar(r.get("head")), _scalar(r.get("rounds"))),
                                  [r["line"]]))
+        out.append(_ref("brief match", r["brief_match"], "  "))
         out.append(_ref("spec match", r["spec_match"], "  "))
     out.append(_ref("review packages", rv["packages"]))
     if not rv["verdicts"]:
@@ -511,6 +512,8 @@ def _md_open(o, out):
         out.append(_with_sources("- task %s: %s" % (t["task"], t["status"]), t.get("sources")))
         if t.get("reason") is not None:
             out += _quote("reason", t["reason"], "  ")
+    if o.get("ledger_state") is not None:
+        out.append(_ref("ledger state", o["ledger_state"]))
     if not o["excluded"]:
         out.append("- excluded by the manifest: none")
     for e in o["excluded"]:

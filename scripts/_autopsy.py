@@ -282,7 +282,7 @@ def read_events(jsonl_path):
 # ---- the run folder ----
 
 def _files(folder, pattern):
-    return sorted(p for p in glob.glob(os.path.join(folder, pattern)) if os.path.isfile(p))
+    return sorted(p for p in glob.glob(os.path.join(glob.escape(folder), pattern)) if os.path.isfile(p))
 
 
 def find_manifest(folder):
@@ -300,12 +300,12 @@ def find_report(folder):
 
 
 def find_ledger(folder):
-    found = sorted(p for p in glob.glob(os.path.join(folder, "*.ledger")) if os.path.isdir(p))
+    found = sorted(p for p in glob.glob(os.path.join(glob.escape(folder), "*.ledger")) if os.path.isdir(p))
     return found[0] if found else None
 
 
 def wf_dirs(folder):
-    return sorted(p for p in glob.glob(os.path.join(folder, "wf_*")) if os.path.isdir(p))
+    return sorted(p for p in glob.glob(os.path.join(glob.escape(folder), "wf_*")) if os.path.isdir(p))
 
 
 def input_files(folder):

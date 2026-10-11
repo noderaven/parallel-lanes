@@ -186,3 +186,27 @@ test('GIT_DIR in the environment is ignored, discovery included', () => {
   assert.deepEqual(out.range, mine.shas.slice(1));
   assert.deepEqual(out.files, ['f2.txt', 'f3.txt']);
 });
+
+test('alternates, config and replace refs from the environment are ignored', () => {
+  const mine = makeRepo(1);
+  const other = makeRepo(1);
+  const theirs = commit(other.dir, 'other.txt');
+  const out = pythonJSON([
+    'import os',
+    'import _audit_git as g',
+    'work, other, theirs = sys.argv[1:4]',
+    'os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.path.join(other, ".git", "objects")',
+    'os.environ["GIT_CONFIG_COUNT"] = "1"',
+    'os.environ["GIT_CONFIG_KEY_0"] = "core.bogus"',
+    'os.environ["GIT_CONFIG_VALUE_0"] = "1"',
+    'os.environ["GIT_REPLACE_REF_BASE"] = "refs/other/"',
+    'env = g.git_env()',
+    'dropped = [k for k in ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",',
+    '                       "GIT_CONFIG_VALUE_0", "GIT_REPLACE_REF_BASE") if k not in env]',
+    'git, reason = g.open_repo(work, theirs)',
+    'print(json.dumps({"reason": reason, "dropped": len(dropped), "no_replace": env.get("GIT_NO_REPLACE_OBJECTS")}))',
+  ], [mine.dir, other.dir, theirs]);
+  assert.equal(out.reason, `the repo does not contain ${theirs.slice(0, 7)}`);
+  assert.equal(out.dropped, 5);
+  assert.equal(out.no_replace, '1');
+});

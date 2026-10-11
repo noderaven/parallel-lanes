@@ -236,6 +236,33 @@ test('the brief hash is the plan section\'s', () => {
   spec.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: sha256('brief\n') });
   assert.equal(audit(makeRun(spec), facts()).A1.requirement.brief_hash.state, 'stale');
   assert.equal(audit(makeRun({ ...reviewedRun(s0, s1), plan: null }), facts()).A1.requirement.section_hash.state, 'unavailable');
+  // Every review's brief hash is compared, not only the latest one's.
+  const twice = reviewedRun(s0, s1, [reviewed('A1', s1)]);
+  twice.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: sha256('brief\n') });
+  const reviews = audit(makeRun(twice), facts()).A1.review.reviews;
+  assert.deepEqual(reviews.map((r) => r.brief_match.state), ['stale', 'present']);
+  assert.match(reviews[0].brief_match.note, /another version of the task's plan section/);
+  const noBrief = reviewedRun(s0, s1);
+  noBrief.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: undefined });
+  assert.equal(audit(makeRun(noBrief), facts()).A1.review.reviews[0].brief_match.state, 'unavailable');
+});
+
+test('without a spec copy, a review is compared with a launch spec hash in any ledger file', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  // A lane file whose name sorts before _run.jsonl still finds the setup.
+  const upper = reviewedRun(s0, s1);
+  upper.ledger = { '_run.jsonl': upper.ledger['_run.jsonl'], 'B.jsonl': upper.ledger['a.jsonl'] };
+  const m = audit(makeRun({ ...upper, spec: null }), facts()).A1.review.reviews[0].spec_match;
+  assert.deepEqual(vs(m), [SPEC_SHA, 'present']);
+  assert.equal(m.note, undefined);
+  assert.ok(m.sources.some((x) => x.path === `${LEDGER}/_run.jsonl` && x.at === 'L1'));
+  // With several launches in another file, the latest is used and the order noted.
+  const several = reviewedRun(s0, s1);
+  several.ledger['_run.jsonl'] = [setup(s0, { spec_sha256: sha256('old spec\n') }), setup(s0)];
+  const n = audit(makeRun({ ...several, spec: null }), facts()).A1.review.reviews[0].spec_match;
+  assert.deepEqual(vs(n), [SPEC_SHA, 'present']);
+  assert.match(n.note, /launch order relative to the review is not established/);
+  assert.ok(n.sources.some((x) => x.path === `${LEDGER}/_run.jsonl` && x.at === 'L2'));
 });
 
 test('which launch', () => {

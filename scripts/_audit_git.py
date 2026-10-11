@@ -6,10 +6,14 @@ Import with:
     import _audit_git
 
 Every git call, repo discovery included, runs 'git --no-optional-locks
-<args>' with GIT_OPTIONAL_LOCKS=0 and GIT_NO_LAZY_FETCH=1 set, and with
-GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
-GIT_COMMON_DIR removed from the environment, so nothing in the caller's
-environment points git at another repo. Output is decoded as UTF-8. Nothing
+<args>' with GIT_OPTIONAL_LOCKS=0, GIT_NO_LAZY_FETCH=1 and
+GIT_NO_REPLACE_OBJECTS=1 set, and with GIT_DIR, GIT_WORK_TREE,
+GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR,
+GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT,
+every GIT_CONFIG_KEY_<n> and GIT_CONFIG_VALUE_<n>, GIT_NAMESPACE and
+GIT_REPLACE_REF_BASE removed from the environment, so nothing in the
+caller's environment points git at another repo's objects, adds config, or
+rewrites the recorded history (replace refs). Output is decoded as UTF-8. Nothing
 here fetches, writes config, changes refs or touches the index.
 
 open_repo(path, must_contain) returns (Git, None) or (None, reason). path is
@@ -33,16 +37,21 @@ to git: has_commit gives False and the others None.
 import os
 import subprocess
 
-DROP_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+DROP_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_NAMESPACE",
+            "GIT_REPLACE_REF_BASE")
+DROP_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 def git_env():
     env = {}
     for key, value in os.environ.items():
-        if key.upper() not in DROP_ENV:
+        upper = key.upper()
+        if upper not in DROP_ENV and not upper.startswith(DROP_PREFIXES):
             env[key] = value
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     return env
 
 

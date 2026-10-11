@@ -323,6 +323,24 @@ test('after delivery lists the commits past delivered_sha', () => {
   assert.equal(s.after_delivery.state, 'unavailable');
   assert.equal(s.after_delivery.note, 'no run evidence');
   assert.deepEqual(s.after_delivery.value.commits, [r.fix]);
+  // No commits after the delivered sha: nothing lacks run evidence.
+  const tip = sections(makeRun({ ledger: rangedLedger(r), launches: [launch(accepted(r.fix))] }), { repo: r.dir, head: 'main' });
+  assert.deepEqual([tip.after_delivery.state, tip.after_delivery.note], ['present', 'no commits after the delivered sha']);
+  assert.deepEqual(tip.after_delivery.value.commits, []);
+});
+
+test('a failing ledger status is named, and its open work is a gap', () => {
+  const r = fixtureRepo();
+  const ledger = rangedLedger(r);
+  ledger['a.jsonl'].push({ task: 'A2', event: 'blocked', reason: 'stuck' }, 'not json');
+  const s = sections(makeRun({ ledger, launches: [launch(accepted(r.fix))] }), { repo: r.dir });
+  assert.equal(s.code_outside_ranges.state, 'unavailable');
+  assert.match(s.code_outside_ranges.note, /^ledger status exited [1-9]/);
+  assert.equal(s.open_work.ledger_state.state, 'unavailable');
+  assert.match(s.open_work.ledger_state.note, /blocked and deferred tasks are unknown: ledger status exited [1-9]/);
+  // A ledger status that works leaves ledger_state null.
+  const ok = sections(makeRun({ ledger: rangedLedger(r), launches: [launch(accepted(r.fix))] }), { repo: r.dir });
+  assert.equal(ok.open_work.ledger_state, null);
 });
 
 test('launch order unknown makes the verdict unavailable', () => {

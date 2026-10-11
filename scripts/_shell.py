@@ -264,15 +264,23 @@ def write_text(path, text):
         f.write(text)
 
 
+def sibling_result_path(transcript_dir):
+    """<transcript_dir>.json, absolute, with trailing separators dropped: the
+    last of result_paths, and the only place check-verify's archive mode
+    looks."""
+    return os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir) + ".json"
+
+
 def result_paths(transcript_dir):
     """Where the workflow result file may be, in the order they are tried:
     <session>/workflows/<name>.json for a transcript dir at
     <session>/subagents/workflows/<name>, then <transcript_dir>.json."""
-    base = os.path.abspath(transcript_dir.rstrip("/\\") or transcript_dir)
+    sibling = sibling_result_path(transcript_dir)
+    base = sibling[:-len(".json")]
     parent = os.path.dirname(base)
     paths = []
     if os.path.basename(parent) == "workflows" and os.path.basename(os.path.dirname(parent)) == "subagents":
         session = os.path.dirname(os.path.dirname(parent))
         paths.append(os.path.join(session, "workflows", os.path.basename(base) + ".json"))
-    paths.append(base + ".json")
+    paths.append(sibling)
     return paths

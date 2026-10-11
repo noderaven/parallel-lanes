@@ -36,7 +36,16 @@ user's override, in the order the audit spec gives.
 
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
-in manifest run order, with a recorded range; with its ledger source.
+in manifest run order, with a recorded range; with its ledger source. When
+'ledger status' failed on an archived ledger, code_outside_ranges names that
+failure instead of "no start point recorded", and open_work.ledger_state is
+unavailable with it (else ledger_state is None), so the tasks the ledger
+lists as blocked or deferred count as a gap rather than as absent.
+
+after_delivery (with --head) lists the commits reachable from the head but
+not from the delivered sha: unavailable, "no run evidence", when there are
+any, present with an empty list ("no commits after the delivered sha") when
+there are none.
 """
 
 import glob
@@ -130,7 +139,7 @@ def run_check_verify(run, launch):
     ledger = os.path.join(folder, run["ledger"])
     manifest = os.path.join(folder, run["manifest_path"])
     launch_dir = os.path.join(folder, launch["wf"])
-    inputs = [manifest, launch_dir + ".json"] + sorted(glob.glob(os.path.join(ledger, "*.jsonl")))
+    inputs = [manifest, launch_dir + ".json"] + sorted(glob.glob(os.path.join(glob.escape(ledger), "*.jsonl")))
     sha = _delivered_or_head(launch.get("result"))
     if isinstance(sha, str) and CHECKER_SHA.fullmatch(sha):
         inputs.append(os.path.join(ledger, "checks", "verify-%s.json" % sha))
@@ -320,6 +329,18 @@ def _status(run):
     return status if isinstance(status, dict) else {}
 
 
+def _status_failure(run):
+    """Why 'ledger status' gave nothing for an archived ledger, or None (no
+    ledger, or a status was read)."""
+    if not run.get("ledger") or isinstance(run.get("ledger_status"), dict):
+        return None
+    return run.get("ledger_status_error") or "ledger status gave no result"
+
+
+def _ledger_src(run):
+    return [c.src(run["ledger"], None)] if run.get("ledger") else []
+
+
 def _full_sha(value):
     return isinstance(value, str) and FULL_SHA.fullmatch(value) is not None
 
@@ -488,6 +509,9 @@ def _code_outside(run, git, git_note, launch, why, pairs):
         return c.ref(None, "unavailable", [d_src], "delivered_sha is not a sha of 40 or 64 hex digits")
     start, s_src = start_point(run)
     if start is None:
+        failed = _status_failure(run)
+        if failed is not None:
+            return c.ref(None, "unavailable", _ledger_src(run), failed)
         return c.ref(None, "unavailable", [], "no start point recorded")
     commits = git.rev_list(delivered, [start])
     if commits is None:
@@ -731,7 +755,10 @@ def _after_delivery(git, git_note, launch, why, head):
     if commits is None:
         return c.ref(None, "unavailable", [d_src], "the repo cannot list the commits from %s to %s"
                      % (delivered[:7], head))
-    return c.ref({"from": delivered, "to": head, "commits": commits}, "unavailable", [d_src], "no run evidence")
+    value = {"from": delivered, "to": head, "commits": commits}
+    if not commits:
+        return c.ref(value, "present", [d_src], "no commits after the delivered sha")
+    return c.ref(value, "unavailable", [d_src], "no run evidence")
 
 
 # ---- open work ----
@@ -802,7 +829,12 @@ def _open_work(run, launch, why, pairs):
         e = e if isinstance(e, dict) else {}
         source = c.src(run.get("manifest_path"), "#" + _pointer(["excluded", i]))
         excluded.append({"id": e.get("id"), "reason": _q(e.get("reason"), [source], pairs), "sources": [source]})
-    out = {"tasks": _open_tasks(run, pairs), "excluded": excluded, "stopped_lanes": None, "final": None}
+    out = {"tasks": _open_tasks(run, pairs), "ledger_state": None, "excluded": excluded, "stopped_lanes": None,
+           "final": None}
+    failed = _status_failure(run)
+    if failed is not None:
+        out["ledger_state"] = c.ref(None, "unavailable", _ledger_src(run),
+                                    "the ledger's blocked and deferred tasks are unknown: %s" % failed)
     if launch is None:
         out["stopped_lanes"] = c.ref(None, "unavailable", [], why)
         out["final"] = c.ref(None, "unavailable", [], why)

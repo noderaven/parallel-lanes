@@ -1000,15 +1000,20 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `delivered_sha`; else it is `unavailable` with the reason. It lists the commits reachable from
   the delivered sha but not from the run's start point that no task's recorded range holds
   (integration merges and the final fix). Each is `present` when a final lens head contains it,
-  `inferred` when the final re-review's head contains it (or, for engines from 1.2.1 on, when
-  `final.head` does and `final.unreviewed_fix` is absent), and `missing` otherwise, with
-  `final.unreviewed_fix` quoted when it is set.
-- **After delivery** (with `--head`): the commits between the delivered sha and the head, with no
-  run evidence. **Open work** lists blocked and deferred tasks, open and declined findings,
-  `cannot_verify` entries and stopped lanes.
+  `inferred` when the final re-review's head contains it (or, for engines from 1.2.1 on when no
+  re-review head was recorded, when `final.head` does, differs from every lens head, and
+  `final.unreviewed_fix` is absent), and `missing` otherwise, with `final.unreviewed_fix` quoted
+  when it is set. When `ledger status` fails on the archived ledger, the section names that
+  failure.
+- **After delivery** (with `--head`): the commits between the delivered sha and the head,
+  `unavailable` (no run evidence); with none, it is `present` and adds no gap, so a clean run
+  audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
+  tasks, open and declined findings, `cannot_verify` entries and stopped lanes; when `ledger
+  status` fails, `ledger_state` is `unavailable` with its error, since the ledger's blocked and
+  deferred tasks are then unknown.
 - **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
-  placement, changes (rulings, events, escalations), commits and review (reviews, packages,
-  verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
+  placement, changes (rulings, events, escalations), commits and review (reviews, each with its
+  brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
   `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`.
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
@@ -1025,8 +1030,10 @@ hold a command the manifest never configured.
 **Exit codes.** exit 0 whenever a view is written, including a folder with no launch and a repo
 that lacks the start point. exit 2: a usage error (`--head` without `--repo`), a folder that is no
 directory or holds no `*.lanes.json`, a refused `--out` (the run folder, inside a `*.ledger` or
-`wf_*` dir, or holding a `*.lanes.json`), or an input outside the run folder; nothing is
-written. exit 3: a Windows path cannot be converted. The same inputs give the same bytes. A
+`wf_*` dir or one that would be made under the run folder, holding a `*.lanes.json`, or a
+default `audit/` that resolves outside the run folder), or an input outside the run folder;
+nothing is written. exit 2 also when `--out` cannot be made or written (`cannot write <out>:
+<error>`). exit 3: a Windows path cannot be converted. The same inputs give the same bytes. A
 non-zero exit goes to `tool-outcomes --audit-exit` and never changes `acceptance`.
 
 After `ledger accept`, run archive-run, audit and `tool-outcomes` again so the override and any
