@@ -8,6 +8,7 @@ usage:
   ledger backfill DIR MANIFEST
   ledger accept DIR CHECKOUT HEAD TEXT
   ledger ended DIR STATUS AGENTS RULINGS
+  ledger conditions DIR WF_ID DOCTOR_FILE
 
 append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
 0700. JSON must be an object with a safe non-empty string 'task' (or "_run")
@@ -104,6 +105,27 @@ spent, recorded in one command. AGENTS and RULINGS are decimal integers >= 0;
 it refuses (exit 2, nothing recorded) a count that is not one, or an empty
 STATUS.
 
+conditions binds a saved doctor result (doctor --save) to the launch it was
+observed for: it writes DIR/doctor-<WF_ID>.json (indent 2), never a ledger
+event, so status, backfill and resume do not see it:
+  {"launch": {"wf": WF_ID, "setup_event": N, "setup_head": sha},
+   "recorded_at": "YYYY-MM-DDTHH:MM:SSZ", "doctor": <DOCTOR_FILE's object>}
+N is the number of setup run_started events in DIR (the latest one is this
+launch's) and setup_head is the head of the last of them. WF_ID must match
+^wf_[a-z0-9-]{6,64}$ and DOCTOR_FILE must hold a JSON object (else exit 2).
+When doctor-<WF_ID>.json exists with the same launch and doctor, it is a
+no-op (exit 0, the file untouched). Otherwise it refuses (exit 3, nothing
+written, {"refused": CODE} on stdout), checked in this order:
+  wf_recorded         doctor-<WF_ID>.json exists and differs
+  not_doctor          DOCTOR_FILE has no 'status', or no 'observed_at' of the
+                      form YYYY-MM-DDTHH:MM:SSZ
+  no_setup            DIR has no setup run_started event (a missing DIR
+                      included; DIR is never created)
+  setup_recorded      another doctor-*.json names the same setup_event
+  observation_reused  another doctor-*.json has the same doctor.observed_at
+Other doctor-*.json files that do not read as JSON objects are ignored. On
+success it prints {"recorded": "doctor-<WF_ID>.json", "setup_event": N}.
+
 backfill reads the manifest's task lists (prelude, lanes in order, join), its
 repo, and start_points, and prints {"backfill": {task: {base, head}},
 "derived": [...], "errors": [...]} for every done task. A task with a
@@ -127,6 +149,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -662,8 +685,101 @@ def backfill(directory, manifest_path):
         sys.exit(3)
 
 
+WF_ID = re.compile(r"wf_[a-z0-9-]{6,64}")
+TIMESTAMP = "%Y-%m-%dT%H:%M:%SZ"
+REFUSALS = {
+    "wf_recorded": "this wf already has a different launch conditions snapshot",
+    "not_doctor": "the doctor file has no status or no observed_at of the form YYYY-MM-DDTHH:MM:SSZ",
+    "no_setup": "the ledger has no setup run_started event",
+    "setup_recorded": "another snapshot already names this setup event",
+    "observation_reused": "another snapshot has the same observed_at (run doctor again)",
+}
+
+
+def read_json_object(path):
+    """The JSON object in path, or None when it cannot be read as one."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def is_timestamp(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        time.strptime(value, TIMESTAMP)
+    except ValueError:
+        return False
+    return True
+
+
+def refuse(code):
+    print(json.dumps({"refused": code}))
+    print(f"ledger: conditions refused {code}: {REFUSALS[code]}; nothing written", file=sys.stderr)
+    sys.exit(3)
+
+
+def conditions(directory, wf_id, doctor_file):
+    if not WF_ID.fullmatch(wf_id):
+        fail(2, f"WF_ID {wf_id!r} must match ^wf_[a-z0-9-]{{6,64}}$")
+    doctor = read_json_object(doctor_file)
+    if doctor is None:
+        fail(2, f"cannot read a JSON object from the doctor file {doctor_file!r}")
+    setups = [e for e in read_events(directory)
+              if e["task"] == "_run" and e["event"] == "run_started" and e["phase"] == "setup"]
+    n = len(setups)
+    launch = {"wf": wf_id, "setup_event": n, "setup_head": setups[-1]["head"] if setups else None}
+    name = f"doctor-{wf_id}.json"
+    target = os.path.join(directory, name)
+    done = {"recorded": name, "setup_event": n}
+    if os.path.lexists(target):
+        existing = read_json_object(target)
+        if existing is not None and existing.get("launch") == launch and existing.get("doctor") == doctor:
+            print(json.dumps(done))
+            return
+        refuse("wf_recorded")
+    observed_at = doctor.get("observed_at")
+    if "status" not in doctor or not is_timestamp(observed_at):
+        refuse("not_doctor")
+    if n == 0:
+        refuse("no_setup")
+    others = []
+    for other in sorted(os.listdir(directory)):
+        if other.startswith("doctor-") and other.endswith(".json") and other != name:
+            snap = read_json_object(os.path.join(directory, other))
+            if snap is not None:
+                others.append(snap)
+
+    def field(snap, part, key):
+        value = snap.get(part)
+        return value.get(key) if isinstance(value, dict) else None
+
+    # type() keeps a hand-made true from counting as setup event 1.
+    if any(type(field(s, "launch", "setup_event")) is int and field(s, "launch", "setup_event") == n
+           for s in others):
+        refuse("setup_recorded")
+    if any(field(s, "doctor", "observed_at") == observed_at for s in others):
+        refuse("observation_reused")
+    snapshot = {"launch": launch, "recorded_at": time.strftime(TIMESTAMP, time.gmtime()), "doctor": doctor}
+    # A temp name outside doctor-*.json, which autopsy reads as snapshots.
+    tmp = os.path.join(directory, f".conditions-{os.getpid()}.tmp")
+    try:
+        _shell.write_text(tmp, json.dumps(snapshot, indent=2) + "\n")
+        os.replace(tmp, target)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        fail(3, f"cannot write {target!r}: {e}")
+    print(json.dumps(done))
+
+
 PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6, 9), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
-             "ended": (1,)}
+             "ended": (1,), "conditions": (1, 3)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
 
@@ -705,11 +821,14 @@ def main(argv):
         accept(*argv[1:])
     elif len(argv) == 5 and argv[0] == "ended" and argv[1]:
         ended(*argv[1:])
+    elif len(argv) == 4 and argv[0] == "conditions" and argv[1] and argv[3]:
+        conditions(*argv[1:])
     else:
         fail(2, "usage: ledger append DIR LANE JSON"
                 " | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]"
                 " | ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST] | ledger backfill DIR MANIFEST"
-                " | ledger accept DIR CHECKOUT HEAD TEXT | ledger ended DIR STATUS AGENTS RULINGS")
+                " | ledger accept DIR CHECKOUT HEAD TEXT | ledger ended DIR STATUS AGENTS RULINGS"
+                " | ledger conditions DIR WF_ID DOCTOR_FILE")
 
 
 if __name__ == "__main__":
