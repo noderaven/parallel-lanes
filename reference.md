@@ -560,12 +560,13 @@ list).
 
 ### Run tools line
 
-After `archive-run` and `autopsy`, and after any other tool the hand-back runs, the session runs
-`<python> <skill_dir>/scripts/tool-outcomes`, last. It is read-only, needs no manifest, and
-prints one line, `Run tools: <doctor>; <archive>; <autopsy>; <cleanup>`; show it under its own
-label after the acceptance lead.
+After `archive-run`, `autopsy` and `audit`, and after any other tool the hand-back runs, the
+session runs `<python> <skill_dir>/scripts/tool-outcomes`, last. It is read-only, needs no
+manifest, and prints one line, `Run tools: <doctor>; <archive>; <autopsy>; <audit>; <cleanup>`;
+show it under its own label after the acceptance lead.
 - **Flags:** `--run-folder DIR` (the folder `archive-run` printed; it goes through the same
-  Git Bash path conversion as other paths), `--archive-exit N`, `--autopsy-exit N` (integers),
+  Git Bash path conversion as other paths), `--archive-exit N`, `--autopsy-exit N`,
+  `--audit-exit N` (integers),
   `--conditions-refused CODE` (the latest launch's `ledger conditions` refusal code, one of the
   five in "Launch conditions"), `--relaunch-blocked CHECKS` (comma-separated failed check
   names from a relaunch that doctor stopped), `--cleanup awaiting|done|declined|failed|none`
@@ -582,13 +583,17 @@ label after the acceptance lead.
   - archive: `archived to <DIR>`, `archived`, `archive failed (exit N)` or `archive not run`.
   - autopsy: `autopsy generated (<m> possible contributor(s))`, `autopsy generated
     (contributors unavailable)`, `autopsy failed (exit N)` or `autopsy not run`.
+  - audit: `audit generated (<k> evidence gap(s))`, where k is the length of the `gaps` list in
+    `<run folder>/audit/audit.json` (read with `--audit-exit 0` and `--run-folder`); `audit
+    generated (gaps unavailable)` when that file is missing, unreadable or has no `gaps` list, or
+    there is no `--run-folder`; `audit failed (exit N)`; or `audit not run`. See "Audit".
   - cleanup: `cleanup awaiting approval`, `cleanup done`, `cleanup declined`, `cleanup failed`
     or `cleanup not offered`.
-- **`--json`** prints `{"doctor", "archive", "autopsy", "cleanup"}`, each `{"state",
+- **`--json`** prints `{"doctor", "archive", "autopsy", "audit", "cleanup"}`, each `{"state",
   "detail"}`, where `detail` is that tool's text in the line. States: doctor `recorded`,
   `not_recorded`, `inconsistent` or `not_checked`; archive `archived`, `failed` or `not_run`;
-  autopsy `generated`, `failed` or `not_run`; cleanup `awaiting`, `done`, `declined`, `failed`
-  or `not_offered`.
+  autopsy `generated`, `failed` or `not_run`; audit `generated`, `failed` or `not_run`; cleanup
+  `awaiting`, `done`, `declined`, `failed` or `not_offered`.
 - **Separate from acceptance.** `acceptance` is the only verdict on the delivered work. A tool
   failure never changes `acceptance`, and a clean tools line never stands in for it. Lead with
   `acceptance`, then show this line under its own label.
@@ -621,9 +626,21 @@ Output: one JSON line on stdout, `{"status", "reason"?, "path"?, "differences"?,
 | `stale` | `verify_evidence_stale` | 1 | the evidence file was last written before this launch started |
 | `mismatch` | `verify_mismatch` | 1 | report and evidence differ |
 | `invalid` | `verify_invalid` | 1 | the report, the evidence, the sha, the start time or the acceptance is malformed (`detail` says which) |
+| `unavailable` | `verify_evidence_time_untrusted` | 1 | `--ledger` mode only: the launch has no finite end time, or the evidence is dated after it |
 
 Exit 2: usage error, or the result file or the manifest cannot be found or read (message on
 stderr). Exit 3: a Windows path cannot be converted (no Git Bash or cygpath, as the other helpers).
+
+**`--ledger DIR` (archive mode).** `check-verify <transcript_dir> <manifest> --ledger DIR` checks a
+run folder made by `archive-run`, for `scripts/audit`. The result is read only from
+`<transcript_dir>.json`, never through a session-level file, and the transcript dir itself need not
+exist. The evidence is read from `DIR/checks/verify-<sha>.json`; the manifest must still be a
+readable JSON object, but its `repo.ledger_dir` is neither required nor read nor converted, so a
+POSIX `ledger_dir` needs no cygpath. After the `stale` rule and before `mismatch`, a time rule
+applies: `startTime` must be numeric, `durationMs` a finite number of at least 0, and the evidence
+file dated at or before `startTime + durationMs`; otherwise the status is `unavailable`, reason
+`verify_evidence_time_untrusted`, exit 1. Copies made by hand carry their copy time, so they cannot
+be trusted. Without `--ledger` every status, rule and exit code is unchanged.
 
 The gate: the hand-back may say `accepted`, and Launch step 5 may release with `--remove`, only
 when `result.acceptance.status` is `accepted` AND check-verify exited 0 AND its stdout parsed as
@@ -945,6 +962,82 @@ Exit codes: `autopsy` ends with exit 0 on success, exit 2 on a usage error or a 
 a `*.lanes.json` or a `wf_*` dir, and exit 3 when a path needs converting on Windows and no Git
 Bash is found. `scripts/history` ends with exit 0 on success, or
 exit 2 on a usage error, an unreadable history dir or `index.json`, or outputs it cannot write.
+
+## Audit
+
+`<python> <skill_dir>/scripts/audit <run folder> [--repo DIR] [--head REF] [--out DIR] [--json]`
+reads one archived run folder (never a live path from the manifest) and writes `audit.json` and
+`audit.md`, as UTF-8, into `--out` (default `<run folder>/audit/`), replacing only those two
+files. It prints a summary of at most 10 lines, the last being `full report: <path of audit.md>`;
+the session appends it to the hand-back report. The hand-back passes `--repo` (the manifest's
+`repo.git_dir` in shadow mode, else `repo.root`) and `--head <branch>`, and always uses the default
+`--out`. It reads only the run folder, plus git objects in `--repo` (read-only: no fetch, no
+config or ref change). Every input path must lie inside the run folder, symlinks included. It
+needs no live checkout: a repo that lacks the run's start point is not used, and every git fact is
+then `unavailable` with the reason.
+
+**What it answers:** what the run recorded, what each recorded fact rests on, and where the record
+has holes. It does not change `acceptance` and is not a second verdict engine.
+- **States.** Every derived value is `{value, state, sources, note?}` with a state of `present`,
+  `missing`, `stale`, `conflicting`, `unavailable` or `inferred`; no others. The `gaps` list in
+  `audit.json` holds every value whose state is `missing`, `stale`, `conflicting` or
+  `unavailable`, and its length is the number `tool-outcomes` prints. Sources are paths relative
+  to the run folder, `git:<sha>` or `transcript:<wf>/<agent label>`, each with a ledger line, a
+  JSON pointer or a sha.
+- **Acceptance** is three facts and one derived verdict: `run_verdict` (the result's
+  `acceptance`), `gate` (check-verify's archive-mode outcome: its status, or `checker_error`),
+  and `override` (the ledger `accepted` event). The verdict is `accepted`, `accepted by user`,
+  `accepted (gate unavailable)`, `unverified`, `unavailable`, or the run verdict with the gate's
+  outcome. `accepted (gate unavailable)` is its own value: the run said `accepted`, but
+  check-verify could not judge the evidence (for example `verify_evidence_time_untrusted`), so it
+  is neither `accepted` nor `unverified`. An override counts only at the delivered sha; at
+  another head it is listed `stale`.
+- **Evidence validity.** The audit judges evidence validity from `result.verify` against the manifest's
+  configured checks, with each failed rule named: `checks_missing`, `checks_stale`,
+  `checks_incomplete`, `checks_failed`, `checks_unclean`, or `integrity_not_recorded` (older
+  engines, shown as a gap).
+- **Code outside recorded task ranges** needs `--repo`, a known latest launch and a 40 or 64 digit
+  `delivered_sha`; else it is `unavailable` with the reason. It lists the commits reachable from
+  the delivered sha but not from the run's start point that no task's recorded range holds
+  (integration merges and the final fix). Each is `present` when a final lens head contains it,
+  `inferred` when the final re-review's head contains it (or, for engines from 1.2.1 on when no
+  re-review head was recorded, when `final.head` does, differs from every lens head, and
+  `final.unreviewed_fix` is absent), and `missing` otherwise, with `final.unreviewed_fix` quoted
+  when it is set. When `ledger status` fails on the archived ledger, the section names that
+  failure.
+- **After delivery** (with `--head`): the commits between the delivered sha and the head,
+  `unavailable` (no run evidence); with none, it is `present` and adds no gap, so a clean run
+  audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
+  tasks, open and declined findings, `cannot_verify` entries and stopped lanes; when `ledger
+  status` fails, `ledger_state` is `unavailable` with its error, since the ledger's blocked and
+  deferred tasks are then unknown.
+- **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
+  placement, changes (rulings, events, escalations), commits and review (reviews, each with its
+  brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
+  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`.
+
+**check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
+<run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from
+the fixed list and its exit code. Details in "Verify evidence".
+
+**Privacy.** `audit.md` starts with a line saying it holds local paths and recorded text and is
+not meant to be shared as-is; the report is local-only. It never copies prompts, raw tool output,
+diffs or doctor snapshots. Configured commands become check ids (`test#1`, `<lane>.test#1`,
+`setup#<n>`, `unmatched#<n>`), never command lines. Other recorded text (rulings, notes, reasons,
+findings, dispositions, warnings) is quoted as written, marked as a quote with its source, and can
+hold a command the manifest never configured.
+
+**Exit codes.** exit 0 whenever a view is written, including a folder with no launch and a repo
+that lacks the start point. exit 2: a usage error (`--head` without `--repo`), a folder that is no
+directory or holds no `*.lanes.json`, a refused `--out` (the run folder, inside a `*.ledger` or
+`wf_*` dir or one that would be made under the run folder, holding a `*.lanes.json`, or a
+default `audit/` that resolves outside the run folder), or an input outside the run folder;
+nothing is written. exit 2 also when `--out` cannot be made or written (`cannot write <out>:
+<error>`). exit 3: a Windows path cannot be converted. The same inputs give the same bytes. A
+non-zero exit goes to `tool-outcomes --audit-exit` and never changes `acceptance`.
+
+After `ledger accept`, run archive-run, audit and `tool-outcomes` again so the override and any
+session-verify evidence reach the archive and `audit.json`.
 
 ## Doctor
 

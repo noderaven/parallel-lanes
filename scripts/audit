@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Write the audit view of an archived run: audit.json and audit.md.
+
+usage:
+  python3 audit RUN_FOLDER [--repo DIR] [--head REF] [--out DIR] [--json]
+
+RUN_FOLDER is a history run folder (archive-run's layout): a *.lanes.json
+manifest, the plan and spec copies, the *.ledger dir, and per launch its
+wf_<id>.json result file and wf_<id>/ transcript dir. audit reads only that
+folder: every input path is resolved (symlinks and junctions included) and
+must lie inside it, a launch's result comes only from RUN_FOLDER/<wf>.json,
+and no live path of the manifest (repo.root, repo.ledger_dir, plan, spec) is
+ever read. It runs 'ledger status' on the archived ledger (for event facts
+only) and check-verify in its archive mode (--ledger), keeping only
+check-verify's status, a known reason code and its exit code.
+
+--repo DIR is a worktree or a git dir holding the run's commits (in shadow
+mode, repo.git_dir). Git is used read-only (--no-optional-locks, no fetch,
+no config or ref change). A repo that lacks the run's start point is not
+used: every git fact is then unavailable with the reason. Without --repo
+every git fact is unavailable ("no --repo"). --head REF (needs --repo) is
+the branch tip to compare against: the commits after the delivered sha are
+listed under After delivery.
+
+It writes audit.json and audit.md, as UTF-8, to --out (default
+RUN_FOLDER/audit/), replacing only those two files, and prints a summary of
+at most 10 lines whose last line is 'full report: <path of audit.md>' (with
+--json it prints audit.json instead). The contract of both files is in
+_audit.py: audit.json is {"audit_version": 1, "run_id", "repo", "run",
+"tasks", "gaps"}, every value a ref {"value", "state", "sources"[, "note"]}
+and every recorded text a quote {"quote", "sources", "commands_replaced"}
+in which configured commands are check ids; gaps lists every value whose
+state is missing, stale, conflicting or unavailable. audit.md starts with a
+line saying it holds local paths and recorded text and is not meant to be
+shared as-is. The same inputs give the same bytes.
+
+An --out that is RUN_FOLDER, is equal to or inside any *.ledger or wf_* dir
+of the run, would make one (its first part under RUN_FOLDER matches *.ledger
+or wf_*, whether or not that dir exists yet), or holds a *.lanes.json is
+refused, and so is a default RUN_FOLDER/audit that resolves outside
+RUN_FOLDER. Each file is written through a temp file that mkstemp creates
+in --out, so an existing file or link there is never followed.
+
+Exit 0 whenever the view is written (a folder with no launch, or a repo
+without the run's start point, included); 2 on a usage error (--head without
+--repo, an empty value), a RUN_FOLDER that is no directory or holds no
+*.lanes.json, a refused --out, or an input that resolves outside RUN_FOLDER
+(nothing is written), and when --out cannot be made or written ("cannot
+write <out>: <error>"); 3 when a path needs converting on Windows and no Git
+Bash or cygpath is found.
+"""
+
+import argparse
+import fnmatch
+import glob
+import json
+import os
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _audit  # noqa: E402
+import _audit_core  # noqa: E402
+import _autopsy  # noqa: E402
+import _shell  # noqa: E402
+
+USAGE = "audit RUN_FOLDER [--repo DIR] [--head REF] [--out DIR] [--json]"
+
+
+def _shown(path):
+    return path.replace("\\", "/") if os.sep == "\\" else path
+
+
+SOURCE_PATTERNS = ("*.ledger", "wf_*")
+
+
+def _first_part(folder, out):
+    """The first path component of out under folder (both resolved), or
+    None when out does not lie inside folder."""
+    if not _audit_core.inside(folder, out):
+        return None
+    try:
+        rel = os.path.relpath(os.path.realpath(out), os.path.realpath(folder))
+    except ValueError:
+        return None
+    return rel.split(os.sep)[0]
+
+
+def refused_out(folder, out):
+    """Why out may not be written to, or None."""
+    if _audit_core.inside(folder, out) and _audit_core.inside(out, folder):
+        return "--out %s is the run folder" % _shown(out)
+    pattern = glob.escape(folder)
+    sources = [p for p in glob.glob(os.path.join(pattern, "*.ledger")) + glob.glob(os.path.join(pattern, "wf_*"))
+               if os.path.isdir(p)]
+    for path in sorted(sources):
+        if _audit_core.inside(path, out):
+            return "--out %s lies in the run's %s" % (_shown(out), os.path.basename(path))
+    # A dir not made yet would be read as a launch or a ledger by the next
+    # audit, autopsy or archive-run.
+    first = _first_part(folder, out)
+    if first is not None and any(fnmatch.fnmatch(first, p) for p in SOURCE_PATTERNS):
+        return "--out %s would make %s in the run folder, which reads as a run source" % (_shown(out), first)
+    if os.path.exists(out) and not os.path.isdir(out):
+        return "--out %s is not a directory" % _shown(out)
+    if os.path.isdir(out) and glob.glob(os.path.join(glob.escape(out), "*.lanes.json")):
+        return "--out %s holds a *.lanes.json" % _shown(out)
+    return None
+
+
+def write(out, name, text):
+    """Write out/name through a new temp file in out: mkstemp creates it
+    exclusively, so an existing file or link there is never followed."""
+    fd, tmp = tempfile.mkstemp(dir=out, prefix=".audit-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(out, name))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        print("audit: %s" % message, file=sys.stderr)
+        print("usage: %s" % USAGE, file=sys.stderr)
+        sys.exit(2)
+
+
+def main(argv):
+    _shell.setup_io()
+    p = Parser(prog="audit", usage=USAGE, allow_abbrev=False)
+    p.add_argument("run_folder")
+    p.add_argument("--repo")
+    p.add_argument("--head")
+    p.add_argument("--out")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv[1:])
+    for name in ("run_folder", "repo", "head", "out"):
+        if getattr(args, name) == "":
+            p.error("%s is empty" % ("RUN_FOLDER" if name == "run_folder" else "--" + name))
+    if args.head is not None and args.repo is None:
+        p.error("--head needs --repo")
+
+    try:
+        folder = os.path.abspath(_shell.native_path(args.run_folder))
+        repo = _shell.native_path(args.repo) if args.repo is not None else None
+        out = os.path.abspath(_shell.native_path(args.out)) if args.out is not None else None
+    except _shell.BashNotFound as e:
+        print("audit: %s" % e, file=sys.stderr)
+        return 3
+    if not os.path.isdir(folder):
+        print("audit: not a directory: %s" % _shown(folder), file=sys.stderr)
+        return 2
+    if _autopsy.find_manifest(folder) is None:
+        print("audit: no *.lanes.json manifest in %s" % _shown(folder), file=sys.stderr)
+        return 2
+    if out is None:
+        out = os.path.join(folder, "audit")
+        if os.path.lexists(out) and not _audit_core.inside(folder, out):
+            print("audit: --out %s resolves outside the run folder; nothing written" % _shown(out),
+                  file=sys.stderr)
+            return 2
+    reason = refused_out(folder, out)
+    if reason is not None:
+        print("audit: %s; nothing written" % reason, file=sys.stderr)
+        return 2
+
+    try:
+        audit = _audit.build(folder, repo=repo, head=args.head)
+    except _audit_core.OutsideRunFolder as e:
+        print("audit: %s; nothing written" % _shown(str(e)), file=sys.stderr)
+        return 2
+    json_text = json.dumps(audit, indent=2, ensure_ascii=False) + "\n"
+    md_text = _audit.render_md(audit)
+    try:
+        os.makedirs(out, exist_ok=True)
+        write(out, "audit.json", json_text)
+        write(out, "audit.md", md_text)
+    except OSError as e:
+        print("audit: cannot write %s: %s" % (_shown(out), e), file=sys.stderr)
+        return 2
+    if args.json:
+        sys.stdout.write(json_text)
+    else:
+        sys.stdout.write(_audit.render_summary(audit, _shown(os.path.join(out, "audit.md"))))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

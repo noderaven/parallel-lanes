@@ -2,7 +2,7 @@
 """Compare the verify agent's report with the check evidence saved for it.
 
 usage:
-  python3 check-verify TRANSCRIPT_DIR MANIFEST
+  python3 check-verify TRANSCRIPT_DIR MANIFEST [--ledger DIR]
 
 TRANSCRIPT_DIR is the launch's transcript directory (as given to run-report);
 the workflow result file is found from it as run-report finds it
@@ -11,6 +11,17 @@ holds the evidence. The report is result.verify, the run-checks JSON the
 verify agent returned; the evidence is the run-checks JSON saved at
 <ledger_dir>/checks/verify-<sha>.json, where sha is result.delivered_sha, or
 result.verify.head when that is null.
+
+Archive mode (--ledger DIR), for a run folder made by archive-run:
+  - the result is read only from <TRANSCRIPT_DIR>.json, never a session-level
+    file, and TRANSCRIPT_DIR itself need not exist;
+  - the evidence is read from DIR/checks/verify-<sha>.json. MANIFEST must
+    still be a readable JSON object, but its repo.ledger_dir is neither
+    required nor read nor converted, so a POSIX ledger_dir needs no cygpath;
+  - the evidence must be dated at or before the launch's end, startTime plus
+    a finite, non-negative durationMs (the unavailable status below). Copies
+    made by hand carry their copy time, so they cannot be trusted.
+Without --ledger every status, rule and exit code below is as it always was.
 
 Trust boundary: the session compares the agent's report with the saved check
 evidence; it does not re-run the checks. It does not catch an agent that
@@ -43,6 +54,11 @@ Prints one JSON line: {"status", "reason"?, "path"?, "differences"?,
                                          ms) is absent or not a number
   stale         verify_evidence_stale    the evidence file was last written
                                          before startTime
+  unavailable   verify_evidence_time_    archive mode only: the result file's
+                untrusted                durationMs is absent or not a finite
+                                         number >= 0, or the evidence file
+                                         was last written after startTime +
+                                         durationMs
   mismatch      verify_mismatch          head, ok, clean, tracked_before,
                                          tracked_after, untracked_before,
                                          untracked_after or a result's
@@ -51,17 +67,19 @@ Prints one JSON line: {"status", "reason"?, "path"?, "differences"?,
   match         -                        report and fresh evidence agree
                                          (exit 0)
 
-detail names the malformed field for invalid. path is the evidence file once
+detail names the malformed field for invalid, and why the time is untrusted
+for unavailable. path is the evidence file once
 the sha is known. A difference is {"field": <name> or "results[<i>]",
 "reported": SIDE, "evidence": SIDE}, SIDE {"present": true, "value": V} or
 {"present": false}: a field absent on one side and present (even as null) on
 the other differs.
 
-Exit 0 for match and not_required; 1 for missing, stale, mismatch and
-invalid; 2 on a usage error, an unreadable MANIFEST (or one without a string
-repo.ledger_dir), or no readable result file with a result object (message on
-stderr); 3 when a path needs converting on Windows and no Git Bash or cygpath
-is found.
+Exit 0 for match and not_required; 1 for missing, stale, unavailable,
+mismatch and invalid; 2 on a usage error (--ledger without a non-empty DIR,
+or given twice), an unreadable MANIFEST (or, without --ledger, one without a
+string repo.ledger_dir), or no readable result file with a result object
+(message on stderr); 3 when a path needs converting on Windows and no Git
+Bash or cygpath is found.
 """
 import json
 import math
@@ -73,7 +91,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _shell  # noqa: E402
 
-USAGE = "usage: check-verify TRANSCRIPT_DIR MANIFEST"
+USAGE = "usage: check-verify TRANSCRIPT_DIR MANIFEST [--ledger DIR]"
 LISTS = ("tracked_before", "tracked_after", "untracked_before", "untracked_after")
 COMPARED = ("head", "ok", "clean") + LISTS
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -160,8 +178,37 @@ def invalid(detail, path=None):
     return out
 
 
-def check(data, ledger_dir):
-    """The outcome for a result file's data, as the JSON object to print."""
+def finite_number(value):
+    """Whether value is an int or float (never a bool) with a finite value."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer too large for a float
+        return False
+
+
+def untrusted_time(data, mtime):
+    """Why the evidence's time cannot be trusted in archive mode, or None.
+
+    mtime is the evidence file's modification time in seconds; data's
+    startTime is already known to be a finite number.
+    """
+    duration = data.get("durationMs")
+    if not finite_number(duration) or duration < 0:
+        return "durationMs is absent or not a finite number >= 0"
+    end = (data["startTime"] + duration) / 1000
+    if not math.isfinite(end):
+        return "startTime + durationMs is not a finite time"
+    if mtime > end:
+        return "the evidence file was last written after the launch ended (startTime + durationMs)"
+    return None
+
+
+def check(data, ledger_dir, archive=False):
+    """The outcome for a result file's data, as the JSON object to print.
+
+    archive applies the archive-mode time rule (the unavailable status)."""
     result = data["result"]
     acceptance = result.get("acceptance")
     if not isinstance(acceptance, dict) or type(acceptance.get("status")) is not str:
@@ -187,7 +234,7 @@ def check(data, ledger_dir):
     try:
         with open(path, encoding="utf-8") as f:
             evidence = json.load(f)
-        mtime_ms = os.stat(path).st_mtime * 1000
+        mtime = os.stat(path).st_mtime
     except (OSError, ValueError) as e:
         return invalid(f"evidence is not readable JSON: {e}", path)
     why = malformed(evidence, "evidence")
@@ -195,16 +242,15 @@ def check(data, ledger_dir):
         return invalid(why, path)
 
     start = data.get("startTime")
-    if type(start) not in (int, float):
+    if not finite_number(start):
         return invalid("startTime is absent or not a number", path)
-    try:
-        finite = math.isfinite(start)
-    except OverflowError:  # an integer too large for a float
-        finite = False
-    if not finite:
-        return invalid("startTime is absent or not a number", path)
-    if mtime_ms < start:
+    if mtime * 1000 < start:
         return {"status": "stale", "reason": "verify_evidence_stale", "path": path}
+    if archive:
+        why = untrusted_time(data, mtime)
+        if why:
+            return {"status": "unavailable", "reason": "verify_evidence_time_untrusted",
+                    "path": path, "detail": why}
 
     found = differences(report, evidence)
     if found:
@@ -212,27 +258,51 @@ def check(data, ledger_dir):
     return {"status": "match", "path": path}
 
 
+def parse_args(args):
+    """(positional args, the --ledger DIR or None), or None on a usage error."""
+    positional, ledger = [], None
+    i = 0
+    while i < len(args):
+        if args[i] == "--ledger":
+            if ledger is not None or i + 1 >= len(args) or not args[i + 1]:
+                return None
+            ledger = args[i + 1]
+            i += 2
+        else:
+            positional.append(args[i])
+            i += 1
+    if len(positional) != 2:
+        return None
+    return positional, ledger
+
+
 def main(argv):
     _shell.setup_io()
-    args = argv[1:]
-    if len(args) != 2:
+    parsed = parse_args(argv[1:])
+    if parsed is None:
         print(USAGE, file=sys.stderr)
         return 2
+    args, ledger_arg = parsed
     try:
         transcript_dir, manifest_path = (_shell.native_path(a) for a in args)
         manifest = read_object(manifest_path, "manifest")
-        repo = manifest.get("repo")
-        ledger_dir = repo.get("ledger_dir") if isinstance(repo, dict) else None
-        if type(ledger_dir) is not str or not ledger_dir:
-            raise Usage(f"manifest {manifest_path} has no string repo.ledger_dir")
-        ledger_dir = _shell.native_path(ledger_dir)
-        found = next((p for p in _shell.result_paths(transcript_dir) if os.path.isfile(p)), None)
+        if ledger_arg is None:
+            repo = manifest.get("repo")
+            ledger_dir = repo.get("ledger_dir") if isinstance(repo, dict) else None
+            if type(ledger_dir) is not str or not ledger_dir:
+                raise Usage(f"manifest {manifest_path} has no string repo.ledger_dir")
+            ledger_dir = _shell.native_path(ledger_dir)
+            candidates = _shell.result_paths(transcript_dir)
+        else:
+            ledger_dir = _shell.native_path(ledger_arg)
+            candidates = [_shell.sibling_result_path(transcript_dir)]
+        found = next((p for p in candidates if os.path.isfile(p)), None)
         if found is None:
-            raise Usage("no workflow result file at " + " or ".join(_shell.result_paths(transcript_dir)))
+            raise Usage("no workflow result file at " + " or ".join(candidates))
         data = read_object(found, "result file")
         if not isinstance(data.get("result"), dict):
             raise Usage(f"result file {found} has no result object")
-        out = check(data, ledger_dir)
+        out = check(data, ledger_dir, archive=ledger_arg is not None)
     except Usage as e:
         print(f"check-verify: {e}", file=sys.stderr)
         return 2

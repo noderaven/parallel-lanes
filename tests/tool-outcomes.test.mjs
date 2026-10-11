@@ -93,7 +93,7 @@ test('the line covers each tool', () => {
   assert.equal(
     line('--archive-exit', '0', ...ok(dir, '--cleanup', 'awaiting')),
     `Run tools: doctor before wf_abc123: ok, 2 warning(s) (memory, defender); archived to ${shown(dir)}; `
-      + 'autopsy generated (2 possible contributor(s)); cleanup awaiting approval',
+      + 'autopsy generated (2 possible contributor(s)); audit not run; cleanup awaiting approval',
   );
 });
 
@@ -127,7 +127,8 @@ test('failures name their tool', () => {
 test('missing pieces are named', () => {
   assert.equal(
     line(),
-    'Run tools: launch conditions not checked (autopsy not run); archive not run; autopsy not run; cleanup not offered',
+    'Run tools: launch conditions not checked (autopsy not run); archive not run; autopsy not run; '
+      + 'audit not run; cleanup not offered',
   );
 
   const older = runFolder({ autopsy_version: 3, run_id: 'r1', launches: [launch('wf_abc123')] });
@@ -146,7 +147,7 @@ test('missing pieces are named', () => {
   assert.equal(
     noFolder,
     'Run tools: launch conditions not checked (autopsy unreadable); archived; '
-      + 'autopsy generated (contributors unavailable); cleanup not offered',
+      + 'autopsy generated (contributors unavailable); audit not run; cleanup not offered',
   );
 
   assert.ok(line('--cleanup', 'done').endsWith('; cleanup done'));
@@ -231,6 +232,9 @@ test('usage errors exit 2', () => {
     ['--autopsy-exit', '0\n'],
     ['--archive-exit', 'x'],
     ['--autopsy-exit', '1.5'],
+    ['--audit-exit', '0\n'],
+    ['--audit-exit', 'x'],
+    ['--audit-exit', '1.5'],
     ['--run-folder', ''],
     ['--unknown'],
     ['extra'],
@@ -250,6 +254,7 @@ test("--json gives each tool's state", () => {
     doctor: { state: 'recorded', detail: 'doctor before wf_abc123: ok, 2 warning(s) (memory, defender)' },
     archive: { state: 'archived', detail: `archived to ${shown(dir)}` },
     autopsy: { state: 'generated', detail: 'autopsy generated (2 possible contributor(s))' },
+    audit: { state: 'not_run', detail: 'audit not run' },
     cleanup: { state: 'awaiting', detail: 'cleanup awaiting approval' },
   });
 
@@ -259,6 +264,7 @@ test("--json gives each tool's state", () => {
     doctor: { state: 'not_checked', detail: 'launch conditions not checked (autopsy not run)' },
     archive: { state: 'not_run', detail: 'archive not run' },
     autopsy: { state: 'not_run', detail: 'autopsy not run' },
+    audit: { state: 'not_run', detail: 'audit not run' },
     cleanup: { state: 'not_offered', detail: 'cleanup not offered' },
   });
 
@@ -267,7 +273,7 @@ test("--json gives each tool's state", () => {
     '--cleanup', 'declined').stdout);
   assert.deepEqual(
     Object.fromEntries(Object.entries(states).map(([k, v]) => [k, v.state])),
-    { doctor: 'not_recorded', archive: 'failed', autopsy: 'generated', cleanup: 'declined' },
+    { doctor: 'not_recorded', archive: 'failed', autopsy: 'generated', audit: 'not_run', cleanup: 'declined' },
   );
   const odd = runFolder(autopsy([entry({ state: 'inconsistent', reason: 'snapshot unreadable' })]));
   assert.equal(JSON.parse(run('--json', ...ok(odd)).stdout).doctor.state, 'inconsistent');
@@ -280,8 +286,70 @@ test('a Git Bash run folder works on Windows', { skip: !IS_WINDOWS }, () => {
   assert.equal(
     line('--archive-exit', '0', ...ok(msys)),
     `Run tools: doctor before wf_abc123: ok, 2 warning(s) (memory, defender); archived to ${shown(dir)}; `
-      + 'autopsy generated (2 possible contributor(s)); cleanup not offered',
+      + 'autopsy generated (2 possible contributor(s)); audit not run; cleanup not offered',
   );
+});
+
+// Writes <dir>/audit/audit.json: an object as JSON, a string as is.
+function writeAudit(dir, audit) {
+  mkdirSync(join(dir, 'audit'), { recursive: true });
+  writeFileSync(join(dir, 'audit', 'audit.json'), typeof audit === 'string' ? audit : JSON.stringify(audit));
+}
+
+const AUDIT_PART = /; (audit [^;]*); cleanup /;
+const auditPart = (...args) => {
+  const out = line(...args);
+  const m = out.match(AUDIT_PART);
+  assert.ok(m, out);
+  return m[1];
+};
+
+test('the audit part counts gaps', () => {
+  const dir = runFolder(FIRST);
+  writeAudit(dir, { gaps: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] });
+  const out = line('--archive-exit', '0', ...ok(dir, '--audit-exit', '0', '--cleanup', 'awaiting'));
+  assert.ok(out.includes('autopsy generated (2 possible contributor(s)); audit generated (3 evidence gap(s)); '
+    + 'cleanup awaiting approval'), out);
+  writeAudit(dir, { gaps: [] });
+  assert.equal(auditPart(...ok(dir, '--audit-exit', '0')), 'audit generated (0 evidence gap(s))');
+});
+
+test('a missing or unreadable audit.json says gaps unavailable', () => {
+  const none = runFolder(FIRST);
+  const garbage = runFolder(FIRST);
+  writeAudit(garbage, '{"gaps": [');
+  const noList = runFolder(FIRST);
+  writeAudit(noList, { gaps: 3 });
+  const notObject = runFolder(FIRST);
+  writeAudit(notObject, '[1, 2]');
+  for (const dir of [none, garbage, noList, notObject]) {
+    assert.equal(auditPart(...ok(dir, '--audit-exit', '0')), 'audit generated (gaps unavailable)');
+  }
+  // Without a run folder there is no file to read.
+  assert.ok(line('--audit-exit', '0').includes('; audit generated (gaps unavailable); '));
+  // The file is read only after a successful audit.
+  const failed = runFolder(FIRST);
+  writeAudit(failed, { gaps: [1] });
+  assert.equal(auditPart(...ok(failed, '--audit-exit', '3')), 'audit failed (exit 3)');
+});
+
+test('a failed audit and no audit are named', () => {
+  assert.ok(line('--audit-exit', '2').includes('; audit failed (exit 2); '));
+  assert.ok(line().includes('; audit not run; '));
+  const dir = runFolder(FIRST);
+  assert.equal(auditPart(...ok(dir)), 'audit not run');
+});
+
+test('--json has the audit state', () => {
+  const dir = runFolder(FIRST);
+  writeAudit(dir, { gaps: [1, 2] });
+  const audit = (...args) => JSON.parse(run('--json', ...args).stdout).audit;
+  assert.deepEqual(audit(...ok(dir, '--audit-exit', '0')),
+    { state: 'generated', detail: 'audit generated (2 evidence gap(s))' });
+  assert.deepEqual(audit('--audit-exit', '0'),
+    { state: 'generated', detail: 'audit generated (gaps unavailable)' });
+  assert.deepEqual(audit('--audit-exit', '4'), { state: 'failed', detail: 'audit failed (exit 4)' });
+  assert.deepEqual(audit(), { state: 'not_run', detail: 'audit not run' });
 });
 
 // Last, so it covers every output above.

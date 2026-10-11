@@ -3,15 +3,16 @@
 
 usage:
   python3 tool-outcomes [--run-folder DIR] [--archive-exit N]
-                        [--autopsy-exit N] [--conditions-refused CODE]
+                        [--autopsy-exit N] [--audit-exit N]
+                        [--conditions-refused CODE]
                         [--relaunch-blocked CHECKS]
                         [--cleanup awaiting|done|declined|failed|none]
                         [--json]
 
 DIR is the run's history folder (archive-run's layout, where autopsy wrote
-autopsy.json); a Git Bash /c/... path works on Windows. --archive-exit and
---autopsy-exit are those tools' exit codes, left out when a tool did not
-run. --conditions-refused is the refusal code of the latest launch's
+autopsy.json); a Git Bash /c/... path works on Windows. --archive-exit,
+--autopsy-exit and --audit-exit are those tools' exit codes, left out when
+a tool did not run. --conditions-refused is the refusal code of the latest launch's
 `ledger conditions` (wf_recorded, not_doctor, no_setup, setup_recorded or
 observation_reused). --relaunch-blocked is a comma-separated list of the
 doctor checks that blocked a relaunch. --cleanup is the cleanup offer's
@@ -19,7 +20,7 @@ state (none, the default, when no cleanup is offered).
 
 It prints one line:
 
-  Run tools: <doctor>; <archive>; <autopsy>; <cleanup>
+  Run tools: <doctor>; <archive>; <autopsy>; <audit>; <cleanup>
 
 doctor comes from the last entry of launch_conditions in DIR/autopsy.json
 (autopsy's binding of a doctor result to its launch), read only with
@@ -54,6 +55,12 @@ every launch's possible_contributors; "autopsy generated (contributors
 unavailable)" when autopsy.json is not usable; "autopsy failed (exit N)";
 "autopsy not run".
 
+audit: "audit generated (<k> evidence gap(s))", k the length of the gaps
+list in DIR/audit/audit.json, read only with --audit-exit 0 and --run-folder;
+"audit generated (gaps unavailable)" with --audit-exit 0 when that file is
+missing, unreadable or has no gaps list, or when there is no --run-folder;
+"audit failed (exit N)"; "audit not run".
+
 cleanup: "cleanup awaiting approval", "cleanup done", "cleanup declined",
 "cleanup failed" or "cleanup not offered".
 
@@ -61,12 +68,12 @@ The line never mentions implementation acceptance or any task's status.
 
 --json prints one JSON line instead:
 
-  {"doctor", "archive", "autopsy", "cleanup"}, each {"state", "detail"}
+  {"doctor", "archive", "autopsy", "audit", "cleanup"}, each {"state", "detail"}
 
 detail is that tool's text in the line. The states: doctor recorded,
 not_recorded, inconsistent or not_checked; archive archived, failed or
-not_run; autopsy generated, failed or not_run; cleanup awaiting, done,
-declined, failed or not_offered. Readers ignore keys they do not know.
+not_run; autopsy and audit generated, failed or not_run; cleanup awaiting,
+done, declined, failed or not_offered. Readers ignore keys they do not know.
 
 It is read-only and needs no manifest. When DIR cannot be converted on
 Windows (no Git Bash or cygpath), DIR is shown as given and autopsy.json
@@ -136,6 +143,7 @@ def parse_args(argv):
     p.add_argument("--run-folder", type=folder_arg, metavar="DIR")
     p.add_argument("--archive-exit", type=exit_code, metavar="N")
     p.add_argument("--autopsy-exit", type=exit_code, metavar="N")
+    p.add_argument("--audit-exit", type=exit_code, metavar="N")
     p.add_argument("--conditions-refused", choices=REFUSAL_CODES, metavar="CODE")
     p.add_argument("--relaunch-blocked", type=check_names, metavar="CHECKS")
     p.add_argument("--cleanup", choices=("awaiting", "done", "declined", "failed", "none"),
@@ -248,6 +256,32 @@ def autopsy_part(args, data):
     return "generated", "autopsy generated (%d possible contributor(s))" % m
 
 
+def read_audit_gaps(folder):
+    """The length of the gaps list in FOLDER/audit/audit.json, or None when
+    the file is missing, unreadable, not an object or has no gaps list."""
+    if folder is None:
+        return None
+    try:
+        with open(os.path.join(folder, "audit", "audit.json"), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("gaps"), list):
+        return None
+    return len(data["gaps"])
+
+
+def audit_part(args, folder):
+    if args.audit_exit is None:
+        return "not_run", "audit not run"
+    if args.audit_exit != 0:
+        return "failed", "audit failed (exit %d)" % args.audit_exit
+    gaps = read_audit_gaps(folder)
+    if gaps is None:
+        return "generated", "audit generated (gaps unavailable)"
+    return "generated", "audit generated (%d evidence gap(s))" % gaps
+
+
 def outcomes(args):
     folder = shown_folder = None
     if args.run_folder is not None:
@@ -264,6 +298,7 @@ def outcomes(args):
         ("doctor", doctor),
         ("archive", archive_part(args, shown_folder)),
         ("autopsy", autopsy_part(args, data)),
+        ("audit", audit_part(args, folder)),
         ("cleanup", (cleanup, CLEANUP_WORDS[cleanup])),
     )
     return {key: {"state": state, "detail": detail} for key, (state, detail) in parts}
@@ -276,7 +311,7 @@ def main(argv):
     if args.json:
         sys.stdout.write(json.dumps(out) + "\n")
     else:
-        details = [out[k]["detail"] for k in ("doctor", "archive", "autopsy", "cleanup")]
+        details = [out[k]["detail"] for k in ("doctor", "archive", "autopsy", "audit", "cleanup")]
         sys.stdout.write("Run tools: " + "; ".join(details) + "\n")
     return 0
 

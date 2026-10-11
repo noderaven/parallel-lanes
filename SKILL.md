@@ -251,7 +251,7 @@ The run returns `status`:
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
   with `<python> <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
-  "<what>"`.
+  "<what>"`. Then rerun archive-run, audit and tool-outcomes, so the override reaches the archive.
 
 Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` (Launch step 4's transcript dir) and append
@@ -260,9 +260,11 @@ its output, with the contents reference.md "Report contents" lists.
 After the report, for every run that ends after a launch (never a dry run): `<python>
 <skill_dir>/scripts/archive-run <manifest file> <transcript dir>...`, then `<python>
 <skill_dir>/scripts/autopsy <run folder>` (the folder archive-run prints), appending its summary.
-Details: reference.md "Run history" and "Autopsy". Last, after any other tool: `<python>
+Then `<python> <skill_dir>/scripts/audit <run folder> --repo <repo.git_dir in shadow mode, else
+repo.root> --head <branch>`, appending its summary (reference.md "Audit"). Details: reference.md
+"Run history" and "Autopsy". Last, after any other tool: `<python>
 <skill_dir>/scripts/tool-outcomes --run-folder <folder> --archive-exit N --autopsy-exit N
-[--conditions-refused CODE] [--relaunch-blocked CHECKS] --cleanup awaiting|none`. Show its line
+--audit-exit N [--conditions-refused CODE] [--relaunch-blocked CHECKS] --cleanup awaiting|none`. Show its line
 under its own label after the acceptance lead, and run it again after cleanup (reference.md
 "Report").
 

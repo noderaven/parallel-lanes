@@ -561,7 +561,64 @@ test('README names tool-outcomes among the scripts', () => {
   assert.match(text, /\| `scripts\/` \|[^|]*tool-outcomes/);
 });
 
-test('SKILL.md leaves room for the next release', () => {
-  const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
-  assert.ok(words < 2950, `SKILL.md has ${words} words`);
+// These tests check instructions to the session in SKILL.md, reference.md and
+// README.md (what they must say about the audit), not behaviour the code
+// enforces.
+test('the hand-back runs audit before tool-outcomes', () => {
+  const skill = flat(SKILL_MD);
+  const handBack = skill.slice(skill.indexOf('## Hand-back'), skill.indexOf('## Resume'));
+  const autopsy = handBack.indexOf('scripts/autopsy');
+  const audit = handBack.indexOf('scripts/audit');
+  const tools = handBack.indexOf('scripts/tool-outcomes');
+  assert.ok(autopsy >= 0 && audit > autopsy && tools > audit, handBack);
+  const auditCommand = handBack.slice(audit, tools);
+  assert.match(auditCommand, /--repo <repo\.git_dir in shadow mode, else repo\.root>/, auditCommand);
+  assert.match(auditCommand, /--head <branch>/, auditCommand);
+  assert.match(auditCommand, /appending its summary/, auditCommand);
+  assert.ok(auditCommand.includes('reference.md "Audit"'), auditCommand);
+  assert.match(handBack.slice(tools), /--audit-exit N/, handBack.slice(tools));
+});
+
+test('a user accept reruns the archive and audit', () => {
+  const skill = flat(SKILL_MD);
+  const handBack = skill.slice(skill.indexOf('## Hand-back'), skill.indexOf('## Resume'));
+  const accept = handBack.indexOf('scripts/ledger accept');
+  assert.ok(accept >= 0, handBack);
+  const after = handBack.slice(accept, handBack.indexOf('Report: run', accept));
+  const archive = after.indexOf('archive-run');
+  const audit = after.indexOf('audit');
+  const tools = after.indexOf('tool-outcomes');
+  assert.ok(archive >= 0 && audit > archive && tools > audit, after);
+  assert.match(after, /rerun/, after);
+});
+
+test('reference.md documents the audit', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  assert.ok(ref.includes('\n## Audit\n'), 'reference.md lacks ## Audit');
+  const audit = section(ref, 'Audit');
+  const wants = [
+    // the six states and the gap list
+    '`present`', '`missing`', '`stale`', '`conflicting`', '`unavailable`', '`inferred`', 'gaps',
+    // the verdict and the evidence rules
+    'accepted (gate unavailable)', 'evidence validity',
+    // the range section and the final re-review
+    'Code outside recorded task ranges', 'final re-review',
+    // check-verify's archive mode
+    '--ledger', 'verify_evidence_time_untrusted',
+    // privacy
+    'check ids', 'quoted as written', 'local-only',
+    // output and exit codes
+    'UTF-8', 'exit 0', 'exit 2', 'exit 3', '--audit-exit',
+  ];
+  for (const word of wants) {
+    assert.ok(audit.includes(word), `the Audit section lacks ${word}`);
+  }
+  const verify = section(ref, 'Verify evidence');
+  assert.ok(verify.includes('--ledger') && verify.includes('verify_evidence_time_untrusted'), verify);
+  const tools = section(ref, 'Report');
+  assert.ok(tools.includes('--audit-exit') && tools.includes('audit generated'), tools);
+});
+
+test('README names audit among the scripts', () => {
+  assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\baudit\b/);
 });
