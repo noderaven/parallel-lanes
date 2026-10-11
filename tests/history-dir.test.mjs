@@ -5,7 +5,7 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
@@ -155,46 +155,105 @@ test('inside is case-insensitive on Windows only', () => {
   assert.equal(out.parent, false);
 });
 
-test('the index lock excludes a second holder and recovers a stale one', () => {
+// take(wait_s): enter and leave the index lock of sys.argv[1]; True.
+const TAKE = [
+  'def take(wait_s):',
+  '    with _history.index_lock(sys.argv[1], wait_s=wait_s):',
+  '        return True',
+  '',
+].join('\n');
+
+// A Python child that holds the index lock of hdir until release() closes
+// its stdin. Resolves once the child prints held.
+async function holdLock(hdir) {
+  const code = PRELUDE + [
+    'with _history.index_lock(sys.argv[1]):',
+    "    print('held', flush=True)",
+    '    sys.stdin.read()',
+  ].join('\n');
+  const child = spawn('python3', ['-c', code, hdir], { env: cleanEnv() });
+  let stdout = '';
+  let stderr = '';
+  let exited = false;
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const closed = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (status) => { exited = true; resolve(status); });
+  });
+  const deadline = Date.now() + 60000;
+  while (!stdout.includes('held') && !exited && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!stdout.includes('held')) {
+    child.kill();
+    assert.fail(`the holder did not take the lock: ${stderr}`);
+  }
+  return {
+    child,
+    closed,
+    release() {
+      child.stdin.end();
+      return closed;
+    },
+  };
+}
+
+test('the index lock excludes a second holder until it is released', () => {
   const hdir = freshDir('lock');
   const lock = join(hdir, 'index.lock');
-  const take = [
-    'def take(wait_s):',
-    '    with _history.index_lock(sys.argv[1], wait_s=wait_s):',
-    "        return os.path.exists(os.path.join(sys.argv[1], 'index.lock'))",
-  ].join('\n');
   const { out } = py([
-    take,
+    TAKE,
     'with _history.index_lock(sys.argv[1]):',
-    "    with open(os.path.join(sys.argv[1], 'index.lock'), encoding='utf-8') as f:",
-    '        held = json.load(f)',
     '    second = attempt(lambda: take(0.5))',
-    "print(json.dumps({'held_pid': held['pid'] == os.getpid(), 'second': second, 'after': attempt(lambda: take(0.5))}))",
+    'after = attempt(lambda: take(0.5))',
+    "with open(os.path.join(sys.argv[1], 'index.lock'), encoding='utf-8') as f:",
+    '    held = json.load(f)',
+    "print(json.dumps({'held_pid': held['pid'] == os.getpid(), 'second': second, 'after': after}))",
   ].join('\n'), { args: [hdir] });
-  assert.equal(out.held_pid, true);
   assert.equal(out.second.error, 'HistoryError', JSON.stringify(out.second));
   assert.ok(out.second.message.includes('index.lock'), out.second.message);
   assert.deepEqual(out.after, { ok: true });
-  assert.ok(!existsSync(lock), 'the lock is removed on exit');
-
-  writeFileSync(lock, '{"pid": 1, "time": "2026-10-10T00:00:00Z"}');
-  const old = new Date(Date.now() - 20 * 60 * 1000);
-  utimesSync(lock, old, old);
-  const stale = py([take, 'print(json.dumps(attempt(lambda: take(0.5))))'].join('\n'), { args: [hdir] });
-  assert.deepEqual(stale.out, { ok: true });
-  assert.match(stale.stderr, /stale/);
-  assert.ok(!existsSync(lock), 'the taken-over lock is removed on exit');
+  assert.ok(existsSync(lock), 'the lock file is never deleted');
+  assert.equal(out.held_pid, true, 'the lock file holds the holder pid');
 });
 
-test('a fresh lock found at a stale takeover is put back, not taken', () => {
-  const hdir = freshDir('fresh takeover');
+test('a live holder keeps the lock however old the lock file is', async () => {
+  const hdir = freshDir('live holder');
   const lock = join(hdir, 'index.lock');
-  writeFileSync(lock, '{"pid": 2, "token": "fresh"}');
-  // As if the lock was judged stale just before a new holder replaced it.
-  const { out } = py("print(json.dumps(_history._take_over(os.path.join(sys.argv[1], 'index.lock'), 9999, 600)))",
-    { args: [hdir] });
-  assert.equal(out, false);
-  assert.equal(readFileSync(lock, 'utf8'), '{"pid": 2, "token": "fresh"}');
+  const holder = await holdLock(hdir);
+  try {
+    const old = new Date(Date.now() - 20 * 60 * 1000);
+    utimesSync(lock, old, old);
+    const { out, stderr } = py([TAKE, 'print(json.dumps(attempt(lambda: take(0.5))))'].join('\n'), { args: [hdir] });
+    assert.equal(out.error, 'HistoryError', JSON.stringify(out));
+    assert.match(out.message, /index\.lock is held by another process/);
+    assert.match(stderr, /waiting for .*index\.lock/);
+    assert.doesNotMatch(stderr, /stale/);
+  } finally {
+    await holder.release();
+  }
+});
+
+test('a holder that dies releases the lock', async () => {
+  const hdir = freshDir('dead holder');
+  const holder = await holdLock(hdir);
+  holder.child.kill();
+  await holder.closed;
+  const { out } = py([TAKE, 'print(json.dumps(attempt(lambda: take(5))))'].join('\n'), { args: [hdir] });
+  assert.deepEqual(out, { ok: true });
+});
+
+test('a leftover lock file from the unreleased O_EXCL lock does not block', () => {
+  const hdir = freshDir('leftover');
+  const lock = join(hdir, 'index.lock');
+  writeFileSync(lock, '{"pid": 1, "token": "old"}');
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  utimesSync(lock, old, old);
+  const { out } = py([TAKE, 'print(json.dumps(attempt(lambda: take(0))))'].join('\n'), { args: [hdir] });
+  assert.deepEqual(out, { ok: true });
+  assert.ok(existsSync(lock), 'the lock file is never deleted');
+  assert.ok(!readFileSync(lock, 'utf8').includes('"old"'), 'the new holder wrote its own details');
 });
 
 test('a history dir that refuses the lock file fails at once', {
