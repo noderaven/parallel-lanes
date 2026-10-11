@@ -1909,8 +1909,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     .map((lane) => `Lane ${lane.id} commands (with its overrides; run these too):\n${commandsText(m, lane.id, featureDir(m))}`);
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
-    return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain prints nothing, ` +
-      `${admin} worktree remove ${q(w.dir)} then git -C ${dir} branch -d ${q(w.branch)}`;
+    return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain --untracked-files=all prints nothing, ` +
+      `${admin} -c status.showUntrackedFiles=all worktree remove ${q(w.dir)} then git -C ${dir} branch -d ${q(w.branch)}`;
   });
   const joinIds = m.join.length > 0 ? m.join.map((t) => t.id).join(', ') : '(none)';
   // Every join task committed in an earlier attempt: a final fix of that
@@ -1970,8 +1970,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
     'Return status failed with the reason in notes at the first of steps 1-5 that fails.',
     '',
-    `1. git -C ${dir} status --porcelain must print nothing (this is what clean means below; never make it`,
-    '   so by deleting, cleaning, or stashing files).',
+    `1. git -C ${dir} status --porcelain --untracked-files=all must print nothing (this is what clean means`,
+    '   below; never make it so by deleting, cleaning, or stashing files).',
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     ...conflictLine,
@@ -2027,8 +2027,8 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
     `The first-pass merge aborted on conflicts in: ${files}.`,
     '',
-    `1. git -C ${dir} status --porcelain must print nothing; otherwise return status failed (never make it so`,
-    '   by deleting, cleaning, or stashing files).',
+    `1. git -C ${dir} status --porcelain --untracked-files=all must print nothing; otherwise return status`,
+    '   failed (never make it so by deleting, cleaning, or stashing files).',
     '2. Merge each lane branch, in this order, with a merge commit whose message follows the commit rules:',
     ...merges,
     '   A branch already merged reports already up to date; that is fine. On a conflict, resolve it keeping',
