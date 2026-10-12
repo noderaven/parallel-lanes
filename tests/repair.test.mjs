@@ -332,13 +332,77 @@ test('repairDue: only a complete, clean, exact inventory with an ordinary failin
   assert.equal(repairDue(m, verified(sha, 2), sha), true, 'exit 2');
 });
 
-test('repairHeadEligible needs the reported head and a descends_from ok', () => {
+test('repairHeadEligible needs the reported head and a descends_from ok for the repair start', () => {
   const sha = H('r1');
-  assert.equal(repairHeadEligible(descends(sha, H('f1')), sha), true);
-  assert.equal(repairHeadEligible(verified(sha), sha), false, 'no descends_from');
-  assert.equal(repairHeadEligible(verified(sha, 0, { descends_from: { sha: H('f1'), ok: false } }), sha), false);
-  assert.equal(repairHeadEligible(descends(H('x'), H('f1')), sha), false, 'head mismatch');
-  assert.equal(repairHeadEligible(null, sha), false);
+  const from = H('f1');
+  assert.equal(repairHeadEligible(descends(sha, from), sha, from), true);
+  assert.equal(repairHeadEligible(verified(sha), sha, from), false, 'no descends_from');
+  assert.equal(repairHeadEligible(verified(sha, 0, { descends_from: { sha: from, ok: false } }), sha, from), false);
+  assert.equal(repairHeadEligible(descends(H('x'), from), sha, from), false, 'head mismatch');
+  assert.equal(repairHeadEligible(descends(sha, sha), sha, from), false, 'descends_from names another sha');
+  assert.equal(repairHeadEligible(null, sha, from), false);
+});
+
+// ---- F3 review fixes (2026-10-11) ----
+
+const { repairReserve } = await loadHelpers(['repairReserve']);
+const HOOKS = { post_integrate: 'POST: check contracts', e2e: 'E2E: run it' };
+
+test('repairReserve counts the hook rechecks a repair makes necessary', () => {
+  assert.equal(repairReserve(manifest()), 6);
+  assert.equal(repairReserve(manifest({ hooks: { e2e: 'x' } })), 10);
+  assert.equal(repairReserve(manifest({ hooks: { post_integrate: 'x' } })), 8);
+  assert.equal(repairReserve(manifest({ hooks: HOOKS })), 12);
+});
+
+test('with hooks and only 6 free agents, no repair: the run completes rejected, never stops on budget', async () => {
+  // Agents up to the failing verify with both hooks and no findings:
+  // pre-flight, 4 implement + 4 review, integrate, post-integrate, e2e,
+  // 3 lenses, verify = 16; 6 free is below the reserve of 12.
+  const m = manifest({ hooks: HOOKS, limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 22 } });
+  const { result, calls } = await run(m, {
+    ...noFindings({ verify: [verified(TIP, 1)] }),
+    'post-integrate': [{ status: 'done', head: H('P1'), notes: 'ok' }],
+    e2e: [{ head: TIP, items: [{ item: 'x', result: 'PASS', evidence: 'ok' }] }],
+    'post-integrate recheck': [{ status: 'done', head: TIP, notes: 'ok' }],
+    ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+  assert.deepEqual(kinds(result), ['checks_failed']);
+  assert.equal(result.check_policy.repair_reserve, 12);
+});
+
+test('a repair head whose verify returned nothing is unreviewed with its own sentence', async () => {
+  const { result } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), null],
+      'verify retry': [null],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  const reason = result.acceptance.reasons.find((r) => r.kind === 'final_fix_unreviewed');
+  assert.ok(reason && reason.detail.includes(`no verify result at ${H('r1')}`), JSON.stringify(result.acceptance));
+  assert.notEqual(result.acceptance.status, 'accepted');
+});
+
+test('a done final fix without a head gets no repair', async () => {
+  const script = { ...withFix({ verify: [verified(TIP, 1)], 'final re-review': [resolved(TIP)] }), ...taskScript(ALL) };
+  script['final fix'] = [{ status: 'done', head: '', tests: '', notes: '', dispositions: [
+    { id: 'F1', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' }] }];
+  const { calls } = await run(manifest(), script);
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+});
+
+test('supervised with no findings: no repair, rejected as today', async () => {
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), {
+    ...noFindings({ verify: [verified(TIP, 1)] }),
+    ...taskScript(ALL),
+  });
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+  assert.deepEqual(kinds(result), ['checks_failed']);
 });
 
 // ---- no final findings ----

@@ -120,9 +120,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // A failing verify after the fix (autonomous): bounded repairs (spec 4.5)
-  // before the re-review, whose range tip..final.head then covers them.
+  // before the re-review, whose range tip..final.head then covers them. Only
+  // after a fix that returned a sha head (spec 4.5).
   let repaired = null;
-  if (repair !== null && verifyAt !== null && final.verify) {
+  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head)) {
     repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair });
     final.head = repaired.head;
     final.verify = repaired.verify;
@@ -170,10 +171,11 @@ function repairDue(m, verify, sha) {
 }
 
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
-// at it, and run-checks --descends-from found the repair's start an ancestor.
-function repairHeadEligible(verify, sha) {
+// at it, and run-checks --descends-from found from, the repair's start, an
+// ancestor (the check must name from, not some other sha).
+function repairHeadEligible(verify, sha, from) {
   return Boolean(verify) && verify.head === sha && Boolean(verify.descends_from)
-    && verify.descends_from.ok === true;
+    && verify.descends_from.ok === true && verify.descends_from.sha === from;
 }
 
 // Why a re-review result does not review the repairs at delivered, or null
@@ -226,11 +228,13 @@ async function runRepairs(m, io, ctx) {
     }
     if (r.head === head) break;
     const v = await ctx.verifyAt(r.head, head);
-    if (!repairHeadEligible(v, r.head)) {
+    if (!repairHeadEligible(v, r.head, head)) {
       const observed = v && isSha(v.head) ? v.head : r.head;
-      unreviewed = observed !== r.head
-        ? `repair ${entry.attempt} reported ${r.head}, but ${m.repo.branch} is at ${observed}`
-        : `repair ${entry.attempt} reported ${r.head}, which is not a descendant of ${head} on ${m.repo.branch}`;
+      unreviewed = !v || !isSha(v.head)
+        ? `repair ${entry.attempt} reported ${r.head}, but there is no verify result at ${r.head}`
+        : observed !== r.head
+          ? `repair ${entry.attempt} reported ${r.head}, but ${m.repo.branch} is at ${observed}`
+          : `repair ${entry.attempt} reported ${r.head}, which is not a descendant of ${head} on ${m.repo.branch}`;
       entry.head = observed;
       head = observed;
       verify = v;
@@ -517,7 +521,7 @@ async function runAll(manifest, io) {
       widen_paths: Array.isArray(m.widen_paths) ? m.widen_paths : [],
       repair_limit: repairLimit(m),
       repairs_spent: m.repairs_spent || 0,
-      repair_reserve: repairReserve(),
+      repair_reserve: repairReserve(m),
       final_inventory_count: finalChecks(m).length,
       autonomy: effectiveAutonomy(m),
     },
@@ -811,14 +815,14 @@ async function runAll(manifest, io) {
     { ...sonnetHigh, overBudget: true });
   // Repairs after a failing verify (spec 4.5): autonomous only, at most
   // repairLimit(m) per run (repairs_spent carries earlier launches'), and
-  // each admitted only while repairReserve() agents are free, so the
+  // each admitted only while repairReserve(m) agents are free, so the
   // repair, its verify and the re-review that must follow (each with one
   // retry) can never be refused. admit() counts the attempt it admits.
   let attempts = 0;
   const spent = m.repairs_spent || 0;
   const admit = () => {
     const ok = autonomous && state.refused.length === 0
-      && effectiveLimits(m).max_agents - state.agents >= repairReserve()
+      && effectiveLimits(m).max_agents - state.agents >= repairReserve(m)
       && attempts < repairLimit(m) - spent;
     if (ok) attempts += 1;
     return ok;

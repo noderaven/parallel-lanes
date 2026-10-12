@@ -48,7 +48,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). They are the lane's own checks: integration and verify run every distinct one, so a narrower run of a project check belongs in `task_checks`, not here. |
 | `task_checks` | Optional `{<task id>: {test, lint?, build?}}`: the targeted checks a task runs once before committing (see Check ownership). `test` is required and names at least one command; an absent `lint` or `build` inherits the lane's. A batch uses its last task's entry. Every command must be a narrower run of a check the delivery inventory already runs, in the same checkout and environment; must run correctly at the task that uses it (list the lane's test files created or changed by that task and the lane's earlier tasks, cumulatively, so no entry names a file a later task creates); must fail when it selects no tests (name existing test files; a filter that passes on zero matches needs a wrapper that fails); and keeps an explicit worker limit like the project's test command (for example `node --test --test-concurrency=4 ...`). Derive the entries from the briefs' test files and commands; a task you cannot map gets no entry and runs its lane's checks. Never part of the delivery inventory. |
 | `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Take them from the plan's shared files; no absolute path or `..`. |
-| `repairs_spent` | Optional integer, default 0: repairs after a failing verify that earlier launches of this run made (the sum of `final.repairs` lengths in their reports). Set it on a transient relaunch or a resume, like the budget carry-over; a run allows 2 in all (see Check ownership). |
+| `repairs_spent` | Optional integer, default 0: repairs after a failing verify that earlier launches of this run made (the sum of `final.repairs` lengths in their reports; a report without `final` made none). Set it on a transient relaunch or a resume, like the budget carry-over; a run allows 2 in all (see Check ownership). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
 | `join` | Tasks run in order on the merged branch after integration. |
@@ -300,9 +300,10 @@ raised it).
   (dry run, table, explicit yes). The only edits that
   need no second table are `setup_result`, `start_points`, and the relaunch carry-over (budgets
   and `repairs_spent`).
-- Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while 6 agents
-  are free, so a repair never causes a refusal: with less room there is no repair, and the run
-  ends as it would without one.
+- Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while
+  `repairReserve` agents are free (6, plus 4 with an e2e hook and 2 with a post-integrate hook),
+  so neither the repair nor the checks it makes necessary are ever refused: with less room
+  there is no repair, and the run ends as it would without one.
 - The `verify` agent (the project checks through `scripts/run-checks`) runs even past
   `max_agents`: the checks are cheap and deterministic, so the evidence after the last change
   exists even when the budget is spent. When the budget stops the run after the join (in E2E or
@@ -382,9 +383,11 @@ checks.
 - Due only when verify ran at the head, with exactly the configured inventory, no
   `head_after`, a clean checkout, and a failing exit that is not 124, 128 or above, or
   negative (a timeout or a signal is not a defect to fix).
-- Admitted only while `repairReserve()` (6) agents are free and fewer than 2 repairs were made
-  in the run (`repairs_spent` carries earlier launches'), so the repair, its verify and the
-  re-review that must follow, each with one retry, are never refused.
+- Admitted only while `repairReserve` agents are free and fewer than 2 repairs were made in the
+  run (`repairs_spent` carries earlier launches'). The reserve is 6 (the repair, its verify and
+  the re-review that must follow, each with one retry), plus 4 with an e2e hook and 2 with a
+  post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
+  is ever refused.
 - One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
   correct fix, focused checks only, `fix: make the delivery checks pass`. It never weakens,
   skips or deletes a check, test or criterion, never changes the commands or the scripts and

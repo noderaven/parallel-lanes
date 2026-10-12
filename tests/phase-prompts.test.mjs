@@ -235,7 +235,9 @@ test('the tests-path post-integration fixer may rerun the failing command to rep
 test('the repair prompt forbids changing the commands or what they run, and names flaky failures', () => {
   const verify = { head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 1 }] };
   const p = flat(verifyRepairPrompt(manifest(), verify, H('f1'), 1));
-  assert.ok(p.includes('never change the commands above, or the scripts and config they run, to make them pass'), p);
+  assert.ok(p.includes('never change the commands, lane_commands or task_checks, or the test runner configuration, to '
+    + 'make them pass'), p);
+  assert.ok(p.includes('Fixing a wrong test is allowed when the test, not the code, is wrong: say why in notes.'), p);
   assert.ok(/flaky, timeout, crash or environment failure/.test(p), p);
 });
 
