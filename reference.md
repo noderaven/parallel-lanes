@@ -363,7 +363,9 @@ Each kind of check has one owner (1.6.0). Review depth is unchanged.
 - `lane`: the unit has no `task_checks` entry: the lane's checks run, as before 1.6.0.
 - `targeted`: it has one and no widening reason holds: the entry's commands run.
 - `widened`: it has one but a reason holds: the project's commands plus the lane's own
-  additions run (project-wide, not the lane's possibly narrower list).
+  additions run (project-wide, not the lane's possibly narrower list). A lane whose
+  `lane_commands` setup differs from the project's widens to its own checks instead: its
+  worktree never ran the project's setup, and integration still runs every check.
 
 Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
 changed path the Files list does not cover), `widen_path` (a changed path under
@@ -410,9 +412,12 @@ Skipped lanes are in `setup_result.setup_skipped` and the `run_started` ledger e
 relaunch recomputes `done` and `reviewed` before setup (approvals can be reopened or go
 stale).
 
-**run-checks** reads `git status` twice per call: one `--untracked-files=all` snapshot before
-the commands and one after. The tracked and untracked lists are as before; `clean` is the
-after snapshot being empty, so it no longer follows a `status.showUntrackedFiles=no` setting.
+**run-checks** reads `git status` twice per call on a clean checkout: one
+`--untracked-files=all` snapshot before the commands and one after. When a snapshot has
+tracked changes, the tracked list is read with `--untracked-files=no` (one more call), so a
+submodule holding only untracked files is not a tracked change, as before. The tracked and
+untracked lists are as before; `clean` is the after snapshot being empty, so it no longer
+follows a `status.showUntrackedFiles=no` setting.
 
 ## Active-run markers and stops
 

@@ -123,6 +123,22 @@ test('wideChecks adds only the task\'s own lane overrides', () => {
   assert.deepEqual(laneChecks(m, 'alpha'), [{ group: 'test', command: 'npm test -- alpha' }, { group: 'lint', command: 'npm run lint' }]);
 });
 
+test('a lane that overrides setup widens to its own checks: its worktree never ran the project setup', () => {
+  const m = manifest({
+    commands: { setup: ['npm ci', 'uv sync'], test: ['npm test', 'pytest'], lint: [], build: [] },
+    lane_commands: { alpha: { setup: ['uv sync'], test: ['pytest'] }, beta: { test: ['npm test'] } },
+  });
+  assert.deepEqual(wideChecks(m, 'alpha'), laneChecks(m, 'alpha'));
+  assert.deepEqual(wideChecks(m, 'alpha'), [{ group: 'test', command: 'pytest' }]);
+  // Same setup as the project (or no setup override): project-wide as before.
+  assert.deepEqual(wideChecks(m, 'beta'), [{ group: 'test', command: 'npm test' }, { group: 'test', command: 'pytest' }]);
+  const same = manifest({ lane_commands: { alpha: { setup: ['npm ci'], test: ['npm test -- alpha'] } } });
+  assert.deepEqual(wideChecks(same, 'alpha'), [
+    { group: 'test', command: 'npm test' }, { group: 'lint', command: 'npm run lint' },
+    { group: 'test', command: 'npm test -- alpha' },
+  ]);
+});
+
 test('no lane checks means no task-checks call and no task-checks text', () => {
   const m = manifest({ commands: { setup: [], test: [], lint: [], build: [] }, task_checks: {} });
   const where = laneWhere(m, lane(m, 'alpha'));

@@ -110,6 +110,21 @@ test('status.showUntrackedFiles=no still makes clean false with an untracked fil
   assert.equal(report.clean, false);
 });
 
+test('a submodule with untracked files is not a tracked change, as in 1.5.2', () => {
+  const sub = repo({ 'lib.js': '1\n' });
+  const dir = repo({ 'a.js': '1\n' });
+  const res = spawnSync('git', ['-C', dir, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'sub'],
+    { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
+  assert.equal(res.status, 0, res.stderr);
+  gitOk(dir, 'commit', '-q', '-m', 'add sub');
+  writeFileSync(join(dir, 'sub', 'scratch.txt'), 'x\n');
+  const tracked = lines(gitOk(dir, 'status', '--porcelain', '--untracked-files=no'));
+  const report = runChecks(dir);
+  assert.deepEqual(report.tracked_before, tracked);
+  assert.deepEqual(report.tracked_before, []);
+  assert.deepEqual(report.tracked_after, []);
+});
+
 test('exactly two status calls per run', () => {
   const dir = repo({ 'a.js': '1\n' });
   const trace = join(TMP, `trace ${counter}.txt`);

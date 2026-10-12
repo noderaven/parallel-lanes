@@ -122,8 +122,17 @@ function laneChecks(m, laneId) {
 // The checks a widened task runs (spec 4.2): the project's test, lint and
 // build commands in group order, then, for a real lane only, that lane's
 // lane_commands commands not already listed: finalChecks restricted to the
-// project and one lane.
+// project and one lane. A lane whose lane_commands setup differs from the
+// project's ran only its own setup in its worktree, so the project's commands
+// may not work there: it widens to its own checks (laneChecks), as before
+// 1.6.0, and integration still runs every check.
 function wideChecks(m, laneId) {
+  const own = m.lane_commands && Object.prototype.hasOwnProperty.call(m.lane_commands, laneId)
+    ? m.lane_commands[laneId] : null;
+  if (own && Object.prototype.hasOwnProperty.call(own, 'setup')
+    && JSON.stringify(commandGroup(m, laneId, 'setup')) !== JSON.stringify(commandGroup(m, null, 'setup'))) {
+    return laneChecks(m, laneId);
+  }
   const out = [];
   for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
   if ((m.lanes || []).some((l) => l.id === laneId)) {

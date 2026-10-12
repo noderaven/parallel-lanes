@@ -37,8 +37,11 @@ without --out):
    "untracked_after": [<the same from the after snapshot; [] when none>]}
 
 The snapshots are git status --porcelain --untracked-files=all, taken once
-before the first command and once after the last: two status calls per run.
-The tracked lines equal those of --untracked-files=no. clean ignores a
+before the first command and once after the last: two status calls per run
+on a clean checkout. When a snapshot holds a tracked line, the tracked list is
+read with --untracked-files=no instead (one more call), since =all also
+reports a submodule that only holds untracked files as modified; so the
+tracked lines always equal those of --untracked-files=no. clean ignores a
 status.showUntrackedFiles=no setting: an untracked file always makes it
 false.
 
@@ -164,10 +167,16 @@ def snapshot(directory):
     return [line for line in lines if line]
 
 
-def tracked_lines(lines):
-    """The snapshot lines for tracked files: every line but the "?? " ones
-    (ignored files, "!!", are never listed without --ignored)."""
-    return [line for line in lines if not line.startswith("?? ")]
+def tracked_lines(directory, lines):
+    """The tracked-file lines, as git status --porcelain --untracked-files=no
+    prints them. A snapshot with no tracked line has none, so no further call
+    is needed; otherwise they are read with --untracked-files=no, because
+    --untracked-files=all also reports a submodule that only holds untracked
+    files as modified (" M sub"), which =no does not."""
+    if all(line.startswith("?? ") for line in lines):
+        return []
+    out = status_of(directory, "--untracked-files=no")
+    return [line for line in (raw.rstrip("\r\n") for raw in out.split("\n")) if line]
 
 
 def untracked_lines(lines):
@@ -242,6 +251,7 @@ def run(directory, out, root, cmds, descends=None):
             if os.path.islink(log) or not contained(log, root):
                 fail(3, f"log path {log!r} is outside {root!r}")
     before = snapshot(directory)
+    tracked_before = tracked_lines(directory, before)
     lineage = None
     if descends is not None:
         lineage = {"sha": descends, "ok": descends_from(directory, descends)}
@@ -249,7 +259,7 @@ def run(directory, out, root, cmds, descends=None):
             # Not a descendant: no command runs, and the report says why.
             report = {"checkout": directory, "branch": branch, "head": head, "results": [], "ok": False,
                       "clean": not before,
-                      "tracked_before": tracked_lines(before), "tracked_after": tracked_lines(before),
+                      "tracked_before": tracked_before, "tracked_after": tracked_before,
                       "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(before),
                       "descends_from": lineage}
             emit(report, out)
@@ -264,10 +274,11 @@ def run(directory, out, root, cmds, descends=None):
                         "started": started, "ended": ended, "duration_s": round(duration, 3),
                         "log": log, "tail": tail_of(log)})
     finish = snapshot(directory)
+    tracked_after = tracked_lines(directory, finish)
     after = head_of(directory)
     report = {"checkout": directory, "branch": branch, "head": head, "results": results,
               "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": not finish,
-              "tracked_before": tracked_lines(before), "tracked_after": tracked_lines(finish),
+              "tracked_before": tracked_before, "tracked_after": tracked_after,
               "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(finish)}
     if after != head:
         report["head_after"] = after
