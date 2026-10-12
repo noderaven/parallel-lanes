@@ -347,7 +347,9 @@ raised it).
 
 ## Check ownership
 
-Each kind of check has one owner (1.6.0). Review depth is unchanged.
+Each kind of check has one owner (1.6.0). Review depth is unchanged. From 1.6.1 every owner
+runs its checks through the procedure in "Long checks" below, so a check that outlasts one
+tool call never ends the agent's turn.
 
 | Who | Runs |
 |---|---|
@@ -418,6 +420,87 @@ tracked changes, the tracked list is read with `--untracked-files=no` (one more 
 submodule holding only untracked files is not a tracked change, as before. The tracked and
 untracked lists are as before; `clean` is the after snapshot being empty, so it no longer
 follows a `status.showUntrackedFiles=no` setting.
+
+## Long checks
+
+A tool call that outlasts the Bash tool's 10 minute limit is cut off, and an agent that
+waits on a background job it cannot see may end its turn and return no result. From 1.6.1
+every check an agent runs (task checks, integration, verify, and any other command expected
+to run longer than 9 minutes) goes through one procedure built on
+`scripts/await-checks`, whatever its length. The prompts carry it with the commands filled in.
+
+**Procedure** (the agent's side):
+1. `await-checks reserve --ledger <ledger> --name <name>` (a short call) prints a result file,
+   `<ledger>/checks/<name>.<n>.json`, created empty and exclusively with `n` the first free
+   number. Every run, a rerun after a fix included, reserves its own file: a path that
+   already holds a report would make the wait return the previous run's report.
+2. Start the check with the Bash tool's `run_in_background` set to true, its result path set
+   to the reserved file: `run-checks <dir> --out FILE --root <ledger> --cmd GROUP COMMAND`, or
+   `task-checks ... --evidence FILE`.
+3. `await-checks wait FILE` in the foreground with a 600000 ms timeout, again while it exits 4.
+   It prints the report as the check wrote it.
+4. Change nothing in that checkout while a check runs (no edits, commits or other checks),
+   and never end the turn while one runs.
+5. After a stop (exit 5), reserve and start once more; after a second stop do not start it
+   again and report the checks as failed, never as passed, with both outcomes the wait
+   printed.
+
+A report with `tree_changed` true (below) means the checkout changed while the checks ran: run
+them once more, with a new reserve. Rerun only once; if the checkout changed again, keep that
+result and say in the notes that the checks themselves change the checkout.
+
+**Verify** reserves with `--exact`, so its result file is the fixed `<ledger>/checks/verify-<sha>.json`
+that `scripts/check-verify` reads: reserve empties an existing file. While an earlier writer
+still holds that path's check-file lock, reserve writes nothing and prints
+`{"status": "busy", "file": PATH}` with exit 4. The agent runs `await-checks wait` on that
+path until it no longer exits 4, ignores that report, then reserves again. If the checks
+stopped twice, the verify result carries no report and the run records `verify_stopped`
+(the reason, with `verify` null), so there is no verify result to accept.
+
+**await-checks reserve** exits 0 and prints the path alone; 4 busy (`--exact` only); 2 on a
+usage error (an unsafe name, a missing ledger, a path outside the ledger or a symlink; nothing
+is written); 3 on any other error.
+
+**await-checks wait** polls every 2 s for `--max` seconds (default 540, 1-570):
+- Exit 0 or 1: the file holds a complete report (a JSON object with a boolean `ok`); stdout is
+  its line, exit 0 when `ok`, 1 when not. A report counts only once its writer is gone: wait
+  reads the file only when no writer holds the check-file lock.
+- Exit 3: an error record (an object with an `error` key, such as task-checks' own), or a file
+  that holds anything else once the writer is gone and the grace has passed.
+- Exit 4: still running at `--max`; stdout is `{"status": "running", "file": FILE,
+  "waited_s": N}`. Run the wait again.
+- Exit 5: stopped without a report. stdout is `{"status": "stopped", "file": FILE, "reason": R}`
+  with R `died` (this wait saw the lock held earlier, or a sidecar `FILE.lock` is left that no
+  one holds: the writer was killed) or `not_started` (the check never began). Every stopped
+  outcome waits for the 60 s start grace first, counted from the later of the file's
+  modification time and the start of the wait, so a slow interpreter start is not a stop.
+  `AWAIT_CHECKS_GRACE_S` replaces the 60 s; it exists for the tests only.
+- Exit 2: a usage error.
+
+**Check-file lock.** A writer (`run-checks --out`, `task-checks`) holds an OS lock on the
+sidecar `FILE.lock` (`scripts/_await.py`) from the moment the path is known until its last
+write; the lock dies with the process, so a killed writer is never mistaken for a live one.
+`task-checks` holds it for its whole run and tells `run-checks` `--lock-held`, so the two do
+not contend for it. A leftover sidecar is harmless.
+
+**tree_changed.** `run-checks` takes a content fingerprint (a sha256 over HEAD, `git diff HEAD
+--binary` and each untracked, non-ignored path with its blob sha) before the first command and
+after the last. The report's `tree_changed` is true when they differ, false when equal and
+null when a fingerprint could not be taken. The `git status` lists cannot see an edit to a file
+that is already modified or untracked; the fingerprint can. `await-checks wait` prints one
+line on stderr when it is true: `the checkout changed while the checks ran; rerun them`.
+
+**Evidence files.** `task-checks --evidence FILE` writes its evidence to the reserved FILE
+(which must be empty, directly in `<ledger>/checks` and named `task-<unit>.<n>.json`; else exit
+2 and nothing is written). An empty file, such as one reserved and never written, is never valid
+evidence: check-verify reports an empty `verify-<sha>.json` as `invalid`, audit never reads it as
+present, and autopsy counts an empty `task-*.json` as malformed and unmatched.
+
+**Autopsy** recognises a procedure by its commands: a background start of `run-checks --out F`
+or `task-checks --evidence F` with a later `await-checks wait` on a file of the same name. It
+times the execution from the archived report, not as a timeout or a background check, and
+`checks.waits` counts the executions that reserved first, the waits, the stops and the waits an
+agent improvised.
 
 ## Active-run markers and stops
 

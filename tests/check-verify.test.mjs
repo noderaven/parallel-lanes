@@ -519,3 +519,10 @@ test('the documented recovery works', () => {
   assert.equal(status.code, 0, status.stderr);
   assert.deepEqual(JSON.parse(status.stdout).accepted, [{ head, text }]);
 });
+
+test('check-verify reports an empty verify file as invalid', () => {
+  // await-checks reserve creates the file empty; a check that never wrote it leaves it so.
+  const res = check({ evidence: '' });
+  expectStatus(res, 'invalid', 'verify_invalid', 1);
+  assert.match(res.out.detail, /evidence is not readable JSON/);
+});

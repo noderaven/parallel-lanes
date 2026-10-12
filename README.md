@@ -359,7 +359,7 @@ Other things to know:
 | `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
 | `adopt.md` | Adopting earlier work from a hand-run attempt, with a worked example |
 | `run.workflow.js` | The orchestrator, built from `src/` by `scripts/build` |
-| `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, task-checks, run-checks, audit, tool-outcomes, and other helpers |
+| `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, task-checks, run-checks, await-checks, audit, tool-outcomes, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `agents/` | The `parallel-lanes-worker` agent definition |
 | `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, four files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |

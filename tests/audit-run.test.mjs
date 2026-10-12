@@ -593,3 +593,16 @@ test('open work is listed', () => {
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);
 });
+
+test('audit treats an empty verify-<sha>.json as invalid or missing, never present', () => {
+  const evidence = `${LEDGER}/checks/verify-${D}.json`;
+  const folder = makeRun({
+    launches: [launch(accepted(D))],
+    files: { [evidence]: '' },
+    mtimes: { [evidence]: START / 1000 + 60 },
+  });
+  const s = sections(folder, { real: true });
+  assert.equal(s.facts.gate, 'invalid');
+  assert.ok(['unavailable', 'missing'].includes(s.checks.gate.state), s.checks.gate.state);
+  assert.notEqual(s.facts.verdict, 'accepted');
+});
