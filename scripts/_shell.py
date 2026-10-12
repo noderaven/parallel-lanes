@@ -18,6 +18,7 @@ Linux and macOS it is the bash on PATH. Failure raises BashNotFound.
 
 native_path() gives the one path form passed between components on Windows,
 C:/... (what cygpath -m prints); elsewhere it returns its argument unchanged.
+contained() tells whether a path resolves inside a root directory.
 
 setup_io(), write_text() and write_text_atomic() keep output LF and UTF-8 on
 every platform; write_text_atomic() also replaces the file in one step.
@@ -246,6 +247,24 @@ def native_path(p, platform=None, cygpath=None):
             + ". " + _CYGPATH_HINT
         )
     return _drive_form(out) or out
+
+
+def contained(path, root):
+    """Whether path resolves inside root (or is root), following every
+    symlink or junction along the part of path that exists; a path on
+    another drive is outside."""
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        # Different drives (a junction to another drive on Windows): outside.
+        return False
 
 
 def bash_argv(*args):
