@@ -149,7 +149,7 @@ function acceptedSpec(r, o = {}) {
         { label: 'A2 implement', result: { status: 'DONE' } },
         { label: 'A2 review', result: { verdict: 'approve', findings: [] } },
         { label: 'final review superpowers', result: { head: r.a2, findings: [] } },
-        { label: 'final re-review', result: { head: r.fix, results: [] } },
+        { label: 'final re-review', result: { head: r.fix, results: [], new_findings: [] } },
       ],
       agents: [
         { label: 'A1 implement', model: 'sonnet', lines: [{ type: 'user', message: { role: 'user', content: 'do it zqprompt' } }, usage] },
