@@ -806,7 +806,10 @@ function verifyPrompt(m, sha, from = null) {
     '   with results [] and ok false.',
     `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     '3. Run the checks, as one run-checks call:',
-    ...procedureLines(m, { name: `verify-${sha}`, exact: true, start: cmd, stop }).map((l) => `   ${l}`),
+    ...procedureLines(m, {
+      name: `verify-${sha}`, exact: true, start: cmd, stop,
+      changed: 'return the JSON of that rerun as the wait printed it, with tree_changed true.',
+    }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
     phaseRules(m),

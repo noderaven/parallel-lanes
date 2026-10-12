@@ -1206,10 +1206,16 @@ function waitCommand(m) {
 // the busy case), start start (a check command carrying resultPath()) in the
 // background, wait for it, change nothing while it runs, and start once more
 // after a stop. stop (optional) says what the agent does after a second
-// stop; by default it reports the checks failed.
-function procedureLines(m, { name, exact = false, start, stop = null }) {
+// stop; by default it reports the checks failed. A run that changed the
+// checkout is rerun once only, so checks that write files into the checkout
+// cannot loop: changed (optional) says what the agent does with the rerun's
+// result when it changed the checkout again; by default it keeps that result
+// and says so in its notes.
+function procedureLines(m, { name, exact = false, start, stop = null, changed = null }) {
   const second = stop === null ? 'report the checks as failed (never as passed), with both outcomes the wait printed'
     + ' in your notes.' : stop;
+  const again = changed === null ? 'keep that result (it carries tree_changed true) and say in your notes that'
+    + ' the checks themselves change the checkout.' : changed;
   return [
     'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
     'the new path.',
@@ -1226,7 +1232,9 @@ function procedureLines(m, { name, exact = false, start, stop = null }) {
     `   ${waitCommand(m)}`,
     '   Exit 4 means the check is still running: run the wait again, as often as it takes. Exit 0 (passed), 1',
     "   (failed) or 3 (an error record) prints the check's result, its one JSON line. If the wait also says the",
-    '   checkout changed while the checks ran, run them again, starting with a new reserve.',
+    '   checkout changed while the checks ran, run them once more, starting with a new reserve. Rerun only once:',
+    '   if the checkout changed again on that rerun, do not run the checks a third time;',
+    `   ${again}`,
     '4. While a check runs, change nothing in that checkout (no edits, commits or other checks), and never finish',
     '   your turn or return your result.',
     '5. Exit 5 means the check stopped without a result: reserve and start it once more, as above. After a',
@@ -1243,7 +1251,8 @@ function longCheckRuleLines(m) {
   return [
     'Long commands: any command you expect to run longer than 9 minutes that this prompt does not already hand you',
     'as a check (a wide test filter, a long hook step) runs through run-checks, with DIR the checkout it runs in,',
-    'GROUP a label such as test, and COMMAND the command, each single-quoted.',
+    'GROUP a label such as test, and COMMAND the command, each single-quoted, writing any single quote inside',
+    "COMMAND as '\\'' (close the quotes, an escaped quote, reopen them).",
     ...procedureLines(m, { name: 'long', start }),
   ];
 }
@@ -2746,7 +2755,10 @@ function verifyPrompt(m, sha, from = null) {
     '   with results [] and ok false.',
     `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     '3. Run the checks, as one run-checks call:',
-    ...procedureLines(m, { name: `verify-${sha}`, exact: true, start: cmd, stop }).map((l) => `   ${l}`),
+    ...procedureLines(m, {
+      name: `verify-${sha}`, exact: true, start: cmd, stop,
+      changed: 'return the JSON of that rerun as the wait printed it, with tree_changed true.',
+    }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
     phaseRules(m),

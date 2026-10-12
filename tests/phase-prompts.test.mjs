@@ -211,6 +211,9 @@ test('verify reserves verify-<sha> with --exact and still writes under the ledge
     + `git -C '/work/repo' status --porcelain --untracked-files=all prints nothing, empty tracked_before, tracked_after, `
     + 'untracked_before and untracked_after lists, head = the output of'), text);
   assert.ok(text.includes('and stopped naming both outcomes the wait printed'), text);
+  // Checks that change the checkout run twice at most; verify then returns that JSON.
+  assert.ok(text.includes('do not run the checks a third time; return the JSON of that rerun as the wait printed '
+    + 'it, with tree_changed true.'), text);
 });
 
 test('the repair\'s verify (from set) also uses --exact and --descends-from', () => {

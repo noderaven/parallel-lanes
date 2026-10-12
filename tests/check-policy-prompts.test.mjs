@@ -298,7 +298,14 @@ test('procedureLines names reserve, run_in_background, wait and its exit codes 4
   ];
   assert.deepEqual(points, [...points].sort((a, b) => a - b), 'in the order of spec 4.1');
   assert.ok(text.includes('Every run, a rerun after a fix included, starts with its own reserve'), text);
-  assert.ok(text.includes('the checkout changed while the checks ran'), text);
+  assert.ok(text.includes('the checkout changed while the checks ran, run them once more, starting with a new '
+    + 'reserve. Rerun only once: if the checkout changed again on that rerun, do not run the checks a third time; '
+    + 'keep that result (it carries tree_changed true) and say in your notes that the checks themselves change the '
+    + 'checkout.'), text);
+  assert.ok(!text.includes('run them again'), text);
+  // A caller can say what a rerun that changed the checkout again returns.
+  const changed = flat(procedureLines(m, { name: 'x', start, changed: 'return CHANGED-TEXT.' }).join('\n'));
+  assert.ok(changed.includes('do not run the checks a third time; return CHANGED-TEXT.'), changed);
   // No busy handling without --exact; with it, wait on the file reserve names.
   assert.ok(!text.includes('busy'), text);
   const exact = flat(procedureLines(m, { name: 'verify-x', exact: true, start }).join('\n'));
@@ -328,6 +335,8 @@ test('the general long-command rule reaches implementers and phase agents but no
   assert.ok(text.includes(`${RESERVE}'long'`), text);
   assert.ok(text.includes("cd 'DIR' && 'python3' '/skills/parallel-lanes/scripts/run-checks' 'DIR' --out '<P>' "
     + "--root '/work/ledger' --cmd 'GROUP' 'COMMAND'"), text);
+  // A single quote inside COMMAND is written the way shellQuote escapes it.
+  assert.ok(text.includes("writing any single quote inside COMMAND as '\\''"), text);
   assert.ok(text.includes(WAIT), text);
   // It left the shared agent rules, which have no manifest.
   assert.ok(!agentRules().includes('600000'), agentRules());
