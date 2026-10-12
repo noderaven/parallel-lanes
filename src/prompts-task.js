@@ -112,13 +112,44 @@ function runChecksCommand(m, dir, checks, out = null) {
     ...evidence, ...parts].join(' ');
 }
 
-// The scripts/run-checks call for every test, lint and build command of a
-// ledger lane in dir (the setup group is not a check). null when there is no
-// check command.
-function checksCommand(m, laneId, dir, out = null) {
-  const checks = ['test', 'lint', 'build']
+// Every test, lint and build command of a ledger lane, as [{group, command}]
+// (the setup group is not a check).
+function laneChecks(m, laneId) {
+  return ['test', 'lint', 'build']
     .flatMap((group) => commandGroup(m, laneId, group).map((command) => ({ group, command })));
-  return runChecksCommand(m, dir, checks, out);
+}
+
+// The checks a widened task runs (spec 4.2): the project's test, lint and
+// build commands in group order, then, for a real lane only, that lane's
+// lane_commands commands not already listed: finalChecks restricted to the
+// project and one lane.
+function wideChecks(m, laneId) {
+  const out = [];
+  for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
+  if ((m.lanes || []).some((l) => l.id === laneId)) {
+    for (const group of ['test', 'lint', 'build']) {
+      for (const command of commandGroup(m, laneId, group)) {
+        if (!out.some((c) => c.group === group && c.command === command)) out.push({ group, command });
+      }
+    }
+  }
+  return out;
+}
+
+// The scripts/run-checks call for every test, lint and build command of a
+// ledger lane in dir. null when there is no check command.
+function checksCommand(m, laneId, dir, out = null) {
+  return runChecksCommand(m, dir, laneChecks(m, laneId), out);
+}
+
+// What an agent handed a run-checks call without --out is told about its
+// output and logs.
+function checksLogLines() {
+  return [
+    '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+    '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+    '  (the log\'s parent) once you have read what you need.',
+  ];
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
@@ -128,11 +159,66 @@ function commandsText(m, laneId, dir = null) {
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
     lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
-      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
-      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
-      '  (the log\'s parent) once you have read what you need.');
+      ...checksLogLines());
   }
   return lines.join('\n');
+}
+
+// The scripts/task-checks call a task's implementer runs once before
+// committing (spec 4.2, 4.3), in where.dir for the unit's range from base;
+// null when the ledger lane has no test, lint or build command.
+function taskChecksCommand(m, task, where, base) {
+  const lane = laneChecks(m, where.lane);
+  if (lane.length === 0) return null;
+  const q = shellQuote;
+  const pairs = (flag, checks) => checks.flatMap((c) => [flag, q(c.group), q(c.command)]);
+  const entry = taskChecksEntry(m, task, where.lane);
+  return [
+    `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
+    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--lane', q(where.lane),
+    ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
+    ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
+    ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
+    ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
+    ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
+    ...pairs('--lane-cmd', lane),
+    ...pairs('--wide-cmd', wideChecks(m, where.lane)),
+  ].join(' ');
+}
+
+// The implementer's task-checks instructions (spec 4.3); [] when there is no
+// task-checks call.
+function taskChecksLines(m, task, where, base) {
+  const cmd = taskChecksCommand(m, task, where, base);
+  if (cmd === null) return [];
+  return [
+    'Task checks. Before you commit, run the task checks once, as one call. This replaces the full-suite run the',
+    "instructions above ask for, and the test-driven-development skill's rule that your verification is the whole",
+    'project suite. The full project checks run at integration and at delivery.',
+    `  ${cmd}`,
+    'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
+    'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
+    'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
+    'targeted checks do not cover (a shared contract, configuration, generated or ignored inputs, or a dependency',
+    "that is not a direct import), add --force-full '<why>' to the call. If the targeted checks fail because of the",
+    "list itself (a missing file, a selection that matches no test), rerun with --force-full 'targeted list invalid:",
+    "<what>'.",
+    ...(isBatch(task) ? ['This is a batch: run the call once, before the last commit of the batch; earlier commits use',
+      'focused tests.'] : []),
+    "It prints one JSON line; each command's full output is in the file its result names as log, kept with the run's",
+    'evidence: read the log instead of rerunning a command, and leave the file in place.',
+  ];
+}
+
+// The line that points a reviewer at the unit's task-check evidence (spec
+// 4.3). Files are task-<unit id>.<n>.json: the '.' after the id keeps a
+// batch id (T2-T3) apart from its first task's (T2).
+function taskEvidenceLine(m, task) {
+  return [
+    `Task-check evidence for this unit: ${m.repo.ledger_dir}/checks/task-${task.id}.<n>.json (n = 1, 2, ...);`,
+    'each records its selection (policy.selected) and reasons. Do not rerun the checks. Report a wrong selection',
+    'as a finding (for example targeted checks on a change that clearly reaches another lane).',
+  ].join('\n');
 }
 
 // One line per finding; a finding that shares its location with other
@@ -226,7 +312,8 @@ function fixMessagesLines() {
   return [
     'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
     '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
-    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    `the final fix \`${finalFixMessage()}\`, the post-integration fix \`${postIntegrateFixMessage()}\`, and a`,
+    `repair after a failing verify \`${repairFixMessage()}\`.`,
     'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
     'with `chore: continue Task <id>`.',
     "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
@@ -279,8 +366,8 @@ function taskContext(m, task, where, guidance = null) {
       : `Amendment to the task brief for this run (it overrides the brief where they differ): ${a}`)),
     `Implementer report file: ${files.report}`,
     '',
-    'Project commands (run from the worktree):',
-    commandsText(m, where.lane, where.dir),
+    'Project commands (run from the worktree; the full set runs at integration and delivery):',
+    commandsText(m, where.lane),
     '',
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'Never commit anything under .superpowers/.',
@@ -298,10 +385,19 @@ function fallbackImplementer() {
   return [
     'Built-in instructions (superpowers not found):',
     'Implement exactly what the task brief specifies, nothing more. Follow test-driven development: write the',
-    'failing tests first, run them and see them fail, implement, then run the full project test suite and make',
-    'it pass. Commit with the commit rules below. Write your report (what you built, tests and their output,',
-    'files changed, concerns) to the implementer report file. If anything is unclear or you cannot finish,',
-    'report blocked with the specifics instead of guessing.',
+    'failing tests first, run them and see them fail, implement, then run the task checks command once before',
+    'committing and make it pass. Commit with the commit rules below. Write your report (what you built, tests and',
+    'their output, files changed, concerns) to the implementer report file. If anything is unclear or you cannot',
+    'finish, report blocked with the specifics instead of guessing.',
+  ].join('\n');
+}
+
+function fallbackFixer() {
+  return [
+    'Built-in instructions (superpowers not found):',
+    'Fix exactly the findings listed below, nothing more. Rerun the tests that cover the amended code, commit with',
+    'the commit rules below, and append a fix report (what changed, covering tests, command, output) to the',
+    'implementer report file. If you cannot fix a finding, report blocked with the specifics instead of guessing.',
   ].join('\n');
 }
 
@@ -564,6 +660,8 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
         ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
+  const checks = taskChecksLines(m, task, where, base);
+  if (checks.length > 0) parts.push('', checks.join('\n'));
   parts.push('', [
     finishText(batch, `every commit since the ${noun} base`),
     `  ${finishCommand(m, task, where, base)}`,
@@ -612,6 +710,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     ...scopeLines(task),
+    taskEvidenceLine(m, task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -631,15 +730,17 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     `You are fixing review findings for ${unitName(task)}`,
     ...batchLines(task),
     '',
-    sdd === null ? fallbackImplementer() : [
+    sdd === null ? fallbackFixer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
     ...reopenLines(m, task, where, reopen),
-    `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
-    `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, commit on top of it, and append a fix report (what changed,`,
+    `covering tests, command, output) to ${files.report}.`,
+    'Rerun the tests that cover the amended code; do not run the task checks or the full suite: the re-review',
+    'judges the fix, and integration and verify run the full checks.',
     commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
@@ -683,6 +784,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     ...scopeLines(task),
+    taskEvidenceLine(m, task),
     '',
     taskContext(m, task, where, guidance),
     '',
