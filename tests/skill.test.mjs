@@ -622,3 +622,44 @@ test('reference.md documents the audit', () => {
 test('README names audit among the scripts', () => {
   assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\baudit\b/);
 });
+
+// ---- 1.6.0 check policy (spec 4.12) ----
+
+test('the relaunch recomputes the ledger state before setup', () => {
+  const relaunch = section(read(SKILL_MD).toString('utf8'), 'Transient stops');
+  const recompute = relaunch.indexOf('recompute `done`');
+  const setup = relaunch.indexOf('scripts/setup --owner');
+  assert.ok(recompute >= 0 && setup >= 0 && recompute < setup, relaunch);
+  assert.ok(relaunch.includes('repairs_spent'), relaunch);
+  assert.ok(relaunch.includes('setup_skipped'), relaunch);
+});
+
+test('reference.md documents the check policy fields', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const fields = section(ref, 'Manifest fields');
+  for (const word of ['`task_checks`', '`widen_paths`', '`repairs_spent`', 'setup_skipped']) {
+    assert.ok(fields.includes(word), `Manifest fields lacks ${word}`);
+  }
+  const ownership = section(ref, 'Check ownership');
+  for (const word of ['task-checks', 'targeted', 'widened', '--force-full', 'repair', '--descends-from', 'repairReserve',
+    'new_findings', 'setup_skipped', 'status.showUntrackedFiles']) {
+    assert.ok(ownership.includes(word), `Check ownership lacks ${word}`);
+  }
+  assert.ok(flat(REFERENCE_MD).includes('changes to shared files will not widen task checks'), 'the widen warning');
+  const budgets = section(ref, 'Budgets');
+  assert.ok(budgets.includes('repairs_spent'), budgets);
+  const autopsy = section(ref, 'Autopsy');
+  for (const word of ['task_check_calls', 'project_test_runs', 'check calls with a test group']) {
+    assert.ok(autopsy.includes(word), `Autopsy lacks ${word}`);
+  }
+});
+
+test('SKILL.md lists checks among the dry-run fields and points to the check policy fields', () => {
+  const skill = flat(SKILL_MD);
+  assert.ok(skill.includes('`{dry_run, errors, agents, lanes_effective, notices, checks}`'), 'dry-run fields');
+  assert.ok(skill.includes('`task_checks`') && skill.includes('`widen_paths`'), 'manifest step');
+});
+
+test('README names task-checks among the scripts', () => {
+  assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\btask-checks\b/);
+});
