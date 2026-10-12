@@ -56,10 +56,10 @@ const W = 'node t.mjs W';
 
 // Runs task-checks with unit U1 (task U1), the given extra arguments, and the
 // lane and wide lists; entry: true adds --entry U1 --targeted test T.
-function run(r, { entry = true, args = [], unit = 'U1', tasks = [unit] } = {}) {
-  const argv = [SCRIPT, r.dir, '--base', r.base, '--ledger', r.ledger, '--unit', unit, '--lane', 'alpha',
+function run(r, { entry = true, args = [], unit = 'U1', tasks = [unit], lane = 'alpha', entryId = null } = {}) {
+  const argv = [SCRIPT, r.dir, '--base', r.base, '--ledger', r.ledger, '--unit', unit, '--lane', lane,
     ...tasks.flatMap((t) => ['--task', t]),
-    ...(entry ? ['--entry', tasks[tasks.length - 1], '--targeted', 'test', T] : []),
+    ...(entry ? ['--entry', entryId || tasks[tasks.length - 1], '--targeted', 'test', T] : []),
     '--lane-cmd', 'test', L, '--wide-cmd', 'test', W, '--project-test', W, ...args];
   const res = spawnSync('python3', argv, { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
   let json = null;
@@ -293,6 +293,58 @@ test('run-checks giving no JSON yields an error record and exit 3', () => {
   assert.deepEqual(codes(json), ['git_failed']);
   const saved = JSON.parse(readFileSync(join(r.ledger, 'checks', 'task-U1.1.json'), 'utf8'));
   assert.equal(saved.error, json.error);
+});
+
+// ---- review fixes (T1 review, 2026-10-11) ----
+
+test('no entry plus a widening reason stays lane, with both reasons', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'new.js'), 'x\n');
+  const { json } = run(r, { entry: false, args: ['--declared', 'src/a.js'] });
+  assert.equal(json.policy.selected, 'lane');
+  assert.deepEqual(codes(json), ['no_entry', 'outside_files']);
+  assert.deepEqual(ran(json), [L]);
+});
+
+test('an unsafe lane or entry alone is refused with exit 2', () => {
+  const r = repo();
+  assert.equal(run(r, { lane: '../x' }).status, 2);
+  assert.equal(run(r, { entryId: 'a/b' }).status, 2);
+  assert.ok(!existsSync(join(r.ledger, 'checks')));
+});
+
+test('a base that is not a sha is a usage error and runs no git', () => {
+  const r = repo();
+  const injected = join(TMP, `injected ${counter}.txt`);
+  const res = run({ ...r, base: `--output=${injected}` });
+  assert.equal(res.status, 2, res.stderr);
+  assert.ok(!existsSync(injected));
+  assert.ok(!existsSync(join(r.ledger, 'checks')));
+});
+
+test('an unexpected error exits 3, never 1', () => {
+  const r = repo();
+  const file = join(TMP, `ledger-file ${counter}`);
+  writeFileSync(file, 'not a directory');
+  const res = run({ ...r, ledger: file }, { args: ['--declared', 't.mjs'] });
+  assert.equal(res.status, 3, `${res.status}: ${res.stderr}`);
+});
+
+test('a git path with a backslash is never covered', { skip: IS_WINDOWS && 'Windows file names cannot hold a backslash' }, () => {
+  const r = repo();
+  writeFileSync(join(r.dir, 'src\\x.js'), 'x\n');
+  const { json } = run(r, { args: ['--declared', 'src/', '--declared', 'src/x.js'] });
+  assert.deepEqual(codes(json), ['outside_files']);
+  assert.equal(json.policy.selected, 'widened');
+});
+
+test('an error record carries policy.started', () => {
+  const r = repo();
+  const notRepo = join(TMP, `not-a-repo ${counter}`);
+  mkdirSync(notRepo, { recursive: true });
+  const { status, json } = run({ ...r, dir: notRepo }, { args: ['--declared', 'x.js'] });
+  assert.equal(status, 3);
+  assert.match(json.policy.started, /Z$/);
 });
 
 test('an evidence path outside the ledger exits 3 and writes nothing outside', { skip: !SYMLINKS && 'symlinks unavailable' }, () => {

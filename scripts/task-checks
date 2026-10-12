@@ -56,9 +56,14 @@ accept, skip or reuse checks: it is a record and a count.
 UNIT_ID, LANE and every --task and --entry id must match
 ^[A-Za-z0-9_][A-Za-z0-9._-]*$.
 
-Exit: run-checks' exit when it printed JSON (0 every check passed, 1 a check
-failed); 2 on a usage error (nothing is written); 3 when the evidence path is
-outside LEDGER_DIR, or run-checks printed no JSON.
+BASE must be a commit sha (7 to 40 lowercase hex digits).
+
+Exit: run-checks' exit when it printed JSON and exited 0 or 1 (0 every check
+passed, 1 a check failed); 2 on a usage error (nothing is written); 3 when
+the evidence path is outside LEDGER_DIR, run-checks printed no JSON or
+exited with another code, or any unexpected error happened (an error record
+is written to the reserved evidence file when there is one). Exit 1 always
+means a check failed.
 """
 
 import json
@@ -79,6 +84,7 @@ GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 SAFE_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+SHA = re.compile(r"^[0-9a-f]{7,40}$")
 ERROR_TAIL = 2000
 USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
          "--task ID [...] [--declared PATH ...] [--widen PATH ...] [--project-test CMD ...] "
@@ -144,6 +150,8 @@ def parse(argv):
         fail(2, "--lane-cmd and --wide-cmd are required")
     if (args["entry"] is None) != (not args["targeted"]):
         fail(2, "--entry and --targeted come together")
+    if not SHA.match(args["base"]):
+        fail(2, f"--base {args['base']!r} is not a commit sha")
     for value in [args["unit"], args["lane"], *args["tasks"]] + ([args["entry"]] if args["entry"] else []):
         if not SAFE_ID.match(value):
             fail(2, f"unsafe id {value!r}")
@@ -178,7 +186,12 @@ def changed_paths(directory, base):
 
 
 def covered(path, entries):
-    norm = posixpath.normpath(path.replace("\\", "/"))
+    # git always prints '/' separators: a '\' in a changed path is part of a
+    # file name (possible on POSIX), never a separator, so such a path is not
+    # covered (widened when in doubt).
+    if "\\" in path:
+        return False
+    norm = posixpath.normpath(path)
     for entry, is_dir in entries:
         if norm == entry or (is_dir and (entry == "." or norm.startswith(entry + "/"))):
             return True
@@ -217,7 +230,11 @@ def contained(path, root):
         head, name = os.path.split(head)
         tail.insert(0, name)
     resolved = os.path.join(os.path.realpath(head), *tail)
-    return os.path.commonpath([resolved, root]) == root
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        # Different drives (a junction to another drive on Windows): outside.
+        return False
 
 
 def reserve(ledger, unit):
@@ -246,7 +263,28 @@ def save(path, data):
 
 
 def main(argv):
+    """run, with any unexpected error (git missing, cygpath missing, an
+    unwritable ledger) ending in exit 3, never 1, which means a check failed:
+    an error record is written to the reserved evidence file when there is
+    one."""
     _shell.setup_io()
+    state = {"out": None, "policy": None}
+    try:
+        run(argv, state)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 - every failure must exit 3
+        message = f"{type(e).__name__}: {e}"
+        if state["out"] is not None:
+            try:
+                save(state["out"], {"results": [], "ok": False, "error": message[-ERROR_TAIL:],
+                                    "policy": state["policy"]})
+            except Exception:  # noqa: BLE001 - the exit code matters more than the record
+                pass
+        fail(3, message)
+
+
+def run(argv, state):
     started = utc_stamp()
     args = parse(argv)
     changed = changed_paths(args["dir"], args["base"])
@@ -261,7 +299,9 @@ def main(argv):
                     "lane": as_list(args["lane_cmds"]), "wide": as_list(args["wide_cmds"])},
         "project_test_executed": False,
     }
+    state["policy"] = policy
     out = reserve(args["ledger"], args["unit"])
+    state["out"] = out
     cmd = [sys.executable, os.path.join(HERE, "run-checks"), args["dir"], "--out", out, "--root", args["ledger"]]
     for group, command in chosen:
         cmd += ["--cmd", group, command]
