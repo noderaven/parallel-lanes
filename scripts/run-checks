@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run a checkout's project commands one by one and keep every exit status.
 
-usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd ...]
+usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA]
+                  [--lock-held] --cmd GROUP COMMAND [--cmd ...]
 
 Each COMMAND runs with bash -c in DIR (the bash _shell.find_bash resolves:
 Git Bash on Windows, never the WSL launcher), in the given order, and every
@@ -34,7 +35,17 @@ without --out):
    "untracked_before": [<the before snapshot's lines that start with "?? ":
                          every untracked file that is not ignored; [] when
                          none>],
-   "untracked_after": [<the same from the after snapshot; [] when none>]}
+   "untracked_after": [<the same from the after snapshot; [] when none>],
+   "tree_changed": <true when the content fingerprints taken before the
+                    first command and after the last differ, false when
+                    they are equal, null when either could not be taken>}
+
+The fingerprint (fingerprint below) is a sha256 over HEAD, the output of
+git diff HEAD --binary --no-ext-diff --no-textconv, and each untracked,
+non-ignored path with its blob sha. It sees what the snapshots cannot: an
+edit to a file that is already modified or untracked leaves the porcelain
+lines as they were, but changes tree_changed. Any git call that fails makes
+the fingerprint, and so tree_changed, null.
 
 The snapshots are git status --porcelain --untracked-files=all, taken once
 before the first command and once after the last: two status calls per run
@@ -53,24 +64,47 @@ change the code it checks).
 command, git merge-base --is-ancestor SHA HEAD runs. When SHA is an ancestor
 of HEAD the JSON gains "descends_from": {"sha": SHA, "ok": true} and the
 commands run. Otherwise no command runs: the JSON has every field above with
-"results": [], "ok": false, the after lists equal to the before ones, and
-"descends_from": {"sha": SHA, "ok": false}; it is written to FILE as usual and
+"results": [], "ok": false, the after lists equal to the before ones,
+"tree_changed": false, and "descends_from": {"sha": SHA, "ok": false}; it is
+written to FILE as usual and
 run-checks exits 1. The verify step uses it to accept a repair's head only
 when it descends from the revision the repair started at.
 
 On Windows DIR, FILE and ROOT may be given in any form (C:\\x, /c/x, /tmp/x)
 and are used, like each log path, in the C:/... form. FILE is written as UTF-8 with LF line
-endings.
+endings, in one step (_shell.write_text_atomic: a temp file beside FILE, then
+a replace), so a reader sees FILE's old contents or the whole report, never
+part of it.
+
+The check-file lock (_await): with --out, once FILE is validated (inside
+ROOT and not a symlink, when --root is given), run-checks holds
+_await.hold(FILE), an OS lock on the sidecar FILE.lock, until the report is
+written; then it releases the lock and deletes the sidecar. A waiter
+(await-checks wait) reads a free lock while FILE is still empty as a writer
+that is gone. A lock another process keeps for 5 s is an error (exit 3).
+
+Error records: from the moment FILE is validated, every failure writes
+{"results": [], "ok": false, "error": <the message>} to FILE (in one step)
+before run-checks exits with its usual code: not a checkout, no bash, a log
+outside ROOT, the lock not taken, and an unexpected exception (written, then
+raised as before). A usage error or a FILE that fails its own validation
+writes nothing.
+
+--lock-held is internal: task-checks, which holds FILE's lock itself and
+writes FILE's error records, passes it. With it run-checks takes no lock and
+writes no error record, but still writes the report to FILE.
 
 GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and
 GIT_COMMON_DIR are removed from the environment.
 
 Exit 0 when ok; 1 when a command failed or moved HEAD; 2 on usage error; 3
 when DIR is not a git checkout, FILE or a log is outside ROOT (or is a
-symlink), or no bash can be found
+symlink), FILE's lock cannot be taken, or no bash can be found
 (the message names CLAUDE_CODE_GIT_BASH_PATH; no command runs).
 """
 
+import contextlib
+import hashlib
 import io
 import json
 import os
@@ -83,6 +117,7 @@ from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _await  # noqa: E402
 import _shell  # noqa: E402
 
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -93,11 +128,26 @@ TAIL_CHARS = 4096
 TAIL_WINDOW = 65536  # bytes read from the end of a log for its tail
 TRUNCATED = "[truncated] "
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
-USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] "
+USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] [--lock-held] "
          "--cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+
+# Where fail writes its error record: FILE once it is validated, unless
+# --lock-held says the caller writes FILE's records; None before that.
+_record = None
+
+
+def write_record(message):
+    """Write the error record {"results": [], "ok": false, "error": message}
+    to _record (when set), atomically. A failed write is ignored: the caller
+    exits with its own code anyway."""
+    if _record is not None:
+        line = json.dumps({"results": [], "ok": False, "error": message})
+        with contextlib.suppress(OSError):
+            _shell.write_text_atomic(_record, line + "\n")
 
 
 def fail(code, message):
+    write_record(message)
     print(f"run-checks: {message}", file=sys.stderr)
     sys.exit(code)
 
@@ -107,27 +157,20 @@ def git(directory, *args):
                           errors="surrogateescape", env=ENV)
 
 
-def contained(path, root):
-    root = os.path.realpath(root)
-    path = os.path.abspath(path)
-    head, tail = path, []
-    while not os.path.lexists(head) and head != os.path.dirname(head):
-        head, name = os.path.split(head)
-        tail.insert(0, name)
-    resolved = os.path.join(os.path.realpath(head), *tail)
-    return os.path.commonpath([resolved, root]) == root
-
-
 def parse(argv):
     if not argv or not argv[0] or argv[0].startswith("-"):
         fail(2, USAGE)
     directory, rest = _shell.native_path(argv[0]), argv[1:]
     out = root = descends = None
+    lock_held = False
     cmds = []
     while rest:
         if rest[0] == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
             cmds.append((rest[1], rest[2]))
             rest = rest[3:]
+        elif rest[0] == "--lock-held":
+            lock_held = True
+            rest = rest[1:]
         elif rest[0] in ("--out", "--root") and len(rest) >= 2 and rest[1]:
             if rest[0] == "--out":
                 out = _shell.native_path(rest[1])
@@ -139,7 +182,7 @@ def parse(argv):
             rest = rest[2:]
         else:
             fail(2, USAGE)
-    return directory, out, root, cmds, descends
+    return directory, out, root, cmds, descends, lock_held
 
 
 def head_of(directory):
@@ -190,6 +233,83 @@ def descends_from(directory, sha):
     return git(directory, "merge-base", "--is-ancestor", sha, "HEAD").returncode == 0
 
 
+def _git_bytes(directory, *args, **kwargs):
+    """git -C directory args with byte output; stderr is dropped."""
+    return subprocess.run(["git", "-C", directory, *args], stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, env=ENV, **kwargs)
+
+
+def fingerprint(directory):
+    """A sha256 hex digest of the checkout's content beyond what HEAD holds,
+    or None when any git call fails. It hashes, in order:
+      - "HEAD\\n<head sha>\\n";
+      - the stdout of git diff HEAD --binary --no-ext-diff --no-textconv,
+        streamed, never held in memory whole;
+      - for each untracked, non-ignored path (git ls-files --others
+        --exclude-standard -z, sorted), path + "\\0" + its blob sha + "\\n",
+        the shas from one git hash-object --stdin-paths fed the list. Two
+        kinds of path hash-object cannot hash (it fails on them, which
+        would make every fingerprint of the tree None) are kept out of
+        that list: a path ending in "/" (an untracked nested repository)
+        adds path + "\\0\\n", and a symlink or junction (dangling, or to a
+        directory) adds path + "\\0link " + its target + "\\n".
+    The porcelain snapshots miss an edit to a file that is already modified
+    or untracked; this does not."""
+    digest = hashlib.sha256()
+    try:
+        head = _git_bytes(directory, "rev-parse", "--verify", "HEAD^{commit}")
+        if head.returncode != 0:
+            return None
+        digest.update(b"HEAD\n" + head.stdout.strip() + b"\n")
+        diff = subprocess.Popen(["git", "-C", directory, "diff", "HEAD", "--binary", "--no-ext-diff",
+                                 "--no-textconv"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=ENV)
+        with diff:
+            for chunk in iter(lambda: diff.stdout.read(65536), b""):
+                digest.update(chunk)
+        if diff.returncode != 0:
+            return None
+        others = _git_bytes(directory, "ls-files", "--others", "--exclude-standard", "-z")
+        if others.returncode != 0:
+            return None
+        paths = sorted(p for p in others.stdout.split(b"\0") if p)
+        base = os.fsencode(directory)
+        links, files = {}, []
+        for path in paths:
+            if path.endswith(b"/"):
+                continue
+            try:
+                links[path] = os.readlink(os.path.join(base, path))
+            except (OSError, ValueError):
+                files.append(path)
+        shas = []
+        if files:
+            # One path per line: a name holding a newline cannot be fed, and
+            # makes hash-object fail or the count differ, so None.
+            hashed = _git_bytes(directory, "hash-object", "--stdin-paths", input=b"\n".join(files) + b"\n")
+            shas = hashed.stdout.split()
+            if hashed.returncode != 0 or len(shas) != len(files):
+                return None
+    except OSError:
+        return None
+    blobs = iter(shas)
+    for path in paths:
+        if path.endswith(b"/"):
+            digest.update(path + b"\0\n")
+        elif path in links:
+            digest.update(path + b"\0link " + links[path] + b"\n")
+        else:
+            digest.update(path + b"\0" + next(blobs) + b"\n")
+    return digest.hexdigest()
+
+
+def tree_changed(before, after):
+    """Whether the fingerprints before and after differ; None when either is
+    None (one of them could not be taken)."""
+    if before is None or after is None:
+        return None
+    return before != after
+
+
 def log_paths(out, count):
     """The absolute log path of each of count commands, beside out when given."""
     if count == 0:
@@ -229,16 +349,34 @@ def tail_of(path):
 
 
 def main(argv):
+    global _record
     _shell.setup_io()
-    try:
-        run(*parse(argv))
-    except _shell.BashNotFound as e:
-        fail(3, str(e))
+    directory, out, root, cmds, descends, lock_held = parse(argv)
+    if out is not None and root is not None and (os.path.islink(out) or not _shell.contained(out, root)):
+        fail(3, f"output path {out!r} is outside {root!r}")
+    with contextlib.ExitStack() as stack:
+        if out is not None and not lock_held:
+            # FILE is valid: from here every failure leaves its error record
+            # there, and the lock is held until the report is written.
+            _record = out
+            try:
+                parent = os.path.dirname(out)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                stack.enter_context(_await.hold(out))
+            except OSError as e:
+                fail(3, f"cannot lock {out!r}: {e}")
+        try:
+            run(directory, out, root, cmds, descends)
+        except _shell.BashNotFound as e:
+            fail(3, str(e))
+        except Exception as e:
+            write_record(f"internal error: {type(e).__name__}: {e}")
+            raise
 
 
 def run(directory, out, root, cmds, descends=None):
-    if out is not None and root is not None and (os.path.islink(out) or not contained(out, root)):
-        fail(3, f"output path {out!r} is outside {root!r}")
+    """The checks themselves; main has validated out against root."""
     if cmds:
         # Found before anything runs: a missing bash fails no check halfway.
         _shell.find_bash()
@@ -248,7 +386,7 @@ def run(directory, out, root, cmds, descends=None):
     if out is not None and root is not None:
         # Beside FILE; without --out they are in a new temporary directory.
         for log in logs:
-            if os.path.islink(log) or not contained(log, root):
+            if os.path.islink(log) or not _shell.contained(log, root):
                 fail(3, f"log path {log!r} is outside {root!r}")
     before = snapshot(directory)
     tracked_before = tracked_lines(directory, before)
@@ -261,8 +399,9 @@ def run(directory, out, root, cmds, descends=None):
                       "clean": not before,
                       "tracked_before": tracked_before, "tracked_after": tracked_before,
                       "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(before),
-                      "descends_from": lineage}
+                      "tree_changed": False, "descends_from": lineage}
             emit(report, out)
+    fingerprint_before = fingerprint(directory)
     results = []
     for (group, command), log in zip(cmds, logs):
         with open(log, "wb") as f:
@@ -273,13 +412,15 @@ def run(directory, out, root, cmds, descends=None):
         results.append({"group": group, "command": command, "exit": res.returncode,
                         "started": started, "ended": ended, "duration_s": round(duration, 3),
                         "log": log, "tail": tail_of(log)})
+    fingerprint_after = fingerprint(directory)
     finish = snapshot(directory)
     tracked_after = tracked_lines(directory, finish)
     after = head_of(directory)
     report = {"checkout": directory, "branch": branch, "head": head, "results": results,
               "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": not finish,
               "tracked_before": tracked_before, "tracked_after": tracked_after,
-              "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(finish)}
+              "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(finish),
+              "tree_changed": tree_changed(fingerprint_before, fingerprint_after)}
     if after != head:
         report["head_after"] = after
     if lineage is not None:
@@ -288,14 +429,14 @@ def run(directory, out, root, cmds, descends=None):
 
 
 def emit(report, out):
-    """Write report to out (when given), print it as one line, and exit 0 when
-    it is ok, else 1."""
+    """Write report to out (when given) in one step, print it as one line, and
+    exit 0 when it is ok, else 1."""
     line = json.dumps(report)
     if out is not None:
         parent = os.path.dirname(out)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        _shell.write_text(out, line + "\n")
+        _shell.write_text_atomic(out, line + "\n")
     print(line)
     sys.exit(0 if report["ok"] else 1)
 

@@ -18,8 +18,10 @@ Linux and macOS it is the bash on PATH. Failure raises BashNotFound.
 
 native_path() gives the one path form passed between components on Windows,
 C:/... (what cygpath -m prints); elsewhere it returns its argument unchanged.
+contained() tells whether a path resolves inside a root directory.
 
-setup_io() and write_text() keep output LF and UTF-8 on every platform.
+setup_io(), write_text() and write_text_atomic() keep output LF and UTF-8 on
+every platform; write_text_atomic() also replaces the file in one step.
 
 result_paths() lists where a launch's workflow result file may be.
 """
@@ -29,6 +31,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 VARIABLE = "CLAUDE_CODE_GIT_BASH_PATH"
 # The file names Claude Code accepts for CLAUDE_CODE_GIT_BASH_PATH.
@@ -245,6 +249,24 @@ def native_path(p, platform=None, cygpath=None):
     return _drive_form(out) or out
 
 
+def contained(path, root):
+    """Whether path resolves inside root (or is root), following every
+    symlink or junction along the part of path that exists; a path on
+    another drive is outside."""
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        # Different drives (a junction to another drive on Windows): outside.
+        return False
+
+
 def bash_argv(*args):
     """[find_bash(), *args]: an argument list that starts the right bash."""
     return [find_bash()] + list(args)
@@ -262,6 +284,43 @@ def write_text(path, text):
     """Write text to path as UTF-8 with LF line endings."""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
+
+
+# How write_text_atomic retries a replace Windows refuses while a reader has
+# the file open: every _REPLACE_RETRY_S seconds for up to _REPLACE_WAIT_S.
+_REPLACE_RETRY_S = 0.05
+_REPLACE_WAIT_S = 2
+
+
+def write_text_atomic(path, text):
+    """Write text to path as UTF-8 with LF line endings, atomically: a reader
+    sees the old contents or the new, never part of them.
+
+    The text goes to a temp file in path's directory, which then replaces
+    path (os.replace). On Windows the replace fails with PermissionError
+    while another process has path open; it is retried every 0.05 s for up
+    to 2 s, then the error is raised. The temp file never outlives a
+    failure."""
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        deadline = time.monotonic() + _REPLACE_WAIT_S
+        while True:
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if not _is_windows(sys.platform) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(_REPLACE_RETRY_S)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def sibling_result_path(transcript_dir):
