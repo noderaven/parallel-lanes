@@ -6,7 +6,7 @@ usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE
                    [--project-test CMD ...]
                    [--entry TASK_ID --targeted GROUP CMD [--targeted GROUP CMD ...]]
                    --lane-cmd GROUP CMD [...] --wide-cmd GROUP CMD [...]
-                   [--force-full REASON]
+                   [--force-full REASON] [--evidence PATH]
 
 Options come in any order. The workflow builds the call (spec 4.2 of the
 1.6.0 check policy); the task's implementer runs it once before committing.
@@ -36,19 +36,40 @@ case-insensitive filesystem a case mismatch only widens. A --declared or
 --widen value that is absolute or leaves the project after normalizing is a
 usage error.
 
-The chosen list runs through run-checks (DIR --out FILE --root LEDGER_DIR).
-FILE is LEDGER_DIR/checks/task-<UNIT_ID>.<n>.json, n the first number from 1
-whose file can be created exclusively; it must resolve inside LEDGER_DIR.
-run-checks writes its JSON there and its logs beside it; this helper adds
-policy:
+The chosen list runs through run-checks (DIR --out FILE --root LEDGER_DIR
+--lock-held). FILE, the result file, is:
+  - with --evidence PATH: PATH, reserved beforehand by await-checks reserve
+    --ledger LEDGER_DIR --name task-<UNIT_ID>. Argv is read in full, then
+    PATH is checked before any other usage check: --ledger and a safe
+    --unit must be given, and PATH (any form on Windows, used in the C:/...
+    form) must lie directly in LEDGER_DIR/checks, resolve inside
+    LEDGER_DIR, be an existing regular file (not a symlink) of size 0, and
+    be named task-<UNIT_ID>.<n>.json (n from 1, no leading zero).
+    Otherwise exit 2 with nothing written.
+  - without it: LEDGER_DIR/checks/task-<UNIT_ID>.<n>.json, n the first
+    number from 1 whose file can be created exclusively; it must resolve
+    inside LEDGER_DIR (1.6.0's reservation, for a manual call).
+This helper holds FILE's check-file lock (_await.hold: an OS lock on the
+sidecar FILE.lock) from the moment FILE is known until its last write, so
+run-checks, told --lock-held, takes none, and a waiter (await-checks wait)
+never takes run-checks' report, written before policy is added, for the
+result. run-checks writes its JSON to FILE and its logs beside it; this
+helper adds policy:
   {unit, tasks, lane, base, started, entry, selected, reasons, changed,
    offered: {targeted, lane, wide}, project_test_executed}
 started is the UTC time this helper began (ISO 8601, milliseconds, Z);
 project_test_executed is true when an executed command equals a
---project-test value. The file is rewritten (temporary file, then replace)
-and printed as one JSON line. When run-checks prints no JSON (a crash, or
-its exit 3), the file holds {"results": [], "ok": false, "error": <its
-stderr tail>, "policy": ...}, printed too.
+--project-test value. The file is rewritten in one step
+(_shell.write_text_atomic) and printed as one JSON line. When run-checks
+prints no JSON (a crash, or its exit 3), the file holds {"results": [],
+"ok": false, "error": <its stderr tail>, "policy": ...}, printed too.
+
+Error records: once FILE is known (a valid --evidence PATH, or the reserved
+file), every later failure writes {"results": [], "ok": false, "error":
+<message>, "policy": <the policy, or null when not yet built>} to FILE before
+the exit: a usage error after a valid --evidence (exit 2), the lock not
+taken within 5 s, or an unexpected error (exit 3). A background run's output
+is invisible to the agent that started it; the record says why it ended.
 
 This evidence covers a working tree before a commit. Nothing reads it to
 accept, skip or reuse checks: it is a record and a count.
@@ -59,25 +80,27 @@ UNIT_ID, LANE and every --task and --entry id must match
 BASE must be a commit sha (7 to 40 lowercase hex digits).
 
 Exit: run-checks' exit when it printed JSON and exited 0 or 1 (0 every check
-passed, 1 a check failed); 2 on a usage error (nothing is written); 3 when
-the evidence path is outside LEDGER_DIR, run-checks printed no JSON or
-exited with another code, or any unexpected error happened (an error record
-is written to the reserved evidence file when there is one). Exit 1 always
-means a check failed.
+passed, 1 a check failed); 2 on a usage error (nothing is written, except
+the error record after a valid --evidence); 3 when the reserved path is
+outside LEDGER_DIR, FILE's lock cannot be taken, run-checks printed no JSON
+or exited with another code, or any unexpected error happened (with the
+error record once FILE is known). Exit 1 always means a check failed.
 """
 
+import contextlib
 import json
 import os
 import posixpath
 import re
+import stat
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
+import _await  # noqa: E402
 import _shell  # noqa: E402
 
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -89,15 +112,28 @@ ERROR_TAIL = 2000
 USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
          "--task ID [...] [--declared PATH ...] [--widen PATH ...] [--project-test CMD ...] "
          "[--entry TASK_ID --targeted GROUP CMD ...] --lane-cmd GROUP CMD [...] "
-         "--wide-cmd GROUP CMD [...] [--force-full REASON]")
+         "--wide-cmd GROUP CMD [...] [--force-full REASON] [--evidence PATH]")
 SINGLE = {"--base": "base", "--ledger": "ledger", "--unit": "unit", "--lane": "lane",
-          "--entry": "entry", "--force-full": "forced"}
+          "--entry": "entry", "--force-full": "forced", "--evidence": "evidence"}
 REPEATED = {"--task": "tasks", "--declared": "declared", "--widen": "widen",
             "--project-test": "project_tests"}
 PAIRS = {"--targeted": "targeted", "--lane-cmd": "lane_cmds", "--wide-cmd": "wide_cmds"}
 
 
+# The result file once it is known (validated --evidence, or the reserved
+# file) and the policy once it is built: fail writes its error record there.
+_state = {"out": None, "policy": None}
+
+
 def fail(code, message):
+    """Exit with code; once the result file is known, write the error record
+    there first."""
+    if _state["out"] is not None:
+        try:
+            save(_state["out"], {"results": [], "ok": False, "error": message[-ERROR_TAIL:],
+                                 "policy": _state["policy"]})
+        except Exception:  # noqa: BLE001 - the exit code matters more than the record
+            pass
     print(f"task-checks: {message}", file=sys.stderr)
     sys.exit(code)
 
@@ -120,18 +156,27 @@ def entry_key(path):
 
 
 def parse(argv):
-    if not argv or not argv[0] or argv[0].startswith("-"):
-        fail(2, USAGE)
-    args = {"dir": argv[0], "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
-            "forced": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
+    """Every option argv holds, read without exiting: args["usage"] is the
+    first usage error the reading met (checked by validate), or None. A token
+    that is not an option is skipped."""
+    args = {"dir": None, "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
+            "forced": None, "evidence": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
             "targeted": [], "lane_cmds": [], "wide_cmds": []}
-    rest = argv[1:]
+    errors = []
+    rest = argv
+    if argv and argv[0] and not argv[0].startswith("-"):
+        args["dir"], rest = argv[0], argv[1:]
+    else:
+        errors.append(USAGE)
+        if argv and not argv[0]:
+            rest = argv[1:]
     while rest:
         flag = rest[0]
         if flag in SINGLE and len(rest) >= 2 and rest[1]:
             if args[SINGLE[flag]] is not None:
-                fail(2, f"{flag} given twice")
-            args[SINGLE[flag]] = rest[1]
+                errors.append(f"{flag} given twice")
+            else:
+                args[SINGLE[flag]] = rest[1]
             rest = rest[2:]
         elif flag in REPEATED and len(rest) >= 2 and rest[1]:
             args[REPEATED[flag]].append(rest[1])
@@ -140,7 +185,39 @@ def parse(argv):
             args[PAIRS[flag]].append((rest[1], rest[2]))
             rest = rest[3:]
         else:
-            fail(2, USAGE)
+            errors.append(USAGE)
+            rest = rest[1:]
+    args["usage"] = errors[0] if errors else None
+    return args
+
+
+def check_evidence(args):
+    """The --evidence path, native-pathed, once it passes the docstring's
+    rules; else exit 2 with nothing written."""
+    ledger, unit = args["ledger"], args["unit"]
+    if ledger is None or unit is None or not SAFE_ID.fullmatch(unit):
+        fail(2, "--evidence needs --ledger and a safe --unit")
+    ledger = _shell.native_path(ledger)
+    path = _shell.native_path(args["evidence"])
+    if not re.fullmatch(r"task-" + re.escape(unit) + r"\.[1-9][0-9]*\.json", os.path.basename(path)):
+        fail(2, f"--evidence {path!r} is not named task-{unit}.<n>.json")
+    checks = os.path.realpath(os.path.join(ledger, "checks"))
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(path)))
+    if os.path.normcase(parent) != os.path.normcase(checks) or not _shell.contained(path, ledger):
+        fail(2, f"--evidence {path!r} is not in {os.path.join(ledger, 'checks')!r}")
+    try:
+        st = os.lstat(path)
+    except OSError:
+        fail(2, f"--evidence {path!r} does not exist")
+    if not stat.S_ISREG(st.st_mode) or st.st_size != 0:
+        fail(2, f"--evidence {path!r} is not an empty regular file")
+    return path
+
+
+def validate(args):
+    """Every usage check but --evidence's: exit 2 on the first that fails."""
+    if args["usage"] is not None:
+        fail(2, args["usage"])
     for key in ("base", "ledger", "unit", "lane"):
         if args[key] is None:
             fail(2, f"--{key} is required")
@@ -165,7 +242,6 @@ def parse(argv):
         args[key] = keys
     args["dir"] = _shell.native_path(args["dir"])
     args["ledger"] = _shell.native_path(args["ledger"])
-    return args
 
 
 def git_paths(directory, *git_args):
@@ -222,31 +298,16 @@ def select(args, changed):
     return ("widened" if reasons else "targeted"), reasons
 
 
-def contained(path, root):
-    root = os.path.realpath(root)
-    path = os.path.abspath(path)
-    head, tail = path, []
-    while not os.path.lexists(head) and head != os.path.dirname(head):
-        head, name = os.path.split(head)
-        tail.insert(0, name)
-    resolved = os.path.join(os.path.realpath(head), *tail)
-    try:
-        return os.path.commonpath([resolved, root]) == root
-    except ValueError:
-        # Different drives (a junction to another drive on Windows): outside.
-        return False
-
-
 def reserve(ledger, unit):
     """Create LEDGER/checks/task-<unit>.<n>.json exclusively; its path."""
     checks = os.path.join(ledger, "checks")
     n = 1
     while True:
         path = os.path.join(checks, f"task-{unit}.{n}.json")
-        if not contained(path, ledger):
+        if not _shell.contained(path, ledger):
             fail(3, f"evidence path {path!r} is outside {ledger!r}")
         os.makedirs(checks, exist_ok=True)
-        if not contained(path, ledger):
+        if not _shell.contained(path, ledger):
             fail(3, f"evidence path {path!r} is outside {ledger!r}")
         try:
             os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
@@ -256,37 +317,66 @@ def reserve(ledger, unit):
 
 
 def save(path, data):
-    fd, tmp = tempfile.mkstemp(prefix=".task-checks-", dir=os.path.dirname(path))
-    os.close(fd)
-    _shell.write_text(tmp, json.dumps(data) + "\n")
-    os.replace(tmp, path)
+    """Write data to path as one JSON line, in one step."""
+    _shell.write_text_atomic(path, json.dumps(data) + "\n")
+
+
+def crash(e):
+    """Exit 3 for an unexpected error, with its error record."""
+    fail(3, f"{type(e).__name__}: {e}")
 
 
 def main(argv):
     """run, with any unexpected error (git missing, cygpath missing, an
     unwritable ledger) ending in exit 3, never 1, which means a check failed:
-    an error record is written to the reserved evidence file when there is
-    one."""
+    an error record is written to the result file once it is known."""
     _shell.setup_io()
-    state = {"out": None, "policy": None}
     try:
-        run(argv, state)
+        run(argv)
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 - every failure must exit 3
-        message = f"{type(e).__name__}: {e}"
-        if state["out"] is not None:
-            try:
-                save(state["out"], {"results": [], "ok": False, "error": message[-ERROR_TAIL:],
-                                    "policy": state["policy"]})
-            except Exception:  # noqa: BLE001 - the exit code matters more than the record
-                pass
-        fail(3, message)
+        crash(e)
 
 
-def run(argv, state):
+def holding(out, work):
+    """work() inside out's check-file lock; out is the result file from here
+    on, so every failure leaves its error record there, written before the
+    lock is released."""
+    _state["out"] = out
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_await.hold(out))
+        except OSError as e:
+            fail(3, f"cannot lock {out!r}: {e}")
+        try:
+            work()
+        except SystemExit:
+            raise
+        except Exception as e:  # noqa: BLE001 - every failure must exit 3
+            crash(e)
+
+
+def run(argv):
     started = utc_stamp()
     args = parse(argv)
+    if args["evidence"] is not None:
+        out = check_evidence(args)
+
+        def work():
+            validate(args)
+            chosen, policy = plan(args, started)
+            run_checks(args, chosen, policy, out)
+        holding(out, work)
+    else:
+        validate(args)
+        chosen, policy = plan(args, started)
+        out = reserve(args["ledger"], args["unit"])
+        holding(out, lambda: run_checks(args, chosen, policy, out))
+
+
+def plan(args, started):
+    """(the command list to run, the policy) for validated args."""
     changed = changed_paths(args["dir"], args["base"])
     selected, reasons = select(args, changed)
     chosen = {"targeted": args["targeted"], "lane": args["lane_cmds"], "widened": args["wide_cmds"]}[selected]
@@ -299,10 +389,15 @@ def run(argv, state):
                     "lane": as_list(args["lane_cmds"]), "wide": as_list(args["wide_cmds"])},
         "project_test_executed": False,
     }
-    state["policy"] = policy
-    out = reserve(args["ledger"], args["unit"])
-    state["out"] = out
-    cmd = [sys.executable, os.path.join(HERE, "run-checks"), args["dir"], "--out", out, "--root", args["ledger"]]
+    _state["policy"] = policy
+    return chosen, policy
+
+
+def run_checks(args, chosen, policy, out):
+    """Run the chosen list through run-checks into out (whose lock this
+    process holds), add policy, save, print, and exit."""
+    cmd = [sys.executable, os.path.join(HERE, "run-checks"), args["dir"], "--out", out, "--root", args["ledger"],
+           "--lock-held"]
     for group, command in chosen:
         cmd += ["--cmd", group, command]
     res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)

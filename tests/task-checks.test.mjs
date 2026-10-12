@@ -7,13 +7,15 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { IS_WINDOWS, SYMLINKS, tempDir } from './platform.mjs';
 
-const SCRIPT = join(SKILL_DIR, 'scripts', 'task-checks');
+const SCRIPTS = join(SKILL_DIR, 'scripts');
+const SCRIPT = join(SCRIPTS, 'task-checks');
+const AWAIT = join(SCRIPTS, 'await-checks');
 const TMP = realpathSync(tempDir('pl-task-checks-'));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const GIT_ENV = {
@@ -355,4 +357,196 @@ test('an evidence path outside the ledger exits 3 and writes nothing outside', {
   const res = run(r, { args: ['--declared', 'x.js'] });
   assert.equal(res.status, 3, res.stderr);
   assert.deepEqual(readdirSync(outside), []);
+});
+
+// ---- --evidence (1.6.1, spec 4.3) ----
+
+const ENV = { ...process.env, ...GIT_ENV };
+const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// await-checks reserve --ledger LEDGER --name task-<unit>: the reserved path.
+function reserve(r, unit = 'U1') {
+  const res = spawnSync('python3', [AWAIT, 'reserve', '--ledger', r.ledger, '--name', `task-${unit}`], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+// task-checks argv for unit U1 (no entry) with --evidence file; lane is the
+// lane list's one command.
+function evidenceArgv(r, file, { lane = L, extra = [] } = {}) {
+  return [SCRIPT, r.dir, '--base', r.base, '--ledger', r.ledger, '--unit', 'U1', '--lane', 'alpha', '--task', 'U1',
+    '--lane-cmd', 'test', lane, '--wide-cmd', 'test', W, '--evidence', file, ...extra];
+}
+
+function runSync(argv) {
+  return spawnSync('python3', argv, { encoding: 'utf8', env: ENV });
+}
+
+// Starts python3 argv in the background; closed resolves to { status, stdout, stderr }.
+function start(argv) {
+  const child = spawn('python3', argv, { env: ENV });
+  let stdout = '';
+  let stderr = '';
+  const state = { exited: false };
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  const closed = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (status) => { state.exited = true; resolve({ status, stdout, stderr }); });
+  });
+  return { closed, state };
+}
+
+// Whether a writer holds the check-file lock of file now (_await.writer_alive).
+function writerAlive(file) {
+  const code = [
+    'import json, sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import _await',
+    'print(json.dumps(_await.writer_alive(sys.argv[1])))',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, file], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+const sidecars = (dir) => readdirSync(dir).filter((f) => f.endsWith('.lock'));
+
+test('--evidence writes the report there and holds one lock', async () => {
+  const r = repo();
+  const file = reserve(r);
+  assert.match(file, /task-U1\.1\.json$/);
+  const checks = join(r.ledger, 'checks');
+  const run = start(evidenceArgv(r, file, { lane: 'sleep 2' }));
+  let alive = false;
+  const deadline = Date.now() + 30000;
+  while (!alive && !run.state.exited && Date.now() < deadline) {
+    if (existsSync(file + '.lock')) alive = writerAlive(file);
+    await tick();
+  }
+  const res = await run.closed;
+  assert.equal(alive, true, 'writer_alive was true during the run');
+  // One lock: run-checks inside took none, so it did not fail on the sidecar.
+  assert.equal(res.status, 0, res.stderr);
+  const report = JSON.parse(res.stdout);
+  assert.deepEqual(ran(report), ['sleep 2']);
+  assert.equal(report.policy.selected, 'lane');
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), report);
+  assert.deepEqual(sidecars(checks), [], 'the sidecar is gone');
+  assert.deepEqual(readdirSync(checks).filter((f) => f.endsWith('.json')), ['task-U1.1.json'], 'nothing else reserved');
+});
+
+test('--evidence refuses a wrong name, a non-empty file, a symlink and a path outside checks/', () => {
+  const r = repo();
+  const checks = join(r.ledger, 'checks');
+  mkdirSync(checks, { recursive: true });
+  const elsewhere = join(TMP, `elsewhere ${counter}`, 'checks');
+  mkdirSync(elsewhere, { recursive: true });
+  const files = {
+    'another unit': [join(checks, 'task-U2.1.json'), ''],
+    'n zero': [join(checks, 'task-U1.0.json'), ''],
+    'no n': [join(checks, 'task-U1.json'), ''],
+    'a suffix': [join(checks, 'task-U1.1.json.txt'), ''],
+    'a non-empty file': [join(checks, 'task-U1.5.json'), '{"ok": true}\n'],
+    'in the ledger, not checks/': [join(r.ledger, 'task-U1.1.json'), ''],
+    'in another ledger': [join(elsewhere, 'task-U1.1.json'), ''],
+  };
+  for (const [path, text] of Object.values(files)) writeFileSync(path, text);
+  const cases = Object.entries(files).map(([what, [path]]) => [what, path]);
+  cases.push(['a missing file', join(checks, 'task-U1.9.json')]);
+  mkdirSync(join(checks, 'task-U1.7.json'));
+  cases.push(['a directory', join(checks, 'task-U1.7.json')]);
+  if (SYMLINKS) {
+    writeFileSync(join(checks, 'target.txt'), '');
+    symlinkSync(join(checks, 'target.txt'), join(checks, 'task-U1.3.json'));
+    cases.push(['a symlink', join(checks, 'task-U1.3.json')]);
+  }
+  const listing = () => [readdirSync(checks).sort(), readdirSync(r.ledger).sort(), readdirSync(elsewhere).sort()];
+  const before = listing();
+  for (const [what, path] of cases) {
+    const res = runSync(evidenceArgv(r, path));
+    assert.equal(res.status, 2, `${what}: ${res.stderr}`);
+    assert.equal(res.stdout, '', what);
+  }
+  assert.deepEqual(listing(), before, 'nothing was written');
+  for (const [path, text] of Object.values(files)) assert.equal(readFileSync(path, 'utf8'), text);
+  // --evidence needs --ledger and a safe --unit; without them nothing is written either.
+  const good = join(checks, 'task-U1.2.json');
+  writeFileSync(good, '');
+  const noLedger = evidenceArgv(r, good);
+  noLedger.splice(noLedger.indexOf('--ledger'), 2);
+  assert.equal(runSync(noLedger).status, 2);
+  const unsafe = evidenceArgv(r, join(checks, 'task-..1.json'));
+  unsafe[unsafe.indexOf('--unit') + 1] = '.';
+  assert.equal(runSync(unsafe).status, 2);
+  assert.equal(readFileSync(good, 'utf8'), '');
+  assert.deepEqual(sidecars(checks), []);
+});
+
+test('a waiter never sees run-checks\' intermediate report', async () => {
+  const r = repo();
+  const file = reserve(r);
+  const run = start(evidenceArgv(r, file, { lane: 'sleep 2' }));
+  const waiter = start([AWAIT, 'wait', file, '--max', '120']);
+  const [res, waited] = await Promise.all([run.closed, waiter.closed]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(waited.status, 0, waited.stderr);
+  const report = JSON.parse(waited.stdout);
+  assert.ok(report.policy, 'the report has policy');
+  assert.deepEqual(report, JSON.parse(res.stdout));
+});
+
+test('a usage error after --evidence leaves an error record', () => {
+  const r = repo();
+  const checks = join(r.ledger, 'checks');
+  for (const [what, edit] of [
+    ['a base that is not a sha', (argv) => { argv[argv.indexOf('--base') + 1] = 'nothex'; }],
+    ['an unknown option', (argv) => { argv.push('--bogus'); }],
+    ['no --task', (argv) => { argv.splice(argv.indexOf('--task'), 2); }],
+  ]) {
+    const file = reserve(r);
+    const argv = evidenceArgv(r, file);
+    edit(argv);
+    const res = runSync(argv);
+    assert.equal(res.status, 2, `${what}: ${res.stderr}`);
+    const text = readFileSync(file, 'utf8');
+    assert.ok(text.endsWith('\n'), what);
+    const record = JSON.parse(text);
+    assert.deepEqual(Object.keys(record).sort(), ['error', 'ok', 'policy', 'results'], what);
+    assert.deepEqual(record.results, []);
+    assert.equal(record.ok, false);
+    assert.equal(record.policy, null, what);
+    assert.ok(record.error.length > 0, what);
+  }
+  assert.match(JSON.parse(readFileSync(join(checks, 'task-U1.1.json'), 'utf8')).error, /not a commit sha/);
+  assert.deepEqual(sidecars(checks), []);
+});
+
+test('run-checks giving no JSON with --evidence leaves the error record there', () => {
+  const r = repo();
+  const notRepo = join(TMP, `not-a-repo ${counter}`);
+  mkdirSync(notRepo, { recursive: true });
+  const file = reserve(r);
+  const res = runSync(evidenceArgv({ ...r, dir: notRepo }, file));
+  assert.equal(res.status, 3, res.stderr);
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual(record, JSON.parse(res.stdout));
+  assert.ok(record.error.length > 0);
+  assert.equal(record.policy.unit, 'U1');
+  assert.deepEqual(readdirSync(join(r.ledger, 'checks')).filter((f) => f.endsWith('.json')), ['task-U1.1.json']);
+});
+
+test('without --evidence the 1.6.0 reservation still works', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  const first = run(r, { args: ['--declared', 'src/a.js'] });
+  const second = run(r, { entry: false, args: ['--declared', 'src/a.js'] });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  const checks = join(r.ledger, 'checks');
+  assert.deepEqual(readdirSync(checks).filter((f) => f.endsWith('.json')).sort(), ['task-U1.1.json', 'task-U1.2.json']);
+  assert.deepEqual(JSON.parse(readFileSync(join(checks, 'task-U1.1.json'), 'utf8')), first.json);
+  assert.deepEqual(JSON.parse(readFileSync(join(checks, 'task-U1.2.json'), 'utf8')), second.json);
+  assert.equal(second.json.policy.selected, 'lane');
+  assert.deepEqual(sidecars(checks), [], 'no sidecar is left');
 });
