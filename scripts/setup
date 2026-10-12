@@ -59,17 +59,26 @@ launcher; found before any change) in the feature checkout and in each lane
 checkout; under lite the lane's own list also runs in the feature checkout
 unless it is the same list. Command output goes to stderr.
 
+Under profile full a lane with no pending work keeps its worktree (created
+or reused and validated as above) but its setup commands are skipped. A
+lane has pending work when some task id in its tasks is not in both the
+manifest's done and reviewed lists (absent lists count as empty), as
+hasWork/taskState in src/plan.js decide; a lane without tasks has none.
+The skipped lanes are listed in setup_skipped in manifest order; a lane
+with no setup commands is never listed. The feature checkout's setup always
+runs, and profile lite runs every list as before (setup_skipped is []).
+
 Before any change setup removes the records of missing worktrees under
 worktree_root (never another worktree's record). repo.base_ref is resolved
 to a commit (a leading '-' is refused); the feature branch starts there.
 
 On success setup appends {"task":"_run","event":"run_started","phase":
 "setup","head":<feature_head>,"plan_sha256":<sha256 of the plan file>,
-"spec_sha256":<sha256 of the spec file, or null>} to the ledger lane _run in
-repo.ledger_dir (ledger status --plan/--spec compares them on a resume) and
-prints the manifest's setup_result:
+"spec_sha256":<sha256 of the spec file, or null>,"setup_skipped":[<lane id>]}
+to the ledger lane _run in repo.ledger_dir (ledger status --plan/--spec
+compares the hashes on a resume) and prints the manifest's setup_result:
   {"feature_head": <sha of repo.branch>, "worktrees": {<lane id>: <path>},
-   "discarded": [...], "preserved": [...]}
+   "discarded": [...], "preserved": [...], "setup_skipped": [<lane id>]}
 The worktree paths are exactly the paths the run uses for the lanes.
 
 On Windows MANIFEST and repo.root, repo.git_dir, repo.worktree_root and
@@ -181,6 +190,20 @@ def setup_commands(m, lane_id):
     if not isinstance(cmds, list) or not all(is_text(c) for c in cmds):
         raise Failure(2, "manifest setup commands must be lists of non-empty strings")
     return cmds
+
+
+def lane_pending(m, lane):
+    """True when some task of the lane is not in both done and reviewed.
+
+    Mirrors hasWork/taskState in src/plan.js: a task not done runs, a done
+    but unreviewed task is reviewed, only a done and reviewed task is
+    skipped. A lane without tasks has no pending work.
+    """
+    done = m.get("done") if isinstance(m.get("done"), list) else []
+    reviewed = m.get("reviewed") if isinstance(m.get("reviewed"), list) else []
+    tasks = lane.get("tasks") if isinstance(lane.get("tasks"), list) else []
+    return any(not (isinstance(t, dict) and t.get("id") in done and t.get("id") in reviewed)
+               for t in tasks)
 
 
 def feature_dir(m):
@@ -429,19 +452,28 @@ def setup(m, owner=None):
             cmds = setup_commands(m, lane["id"])
             if cmds != feature_cmds:
                 run_commands(feature, cmds)
+    # A lane with no pending work keeps its worktree but not its setup run;
+    # a lane without setup commands had nothing to skip and is not listed.
+    skipped = []
     for lane, path, _ in lanes:
-        run_commands(path, setup_commands(m, lane["id"]))
+        cmds = setup_commands(m, lane["id"])
+        if cmds and not lane_pending(m, lane):
+            skipped.append(lane["id"])
+            continue
+        run_commands(path, cmds)
 
     head = repo.head_of(branch)
     entry = {"task": "_run", "event": "run_started", "phase": "setup", "head": head,
-             "plan_sha256": file_sha256(m.get("plan")), "spec_sha256": file_sha256(m.get("spec"))}
+             "plan_sha256": file_sha256(m.get("plan")), "spec_sha256": file_sha256(m.get("spec")),
+             "setup_skipped": skipped}
     res = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ledger"), "append",
                           repo_cfg["ledger_dir"], "_run", json.dumps(entry)],
                          capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)
     if res.returncode != 0:
         raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
-    return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved}
+    return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved,
+            "setup_skipped": skipped}
 
 
 def main(argv):

@@ -113,6 +113,44 @@
         "$ref": "#/$defs/commandSet"
       }
     },
+    "task_checks": {
+      "description": "Targeted checks a task runs before committing, keyed by task id (a batch unit uses its last task's entry). test is required and non-empty; lint and build, when absent, inherit the lane's commands. Never part of the delivery inventory: every command must be a narrower run of a check integration and verify already run, valid at the task that uses it, failing when it selects no tests.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "test"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "test": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/text"
+            }
+          },
+          "lint": {
+            "$ref": "#/$defs/textList"
+          },
+          "build": {
+            "$ref": "#/$defs/textList"
+          }
+        }
+      }
+    },
+    "widen_paths": {
+      "description": "Project-relative paths of shared infrastructure (a trailing / marks a directory). A task whose change touches one runs project-wide checks instead of its targeted ones.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    },
+    "repairs_spent": {
+      "description": "Repairs after a failing verify that earlier launches of this run made; the session carries it over on a relaunch or resume. A run allows 2 repairs in all (autonomous only).",
+      "type": "integer",
+      "minimum": 0
+    },
     "prelude": {
       "$ref": "#/$defs/taskList"
     },
@@ -235,6 +273,13 @@
         },
         "discarded": {
           "$ref": "#/$defs/textList"
+        },
+        "setup_skipped": {
+          "description": "Lane ids whose setup commands setup skipped because every task of the lane is in done and reviewed. A lane with no setup commands is never listed. validateManifest rejects a listed lane that has pending work.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "preserved": {
           "type": "array",

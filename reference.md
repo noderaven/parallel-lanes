@@ -45,7 +45,10 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `repo.worktree_root` | A directory outside the project that does not exist yet (or this run's, when resuming). Git: `<parent of root>/<repo name>-wt-<run_id>`. Shadow: `<config dir>/parallel-lanes/worktrees/<run_id>`. Lane worktrees go to `<worktree_root>/lane-<lane id>` on branches `pl-<run_id>-<lane id>`; shadow mode also uses `<worktree_root>/feature`. |
 | `repo.ledger_dir` | `<run_dir>/<plan-name>.<run_id>.ledger`, where `<run_dir>` is the plan's directory when the plan is outside the project and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`, by default `~/.claude/parallel-lanes/runs/<run_id>/` (plan inside the project, e.g. `docs/superpowers/plans/`). It holds briefs, reports, and review packages too, so it must never be inside the project; the manifest goes in the same `<run_dir>`. |
 | `commands` | `setup`, `test`, `lint`, `build`: lists of shell commands run from a checkout. Take them from the plan's conventions, then the project (package.json scripts, pyproject, Makefile). Use `[]` for a group the project lacks. |
-| `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). |
+| `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). They are the lane's own checks: integration and verify run every distinct one, so a narrower run of a project check belongs in `task_checks`, not here. |
+| `task_checks` | Optional `{<task id>: {test, lint?, build?}}`: the targeted checks a task runs once before committing (see Check ownership). `test` is required and names at least one command; an absent `lint` or `build` inherits the lane's. A batch uses its last task's entry. Every command must be a narrower run of a check the delivery inventory already runs, in the same checkout and environment; must run correctly at the task that uses it (list the lane's test files created or changed by that task and the lane's earlier tasks, cumulatively, so no entry names a file a later task creates); must fail when it selects no tests (name existing test files; a filter that passes on zero matches needs a wrapper that fails); and keeps an explicit worker limit like the project's test command (for example `node --test --test-concurrency=4 ...`). Derive the entries from the briefs' test files and commands; a task you cannot map gets no entry and runs its lane's checks. Never part of the delivery inventory. |
+| `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Take them from the plan's shared files; no absolute path or `..`. |
+| `repairs_spent` | Optional integer, default 0: repairs after a failing verify that earlier launches of this run made (the sum of `final.repairs` lengths in their reports; a report without `final` made none). Set it on a transient relaunch or a resume, like the budget carry-over; a run allows 2 in all (see Check ownership). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
 | `join` | Tasks run in order on the merged branch after integration. |
@@ -58,7 +61,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, CPU count + 2)` (the count from `os.cpu_count()`), `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
 | `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
 | `profile` | `full` (default) or `lite` (see Profiles). |
-| `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved}`. Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
+| `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved, setup_skipped}` (`setup_skipped`: the lanes whose setup commands were skipped because every task is done and reviewed; validation rejects a listed lane with pending work, and then setup reruns). Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
 | `start_points` | The feature heads `ledger status` prints after setup, copied exactly as it prints them: `prelude` from setup, `join` only once a launch got past integration (a new run has no `join` key). |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status --plan`. Never by hand. |
@@ -108,11 +111,17 @@ The header shown with the dry-run table lists: mode, base and feature branch, wo
 `profile`, `autonomy`, `limits.max_agents`, `limits.max_rulings`, lanes at once =
 `lanes_effective`, superpowers or built-in prompts, agent type, commit_rules, overlaps,
 `excluded` with reasons, batches, and whether deferral is allowed. Doctor's warnings go in it
-too.
+too. One line comes from the dry run's `checks` summary, for example "Checks: targeted entries
+for 9 of 12 units; delivery runs 3 checks (1 added by lane_commands); repairs up to 2", and its
+`warnings` follow it (today one: "changes to shared files will not widen task checks", when
+`task_checks` has entries and `widen_paths` is empty).
 
 ### Transient stops
 
-SKILL.md gives the rule; this is how it reads the causes. The causes are every
+SKILL.md gives the rule; this is how it reads the causes. Not transient, so never relaunched
+(stop and notify): `review_rounds`, a supervised blocked or question task, `adjudication_cap`,
+`adjudicator_stop`, `budget`, a failed integration or post-integrate on real failures, and
+status `invalid` or `preflight_conflicts`. The causes are every
 `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
 stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
 `error:`, or `setup failed`, or reads `integration failed: no result from ...` or
@@ -289,7 +298,12 @@ raised it).
 - The final phase has one fix wave. On a cap the run stops cleanly, the session reports and
   notifies. Raise the limit in the manifest, then resume; that goes through Confirmation again
   (dry run, table, explicit yes). The only edits that
-  need no second table are `setup_result`, `start_points`, and the relaunch budget carry-over.
+  need no second table are `setup_result`, `start_points`, and the relaunch carry-over (budgets
+  and `repairs_spent`).
+- Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while
+  `repairReserve` agents are free (6, plus 4 with an e2e hook and 2 with a post-integrate hook),
+  so neither the repair nor the checks it makes necessary are ever refused: with less room
+  there is no repair, and the run ends as it would without one.
 - The `verify` agent (the project checks through `scripts/run-checks`) runs even past
   `max_agents`: the checks are cheap and deterministic, so the evidence after the last change
   exists even when the budget is spent. When the budget stops the run after the join (in E2E or
@@ -330,6 +344,80 @@ raised it).
   progress together when the cap is lower. Raising the cap runs more agents at once, and each
   running agent takes memory, so raise it only on a machine with memory to spare; lowering
   `max_parallel_lanes` instead keeps the table accurate.
+
+## Check ownership
+
+Each kind of check has one owner (1.6.0). Review depth is unchanged.
+
+| Who | Runs |
+|---|---|
+| Implementer (task, retry) | Focused tests while iterating, then `scripts/task-checks` once before committing (a batch: once, before its last commit). |
+| Task fixer | The tests that cover the amended code; no task checks, no full suite. |
+| Task reviewer, re-reviewer | Nothing: they read the task-check evidence and may report a wrong selection as a finding. |
+| Integration | The delivery inventory once: `finalSetup`, then one `run-checks` call over `finalChecks` (the project's commands plus each distinct `lane_commands` one). |
+| Post-integration fixer | After a test failure: focused tests (it may rerun the failing command to reproduce it); the integration rerun owns the full commands. After a hook failure: every project command, since only the hook reruns. |
+| Final fixer | Autonomous: focused checks; verify owns the full inventory. Supervised: every project command, as before 1.6.0. |
+| Verify | The full delivery inventory at the delivered head, fresh, every time. Acceptance reads only this. |
+
+**task-checks** (`scripts/task-checks`; the workflow builds the call) picks one list:
+- `lane`: the unit has no `task_checks` entry: the lane's checks run, as before 1.6.0.
+- `targeted`: it has one and no widening reason holds: the entry's commands run.
+- `widened`: it has one but a reason holds: the project's commands plus the lane's own
+  additions run (project-wide, not the lane's possibly narrower list). A lane whose
+  `lane_commands` setup differs from the project's widens to its own checks instead: its
+  worktree never ran the project's setup, and integration still runs every check.
+
+Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
+changed path the Files list does not cover), `widen_path` (a changed path under
+`widen_paths`), `forced` (the agent's `--force-full '<why>'`, for a shared contract,
+configuration, generated or ignored inputs, a dependency that is not a direct import, or a
+targeted list that turned out invalid), `git_failed`. Changed paths are the working tree
+against the task base (staged, unstaged, both sides of a rename) plus untracked files that are
+not ignored, read NUL-delimited; ignored files are not seen, so widening for them is the
+agent's `--force-full`. Matching is case-sensitive; a `\` in a changed path is never covered.
+Safety: ids must be safe file names and the base a sha (else exit 2, nothing written); the
+evidence file `<ledger>/checks/task-<unit>.<n>.json` is created exclusively inside the ledger
+(else exit 3); exit 1 always means a check failed, and any other failure exits 3 with an
+error record. The evidence is a record and a count: nothing reads it to accept, skip or reuse
+checks.
+
+**Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
+- Due only when verify ran at the head, with exactly the configured inventory, no
+  `head_after`, a clean checkout, and a failing exit that is not 124, 128 or above, or
+  negative (a timeout or a signal is not a defect to fix).
+- Admitted only while `repairReserve` agents are free and fewer than 2 repairs were made in the
+  run (`repairs_spent` carries earlier launches'). The reserve is 6 (the repair, its verify and
+  the re-review that must follow, each with one retry), plus 4 with an e2e hook and 2 with a
+  post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
+  is ever refused.
+- One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
+  correct fix, focused checks only, `fix: make the delivery checks pass`. It never weakens,
+  skips or deletes a check, test or criterion, never changes the commands or the scripts and
+  config they run, and reports blocked for a flaky, timeout, crash, environment or
+  out-of-scope failure.
+- Its head is delivered only when verify, run with `run-checks --descends-from <start>`,
+  confirms the branch head is that sha and descends from where the repair started; otherwise
+  the observed head is recorded and the result is closed (`final_fix_unreviewed`).
+- Every repair is re-reviewed at the delivered head: inside the final re-review after a final
+  fix, or by a `final re-review` of the repair range when there were no findings. Repairs
+  have no id: a problem in one goes in `new_findings`. A missing, refused, other-head or
+  malformed re-review leaves the repair unreviewed.
+- After 2 repairs, or without room, a still-failing verify is `checks_failed`, rejected.
+- The report's `final.repairs` lists each attempt `{attempt, from, observed_head, eligible,
+  head, failed, status, notes}`; `check_policy` records the policy the run ran under.
+
+**Setup skip:** `scripts/setup` runs a lane's setup commands only when the lane has pending
+work (a task not in both `done` and `reviewed`); it still creates and checks every worktree.
+Skipped lanes are in `setup_result.setup_skipped` and the `run_started` ledger entry. A
+relaunch recomputes `done` and `reviewed` before setup (approvals can be reopened or go
+stale).
+
+**run-checks** reads `git status` twice per call on a clean checkout: one
+`--untracked-files=all` snapshot before the commands and one after. When a snapshot has
+tracked changes, the tracked list is read with `--untracked-files=no` (one more call), so a
+submodule holding only untracked files is not a tracked change, as before. The tracked and
+untracked lists are as before; `clean` is the after snapshot being empty, so it no longer
+follows a `status.showUntrackedFiles=no` setting.
 
 ## Active-run markers and stops
 
@@ -858,7 +946,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 4, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 5, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -869,6 +957,19 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
   critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), and the
   full-suite runs in total, inferred and per role. See "Checks" below.
+  - `full_suite_runs` keeps its 1.5 meaning, check calls with a test group: a `run-checks`
+    call passing `--cmd test`, whatever the command, a configured `commands.test` line, or a
+    `task-checks` call whose evidence shows a test group ran.
+  - `project_test_runs` (`total`, `by_role`, `unavailable`) counts executions that ran an
+    exact `commands.test` entry: the accurate "the whole suite ran" counter, computed for older
+    runs too, so compare across versions with it.
+  - `task_check_calls` (`total`, `by_selected` with `targeted`, `lane`, `widened` and
+    `unavailable`, `failed`, `reasons` by code): every `task-checks` call, matched to its
+    evidence (`<ledger>/checks/task-<unit>.<n>.json`) by unit and `policy.started`; a call with
+    missing or malformed evidence is `unavailable`, never a default.
+  - `repairs` (`attempts`, `eligible`, `by_status`, from `final.repairs`) and `setup`
+    (`skipped`, `no_setup_commands`, from `setup_result.setup_skipped`) are `unavailable` for
+    runs before 1.6.0.
 - `tokens` has run-report's token fields per bucket, `unreadable_lines` and `partial`. Each
   bucket also has `agents_with_usage`, the number of its agents whose usage could be read; a
   bucket where it is 0 is `unavailable`, never 0 tokens.

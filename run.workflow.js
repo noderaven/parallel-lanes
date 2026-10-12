@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.5.2: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.0: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -40,6 +40,13 @@ function hasText(v) {
 // counts as no head: the run cannot tell which commit it means.
 function isSha(v) {
   return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
+}
+
+// The message a repair after a failing verify commits with (spec 4.5). A
+// function, not a constant: loadHelpers returns before top-level bindings
+// initialize.
+function repairFixMessage() {
+  return 'fix: make the delivery checks pass';
 }
 
 // Rules every agent gets, task and phase alike.
@@ -524,6 +531,45 @@ function validateManifest(m) {
     }
   }
 
+  // task_checks (spec 4.1): per task id, the targeted checks it runs before
+  // committing. test is required and names at least one command, so an
+  // entry always narrows the test group; lint and build are optional.
+  if ('task_checks' in m) {
+    if (!isObject(m.task_checks)) {
+      err('task_checks: must be an object');
+    } else {
+      for (const [id, entry] of Object.entries(m.task_checks)) {
+        const where = `task_checks.${id}`;
+        if (!taskIds.has(id)) err(`${where}: unknown task id`);
+        if (!isObject(entry)) {
+          err(`${where}: must be an object`);
+          continue;
+        }
+        for (const name of Object.keys(entry)) {
+          if (!['test', 'lint', 'build'].includes(name)) err(`${where}.${name}: unknown command group`);
+          else if (!isTextList(entry[name])) err(`${where}.${name}: must be a list of non-empty strings`);
+        }
+        if (!('test' in entry)) err(`${where}.test: missing`);
+        else if (Array.isArray(entry.test) && entry.test.length === 0) err(`${where}.test: must name at least one command`);
+      }
+    }
+  }
+
+  // widen_paths (spec 4.1): project-relative paths; no absolute path, drive
+  // letter or '..' segment.
+  if ('widen_paths' in m) {
+    const relative = (p) => isText(p) && !/^[\\/]/.test(p) && !/^[A-Za-z]:/.test(p)
+      && !p.split(/[\\/]/).includes('..');
+    if (!Array.isArray(m.widen_paths) || !m.widen_paths.every(relative)) {
+      err('widen_paths: must be a list of project-relative paths');
+    }
+  }
+
+  // repairs_spent (spec 4.5): repairs earlier launches of this run made.
+  if ('repairs_spent' in m && !(Number.isInteger(m.repairs_spent) && m.repairs_spent >= 0)) {
+    err('repairs_spent: must be a non-negative integer');
+  }
+
   if ('hooks' in m) {
     if (!isObject(m.hooks)) {
       err('hooks: must be an object');
@@ -639,6 +685,22 @@ function validateManifest(m) {
       if ('preserved' in r && !(Array.isArray(r.preserved) && r.preserved.every((p) => isObject(p)
         && isText(p.worktree) && isText(p.ref) && isText(p.commit)))) {
         err('setup_result.preserved: must be a list of {worktree, ref, commit}');
+      }
+      // setup_skipped (spec 4.8): lanes whose setup commands setup skipped.
+      // None may have pending work under the manifest's current done and
+      // reviewed (a relaunch with stale lists would have skipped too much).
+      if ('setup_skipped' in r) {
+        const skipped = r.setup_skipped;
+        if (!Array.isArray(skipped) || !skipped.every((id) => typeof id === 'string' && laneIds.has(id))) {
+          err('setup_result.setup_skipped: must be a list of lane ids');
+        } else if (Array.isArray(m.done) && Array.isArray(m.reviewed) && Array.isArray(m.lanes)) {
+          for (const id of skipped) {
+            const lane = m.lanes.find((l) => isObject(l) && l.id === id);
+            if (lane && Array.isArray(lane.tasks) && hasWork(m, lane.tasks.filter(isObject))) {
+              err(`setup_result.setup_skipped: lane ${id} has pending work`);
+            }
+          }
+        }
       }
       if (!isObject(r.worktrees)) {
         err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');
@@ -886,6 +948,77 @@ function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
 }
 
+// The task_checks entry a unit uses (spec 4.1): its task's, or for a batch
+// unit its last task's; null when there is none. checks lists test, lint and
+// build in that order: a group the entry has replaces the ledger lane's
+// (commandGroup), an absent one inherits it. laneId is the ledger lane (a
+// lane id, prelude or join).
+function taskChecksEntry(m, unit, laneId) {
+  const tasks = Array.isArray(unit.tasks) ? unit.tasks : [unit];
+  const id = tasks[tasks.length - 1].id;
+  const all = m.task_checks;
+  if (!all || typeof all !== 'object' || !Object.prototype.hasOwnProperty.call(all, id)) return null;
+  const entry = all[id];
+  const checks = [];
+  for (const group of ['test', 'lint', 'build']) {
+    const own = Object.prototype.hasOwnProperty.call(entry, group) ? entry[group] : commandGroup(m, laneId, group);
+    for (const command of own) checks.push({ group, command });
+  }
+  return { id, checks };
+}
+
+// The repairs a run may make after a failing verify (spec 4.5): 2 in an
+// autonomous run, none in a supervised one. Per run: the caller subtracts
+// m.repairs_spent.
+function repairLimit(m) {
+  return effectiveAutonomy(m) === 'autonomous' ? 2 : 0;
+}
+
+// The agent slots a repair attempt needs free before it starts (spec 4.5):
+// the repair, its verify (over budget but counted) and the re-review that
+// must follow, each with makeIo's one automatic retry (6); plus the hook
+// rechecks a moved head makes necessary: the e2e recheck (a FAIL reruns it,
+// each with a retry: 4) and the post-integrate recheck (2; none under lite).
+function repairReserve(m) {
+  const hooks = (m && m.hooks) || {};
+  return 6 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
+}
+
+// The dry run's checks summary (spec 4.9). Units are the units with work,
+// built as planAgents builds them.
+function checksSummary(m) {
+  const withEntry = [];
+  const withoutEntry = [];
+  const groups = [['prelude', m.prelude], ...m.lanes.map((l) => [l.id, l.tasks]), ['join', m.join]];
+  for (const [laneId, tasks] of groups) {
+    for (let i = 0; i < tasks.length;) {
+      const group = batchGroup(m, tasks, i);
+      i += group.length;
+      if (taskState(m, group[0].id) === 'skip') continue;
+      const unit = group.length > 1 ? batchUnit(group) : group[0];
+      (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+    }
+  }
+  const project = (group, command) => commandGroup(m, null, group).includes(command);
+  const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
+    lane: m.lanes.find((l) => commandGroup(m, l.id, c.group).includes(c.command)).id,
+    group: c.group,
+    command: c.command,
+  }));
+  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
+  const hasEntries = Boolean(m.task_checks) && Object.keys(m.task_checks).length > 0;
+  return {
+    final_count: finalChecks(m).length,
+    final_added_by_lane_commands: added,
+    units_with_entry: withEntry,
+    units_without_entry: withoutEntry,
+    widen_paths_count: widen.length,
+    repair_limit: repairLimit(m),
+    repairs_spent: m.repairs_spent || 0,
+    warnings: hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : [],
+  };
+}
+
 // The tasks a unit of work covers. A batch unit (spec D3) is consecutive
 // light tasks with the same batch key run by one implementer and one review:
 // {id: '<first>-<last>', title, files, tier, security, batch, tasks}. A
@@ -1000,13 +1133,53 @@ function runChecksCommand(m, dir, checks, out = null) {
     ...evidence, ...parts].join(' ');
 }
 
-// The scripts/run-checks call for every test, lint and build command of a
-// ledger lane in dir (the setup group is not a check). null when there is no
-// check command.
-function checksCommand(m, laneId, dir, out = null) {
-  const checks = ['test', 'lint', 'build']
+// Every test, lint and build command of a ledger lane, as [{group, command}]
+// (the setup group is not a check).
+function laneChecks(m, laneId) {
+  return ['test', 'lint', 'build']
     .flatMap((group) => commandGroup(m, laneId, group).map((command) => ({ group, command })));
-  return runChecksCommand(m, dir, checks, out);
+}
+
+// The checks a widened task runs (spec 4.2): the project's test, lint and
+// build commands in group order, then, for a real lane only, that lane's
+// lane_commands commands not already listed: finalChecks restricted to the
+// project and one lane. A lane whose lane_commands setup differs from the
+// project's ran only its own setup in its worktree, so the project's commands
+// may not work there: it widens to its own checks (laneChecks), as before
+// 1.6.0, and integration still runs every check.
+function wideChecks(m, laneId) {
+  const own = m.lane_commands && Object.prototype.hasOwnProperty.call(m.lane_commands, laneId)
+    ? m.lane_commands[laneId] : null;
+  if (own && Object.prototype.hasOwnProperty.call(own, 'setup')
+    && JSON.stringify(commandGroup(m, laneId, 'setup')) !== JSON.stringify(commandGroup(m, null, 'setup'))) {
+    return laneChecks(m, laneId);
+  }
+  const out = [];
+  for (const group of ['test', 'lint', 'build']) for (const command of commandGroup(m, null, group)) out.push({ group, command });
+  if ((m.lanes || []).some((l) => l.id === laneId)) {
+    for (const group of ['test', 'lint', 'build']) {
+      for (const command of commandGroup(m, laneId, group)) {
+        if (!out.some((c) => c.group === group && c.command === command)) out.push({ group, command });
+      }
+    }
+  }
+  return out;
+}
+
+// The scripts/run-checks call for every test, lint and build command of a
+// ledger lane in dir. null when there is no check command.
+function checksCommand(m, laneId, dir, out = null) {
+  return runChecksCommand(m, dir, laneChecks(m, laneId), out);
+}
+
+// What an agent handed a run-checks call without --out is told about its
+// output and logs.
+function checksLogLines() {
+  return [
+    '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
+    '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
+    '  (the log\'s parent) once you have read what you need.',
+  ];
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
@@ -1016,11 +1189,66 @@ function commandsText(m, laneId, dir = null) {
   const all = dir === null ? null : checksCommand(m, laneId, dir);
   if (all !== null) {
     lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
-      '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
-      '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
-      '  (the log\'s parent) once you have read what you need.');
+      ...checksLogLines());
   }
   return lines.join('\n');
+}
+
+// The scripts/task-checks call a task's implementer runs once before
+// committing (spec 4.2, 4.3), in where.dir for the unit's range from base;
+// null when the ledger lane has no test, lint or build command.
+function taskChecksCommand(m, task, where, base) {
+  const lane = laneChecks(m, where.lane);
+  if (lane.length === 0) return null;
+  const q = shellQuote;
+  const pairs = (flag, checks) => checks.flatMap((c) => [flag, q(c.group), q(c.command)]);
+  const entry = taskChecksEntry(m, task, where.lane);
+  return [
+    `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
+    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--lane', q(where.lane),
+    ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
+    ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
+    ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
+    ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
+    ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
+    ...pairs('--lane-cmd', lane),
+    ...pairs('--wide-cmd', wideChecks(m, where.lane)),
+  ].join(' ');
+}
+
+// The implementer's task-checks instructions (spec 4.3); [] when there is no
+// task-checks call.
+function taskChecksLines(m, task, where, base) {
+  const cmd = taskChecksCommand(m, task, where, base);
+  if (cmd === null) return [];
+  return [
+    'Task checks. Before you commit, run the task checks once, as one call. This replaces the full-suite run the',
+    "instructions above ask for, and the test-driven-development skill's rule that your verification is the whole",
+    'project suite. The full project checks run at integration and at delivery.',
+    `  ${cmd}`,
+    'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
+    'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
+    'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
+    'targeted checks do not cover (a shared contract, configuration, generated or ignored inputs, or a dependency',
+    "that is not a direct import), add --force-full '<why>' to the call. If the targeted checks fail because of the",
+    "list itself (a missing file, a selection that matches no test), rerun with --force-full 'targeted list invalid:",
+    "<what>'.",
+    ...(isBatch(task) ? ['This is a batch: run the call once, before the last commit of the batch; earlier commits use',
+      'focused tests.'] : []),
+    "It prints one JSON line; each command's full output is in the file its result names as log, kept with the run's",
+    'evidence: read the log instead of rerunning a command, and leave the file in place.',
+  ];
+}
+
+// The line that points a reviewer at the unit's task-check evidence (spec
+// 4.3). Files are task-<unit id>.<n>.json: the '.' after the id keeps a
+// batch id (T2-T3) apart from its first task's (T2).
+function taskEvidenceLine(m, task) {
+  return [
+    `Task-check evidence for this unit: ${m.repo.ledger_dir}/checks/task-${task.id}.<n>.json (n = 1, 2, ...);`,
+    'each records its selection (policy.selected) and reasons. Do not rerun the checks. Report a wrong selection',
+    'as a finding (for example targeted checks on a change that clearly reaches another lane).',
+  ].join('\n');
 }
 
 // One line per finding; a finding that shares its location with other
@@ -1114,7 +1342,8 @@ function fixMessagesLines() {
   return [
     'Fix commits carry their own messages (in the form the commit rules use): a task fix round',
     '`fix: address review findings for Task <id>` (a batch: `fix: address review findings for Batch <first>-<last>`),',
-    `the final fix \`${finalFixMessage()}\`, and the post-integration fix \`${postIntegrateFixMessage()}\`.`,
+    `the final fix \`${finalFixMessage()}\`, the post-integration fix \`${postIntegrateFixMessage()}\`, and a`,
+    `repair after a failing verify \`${repairFixMessage()}\`.`,
     'An implement attempt that adds to a task\'s first commit with no review findings behind it commits',
     'with `chore: continue Task <id>`.',
     "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
@@ -1167,8 +1396,8 @@ function taskContext(m, task, where, guidance = null) {
       : `Amendment to the task brief for this run (it overrides the brief where they differ): ${a}`)),
     `Implementer report file: ${files.report}`,
     '',
-    'Project commands (run from the worktree):',
-    commandsText(m, where.lane, where.dir),
+    'Project commands (run from the worktree; the full set runs at integration and delivery):',
+    commandsText(m, where.lane),
     '',
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'Never commit anything under .superpowers/.',
@@ -1186,10 +1415,19 @@ function fallbackImplementer() {
   return [
     'Built-in instructions (superpowers not found):',
     'Implement exactly what the task brief specifies, nothing more. Follow test-driven development: write the',
-    'failing tests first, run them and see them fail, implement, then run the full project test suite and make',
-    'it pass. Commit with the commit rules below. Write your report (what you built, tests and their output,',
-    'files changed, concerns) to the implementer report file. If anything is unclear or you cannot finish,',
-    'report blocked with the specifics instead of guessing.',
+    'failing tests first, run them and see them fail, implement, then run the task checks command once before',
+    'committing and make it pass. Commit with the commit rules below. Write your report (what you built, tests and',
+    'their output, files changed, concerns) to the implementer report file. If anything is unclear or you cannot',
+    'finish, report blocked with the specifics instead of guessing.',
+  ].join('\n');
+}
+
+function fallbackFixer() {
+  return [
+    'Built-in instructions (superpowers not found):',
+    'Fix exactly the findings listed below, nothing more. Rerun the tests that cover the amended code, commit with',
+    'the commit rules below, and append a fix report (what changed, covering tests, command, output) to the',
+    'implementer report file. If you cannot fix a finding, report blocked with the specifics instead of guessing.',
   ].join('\n');
 }
 
@@ -1452,6 +1690,8 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
         ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
+  const checks = taskChecksLines(m, task, where, base);
+  if (checks.length > 0) parts.push('', checks.join('\n'));
   parts.push('', [
     finishText(batch, `every commit since the ${noun} base`),
     `  ${finishCommand(m, task, where, base)}`,
@@ -1500,6 +1740,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     ...scopeLines(task),
+    taskEvidenceLine(m, task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -1519,15 +1760,17 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     `You are fixing review findings for ${unitName(task)}`,
     ...batchLines(task),
     '',
-    sdd === null ? fallbackImplementer() : [
+    sdd === null ? fallbackFixer() : [
       `Read and follow ${sdd}/implementer-prompt.md: the prompt block inside its fence is your instructions,`,
       `with Task: ${unitName(task)}; [BRIEF_FILE]: ${briefRef(m, task)}; [directory]: ${where.dir};`,
       `[REPORT_FILE]: ${files.report}. You are at its After Review Findings step.`,
     ].join('\n'),
     '',
     ...reopenLines(m, task, where, reopen),
-    `The branch is at ${head}. Fix these findings, rerun the tests that cover the amended code, commit on top of`,
-    `it, and append a fix report (what changed, covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, commit on top of it, and append a fix report (what changed,`,
+    `covering tests, command, output) to ${files.report}.`,
+    'Rerun the tests that cover the amended code; do not run the task checks or the full suite: the re-review',
+    'judges the fix, and integration and verify run the full checks.',
     commitWithLine(fixCommitMessage(task)),
     'Findings:',
     findingsText(findings),
@@ -1571,6 +1814,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     startBlock(m, task, where, { pkg: { base, head } }, reviewStartFailure()),
     diffSteps(m, task, where, base, head),
     ...scopeLines(task),
+    taskEvidenceLine(m, task),
     '',
     taskContext(m, task, where, guidance),
     '',
@@ -1812,6 +2056,9 @@ function verifySchema() {
             group: { type: 'string' },
             command: { type: 'string' },
             exit: { type: 'integer' },
+            // run-checks prints them; a repair agent reads the failures' logs.
+            log: { type: 'string' },
+            tail: { type: 'string' },
           },
           required: ['group', 'command', 'exit'],
         },
@@ -1822,6 +2069,12 @@ function verifySchema() {
       tracked_after: { type: 'array', items: { type: 'string' } },
       untracked_before: { type: 'array', items: { type: 'string' } },
       untracked_after: { type: 'array', items: { type: 'string' } },
+      // run-checks --descends-from (a repair head's verify, spec 4.5).
+      descends_from: {
+        type: 'object',
+        properties: { sha: { type: 'string' }, ok: { type: 'boolean' } },
+        required: ['sha', 'ok'],
+      },
     },
     required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
@@ -1904,9 +2157,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const admin = gitAdmin(m);
   const merges = m.lanes.map((lane) =>
     `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
-  const overrides = m.lanes
-    .filter((lane) => m.lane_commands && m.lane_commands[lane.id])
-    .map((lane) => `Lane ${lane.id} commands (with its overrides; run these too):\n${commandsText(m, lane.id, featureDir(m))}`);
+  // Step 3 runs the delivery inventory once (spec 4.4): the project's setup
+  // and the lanes' distinct ones, then every distinct check of the project
+  // and the lane_commands overrides.
+  const setup = finalSetup(m);
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m));
+  const step3 = [
+    `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    checks === null ? '   checks: (no test, lint or build command)'
+      : `   checks, as one call (each command's exit status is kept; it exits non-zero when any fails):\n     ${checks}`,
+    ...(checks === null ? [] : checksLogLines().map((l) => ` ${l}`)),
+  ];
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain --untracked-files=all prints nothing, ` +
@@ -1919,7 +2180,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const joinDone = Boolean(lastJoin) && m.join.every((t) => m.done.includes(t.id));
   const finalFixes = joinDone ? [
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
-    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
+    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it. That includes`,
+    `   repair commits after a failing verify (\`${repairFixMessage()}\`).`,
   ] : [];
   const tipLines = m.lanes.map((lane) => {
     const tip = laneTipMap[lane.id];
@@ -1977,9 +2239,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...conflictLine,
     ...overlaps,
     ...deletedBranch,
-    '3. In the tree step 1 found clean, rerun setup and then every command:',
-    commandsText(m, null, featureDir(m)),
-    ...overrides,
+    '3. In the tree step 1 found clean, rerun setup and then every check:',
+    ...step3,
     testFailureLine,
     `4. History: ${preludeTip} is the feature tip after the prelude. This command:`,
     `   git -C ${dir} log --first-parent --format='%H %P %s' ${q(`${preludeTip}..HEAD`)}`,
@@ -2058,9 +2319,14 @@ function postIntegrateFixMessage() {
 
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
-// the notes the failing step returned.
-function postIntegrateFixPrompt(m, failure) {
+// the notes the failing step returned. path (spec 4.4): 'tests' after an
+// integration test failure, where an integration rerun follows and owns the
+// full commands, so the fixer runs focused tests only; 'hook' after a
+// post-integrate hook failure, where only the hook reruns, so the fixer
+// reruns every project command (1.5.2's text).
+function postIntegrateFixPrompt(m, failure, path = 'hook') {
   const dir = shellQuote(featureDir(m));
+  const focused = path === 'tests';
   return [
     `You are fixing a post-integration failure for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on ${m.repo.branch}; do not switch branches.`,
@@ -2069,8 +2335,14 @@ function postIntegrateFixPrompt(m, failure) {
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
     commitWithLine(postIntegrateFixMessage()),
-    'Rerun every project command afterwards and confirm they pass:',
-    commandsText(m, null, featureDir(m)),
+    ...(focused ? [
+      'You may rerun the failing command named above to reproduce the failure. Then run the focused tests that',
+      'cover your change; do not run the full project commands: the integration rerun after you runs every',
+      'command.',
+    ] : [
+      'Rerun every project command afterwards and confirm they pass:',
+      commandsText(m, null, featureDir(m)),
+    ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
     `Plan: ${m.plan}`,
@@ -2078,8 +2350,10 @@ function postIntegrateFixPrompt(m, failure) {
     keepFilesRule(),
     phaseRules(m),
     '',
-    `Return status done when the commands pass, otherwise failed; head = the full sha printed by`,
-    `git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the command results.`,
+    focused ? 'Return status done when your fix is committed and the focused tests pass, otherwise failed; head = the'
+      : 'Return status done when the commands pass, otherwise failed; head = the full sha printed by',
+    focused ? `full sha printed by git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the test results.`
+      : `git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the command results.`,
   ].join('\n');
 }
 
@@ -2269,8 +2543,16 @@ function finalFixPrompt(m, findings, base) {
     '',
     'Fix each finding, or decline it with a reason (only for a false positive, an item outside this',
     "run's scope, or a commit-message finding: history is never rewritten). A reviewer checks every",
-    'decline. Rerun every project command afterwards:',
-    commandsText(m, null, featureDir(m)),
+    // Spec 4.5 and 4.7: verify owns the full checks after an autonomous
+    // final fix (a failure there goes to a repair agent); a supervised run
+    // has no repair, so its fixer still reruns everything.
+    ...(effectiveAutonomy(m) === 'autonomous' ? [
+      'decline. Run the focused checks that cover each fix; do not run the full project commands: verify runs every',
+      'check at the delivered revision right after you, and a failure there goes to a repair agent.',
+    ] : [
+      'decline. Rerun every project command afterwards:',
+      commandsText(m, null, featureDir(m)),
+    ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
     '',
@@ -2291,7 +2573,10 @@ function finalFixPrompt(m, findings, base) {
 // findings carry their id and the fixer's dispositions for it
 // ([{status, reason, evidence}]; none when the fixer gave none). verify:
 // the project checks' result at head (run before the re-review), or null.
-function finalReReviewPrompt(m, base, head, findings, verify = null) {
+// repairs: the repairs after a failing verify inside the range
+// ([{attempt, from, head, failed}], spec 4.5); with no findings the
+// re-review judges only those.
+function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = []) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -2304,35 +2589,60 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
     'Read the fix with:',
     `  git -C ${dir} log ${shellQuote(`${base}..${head}`)}`,
     `  git -C ${dir} diff ${shellQuote(`${base}..${head}`)}`,
-    'Findings under verification, with what the fixer said about each:',
-    findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
+    ...(findings.length > 0 ? [
+      'Findings under verification, with what the fixer said about each:',
+      findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
+    ] : ['No findings are under verification: judge the repair commits in the range.']),
+    ...(repairs.length > 0 ? [
+      'Repairs after a failing verify, in the range (each addressed the failing checks it lists):',
+      ...repairs.map((r) => `- repair ${r.attempt}: ${r.from}..${r.head}, status ${r.status || 'unknown'}; failing then: `
+        + `${(r.failed || []).join(', ') || '(none listed)'} (evidence ${m.repo.ledger_dir}/checks/verify-${r.from}.json)`
+        + `${present(r.notes) ? `; the repair said: ${r.notes}` : ''}`),
+      'Judge the repair commits as fix code: correct, no new critical or important problem, no check, test or',
+      'acceptance criterion weakened, skipped or deleted to get a pass, and nothing that worked around a flaky,',
+      'environment or out-of-scope failure (a retry, a raised timeout, a mocked-out dependency) instead of fixing it.',
+      'Repairs have no id: report any problem in a repair only in new_findings; a weakened, skipped or deleted check',
+      'is at least important.',
+    ] : []),
     '',
     ...(verify ? [
       checksResultText(verify),
-      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      findings.length > 0 ? 'Still judge every finding yourself; a failing check is evidence, not a verdict.'
+        : 'A failing check is evidence, not a verdict.',
       '',
     ] : []),
-    'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
-    'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
-    'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
-    'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...(findings.length > 0 ? [
+      'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
+      'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
+      'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
+      'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
-    `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
-    '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
-    'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
-    'fix}.',
+    ...(findings.length > 0 ? [
+      `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
+      '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
+      'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
+      'fix}.',
+    ] : [
+      `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}),`,
+      'results = [] (no finding is under verification), and new_findings = the problems you found, each',
+      '{severity, file, line, issue, fix} (empty when the repairs are sound).',
+    ]),
   ].join('\n');
 }
 
 // The verify step: every check of the final inventory (project and lane
 // commands, finalChecks) at the delivered revision, through one
 // scripts/run-checks call, whose JSON the agent returns as it printed it.
-function verifyPrompt(m, sha) {
+// from (spec 4.5): the head a repair started at; the checks then run only
+// when sha descends from it (run-checks --descends-from).
+function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
-  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const base = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = from === null ? base : `${base} --descends-from ${shellQuote(from)}`;
   const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
@@ -2348,8 +2658,61 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after, untracked_before, untracked_after.',
+    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}.`,
   ].join('\n');
+}
+
+// The repair agent after a failing verify (spec 4.5, 4.6). verify is the
+// failing run-checks JSON at from, the head the repair starts at; attempt is
+// its number.
+function verifyRepairPrompt(m, verify, from, attempt) {
+  const evidence = `${m.repo.ledger_dir}/checks/verify-${from}.json`;
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
+  const lines = failing.map((r) => [
+    `- ${r.command} (exit ${r.exit})`,
+    present(r.log) ? `  log: ${r.log}` : `  log: beside ${evidence} (its results name each log)`,
+    ...(present(r.tail) ? ['  last lines:', ...r.tail.split('\n').map((l) => `    ${l}`)] : []),
+  ].join('\n'));
+  return [
+    `You are repair ${attempt} for parallel-lanes run ${m.run_id}: the delivery checks failed at ${from}.`,
+    `Work in ${featureDir(m)} on ${m.repo.branch} (now at ${from}); do not switch branches.`,
+    'Failing checks:',
+    ...lines,
+    `The full evidence is ${evidence}.`,
+    '',
+    'Find the cause and fix it with the smallest change that is correct, so the checks pass for the right reason.',
+    'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
+    'commands, lane_commands or task_checks, or the test runner configuration, to make them pass. Fixing a wrong',
+    'test is allowed when the test, not the code, is wrong: say why in notes. If the failure is a flaky, timeout,',
+    "crash or environment failure rather than a failing check, or lies outside this run's scope, change nothing:",
+    'report blocked with the evidence.',
+    'Run the focused checks that cover your fix; do not run the full project commands: verify runs them all at',
+    'your head right after you.',
+    commitWithLine(repairFixMessage()),
+    '',
+    `Plan: ${m.plan}`,
+    `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    implementResultText(featureDir(m), false, from),
+  ].join('\n');
+}
+
+// What a repair agent returns (implementResultText's shape).
+function repairSchema() {
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['done', 'blocked'] },
+      head: { type: 'string' },
+      tests: { type: 'string' },
+      notes: { type: 'string' },
+      changed_lines: { type: 'integer' },
+    },
+    required: ['status', 'head', 'tests', 'notes'],
+  };
 }
 
 // What the project checks found, for an agent that would otherwise rerun
@@ -3458,8 +3821,12 @@ function acceptanceOf(input) {
 // every lens gets them as a checklist and raises one by putting its id in
 // brackets in a finding's issue; final.task_minors_open lists the ones no
 // lens raised. A lens's cannot_verify entries carry its name: an object as
-// lens, a plain string as a '<lens>: ' prefix.
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
+// lens, a plain string as a '<lens>: ' prefix. repair (autonomous runs,
+// spec 4.5): {admit, first}, the admission check and the number of the first
+// attempt; with it, a failing verify after a fix that returned done with a
+// sha head goes to runRepairs before the re-review, which then covers the
+// repairs too. final.repairs lists them ([] when none).
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -3492,7 +3859,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
-    lens_heads: lensHeads,
+    lens_heads: lensHeads, repairs: [],
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   const unbound = reviewProblemOf(lensHeads, results);
@@ -3544,17 +3911,134 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
+  // A failing verify after the fix (autonomous): bounded repairs (spec 4.5)
+  // before the re-review, whose range tip..final.head then covers them. Only
+  // after a fix that returned a sha head (spec 4.5).
+  let repaired = null;
+  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head)) {
+    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair });
+    final.head = repaired.head;
+    final.verify = repaired.verify;
+    final.repairs = repaired.repairs;
+  }
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
-    finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null,
+    final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
-    return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
+    settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
       : 'no result from final re-review');
+  } else {
+    settle(dispositions, rr, undefined, final.head);
   }
-  return settle(dispositions, rr, undefined, final.head);
+  // Repairs need a valid re-review of the delivered head; an ineligible
+  // repair head keeps its own sentence (it is set last).
+  const repairedAny = final.repairs.some((r) => r.eligible);
+  const problem = repairedAny ? validRepairReview(rr, final.head) : null;
+  if (problem !== null) {
+    final.unreviewed_fix = `the repairs ${tip}..${final.head} were not re-reviewed at ${final.head}: ${problem}`;
+  }
+  if (repaired && repaired.unreviewed !== null) final.unreviewed_fix = repaired.unreviewed;
+  return final;
+}
+
+// Whether a verify result calls for a repair (spec 4.5): results at sha, of
+// exactly the configured inventory, with no head_after, on a clean checkout,
+// with a failing exit and no failing exit that marks a timeout or a signal
+// (124, 128 and above, or negative): a hang or a kill is not an assertion a
+// repair agent should fix.
+function repairDue(m, verify, sha) {
+  if (!verify || typeof verify !== 'object' || verify.head !== sha || !Array.isArray(verify.results)) return false;
+  const want = expectedChecks(m);
+  const results = verify.results;
+  if (results.length !== want.length
+    || want.some((w, i) => !results[i] || results[i].group !== w.group || results[i].command !== w.command)) return false;
+  if (present(verify.head_after)) return false;
+  if (uncleanChecksDetail(verify, sha) !== null) return false;
+  const failing = results.filter((r) => r.exit !== 0);
+  if (failing.length === 0) return false;
+  return !failing.some((r) => typeof r.exit !== 'number' || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+}
+
+// Whether a repair's reported head may be delivered (spec 4.5): verify ran
+// at it, and run-checks --descends-from found from, the repair's start, an
+// ancestor (the check must name from, not some other sha).
+function repairHeadEligible(verify, sha, from) {
+  return Boolean(verify) && verify.head === sha && Boolean(verify.descends_from)
+    && verify.descends_from.ok === true && verify.descends_from.sha === from;
+}
+
+// Why a re-review result does not review the repairs at delivered, or null
+// when it does: it must be an object for delivered with results and
+// new_findings lists. With no original findings, settleFinalFindings has
+// nothing to keep open, so this check is what closes the result.
+function validRepairReview(rr, delivered) {
+  if (!rr || typeof rr !== 'object' || rr.__budget) {
+    return rr && rr.__budget ? 'the final re-review was not run: budget exhausted' : 'the final re-review returned no result';
+  }
+  if (rr.head !== delivered) {
+    return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
+      : 'the final re-review did not say which revision it judged';
+  }
+  if (!Array.isArray(rr.results) || !Array.isArray(rr.new_findings)) return 'the final re-review returned a malformed result';
+  return null;
+}
+
+// The repair loop (spec 4.5). ctx = {head, verify (the failing verify at
+// head), verifyAt(sha, from), admit() (true admits one more attempt and
+// counts it), first (the number of the first attempt: repairs_spent + 1)}.
+// Each attempt is one 'verify repair <n>' agent (Opus); a sha head that
+// differs from where it started is verified with --descends-from and
+// delivered only when eligible. Returns {head, verify, repairs, unreviewed}:
+// head and verify are the last ones, repairs one entry per attempt, and
+// unreviewed the sentence for an ineligible head (else null).
+async function runRepairs(m, io, ctx) {
+  let { head, verify } = ctx;
+  const repairs = [];
+  let unreviewed = null;
+  let n = ctx.first;
+  while (repairDue(m, verify, head) && ctx.admit()) {
+    const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
+    const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
+      { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
+    const entry = {
+      attempt: n, from: head, observed_head: r && !r.__budget && present(r.head) ? r.head : null, eligible: false,
+      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (r && r.__budget ? 'budget' : 'no result'),
+      notes: r && !r.__budget && typeof r.notes === 'string' ? r.notes : '',
+    };
+    repairs.push(entry);
+    n += 1;
+    if (!r || r.__budget) break;
+    if (!isSha(r.head)) {
+      if (present(r.head)) {
+        unreviewed = `repair ${entry.attempt} reported head ${JSON.stringify(r.head)}, which is not a commit sha, so any `
+          + `commit it made past ${head} was not re-reviewed`;
+      }
+      break;
+    }
+    if (r.head === head) break;
+    const v = await ctx.verifyAt(r.head, head);
+    if (!repairHeadEligible(v, r.head, head)) {
+      const observed = v && isSha(v.head) ? v.head : r.head;
+      unreviewed = !v || !isSha(v.head)
+        ? `repair ${entry.attempt} reported ${r.head}, but there is no verify result at ${r.head}`
+        : observed !== r.head
+          ? `repair ${entry.attempt} reported ${r.head}, but ${m.repo.branch} is at ${observed}`
+          : `repair ${entry.attempt} reported ${r.head}, which is not a descendant of ${head} on ${m.repo.branch}`;
+      entry.head = observed;
+      head = observed;
+      verify = v;
+      break;
+    }
+    entry.eligible = true;
+    entry.head = r.head;
+    head = r.head;
+    verify = v;
+    if (r.status !== 'done') break;
+  }
+  return { head, verify, repairs, unreviewed };
 }
 
 // The head each final lens reported reviewing ({lens, head}): the string it
@@ -3822,6 +4306,18 @@ async function runAll(manifest, io) {
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
     agent_settings: state.spawned.slice(),
+    // The check policy this run ran under (spec 4.10), for the 1.6.1
+    // validation and later comparisons.
+    check_policy: {
+      task_checks: m.task_checks || {},
+      widen_paths: Array.isArray(m.widen_paths) ? m.widen_paths : [],
+      repair_limit: repairLimit(m),
+      repairs_spent: m.repairs_spent || 0,
+      repair_reserve: repairReserve(m),
+      final_inventory_count: finalChecks(m).length,
+      autonomy: effectiveAutonomy(m),
+    },
+    setup_skipped: m.setup_result && Array.isArray(m.setup_result.setup_skipped) ? m.setup_result.setup_skipped : [],
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -3979,9 +4475,11 @@ async function runAll(manifest, io) {
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
-    const fixPostIntegration = async (failureNotes, base) => {
+    // path: 'tests' (an integration rerun follows and owns the full commands)
+    // or 'hook' (only the hook reruns), spec 4.4.
+    const fixPostIntegration = async (failureNotes, base, path) => {
       const fix = await callM('post-integrate fix', 'Integrate',
-        postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
+        postIntegrateFixPrompt(m, failureNotes, path), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
       if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
@@ -4037,7 +4535,7 @@ async function runAll(manifest, io) {
     // Post-integration test failures (autonomous, C2): fix + re-review, then
     // rerun the integrate step once; still failing stops the run.
     if (autonomous && integ.tests_failed === true) {
-      const from = await fixPostIntegration(integrate.notes || 'a project command failed after the merges', tip);
+      const from = await fixPostIntegration(integrate.notes || 'a project command failed after the merges', tip, 'tests');
       if (from === BUDGET) return budgetReport();
       tip = from;
       integ = await callM('integrate', 'Integrate',
@@ -4062,7 +4560,7 @@ async function runAll(manifest, io) {
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
       if (autonomous && pr.status !== 'done') {
-        const from = await fixPostIntegration(pr.notes, tip);
+        const from = await fixPostIntegration(pr.notes, tip, 'hook');
         if (from === BUDGET) return budgetReport();
         tip = from;
         post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
@@ -4105,8 +4603,23 @@ async function runAll(manifest, io) {
   // The project checks at sha (scripts/run-checks through the verify agent).
   // They are cheap and deterministic, so they run past the agent cap: after
   // the last change the run has evidence even when the budget is spent.
-  const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
+  const verifyAt = (sha, from = null) => callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
     { ...sonnetHigh, overBudget: true });
+  // Repairs after a failing verify (spec 4.5): autonomous only, at most
+  // repairLimit(m) per run (repairs_spent carries earlier launches'), and
+  // each admitted only while repairReserve(m) agents are free, so the
+  // repair, its verify and the re-review that must follow (each with one
+  // retry) can never be refused. admit() counts the attempt it admits.
+  let attempts = 0;
+  const spent = m.repairs_spent || 0;
+  const admit = () => {
+    const ok = autonomous && state.refused.length === 0
+      && effectiveLimits(m).max_agents - state.agents >= repairReserve(m)
+      && attempts < repairLimit(m) - spent;
+    if (ok) attempts += 1;
+    return ok;
+  };
+  const repair = autonomous ? { admit, first: spent + 1 } : null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -4125,7 +4638,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
-    hasChecks ? verifyAt : null, taskMinors);
+    hasChecks ? verifyAt : null, taskMinors, repair);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -4163,6 +4676,32 @@ async function runAll(manifest, io) {
   // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
   if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  // No final findings and a failing verify (autonomous): the same bounded
+  // repairs (spec 4.5). A repair that moved the head gets a final re-review
+  // of its range with no findings under verification; anything but a valid
+  // result for the delivered head leaves it unreviewed (closed).
+  if (repair !== null && hasChecks && !verifiedInReview && verify) {
+    const start = delivered;
+    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair });
+    final.repairs = out.repairs;
+    verify = out.verify;
+    final.head = out.head;
+    delivered = out.head;
+    if (state.refused.length > 0) return budgetReport();
+    if (out.unreviewed !== null) {
+      final.unreviewed_fix = out.unreviewed;
+    } else if (out.head !== start) {
+      const rr = await call('final re-review', 'Final review',
+        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+      if (state.refused.length > 0) return budgetReport();
+      const problem = validRepairReview(rr, out.head);
+      Object.assign(final, settleFinalFindings([], [], rr && Array.isArray(rr.new_findings) ? rr : null,
+        problem || undefined, out.head));
+      if (problem !== null) {
+        final.unreviewed_fix = `the repairs ${start}..${out.head} were not re-reviewed at ${out.head}: ${problem}`;
+      }
+    }
+  }
   const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
     e2e = await runE2e('e2e recheck', 'Verify', checksHere);
@@ -4205,7 +4744,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.5.2';
+const VERSION = '1.6.0';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
@@ -4220,6 +4759,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
     // The exact lines the session prints at the launch; null when invalid.
     notices: errors.length === 0 ? launchNotices(dry, agents) : null,
+    // The check policy at a glance (spec 4.9); null when invalid.
+    checks: errors.length === 0 ? checksSummary(dry) : null,
   };
 }
 

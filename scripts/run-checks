@@ -25,22 +25,38 @@ without --out):
                 "tail": <its last 20 lines, joined with \\n; at most the
                          last 4096 characters of them, starting with
                          "[truncated] " when cut>}],
-   "ok": <true when every exit is 0>, "clean": <true when git status
-   --porcelain printed nothing after the commands>,
-   "tracked_before": [<the lines git status --porcelain --untracked-files=no
-                       printed before the first command: the tracked files
-                       already edited, staged or deleted; [] when none>],
-   "tracked_after": [<the same lines after the last command; [] when none>],
-   "untracked_before": [<the lines git status --porcelain
-                         --untracked-files=all printed before the first
-                         command that start with "?? ": every untracked file
-                         that is not ignored; [] when none>],
-   "untracked_after": [<the same lines after the last command; [] when
-                        none>]}
+   "ok": <true when every exit is 0>, "clean": <true when the after
+   snapshot is empty>,
+   "tracked_before": [<the before snapshot's lines that do not start with
+                       "?? ": the tracked files already edited, staged,
+                       renamed, deleted or conflicted; [] when none>],
+   "tracked_after": [<the same from the after snapshot; [] when none>],
+   "untracked_before": [<the before snapshot's lines that start with "?? ":
+                         every untracked file that is not ignored; [] when
+                         none>],
+   "untracked_after": [<the same from the after snapshot; [] when none>]}
+
+The snapshots are git status --porcelain --untracked-files=all, taken once
+before the first command and once after the last: two status calls per run
+on a clean checkout. When a snapshot holds a tracked line, the tracked list is
+read with --untracked-files=no instead (one more call), since =all also
+reports a submodule that only holds untracked files as modified; so the
+tracked lines always equal those of --untracked-files=no. clean ignores a
+status.showUntrackedFiles=no setting: an untracked file always makes it
+false.
 
 head is read before the commands run and again after; if a command moved
 HEAD the result says so in "head_after" and ok is false (a check must not
 change the code it checks).
+
+--descends-from SHA (7 to 40 hex digits, else a usage error): before any
+command, git merge-base --is-ancestor SHA HEAD runs. When SHA is an ancestor
+of HEAD the JSON gains "descends_from": {"sha": SHA, "ok": true} and the
+commands run. Otherwise no command runs: the JSON has every field above with
+"results": [], "ok": false, the after lists equal to the before ones, and
+"descends_from": {"sha": SHA, "ok": false}; it is written to FILE as usual and
+run-checks exits 1. The verify step uses it to accept a repair's head only
+when it descends from the revision the repair started at.
 
 On Windows DIR, FILE and ROOT may be given in any form (C:\\x, /c/x, /tmp/x)
 and are used, like each log path, in the C:/... form. FILE is written as UTF-8 with LF line
@@ -58,6 +74,7 @@ symlink), or no bash can be found
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -75,7 +92,9 @@ TAIL_LINES = 20
 TAIL_CHARS = 4096
 TAIL_WINDOW = 65536  # bytes read from the end of a log for its tail
 TRUNCATED = "[truncated] "
-USAGE = "usage: run-checks DIR [--out FILE] [--root ROOT] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]"
+SHA = re.compile(r"^[0-9a-f]{7,40}$")
+USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] "
+         "--cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
 
 
 def fail(code, message):
@@ -103,7 +122,7 @@ def parse(argv):
     if not argv or not argv[0] or argv[0].startswith("-"):
         fail(2, USAGE)
     directory, rest = _shell.native_path(argv[0]), argv[1:]
-    out = root = None
+    out = root = descends = None
     cmds = []
     while rest:
         if rest[0] == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
@@ -115,9 +134,12 @@ def parse(argv):
             else:
                 root = _shell.native_path(rest[1])
             rest = rest[2:]
+        elif rest[0] == "--descends-from" and len(rest) >= 2 and SHA.match(rest[1]):
+            descends = rest[1]
+            rest = rest[2:]
         else:
             fail(2, USAGE)
-    return directory, out, root, cmds
+    return directory, out, root, cmds, descends
 
 
 def head_of(directory):
@@ -137,21 +159,35 @@ def status_of(directory, *args):
     return res.stdout
 
 
-def tracked_changes(directory):
-    """The lines git status --porcelain --untracked-files=no prints, without
+def snapshot(directory):
+    """The lines git status --porcelain --untracked-files=all prints, without
     empty lines or the line end but with the leading status columns."""
-    out = status_of(directory, "--untracked-files=no")
+    out = status_of(directory, "--untracked-files=all")
     lines = (line.rstrip("\r\n") for line in out.split("\n"))
     return [line for line in lines if line]
 
 
-def untracked_changes(directory):
-    """The lines git status --porcelain --untracked-files=all prints for
-    untracked files (those starting with "?? "), without the line end; ignored
-    files are not listed."""
-    out = status_of(directory, "--untracked-files=all")
-    lines = (line.rstrip("\r\n") for line in out.split("\n"))
+def tracked_lines(directory, lines):
+    """The tracked-file lines, as git status --porcelain --untracked-files=no
+    prints them. A snapshot with no tracked line has none, so no further call
+    is needed; otherwise they are read with --untracked-files=no, because
+    --untracked-files=all also reports a submodule that only holds untracked
+    files as modified (" M sub"), which =no does not."""
+    if all(line.startswith("?? ") for line in lines):
+        return []
+    out = status_of(directory, "--untracked-files=no")
+    return [line for line in (raw.rstrip("\r\n") for raw in out.split("\n")) if line]
+
+
+def untracked_lines(lines):
+    """The snapshot lines for untracked files (those starting with "?? ")."""
     return [line for line in lines if line.startswith("?? ")]
+
+
+def descends_from(directory, sha):
+    """Whether sha is an ancestor of HEAD (git merge-base --is-ancestor); an
+    unknown sha is not."""
+    return git(directory, "merge-base", "--is-ancestor", sha, "HEAD").returncode == 0
 
 
 def log_paths(out, count):
@@ -200,7 +236,7 @@ def main(argv):
         fail(3, str(e))
 
 
-def run(directory, out, root, cmds):
+def run(directory, out, root, cmds, descends=None):
     if out is not None and root is not None and (os.path.islink(out) or not contained(out, root)):
         fail(3, f"output path {out!r} is outside {root!r}")
     if cmds:
@@ -214,8 +250,19 @@ def run(directory, out, root, cmds):
         for log in logs:
             if os.path.islink(log) or not contained(log, root):
                 fail(3, f"log path {log!r} is outside {root!r}")
-    tracked_before = tracked_changes(directory)
-    untracked_before = untracked_changes(directory)
+    before = snapshot(directory)
+    tracked_before = tracked_lines(directory, before)
+    lineage = None
+    if descends is not None:
+        lineage = {"sha": descends, "ok": descends_from(directory, descends)}
+        if not lineage["ok"]:
+            # Not a descendant: no command runs, and the report says why.
+            report = {"checkout": directory, "branch": branch, "head": head, "results": [], "ok": False,
+                      "clean": not before,
+                      "tracked_before": tracked_before, "tracked_after": tracked_before,
+                      "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(before),
+                      "descends_from": lineage}
+            emit(report, out)
     results = []
     for (group, command), log in zip(cmds, logs):
         with open(log, "wb") as f:
@@ -226,16 +273,23 @@ def run(directory, out, root, cmds):
         results.append({"group": group, "command": command, "exit": res.returncode,
                         "started": started, "ended": ended, "duration_s": round(duration, 3),
                         "log": log, "tail": tail_of(log)})
-    tracked_after = tracked_changes(directory)
-    untracked_after = untracked_changes(directory)
+    finish = snapshot(directory)
+    tracked_after = tracked_lines(directory, finish)
     after = head_of(directory)
-    clean = status_of(directory) == ""
     report = {"checkout": directory, "branch": branch, "head": head, "results": results,
-              "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": clean,
+              "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": not finish,
               "tracked_before": tracked_before, "tracked_after": tracked_after,
-              "untracked_before": untracked_before, "untracked_after": untracked_after}
+              "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(finish)}
     if after != head:
         report["head_after"] = after
+    if lineage is not None:
+        report["descends_from"] = lineage
+    emit(report, out)
+
+
+def emit(report, out):
+    """Write report to out (when given), print it as one line, and exit 0 when
+    it is ok, else 1."""
     line = json.dumps(report)
     if out is not None:
         parent = os.path.dirname(out)

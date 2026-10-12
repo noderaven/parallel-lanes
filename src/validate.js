@@ -435,6 +435,45 @@ function validateManifest(m) {
     }
   }
 
+  // task_checks (spec 4.1): per task id, the targeted checks it runs before
+  // committing. test is required and names at least one command, so an
+  // entry always narrows the test group; lint and build are optional.
+  if ('task_checks' in m) {
+    if (!isObject(m.task_checks)) {
+      err('task_checks: must be an object');
+    } else {
+      for (const [id, entry] of Object.entries(m.task_checks)) {
+        const where = `task_checks.${id}`;
+        if (!taskIds.has(id)) err(`${where}: unknown task id`);
+        if (!isObject(entry)) {
+          err(`${where}: must be an object`);
+          continue;
+        }
+        for (const name of Object.keys(entry)) {
+          if (!['test', 'lint', 'build'].includes(name)) err(`${where}.${name}: unknown command group`);
+          else if (!isTextList(entry[name])) err(`${where}.${name}: must be a list of non-empty strings`);
+        }
+        if (!('test' in entry)) err(`${where}.test: missing`);
+        else if (Array.isArray(entry.test) && entry.test.length === 0) err(`${where}.test: must name at least one command`);
+      }
+    }
+  }
+
+  // widen_paths (spec 4.1): project-relative paths; no absolute path, drive
+  // letter or '..' segment.
+  if ('widen_paths' in m) {
+    const relative = (p) => isText(p) && !/^[\\/]/.test(p) && !/^[A-Za-z]:/.test(p)
+      && !p.split(/[\\/]/).includes('..');
+    if (!Array.isArray(m.widen_paths) || !m.widen_paths.every(relative)) {
+      err('widen_paths: must be a list of project-relative paths');
+    }
+  }
+
+  // repairs_spent (spec 4.5): repairs earlier launches of this run made.
+  if ('repairs_spent' in m && !(Number.isInteger(m.repairs_spent) && m.repairs_spent >= 0)) {
+    err('repairs_spent: must be a non-negative integer');
+  }
+
   if ('hooks' in m) {
     if (!isObject(m.hooks)) {
       err('hooks: must be an object');
@@ -550,6 +589,22 @@ function validateManifest(m) {
       if ('preserved' in r && !(Array.isArray(r.preserved) && r.preserved.every((p) => isObject(p)
         && isText(p.worktree) && isText(p.ref) && isText(p.commit)))) {
         err('setup_result.preserved: must be a list of {worktree, ref, commit}');
+      }
+      // setup_skipped (spec 4.8): lanes whose setup commands setup skipped.
+      // None may have pending work under the manifest's current done and
+      // reviewed (a relaunch with stale lists would have skipped too much).
+      if ('setup_skipped' in r) {
+        const skipped = r.setup_skipped;
+        if (!Array.isArray(skipped) || !skipped.every((id) => typeof id === 'string' && laneIds.has(id))) {
+          err('setup_result.setup_skipped: must be a list of lane ids');
+        } else if (Array.isArray(m.done) && Array.isArray(m.reviewed) && Array.isArray(m.lanes)) {
+          for (const id of skipped) {
+            const lane = m.lanes.find((l) => isObject(l) && l.id === id);
+            if (lane && Array.isArray(lane.tasks) && hasWork(m, lane.tasks.filter(isObject))) {
+              err(`setup_result.setup_skipped: lane ${id} has pending work`);
+            }
+          }
+        }
       }
       if (!isObject(r.worktrees)) {
         err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');

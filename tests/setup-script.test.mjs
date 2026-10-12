@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { SKILL_DIR } from './harness.mjs';
+import { SKILL_DIR, loadHelpers } from './harness.mjs';
 import { BASH, SYMLINKS, samePath, tempDir, mergeEnv, IS_WINDOWS } from './platform.mjs';
 
 const SCRIPTS = join(SKILL_DIR, 'scripts');
@@ -123,9 +123,10 @@ function manifest(c, overrides = {}) {
     },
     commands: { setup: [logCmd], test: [], lint: [], build: [] },
     lane_commands: { b: { setup: [logCmd, `echo b-override >> ${q(c.log)}`] } },
+    // Each lane has a task, so each has pending work and runs its setup.
     lanes: [
-      { id: 'a', name: 'Lane A', tasks: [] },
-      { id: 'b', name: 'Lane B', tasks: [] },
+      { id: 'a', name: 'Lane A', tasks: [{ id: 'a1' }] },
+      { id: 'b', name: 'Lane B', tasks: [{ id: 'b1' }] },
     ],
     ...overrides,
   };
@@ -169,7 +170,7 @@ test('setup: a fresh git run creates the branch and lane worktrees and prints se
   const base = git(c.project, 'rev-parse', 'main');
   const { worktrees, ...result } = setupOk(c, manifest(c));
 
-  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [] });
+  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [], setup_skipped: [] });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -294,6 +295,7 @@ test('setup: ledger records run_started and status reports the earliest start po
     head: first.feature_head,
     plan_sha256: null,
     spec_sha256: null,
+    setup_skipped: [],
   });
   write(c.project, 'more.txt', 'more\n');
   git(c.project, 'add', 'more.txt');
@@ -326,7 +328,7 @@ test('setup runs setup commands with the resolved bash', { skip: IS_WINDOWS && '
   const calls = join(c.root, 'calls');
   write(c.root, 'fake bin/bash', `#!${realBash}\nprintf '%s\\n' "$*" >> ${q(calls)}\nexec ${q(realBash)} "$@"\n`);
   chmodSync(join(c.root, 'fake bin', 'bash'), 0o755);
-  const m = manifest(c, { lanes: [{ id: 'a', name: 'Lane A', tasks: [] }] });
+  const m = manifest(c, { lanes: [{ id: 'a', name: 'Lane A', tasks: [{ id: 'a1' }] }] });
   const res = setup(c, m, [], { PATH: `${join(c.root, 'fake bin')}${delimiter}${process.env.PATH}` });
   assert.equal(res.code, 0, res.stderr);
   assertSamePaths(logLines(c), [c.project, laneDir(c, 'a')]);
@@ -372,7 +374,7 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
   });
   const feature = `${c.worktreeRoot}/feature`;
   const { worktrees, ...result } = setupOk(c, m);
-  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [] });
+  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [], setup_skipped: [] });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(feature, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -732,4 +734,121 @@ test('setup: shadow mode takes no checkout lock', () => {
   });
   setupOk(c, m);
   assert.deepEqual(checkoutLocks(c), []);
+});
+
+// --- spec 4.8: skip the setup commands of lanes with no pending work ----------
+
+// The run_started entries setup appended to the case's ledger.
+function runStarted(c) {
+  return readFileSync(join(c.ledgerDir, '_run.jsonl'), 'utf8').trim().split('\n')
+    .map((l) => JSON.parse(l)).filter((e) => e.event === 'run_started');
+}
+
+test('setup: a lane with every task done and reviewed skips its setup and is listed', () => {
+  const c = newCase();
+  const m = manifest(c, {
+    lanes: [
+      { id: 'a', name: 'Lane A', tasks: [{ id: 'a1' }, { id: 'a2' }] },
+      { id: 'b', name: 'Lane B', tasks: [{ id: 'b1' }] },
+      { id: 'c', name: 'Lane C', tasks: [{ id: 'c1' }] },
+    ],
+    done: ['c1', 'a2', 'a1'],
+    reviewed: ['a1', 'c1', 'a2'],
+  });
+  const result = setupOk(c, m);
+  // Listed in manifest order; only lane b's setup ran, after the feature's.
+  assert.deepEqual(result.setup_skipped, ['a', 'c']);
+  assertSamePaths(logLines(c), [c.project, laneDir(c, 'b'), 'b-override']);
+  // The skipped lanes' worktrees still exist on their branches.
+  assertSamePaths(result.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b'), c: laneDir(c, 'c') });
+  assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
+  assert.equal(git(laneDir(c, 'c'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-c');
+  const [entry] = runStarted(c);
+  assert.deepEqual(entry.setup_skipped, ['a', 'c']);
+});
+
+test('setup: a lane without setup commands is never listed', () => {
+  const c = newCase();
+  const m = manifest(c, {
+    lane_commands: { b: { setup: [] } },
+    done: ['a1', 'b1'],
+    reviewed: ['a1', 'b1'],
+  });
+  const result = setupOk(c, m);
+  assert.deepEqual(result.setup_skipped, ['a']);
+  assertSamePaths(logLines(c), [c.project]);
+  assert.deepEqual(runStarted(c)[0].setup_skipped, ['a']);
+});
+
+test("setup: a done but unreviewed task keeps the lane's setup", () => {
+  const c = newCase();
+  const m = manifest(c, {
+    lanes: [
+      { id: 'a', name: 'Lane A', tasks: [{ id: 'a1' }, { id: 'a2' }] },
+      { id: 'b', name: 'Lane B', tasks: [{ id: 'b1' }] },
+    ],
+    // a2 is done but unreviewed; b1 is reviewed but not done (a reopened task).
+    done: ['a1', 'a2'],
+    reviewed: ['a1', 'b1'],
+  });
+  const result = setupOk(c, m);
+  assert.deepEqual(result.setup_skipped, []);
+  assertSamePaths(logLines(c), [c.project, laneDir(c, 'a'), laneDir(c, 'b'), 'b-override']);
+  assert.deepEqual(runStarted(c)[0].setup_skipped, []);
+});
+
+test('setup: the feature setup always runs', () => {
+  const c = newCase();
+  const m = manifest(c, { done: ['a1', 'b1'], reviewed: ['a1', 'b1'] });
+  const result = setupOk(c, m);
+  assert.deepEqual(result.setup_skipped, ['a', 'b']);
+  assertSamePaths(logLines(c), [c.project]);
+  assertSamePaths(result.worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
+});
+
+test('setup: a lite run is unchanged', () => {
+  const c = newCase();
+  const m = manifest(c, {
+    profile: 'lite',
+    lanes: [{ id: 'b', name: 'Lane B', tasks: [{ id: 'b1' }] }],
+    done: ['b1'],
+    reviewed: ['b1'],
+  });
+  const result = setupOk(c, m);
+  assert.deepEqual(result.setup_skipped, []);
+  assertSamePaths(result.worktrees, { b: c.project });
+  // As without done and reviewed: the feature setup and the lane's own list.
+  assertSamePaths(logLines(c), [c.project, c.project, 'b-override']);
+  assert.deepEqual(runStarted(c)[0].setup_skipped, []);
+});
+
+test('setup: setup and the engine agree on pending', async () => {
+  const { hasWork } = await loadHelpers(['hasWork']);
+  const c = newCase();
+  const lane = (id, tasks) => ({ id, name: `Lane ${id}`, tasks: tasks.map((t) => ({ id: t })) });
+  const m = manifest(c, {
+    lanes: [
+      lane('all', ['t1', 't2']), // every task done and reviewed
+      lane('unreviewed', ['t3', 't4']), // t4 done, not reviewed
+      lane('reopened', ['t5']), // reviewed, not done
+      lane('fresh', ['t6']), // neither
+      lane('empty', []), // no tasks at all
+      lane('nosetup', ['t7']), // done and reviewed, no setup commands
+      lane('override', ['t8']), // done and reviewed, its own setup
+    ],
+    lane_commands: {
+      nosetup: { setup: [] },
+      override: { setup: [`echo override >> ${q(c.log)}`] },
+    },
+    done: ['t1', 't2', 't3', 't4', 't7', 't8'],
+    reviewed: ['t1', 't2', 't3', 't5', 't7', 't8'],
+  });
+  const setupList = (id) => {
+    const own = (m.lane_commands || {})[id];
+    return own && 'setup' in own ? own.setup : m.commands.setup;
+  };
+  const expected = m.lanes.filter((l) => !hasWork(m, l.tasks) && setupList(l.id).length > 0).map((l) => l.id);
+  assert.deepEqual(expected, ['all', 'empty', 'override'], 'the fixture covers both outcomes');
+  const result = setupOk(c, m);
+  assert.deepEqual(result.setup_skipped, expected);
 });

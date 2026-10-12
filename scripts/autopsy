@@ -238,20 +238,28 @@ orphan_snapshots: the wf names of snapshots for launches not in this
 archive, sorted.
 
 checks: executions [{agent, phase, role, check, certainty, full_suite,
-start, end, s, timing, background, on_critical_path}], by_check
-{<check id>: {runs, inferred, untimed, total_s}} and full_suite_runs
-{total, inferred, by_role: {<role>: n}}.
+start, end, s, timing, background, on_critical_path, and for a
+task-checks execution selected}], by_check {<check id>: {runs, inferred,
+untimed, total_s}}, full_suite_runs {total, inferred, by_role: {<role>:
+n}}, task_check_calls {total, by_selected: {targeted, lane, widened,
+unavailable}, failed, reasons: {<code>: n}}, project_test_runs {total,
+by_role: {<role>: n}, unavailable}, repairs {attempts, eligible,
+by_status: {<status>: n}} and setup {skipped, no_setup_commands}.
 - A check id names a configured command: <group>#<n> is
-  commands.<group>[n - 1] (test#1 is commands.test[0]) and
-  <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1]; a command
-  string already listed keeps its first id. check is that id or
-  'run-checks', never the command line or the configured command.
+  commands.<group>[n - 1] (test#1 is commands.test[0]),
+  <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1] and
+  <task>.task.<group>#<n> is task_checks.<task>.<group>[n - 1] (listed
+  after the lane overrides); a command string already listed keeps its
+  first id. check is that id, 'run-checks' or 'task-checks', never the
+  command line or the configured command.
 - An execution is a Bash call whose command line runs a configured command
-  (commands.test, lint and build, and the lane_commands overrides) or
-  run-checks (a word whose basename is run-checks, as the program of a
-  simple command or as the script of python, py, bash or sh, not given -c
-  or -m). The line is read as shell words (heredoc bodies left out, a
-  backslash before a path character read as '/') split into simple
+  (commands.test, lint and build, the lane_commands overrides and the
+  task_checks entries), run-checks or task-checks (a word whose basename
+  is run-checks or task-checks, as the program of a simple command or as
+  the script of python, py, bash or sh, not given -c or -m; a line that
+  runs both is a run-checks call). The line is read as shell words
+  (heredoc bodies left out, a backslash before a path character read as
+  '/') split into simple
   commands at ; & | && || ( ) and newlines; an & inside a redirection
   (2>&1, >&2, &>f) is no separator. A configured command runs where a
   simple command's words start with its words, both without redirections,
@@ -270,7 +278,21 @@ start, end, s, timing, background, on_critical_path}], by_check
   failed at the cd).
 - full_suite is ran or inferred when a simple command that exactly matches
   a commands.test entry (or a run-checks call passing '--cmd test') ran or
-  only may have run, else null.
+  only may have run, else null. For a task-checks execution it comes from
+  its evidence (below): ran when a test-group command executed, else null;
+  inferred without evidence.
+- A task-checks execution is matched to an evidence file the helper wrote,
+  <ledger>/checks/task-*.json: a JSON object whose policy has a non-empty
+  string unit, a non-empty list of task ids, selected (targeted, lane or
+  widened), reasons [{code, detail}], a started timestamp and a boolean
+  project_test_executed, with a boolean ok and a list of results (an error
+  record's is [], beside an error field). Any other file is malformed and
+  never matched. The match is the unused file whose policy.unit equals the
+  unit id of the agent's label, compared whole (a batch's A1-A3 never
+  matches A1), with the earliest policy.started from the call to its end
+  (any time from the call when its end is unknown). selected is the
+  file's; with no match it is "unavailable". A matched call surely ran:
+  its certainty is ran.
 - start is the call. timing says how end was found: measured, the call's
   result; bound, a backgrounded call's observed completion (see
   Background runs), an upper bound on its real end; unavailable, a
@@ -281,13 +303,41 @@ start, end, s, timing, background, on_critical_path}], by_check
 - by_check: runs counts the executions that ran, inferred the others;
   untimed counts the ran executions without a duration, and total_s sums
   the timed ones that ran (bound durations in it are upper bounds).
-- full_suite_runs: total and by_role (run-report's roles) count the
+- full_suite_runs (autopsy.md's 'Check calls with a test group', the
+  legacy count): total and by_role (run-report's roles) count the
   executions whose full_suite is ran, inferred those whose full_suite is
-  inferred. total is a lower bound on full-suite runs: runs through a
-  wrapper (bash -c, a script) are not seen, and inferred runs may not have
-  happened.
+  inferred. A test group may be narrower than the project suite (a
+  focused run-checks --cmd test, a targeted task check). total is a lower
+  bound: runs through a wrapper (bash -c, a script) are not seen, and
+  inferred runs may not have happened.
+- task_check_calls: total counts the task-checks executions; by_selected
+  splits them by selected; failed counts those whose evidence has ok
+  false; reasons tallies the reason codes of the matched evidence
+  (no_entry, no_files, outside_files, widen_path, forced, git_failed).
+  A call without valid evidence counts as unavailable, never as 0.
+- project_test_runs: total and by_role count the executions that ran an
+  exact commands.test entry (the whole project suite): a run-checks call
+  with a '--cmd test CMD' pair whose CMD is one, a task-checks execution
+  whose evidence has project_test_executed true, or a configured command
+  line whose full_suite is ran. unavailable counts the executions where
+  that cannot be known: a task-checks call without evidence, or a project
+  test run that may not have happened (inferred).
+- repairs: over every launch result's final.repairs (each launch lists
+  its own attempts): attempts, eligible (entries with eligible true) and
+  by_status (each entry's status, "unavailable" when it has none).
+  "unavailable" when no launch result has a final.repairs list (a run
+  before 1.6.0).
+- setup: skipped is the manifest's setup_result.setup_skipped (the lanes
+  whose setup commands were skipped for having no pending work) and
+  no_setup_commands the lanes with no setup commands (their
+  lane_commands.<lane>.setup, else commands.setup, is empty), in manifest
+  order. "unavailable" without a setup_skipped list.
 - With no tool event in the whole run, executions, by_check, total,
-  inferred and by_role are "unavailable".
+  inferred, by_role, task_check_calls and project_test_runs are
+  "unavailable"; repairs and setup do not need tool events.
+
+autopsy.md's Checks section shows each of these counters with a one-line
+definition under it.
 
 Times are ISO 8601 UTC strings with milliseconds; durations are seconds, to
 0.1. Anything that cannot be read or derived is "unavailable", never 0.

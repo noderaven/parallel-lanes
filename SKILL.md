@@ -116,9 +116,10 @@ Fields: reference.md "Manifest fields". In order:
    (e.g. "Opus for everything" means all `standard`).
 5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md, the
    plan's conventions, CONTRIBUTING; reference.md). Every agent prompt carries it.
-6. `commands`, paths, `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits`
-   (`review_rounds: 5`, `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New
-   run: `done: []`, `reviewed: []`, no `backfill`.
+6. `commands`, `task_checks` and `widen_paths` (from the plan's tests and shared files), paths,
+   `run_id`, `agent_type`, `autonomy` (`autonomous` default), `limits` (`review_rounds: 5`,
+   `max_parallel_lanes: <cap>`): reference.md "Manifest fields". New run: `done: []`,
+   `reviewed: []`, no `backfill`.
 7. Run files live in `<run_dir>`: the plan's directory when the plan is outside the project
    and its repo, else `<config dir>/parallel-lanes/runs/<run_id>/`. The manifest and
    `repo.ledger_dir` (briefs, reports, review packages) go there, never inside the project. Save the manifest as
@@ -136,7 +137,7 @@ Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file> --save
 Each check and what it means: reference.md "Doctor" and "Launch conditions".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
-   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices}` and
+   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices, checks}` and
    spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
    with errors. Then set `limits.max_agents` = 2 x `agents.length` and `limits.max_rulings` =
    25 (reference.md "Budgets") so the table shows them.
@@ -209,10 +210,8 @@ this. Say the table is the one required check, show it, and wait.
 
 A stop is transient when status is `stopped`, `reason` is not `budget`, and every cause is
 an agent error, a missing result, or setup-command retry exhaustion (reference.md "Transient
-stops" says how the causes are read and which texts count). Every other cause (`review_rounds`, a supervised
-blocked or question task, `adjudication_cap`, `adjudicator_stop`, `budget`, a failed
-integration or post-integrate on real failures) and status `invalid` or `preflight_conflicts`
-are NOT transient: never relaunch; stop and notify.
+stops" says how the causes are read, which texts count, and which causes are NOT transient:
+never relaunch those; stop and notify).
 
 Before recording the stopped launch's end, run doctor again with `--save` (Confirmation): the
 earlier snapshot belongs to the earlier launch.
@@ -224,9 +223,11 @@ earlier snapshot belongs to the earlier launch.
 
 Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
 stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
-fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Rerun
-`scripts/setup --owner <token>`, recompute `done`, `reviewed`, `deferred`, the `carry` notes,
-`backfill`, and `start_points` as in Resume steps 2-3, and launch again. No second table. A second transient stop is a real stop.
+fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Set
+`repairs_spent` to the repairs in the stopped run's `final.repairs` plus the earlier value.
+First recompute `done`, `reviewed`, `deferred`, the `carry` notes and `backfill` as in Resume
+steps 2-3, then rerun `scripts/setup --owner <token>` and take `start_points`; if validation
+rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient stop is a real stop.
 
 ## Notify
 
@@ -286,7 +287,8 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
    Building step 0. No manifest (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
 2. `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
-   task up: reference.md "Backfill"); put each `carry` entry into `notes`. Tasks in `stale`
+   task up: reference.md "Backfill"), and `repairs_spent` from earlier reports' `final.repairs`;
+   put each `carry` entry into `notes`. Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
    spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again

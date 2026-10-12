@@ -416,22 +416,29 @@ function pythonPrompts(m) {
 }
 
 // The lines of a prompt that start a Python helper of the skill.
-const helperLines = (text) => text.split('\n').filter((l) => /scripts\/(ledger|task-brief|start-task|finish-task|run-checks)' /.test(l));
+const helperLines = (text) => text.split('\n')
+  .filter((l) => /scripts\/(ledger|task-brief|start-task|finish-task|run-checks|task-checks)' /.test(l));
 
-test('agents handed the every-check run-checks call are told where its logs go and to remove them', () => {
-  const texts = Object.entries(allPrompts(manifest())).filter(([, t]) => t.includes('- every check at once'));
-  assert.ok(texts.length > 0);
-  for (const [name, text] of texts) {
-    // The call itself: run-checks with no --out, which is what puts each
-    // call's logs in a new temporary directory.
-    const lines = text.split('\n');
-    const call = lines[lines.findIndex((l) => l.includes('- every check at once')) + 1];
-    assert.match(call, /scripts\/run-checks' /, name);
-    assert.ok(!/ --out | --root /.test(call), `${name}: ${call}`);
-    const flat = text.replace(/\s+/g, ' ');
-    assert.ok(flat.includes('in a new temporary directory each call'), name);
-    assert.ok(flat.includes("remove that directory (the log's parent)"), name);
-  }
+// 1.6.0 (spec 4.3): no task agent gets the every-check run-checks call; the
+// implementer gets the task-checks call instead. The phase agents that still
+// get it (commandsText with a dir) are told where its logs go.
+test('no task prompt carries the every-check call; the implementer gets task-checks', () => {
+  const p = allPrompts(manifest());
+  for (const [name, text] of Object.entries(p)) assert.ok(!text.includes('- every check at once'), name);
+  assert.ok(p.implement.includes("/scripts/task-checks' "));
+  for (const name of ['review', 'fix', 'reReview']) assert.ok(!p[name].includes('task-checks\''), name);
+});
+
+test('a phase agent handed the every-check run-checks call is told where its logs go and to remove them', async () => {
+  const { commandsText } = await loadHelpers(['commandsText']);
+  const text = commandsText(manifest(), null, '/work/repo');
+  const lines = text.split('\n');
+  const call = lines[lines.findIndex((l) => l.includes('- every check at once')) + 1];
+  assert.match(call, /scripts\/run-checks' /);
+  assert.ok(!/ --out | --root /.test(call), call);
+  const flat = text.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('in a new temporary directory each call'));
+  assert.ok(flat.includes("remove that directory (the log's parent)"));
 });
 
 test('every Python command uses the manifest python', () => {
@@ -498,9 +505,13 @@ test('a reviewer start failure is a start-task finding the fix and retry prompts
 test('lane_commands override the project commands for that lane', () => {
   const m = manifest({ lane_commands: { alpha: { test: ['uv run pytest -q'] } } });
   const text = implementPrompt(m, task('T2'), WHERE, H('b0'));
-  assert.ok(text.includes('uv run pytest -q'));
-  assert.ok(!text.includes('npm test'));
+  assert.ok(text.includes('- test: uv run pytest -q'));
+  assert.ok(!text.includes('- test: npm test'));
   assert.ok(text.includes('npm ci'));
+  // 1.6.0: the lane's checks are the task-checks lane list; the project's
+  // test command is still offered as the widened list (spec 4.2).
+  assert.ok(text.includes("--lane-cmd 'test' 'uv run pytest -q'"));
+  assert.ok(text.includes("--wide-cmd 'test' 'npm test'"));
 });
 
 // ---- The final check inventory (1.4.0, F3) ----

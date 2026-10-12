@@ -32,6 +32,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
     // The exact lines the session prints at the launch; null when invalid.
     notices: errors.length === 0 ? launchNotices(dry, agents) : null,
+    // The check policy at a glance (spec 4.9); null when invalid.
+    checks: errors.length === 0 ? checksSummary(dry) : null,
   };
 }
 
