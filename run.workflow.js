@@ -2044,6 +2044,9 @@ function verifySchema() {
             group: { type: 'string' },
             command: { type: 'string' },
             exit: { type: 'integer' },
+            // run-checks prints them; a repair agent reads the failures' logs.
+            log: { type: 'string' },
+            tail: { type: 'string' },
           },
           required: ['group', 'command', 'exit'],
         },
@@ -2054,6 +2057,12 @@ function verifySchema() {
       tracked_after: { type: 'array', items: { type: 'string' } },
       untracked_before: { type: 'array', items: { type: 'string' } },
       untracked_after: { type: 'array', items: { type: 'string' } },
+      // run-checks --descends-from (a repair head's verify, spec 4.5).
+      descends_from: {
+        type: 'object',
+        properties: { sha: { type: 'string' }, ok: { type: 'boolean' } },
+        required: ['sha', 'ok'],
+      },
     },
     required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
@@ -2136,9 +2145,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const admin = gitAdmin(m);
   const merges = m.lanes.map((lane) =>
     `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
-  const overrides = m.lanes
-    .filter((lane) => m.lane_commands && m.lane_commands[lane.id])
-    .map((lane) => `Lane ${lane.id} commands (with its overrides; run these too):\n${commandsText(m, lane.id, featureDir(m))}`);
+  // Step 3 runs the delivery inventory once (spec 4.4): the project's setup
+  // and the lanes' distinct ones, then every distinct check of the project
+  // and the lane_commands overrides.
+  const setup = finalSetup(m);
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m));
+  const step3 = [
+    `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    checks === null ? '   checks: (no test, lint or build command)'
+      : `   checks, as one call (each command's exit status is kept; it exits non-zero when any fails):\n     ${checks}`,
+    ...(checks === null ? [] : checksLogLines().map((l) => ` ${l}`)),
+  ];
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain --untracked-files=all prints nothing, ` +
@@ -2151,7 +2168,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const joinDone = Boolean(lastJoin) && m.join.every((t) => m.done.includes(t.id));
   const finalFixes = joinDone ? [
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
-    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it.`,
+    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it. That includes`,
+    `   repair commits after a failing verify (\`${repairFixMessage()}\`).`,
   ] : [];
   const tipLines = m.lanes.map((lane) => {
     const tip = laneTipMap[lane.id];
@@ -2209,9 +2227,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...conflictLine,
     ...overlaps,
     ...deletedBranch,
-    '3. In the tree step 1 found clean, rerun setup and then every command:',
-    commandsText(m, null, featureDir(m)),
-    ...overrides,
+    '3. In the tree step 1 found clean, rerun setup and then every check:',
+    ...step3,
     testFailureLine,
     `4. History: ${preludeTip} is the feature tip after the prelude. This command:`,
     `   git -C ${dir} log --first-parent --format='%H %P %s' ${q(`${preludeTip}..HEAD`)}`,
@@ -2290,9 +2307,14 @@ function postIntegrateFixMessage() {
 
 // Opus fix (autonomous, C2) for a project command (or the post-integration
 // check) still failing on the feature branch after integration. failure is
-// the notes the failing step returned.
-function postIntegrateFixPrompt(m, failure) {
+// the notes the failing step returned. path (spec 4.4): 'tests' after an
+// integration test failure, where an integration rerun follows and owns the
+// full commands, so the fixer runs focused tests only; 'hook' after a
+// post-integrate hook failure, where only the hook reruns, so the fixer
+// reruns every project command (1.5.2's text).
+function postIntegrateFixPrompt(m, failure, path = 'hook') {
   const dir = shellQuote(featureDir(m));
+  const focused = path === 'tests';
   return [
     `You are fixing a post-integration failure for parallel-lanes run ${m.run_id}.`,
     `Work in ${featureDir(m)} on ${m.repo.branch}; do not switch branches.`,
@@ -2301,8 +2323,13 @@ function postIntegrateFixPrompt(m, failure) {
     '',
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
     commitWithLine(postIntegrateFixMessage()),
-    'Rerun every project command afterwards and confirm they pass:',
-    commandsText(m, null, featureDir(m)),
+    ...(focused ? [
+      'Then run the focused tests that cover your change; do not run the full project commands: the integration',
+      'rerun after you runs every command.',
+    ] : [
+      'Rerun every project command afterwards and confirm they pass:',
+      commandsText(m, null, featureDir(m)),
+    ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
     `Plan: ${m.plan}`,
@@ -2310,8 +2337,10 @@ function postIntegrateFixPrompt(m, failure) {
     keepFilesRule(),
     phaseRules(m),
     '',
-    `Return status done when the commands pass, otherwise failed; head = the full sha printed by`,
-    `git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the command results.`,
+    focused ? 'Return status done when your fix is committed and the focused tests pass, otherwise failed; head = the'
+      : 'Return status done when the commands pass, otherwise failed; head = the full sha printed by',
+    focused ? `full sha printed by git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the test results.`
+      : `git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the command results.`,
   ].join('\n');
 }
 
@@ -2501,8 +2530,16 @@ function finalFixPrompt(m, findings, base) {
     '',
     'Fix each finding, or decline it with a reason (only for a false positive, an item outside this',
     "run's scope, or a commit-message finding: history is never rewritten). A reviewer checks every",
-    'decline. Rerun every project command afterwards:',
-    commandsText(m, null, featureDir(m)),
+    // Spec 4.5 and 4.7: verify owns the full checks after an autonomous
+    // final fix (a failure there goes to a repair agent); a supervised run
+    // has no repair, so its fixer still reruns everything.
+    ...(effectiveAutonomy(m) === 'autonomous' ? [
+      'decline. Run the focused checks that cover each fix; do not run the full project commands: verify runs every',
+      'check at the delivered revision right after you, and a failure there goes to a repair agent.',
+    ] : [
+      'decline. Rerun every project command afterwards:',
+      commandsText(m, null, featureDir(m)),
+    ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
     '',
@@ -2523,7 +2560,10 @@ function finalFixPrompt(m, findings, base) {
 // findings carry their id and the fixer's dispositions for it
 // ([{status, reason, evidence}]; none when the fixer gave none). verify:
 // the project checks' result at head (run before the re-review), or null.
-function finalReReviewPrompt(m, base, head, findings, verify = null) {
+// repairs: the repairs after a failing verify inside the range
+// ([{attempt, from, head, failed}], spec 4.5); with no findings the
+// re-review judges only those.
+function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = []) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -2536,8 +2576,17 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
     'Read the fix with:',
     `  git -C ${dir} log ${shellQuote(`${base}..${head}`)}`,
     `  git -C ${dir} diff ${shellQuote(`${base}..${head}`)}`,
-    'Findings under verification, with what the fixer said about each:',
-    findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
+    ...(findings.length > 0 ? [
+      'Findings under verification, with what the fixer said about each:',
+      findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
+    ] : ['No findings are under verification: judge the repair commits in the range.']),
+    ...(repairs.length > 0 ? [
+      'Repairs after a failing verify, in the range (each fixed the failing checks it lists):',
+      ...repairs.map((r) => `- repair ${r.attempt}: ${r.from}..${r.head}; failing then: `
+        + `${(r.failed || []).join(', ') || '(none listed)'}`),
+      'Judge the repair commits as fix code: correct, no new critical or important problem, and no check, test',
+      'or acceptance criterion weakened, skipped or deleted to get a pass; report anything else as a new finding.',
+    ] : []),
     '',
     ...(verify ? [
       checksResultText(verify),
@@ -2562,9 +2611,12 @@ function finalReReviewPrompt(m, base, head, findings, verify = null) {
 // The verify step: every check of the final inventory (project and lane
 // commands, finalChecks) at the delivered revision, through one
 // scripts/run-checks call, whose JSON the agent returns as it printed it.
-function verifyPrompt(m, sha) {
+// from (spec 4.5): the head a repair started at; the checks then run only
+// when sha descends from it (run-checks --descends-from).
+function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
-  const cmd = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const base = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
+  const cmd = from === null ? base : `${base} --descends-from ${shellQuote(from)}`;
   const setup = finalSetup(m);
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
@@ -2580,8 +2632,59 @@ function verifyPrompt(m, sha) {
     'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    'tracked_after, untracked_before, untracked_after.',
+    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}.`,
   ].join('\n');
+}
+
+// The repair agent after a failing verify (spec 4.5, 4.6). verify is the
+// failing run-checks JSON at from, the head the repair starts at; attempt is
+// its number.
+function verifyRepairPrompt(m, verify, from, attempt) {
+  const evidence = `${m.repo.ledger_dir}/checks/verify-${from}.json`;
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
+  const lines = failing.map((r) => [
+    `- ${r.command} (exit ${r.exit})`,
+    present(r.log) ? `  log: ${r.log}` : `  log: beside ${evidence} (its results name each log)`,
+    ...(present(r.tail) ? ['  last lines:', ...r.tail.split('\n').map((l) => `    ${l}`)] : []),
+  ].join('\n'));
+  return [
+    `You are repair ${attempt} for parallel-lanes run ${m.run_id}: the delivery checks failed at ${from}.`,
+    `Work in ${featureDir(m)} on ${m.repo.branch} (now at ${from}); do not switch branches.`,
+    'Failing checks:',
+    ...lines,
+    `The full evidence is ${evidence}.`,
+    '',
+    'Find the cause and fix it with the smallest change that is correct, so the checks pass for the right reason.',
+    'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
+    "manifest's commands. If the failure is a timeout, crash or environment failure rather than a failing check,",
+    'or lies outside this run\'s scope, change nothing: report blocked with the evidence.',
+    'Run the focused checks that cover your fix; do not run the full project commands: verify runs them all at',
+    'your head right after you.',
+    commitWithLine(repairFixMessage()),
+    '',
+    `Plan: ${m.plan}`,
+    `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    ...runRulingsLines(m),
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    implementResultText(featureDir(m), false, from),
+  ].join('\n');
+}
+
+// What a repair agent returns (implementResultText's shape).
+function repairSchema() {
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['done', 'blocked'] },
+      head: { type: 'string' },
+      tests: { type: 'string' },
+      notes: { type: 'string' },
+      changed_lines: { type: 'integer' },
+    },
+    required: ['status', 'head', 'tests', 'notes'],
+  };
 }
 
 // What the project checks found, for an agent that would otherwise rerun
