@@ -3793,8 +3793,12 @@ function acceptanceOf(input) {
 // every lens gets them as a checklist and raises one by putting its id in
 // brackets in a finding's issue; final.task_minors_open lists the ones no
 // lens raised. A lens's cannot_verify entries carry its name: an object as
-// lens, a plain string as a '<lens>: ' prefix.
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = []) {
+// lens, a plain string as a '<lens>: ' prefix. repair (autonomous runs,
+// spec 4.5): {admit, first}, the admission check and the number of the first
+// attempt; with it, a failing verify after a fix that returned done with a
+// sha head goes to runRepairs before the re-review, which then covers the
+// repairs too. final.repairs lists them ([] when none).
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -3827,7 +3831,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const lensHeads = lensHeadsOf(lenses.map(([, name]) => name), results);
   const final = {
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
-    lens_heads: lensHeads,
+    lens_heads: lensHeads, repairs: [],
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
   };
   const unbound = reviewProblemOf(lensHeads, results);
@@ -3879,17 +3883,130 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   }
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
+  // A failing verify after the fix (autonomous): bounded repairs (spec 4.5)
+  // before the re-review, whose range tip..final.head then covers them.
+  let repaired = null;
+  if (repair !== null && verifyAt !== null && final.verify) {
+    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair });
+    final.head = repaired.head;
+    final.verify = repaired.verify;
+    final.repairs = repaired.repairs;
+  }
   // The fixer's word on each finding, for the re-reviewer: every disposition
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
-  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null),
-    finalReReviewSchema());
+  const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null,
+    final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
-    return settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
+    settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
       : 'no result from final re-review');
+  } else {
+    settle(dispositions, rr, undefined, final.head);
   }
-  return settle(dispositions, rr, undefined, final.head);
+  // Repairs need a valid re-review of the delivered head; an ineligible
+  // repair head keeps its own sentence (it is set last).
+  const repairedAny = final.repairs.some((r) => r.eligible);
+  const problem = repairedAny ? validRepairReview(rr, final.head) : null;
+  if (problem !== null) {
+    final.unreviewed_fix = `the repairs ${tip}..${final.head} were not re-reviewed at ${final.head}: ${problem}`;
+  }
+  if (repaired && repaired.unreviewed !== null) final.unreviewed_fix = repaired.unreviewed;
+  return final;
+}
+
+// Whether a verify result calls for a repair (spec 4.5): results at sha, of
+// exactly the configured inventory, with no head_after, on a clean checkout,
+// with a failing exit and no failing exit that marks a timeout or a signal
+// (124, 128 and above, or negative): a hang or a kill is not an assertion a
+// repair agent should fix.
+function repairDue(m, verify, sha) {
+  if (!verify || typeof verify !== 'object' || verify.head !== sha || !Array.isArray(verify.results)) return false;
+  const want = expectedChecks(m);
+  const results = verify.results;
+  if (results.length !== want.length
+    || want.some((w, i) => !results[i] || results[i].group !== w.group || results[i].command !== w.command)) return false;
+  if (present(verify.head_after)) return false;
+  if (uncleanChecksDetail(verify, sha) !== null) return false;
+  const failing = results.filter((r) => r.exit !== 0);
+  if (failing.length === 0) return false;
+  return !failing.some((r) => typeof r.exit !== 'number' || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+}
+
+// Whether a repair's reported head may be delivered (spec 4.5): verify ran
+// at it, and run-checks --descends-from found the repair's start an ancestor.
+function repairHeadEligible(verify, sha) {
+  return Boolean(verify) && verify.head === sha && Boolean(verify.descends_from)
+    && verify.descends_from.ok === true;
+}
+
+// Why a re-review result does not review the repairs at delivered, or null
+// when it does: it must be an object for delivered with results and
+// new_findings lists. With no original findings, settleFinalFindings has
+// nothing to keep open, so this check is what closes the result.
+function validRepairReview(rr, delivered) {
+  if (!rr || typeof rr !== 'object' || rr.__budget) {
+    return rr && rr.__budget ? 'the final re-review was not run: budget exhausted' : 'the final re-review returned no result';
+  }
+  if (rr.head !== delivered) {
+    return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
+      : 'the final re-review did not say which revision it judged';
+  }
+  if (!Array.isArray(rr.results) || !Array.isArray(rr.new_findings)) return 'the final re-review returned a malformed result';
+  return null;
+}
+
+// The repair loop (spec 4.5). ctx = {head, verify (the failing verify at
+// head), verifyAt(sha, from), admit() (true admits one more attempt and
+// counts it), first (the number of the first attempt: repairs_spent + 1)}.
+// Each attempt is one 'verify repair <n>' agent (Opus); a sha head that
+// differs from where it started is verified with --descends-from and
+// delivered only when eligible. Returns {head, verify, repairs, unreviewed}:
+// head and verify are the last ones, repairs one entry per attempt, and
+// unreviewed the sentence for an ineligible head (else null).
+async function runRepairs(m, io, ctx) {
+  let { head, verify } = ctx;
+  const repairs = [];
+  let unreviewed = null;
+  let n = ctx.first;
+  while (repairDue(m, verify, head) && ctx.admit()) {
+    const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
+    const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
+      { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
+    const entry = {
+      attempt: n, from: head, observed_head: r && !r.__budget && present(r.head) ? r.head : null, eligible: false,
+      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (r && r.__budget ? 'budget' : 'no result'),
+      notes: r && !r.__budget && typeof r.notes === 'string' ? r.notes : '',
+    };
+    repairs.push(entry);
+    n += 1;
+    if (!r || r.__budget) break;
+    if (!isSha(r.head)) {
+      if (present(r.head)) {
+        unreviewed = `repair ${entry.attempt} reported head ${JSON.stringify(r.head)}, which is not a commit sha, so any `
+          + `commit it made past ${head} was not re-reviewed`;
+      }
+      break;
+    }
+    if (r.head === head) break;
+    const v = await ctx.verifyAt(r.head, head);
+    if (!repairHeadEligible(v, r.head)) {
+      const observed = v && isSha(v.head) ? v.head : r.head;
+      unreviewed = observed !== r.head
+        ? `repair ${entry.attempt} reported ${r.head}, but ${m.repo.branch} is at ${observed}`
+        : `repair ${entry.attempt} reported ${r.head}, which is not a descendant of ${head} on ${m.repo.branch}`;
+      entry.head = observed;
+      head = observed;
+      verify = v;
+      break;
+    }
+    entry.eligible = true;
+    entry.head = r.head;
+    head = r.head;
+    verify = v;
+    if (r.status !== 'done') break;
+  }
+  return { head, verify, repairs, unreviewed };
 }
 
 // The head each final lens reported reviewing ({lens, head}): the string it
@@ -4157,6 +4274,18 @@ async function runAll(manifest, io) {
     agents_spawned: state.agents,
     rulings_spent: state.rulings,
     agent_settings: state.spawned.slice(),
+    // The check policy this run ran under (spec 4.10), for the 1.6.1
+    // validation and later comparisons.
+    check_policy: {
+      task_checks: m.task_checks || {},
+      widen_paths: Array.isArray(m.widen_paths) ? m.widen_paths : [],
+      repair_limit: repairLimit(m),
+      repairs_spent: m.repairs_spent || 0,
+      repair_reserve: repairReserve(),
+      final_inventory_count: finalChecks(m).length,
+      autonomy: effectiveAutonomy(m),
+    },
+    setup_skipped: m.setup_result && Array.isArray(m.setup_result.setup_skipped) ? m.setup_result.setup_skipped : [],
     ...(reason === null ? {} : { reason }),
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
@@ -4314,9 +4443,11 @@ async function runAll(manifest, io) {
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
-    const fixPostIntegration = async (failureNotes, base) => {
+    // path: 'tests' (an integration rerun follows and owns the full commands)
+    // or 'hook' (only the hook reruns), spec 4.4.
+    const fixPostIntegration = async (failureNotes, base, path) => {
       const fix = await callM('post-integrate fix', 'Integrate',
-        postIntegrateFixPrompt(m, failureNotes), statusSchema(), standard);
+        postIntegrateFixPrompt(m, failureNotes, path), statusSchema(), standard);
       if (state.refused.length > 0) return BUDGET;
       if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== base) {
         const rr = await callM('post-integrate re-review', 'Integrate',
@@ -4372,7 +4503,7 @@ async function runAll(manifest, io) {
     // Post-integration test failures (autonomous, C2): fix + re-review, then
     // rerun the integrate step once; still failing stops the run.
     if (autonomous && integ.tests_failed === true) {
-      const from = await fixPostIntegration(integrate.notes || 'a project command failed after the merges', tip);
+      const from = await fixPostIntegration(integrate.notes || 'a project command failed after the merges', tip, 'tests');
       if (from === BUDGET) return budgetReport();
       tip = from;
       integ = await callM('integrate', 'Integrate',
@@ -4397,7 +4528,7 @@ async function runAll(manifest, io) {
       let pr = phaseResult(post, 'post-integrate');
       // Autonomous self-heal (C2): fix + re-review, then rerun the hook once.
       if (autonomous && pr.status !== 'done') {
-        const from = await fixPostIntegration(pr.notes, tip);
+        const from = await fixPostIntegration(pr.notes, tip, 'hook');
         if (from === BUDGET) return budgetReport();
         tip = from;
         post = await call('post-integrate', 'Integrate', postIntegratePrompt(m, false, integrateChecks()),
@@ -4440,8 +4571,23 @@ async function runAll(manifest, io) {
   // The project checks at sha (scripts/run-checks through the verify agent).
   // They are cheap and deterministic, so they run past the agent cap: after
   // the last change the run has evidence even when the budget is spent.
-  const verifyAt = (sha) => callM('verify', 'Verify', verifyPrompt(m, sha), verifySchema(),
+  const verifyAt = (sha, from = null) => callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
     { ...sonnetHigh, overBudget: true });
+  // Repairs after a failing verify (spec 4.5): autonomous only, at most
+  // repairLimit(m) per run (repairs_spent carries earlier launches'), and
+  // each admitted only while repairReserve() agents are free, so the
+  // repair, its verify and the re-review that must follow (each with one
+  // retry) can never be refused. admit() counts the attempt it admits.
+  let attempts = 0;
+  const spent = m.repairs_spent || 0;
+  const admit = () => {
+    const ok = autonomous && state.refused.length === 0
+      && effectiveLimits(m).max_agents - state.agents >= repairReserve()
+      && attempts < repairLimit(m) - spent;
+    if (ok) attempts += 1;
+    return ok;
+  };
+  const repair = autonomous ? { admit, first: spent + 1 } : null;
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them.
   const budgetStopWithChecks = async (sha) => {
@@ -4460,7 +4606,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
-    hasChecks ? verifyAt : null, taskMinors);
+    hasChecks ? verifyAt : null, taskMinors, repair);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -4498,6 +4644,32 @@ async function runAll(manifest, io) {
   // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
   if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  // No final findings and a failing verify (autonomous): the same bounded
+  // repairs (spec 4.5). A repair that moved the head gets a final re-review
+  // of its range with no findings under verification; anything but a valid
+  // result for the delivered head leaves it unreviewed (closed).
+  if (repair !== null && hasChecks && !verifiedInReview && verify) {
+    const start = delivered;
+    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair });
+    final.repairs = out.repairs;
+    verify = out.verify;
+    final.head = out.head;
+    delivered = out.head;
+    if (state.refused.length > 0) return budgetReport();
+    if (out.unreviewed !== null) {
+      final.unreviewed_fix = out.unreviewed;
+    } else if (out.head !== start) {
+      const rr = await call('final re-review', 'Final review',
+        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+      if (state.refused.length > 0) return budgetReport();
+      const problem = validRepairReview(rr, out.head);
+      Object.assign(final, settleFinalFindings([], [], rr && Array.isArray(rr.new_findings) ? rr : null,
+        problem || undefined, out.head));
+      if (problem !== null) {
+        final.unreviewed_fix = `the repairs ${start}..${out.head} were not re-reviewed at ${out.head}: ${problem}`;
+      }
+    }
+  }
   const checksHere = verify && verify.head === delivered ? verify : null;
   if (m.hooks.e2e && (!e2e || e2e.checked_sha !== delivered)) {
     e2e = await runE2e('e2e recheck', 'Verify', checksHere);

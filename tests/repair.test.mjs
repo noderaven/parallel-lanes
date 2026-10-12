@@ -1,0 +1,497 @@
+// The bounded repair loop after a failing verify (spec 4.5, 4.7) and the
+// report's check records (spec 4.10). Engine-flow tests run the whole script
+// with scripted agents, as tests/run.test.mjs does: an unscripted label
+// throws, so an unexpected repair attempt fails the test.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { loadHelpers, loadScript, H } from './harness.mjs';
+
+const { repairDue, repairHeadEligible, validRepairReview } = await loadHelpers([
+  'repairDue', 'repairHeadEligible', 'validRepairReview',
+]);
+
+function task(id) {
+  return { id, title: `Task ${id}`, files: [`src/${id}.js`], tier: 'standard', security: false };
+}
+
+function manifest(overrides = {}) {
+  return {
+    version: 1,
+    run_id: 'run-1',
+    plan: '/work/plan.md',
+    spec: '/work/spec.md',
+    commit_rules: 'plain ASCII',
+    repo: {
+      mode: 'git', root: '/work/repo', git_dir: null, base_ref: 'main', branch: 'pl/run-1',
+      worktree_root: '/work/wt', ledger_dir: '/work/ledger',
+    },
+    commands: { setup: [], test: ['npm test'], lint: [], build: [] },
+    prelude: [task('T1')],
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2')] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T3')] },
+    ],
+    join: [task('T4')],
+    hooks: {},
+    limits: { review_rounds: 5, max_parallel_lanes: 3 },
+    dry_run: false,
+    done: [],
+    reviewed: [],
+    sp_dir: null,
+    skill_dir: '/skills/parallel-lanes',
+    setup_result: { feature_head: H('F0'), discarded: [], worktrees: { alpha: '/work/wt/lane-alpha', beta: '/work/wt/lane-beta' } },
+    ...overrides,
+  };
+}
+
+const ALL = ['T1', 'T2', 'T3', 'T4'];
+const TIP = H('T4-h');
+
+// The run-checks JSON at sha; from adds descends_from (ok unless given).
+function verified(sha, exit = 0, extra = {}) {
+  return {
+    checkout: '/work/repo', branch: 'pl/run-1', head: sha,
+    results: [{ group: 'test', command: 'npm test', exit, log: `/work/ledger/checks/verify-${sha}.1.log`, tail: `tail ${exit}` }],
+    ok: exit === 0, clean: true, tracked_before: [], tracked_after: [], untracked_before: [], untracked_after: [], ...extra,
+  };
+}
+const descends = (sha, from, exit = 0) => verified(sha, exit, { descends_from: { sha: from, ok: true } });
+const repaired = (head, status = 'done') => ({ status, head, tests: 'npm test -- focused: pass', notes: '' });
+const finding = (issue) => ({ severity: 'important', file: 'src/a.js', line: 3, issue, fix: 'fix it' });
+
+function taskScript(ids) {
+  const script = {};
+  for (const id of ids) {
+    script[`${id} implement`] = [{ status: 'done', base: `${id}-b`, head: H(`${id}-h`), tests: 'pass', notes: '' }];
+    script[`${id} review`] = [{ verdict: 'approve', findings: [], cannot_verify: [] }];
+  }
+  return script;
+}
+
+// Final review with one finding (F1), fixed at f1.
+function withFix(extra = {}) {
+  return {
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }],
+    integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
+    'final review sp': [{ findings: [finding('bug')], cannot_verify: [], head: TIP }],
+    'final review security': [{ findings: [], cannot_verify: [], head: TIP }],
+    'final review correctness': [{ findings: [], cannot_verify: [], head: TIP }],
+    'final fix': [{ status: 'done', head: H('f1'), tests: 'focused pass', notes: '', dispositions: [
+      { id: 'F1', status: 'fixed', reason: 'fixed', evidence: 'src/a.js:3' }] }],
+    ...extra,
+  };
+}
+
+// Final review with no findings.
+function noFindings(extra = {}) {
+  const none = () => [{ findings: [], cannot_verify: [], head: TIP }];
+  return {
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }],
+    integrate: [{ status: 'done', head: H('I1'), notes: 'merged' }],
+    'final review sp': none(), 'final review security': none(), 'final review correctness': none(),
+    ...extra,
+  };
+}
+
+const resolved = (head) => ({ head, results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] });
+
+async function run(m, script) {
+  const calls = [];
+  const agent = async (prompt, opts) => {
+    calls.push({ prompt, ...opts });
+    const queue = script[opts.label];
+    if (!queue || queue.length === 0) throw new Error(`unscripted agent call: ${opts.label}`);
+    return queue.shift();
+  };
+  const parallel = (thunks) => Promise.all(thunks.map((t) => t().catch(() => null)));
+  const result = await loadScript({ args: m, agent, parallel, phase: () => {}, log: () => {} });
+  return { result, calls };
+}
+
+const labels = (calls) => calls.map((c) => c.label);
+const kinds = (result) => result.acceptance.reasons.map((r) => r.kind);
+
+// ---- after a final fix ----
+
+test('fail, repair, pass, valid re-review: accepted', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+  assert.equal(result.delivered_sha, H('r1'));
+  assert.equal(result.final.head, H('r1'));
+  assert.equal(result.verify.head, H('r1'));
+  assert.deepEqual(result.final.repairs.map((r) => [r.attempt, r.from, r.head, r.eligible, r.failed]),
+    [[1, H('f1'), H('r1'), true, ['npm test']]]);
+  const verifies = calls.filter((c) => c.label === 'verify');
+  assert.ok(verifies[1].prompt.includes(`--descends-from '${H('f1')}'`), verifies[1].prompt);
+  const repair = calls.find((c) => c.label === 'verify repair 1');
+  assert.equal(repair.phase, 'Verify');
+  assert.equal(repair.model, 'opus');
+  const rr = calls.find((c) => c.label === 'final re-review').prompt;
+  assert.ok(rr.includes(`${TIP}..${H('r1')}`) && rr.includes('repair 1:'), rr);
+});
+
+test('fail, fail, pass: accepted with two repairs', async () => {
+  const { result } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'), 1), descends(H('r2'), H('r1'))],
+      'verify repair 1': [repaired(H('r1'))],
+      'verify repair 2': [repaired(H('r2'))],
+      'final re-review': [resolved(H('r2'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+  assert.deepEqual(result.final.repairs.map((r) => r.head), [H('r1'), H('r2')]);
+  assert.equal(result.delivered_sha, H('r2'));
+});
+
+test('three failures: rejected checks_failed, two repairs, no third', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'), 1), descends(H('r2'), H('r1'), 1)],
+      'verify repair 1': [repaired(H('r1'))],
+      'verify repair 2': [repaired(H('r2'))],
+      'final re-review': [resolved(H('r2'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.deepEqual(kinds(result), ['checks_failed']);
+  assert.equal(result.final.repairs.length, 2);
+  assert.ok(!labels(calls).includes('verify repair 3'));
+});
+
+// ---- the repair agent's result ----
+
+test('a repair without a new commit: no second verify; rejected', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1)],
+      'verify repair 1': [repaired(H('f1'))],
+      'final re-review': [resolved(H('f1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(labels(calls).filter((l) => l === 'verify').length, 1);
+  assert.equal(result.acceptance.status, 'rejected');
+  assert.equal(result.final.repairs[0].eligible, false);
+  assert.equal(result.delivered_sha, H('f1'));
+});
+
+test('a repair that commits and reports blocked: verified, then stops', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'), 1)],
+      'verify repair 1': [repaired(H('r1'), 'blocked')],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(labels(calls).filter((l) => l === 'verify').length, 2);
+  assert.ok(!labels(calls).includes('verify repair 2'));
+  assert.equal(result.delivered_sha, H('r1'));
+  assert.equal(result.final.repairs[0].status, 'blocked');
+  assert.equal(result.acceptance.status, 'rejected');
+});
+
+test('a non-descendant, a head mismatch or a non-sha head is ineligible: final_fix_unreviewed with the observed head', async () => {
+  const cases = [
+    ['not a descendant', verified(H('r1'), 0, { results: [], ok: false, descends_from: { sha: H('f1'), ok: false } }), H('r1'), H('r1')],
+    ['head mismatch', verified(H('x9'), 0), H('r1'), H('x9')],
+  ];
+  for (const [name, second, reported, branchHead] of cases) {
+    const { result } = await run(manifest(), {
+      ...withFix({
+        verify: [verified(H('f1'), 1), second],
+        'verify repair 1': [repaired(reported)],
+        'final re-review': [resolved(branchHead)],
+      }),
+      ...taskScript(ALL),
+    });
+    assert.notEqual(result.acceptance.status, 'accepted', name);
+    assert.ok(kinds(result).includes('final_fix_unreviewed'), `${name}: ${JSON.stringify(result.acceptance)}`);
+    assert.equal(result.final.repairs[0].observed_head, reported, name);
+    assert.equal(result.final.repairs[0].eligible, false, name);
+    assert.equal(result.final.head, branchHead, name);
+  }
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1)],
+      'verify repair 1': [repaired('see below')],
+      'final re-review': [resolved(H('f1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(labels(calls).filter((l) => l === 'verify').length, 1);
+  assert.ok(kinds(result).includes('final_fix_unreviewed'), JSON.stringify(result.acceptance));
+  assert.equal(result.final.repairs[0].observed_head, 'see below');
+});
+
+test('a repair returning null is retried as the same attempt', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'verify repair 1': [null],
+      'verify repair 1 retry': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.ok(labels(calls).includes('verify repair 1 retry'));
+  assert.equal(result.final.repairs.length, 1);
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+// ---- budget ----
+
+// Agents of the fix path up to and including the first verify: pre-flight,
+// 4 implement + 4 review, integrate, 3 lenses, final fix, verify.
+const BEFORE_REPAIR = 15;
+
+test('no reserve left: no repair, completed and rejected, nothing refused', async () => {
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: BEFORE_REPAIR + 5 } });
+  const { result, calls } = await run(m, {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete');
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+  assert.deepEqual(kinds(result), ['checks_failed']);
+  assert.deepEqual(result.final.repairs, []);
+});
+
+test('the reserve keeps the re-review affordable after every retry', async () => {
+  // Exactly the reserve is left: the repair and its verify each need their
+  // retry, and the re-review still runs.
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: BEFORE_REPAIR + 6 } });
+  const { result, calls } = await run(m, {
+    ...withFix({
+      verify: [verified(H('f1'), 1), null],
+      'verify retry': [descends(H('r1'), H('f1'))],
+      'verify repair 1': [null],
+      'verify repair 1 retry': [repaired(H('r1'))],
+      'final re-review': [null],
+      'final re-review retry': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(labels(calls).includes('final re-review retry'));
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('validRepairReview closes on every bad re-review result', () => {
+  const r1 = H('r1');
+  assert.equal(validRepairReview({ head: r1, results: [], new_findings: [] }, r1), null);
+  for (const bad of [null, undefined, { __budget: true }, { head: H('zz'), results: [], new_findings: [] },
+    { head: r1, results: [] }, { head: r1, new_findings: [] }, { head: r1, results: 'x', new_findings: [] }, 'x']) {
+    assert.equal(typeof validRepairReview(bad, r1), 'string', JSON.stringify(bad));
+  }
+});
+
+// ---- no repair due ----
+
+test('a blocked, null or bad-head final fix: no repair', async () => {
+  for (const fix of [{ status: 'blocked', head: TIP, tests: '', notes: 'stuck' }, null, { status: 'done', head: 'see below', tests: '', notes: '' }]) {
+    const script = {
+      ...withFix({ verify: [verified(H('f1'), 1)] }),
+      ...taskScript(ALL),
+    };
+    script['final fix'] = [fix, fix === null ? null : undefined].filter((x) => x !== undefined);
+    script['final fix retry'] = [null];
+    script.verify = [verified(fix && fix.head && /^[0-9a-f]+$/.test(fix.head) ? fix.head : TIP, 1)];
+    const { result, calls } = await run(manifest(), script);
+    assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')), JSON.stringify(fix));
+    assert.notEqual(result.acceptance.status, 'accepted');
+  }
+});
+
+test('repairDue: only a complete, clean, exact inventory with an ordinary failing exit', () => {
+  const m = manifest();
+  const sha = H('f1');
+  assert.equal(repairDue(m, verified(sha, 1), sha), true);
+  assert.equal(repairDue(m, verified(sha, 0), sha), false, 'nothing failed');
+  assert.equal(repairDue(m, verified(H('x'), 1), sha), false, 'head mismatch');
+  assert.equal(repairDue(m, { ...verified(sha, 1), results: undefined }, sha), false, 'no results');
+  assert.equal(repairDue(m, null, sha), false, 'no result');
+  assert.equal(repairDue(m, verified(sha, 1, { tracked_before: [' M src/a.js'] }), sha), false, 'unclean');
+  assert.equal(repairDue(m, verified(sha, 1, { untracked_before: ['?? x.js'] }), sha), false, 'untracked before');
+  assert.equal(repairDue(m, verified(sha, 1, { head_after: H('y') }), sha), false, 'head_after');
+  const other = verified(sha, 1);
+  other.results[0].command = 'npm run other';
+  assert.equal(repairDue(m, other, sha), false, 'inventory mismatch');
+  for (const exit of [124, 128, 137, 255, -9]) assert.equal(repairDue(m, verified(sha, exit), sha), false, `exit ${exit}`);
+  assert.equal(repairDue(m, verified(sha, 2), sha), true, 'exit 2');
+});
+
+test('repairHeadEligible needs the reported head and a descends_from ok', () => {
+  const sha = H('r1');
+  assert.equal(repairHeadEligible(descends(sha, H('f1')), sha), true);
+  assert.equal(repairHeadEligible(verified(sha), sha), false, 'no descends_from');
+  assert.equal(repairHeadEligible(verified(sha, 0, { descends_from: { sha: H('f1'), ok: false } }), sha), false);
+  assert.equal(repairHeadEligible(descends(H('x'), H('f1')), sha), false, 'head mismatch');
+  assert.equal(repairHeadEligible(null, sha), false);
+});
+
+// ---- no final findings ----
+
+test('no findings: fail, repair, pass, then a final re-review', async () => {
+  const valid = await run(manifest(), {
+    ...noFindings({
+      verify: [verified(TIP, 1), descends(H('r1'), TIP)],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [{ head: H('r1'), results: [], new_findings: [] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(valid.result.acceptance.status, 'accepted', JSON.stringify(valid.result.acceptance));
+  assert.equal(valid.result.delivered_sha, H('r1'));
+  const rr = valid.calls.find((c) => c.label === 'final re-review');
+  assert.ok(rr.prompt.includes(`${TIP}..${H('r1')}`) && rr.prompt.includes('No findings are under verification'), rr.prompt);
+  const blocking = await run(manifest(), {
+    ...noFindings({
+      verify: [verified(TIP, 1), descends(H('r1'), TIP)],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [{ head: H('r1'), results: [], new_findings: [finding('the repair deleted a test')] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(blocking.result.acceptance.status, 'rejected');
+  assert.deepEqual(blocking.result.final.open.map((f) => f.id), ['N1']);
+});
+
+test('no findings: null, another head, or a malformed re-review gives final_fix_unreviewed', async () => {
+  for (const [name, results] of [
+    ['null', { 'final re-review': [null], 'final re-review retry': [null] }],
+    ['another head', { 'final re-review': [{ head: TIP, results: [], new_findings: [] }] }],
+    ['malformed', { 'final re-review': [{ head: H('r1'), results: [] }] }],
+  ]) {
+    const { result } = await run(manifest(), {
+      ...noFindings({
+        verify: [verified(TIP, 1), descends(H('r1'), TIP)],
+        'verify repair 1': [repaired(H('r1'))],
+        ...results,
+      }),
+      ...taskScript(ALL),
+    });
+    assert.notEqual(result.acceptance.status, 'accepted', name);
+    assert.ok(kinds(result).includes('final_fix_unreviewed'), `${name}: ${JSON.stringify(result.acceptance)}`);
+  }
+});
+
+// ---- delivered head ----
+
+test('final.head, delivered_sha, verify.head, and the e2e and post-integrate rechecks name the repaired head', async () => {
+  const hooks = { post_integrate: 'POST: check contracts', e2e: 'E2E: run it' };
+  const r1 = H('r1');
+  for (const [name, script] of [
+    ['after a fix', withFix({
+      verify: [verified(H('f1'), 1), descends(r1, H('f1'))],
+      'verify repair 1': [repaired(r1)],
+      'final re-review': [resolved(r1)],
+    })],
+    ['no findings', noFindings({
+      verify: [verified(TIP, 1), descends(r1, TIP)],
+      'verify repair 1': [repaired(r1)],
+      'final re-review': [{ head: r1, results: [], new_findings: [] }],
+    })],
+  ]) {
+    const { result } = await run(manifest({ hooks }), {
+      ...script,
+      'post-integrate': [{ status: 'done', head: H('P1'), notes: 'ok' }],
+      e2e: [{ head: TIP, items: [{ item: 'x', result: 'PASS', evidence: 'ok' }] }],
+      'e2e recheck': [{ head: r1, items: [{ item: 'x', result: 'PASS', evidence: 'ok' }] }],
+      'post-integrate recheck': [{ status: 'done', head: r1, notes: 'ok' }],
+      ...taskScript(ALL),
+    });
+    assert.equal(result.final.head, r1, name);
+    assert.equal(result.delivered_sha, r1, name);
+    assert.equal(result.verify.head, r1, name);
+    assert.equal(result.e2e.checked_sha, r1, name);
+    assert.equal(result.acceptance.status, 'accepted', `${name}: ${JSON.stringify(result.acceptance)}`);
+  }
+});
+
+// ---- supervised and relaunches ----
+
+test('supervised: no repair, rejected as today', async () => {
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    ...taskScript(ALL),
+  });
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+  assert.deepEqual(kinds(result), ['checks_failed']);
+  assert.equal(result.check_policy.repair_limit, 0);
+});
+
+test('repairs_spent 1 allows one attempt; 2 allows none', async () => {
+  const one = await run(manifest({ repairs_spent: 1 }), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'), 1)],
+      'verify repair 2': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(one.result.final.repairs.map((r) => r.attempt), [2]);
+  assert.equal(one.result.acceptance.status, 'rejected');
+  const none = await run(manifest({ repairs_spent: 2 }), {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    ...taskScript(ALL),
+  });
+  assert.ok(!labels(none.calls).some((l) => l.startsWith('verify repair')));
+});
+
+test('a resume after exhaustion runs no repair and reviews the branch afresh', async () => {
+  const backfill = Object.fromEntries(ALL.map((id) => [id, { base: `${id}-b`, head: H(`${id}-h`) }]));
+  const m = manifest({ done: ALL, reviewed: ALL, backfill, repairs_spent: 2 });
+  const { result, calls } = await run(m, {
+    ...noFindings({ verify: [verified(TIP, 1)] }),
+  });
+  assert.ok(labels(calls).includes('final review sp'), 'the lenses review the branch again');
+  assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
+  assert.equal(result.acceptance.status, 'rejected');
+});
+
+// ---- reports ----
+
+test('stopped reports carry final.repairs and check_policy', async () => {
+  // No reserve and no room for the re-review: the run stops on budget.
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: BEFORE_REPAIR } });
+  const { result } = await run(m, {
+    ...withFix({ verify: [verified(H('f1'), 1)] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'stopped');
+  assert.deepEqual(result.final.repairs, []);
+  assert.deepEqual(result.check_policy, {
+    task_checks: {}, widen_paths: [], repair_limit: 2, repairs_spent: 0, repair_reserve: 6,
+    final_inventory_count: 1, autonomy: 'autonomous',
+  });
+});
+
+test('setup_skipped and the check policy reach the report', async () => {
+  const m = manifest({
+    task_checks: { T2: { test: ['node --test t2'] } }, widen_paths: ['package.json'],
+    done: ['T3'], reviewed: ['T3'], backfill: { T3: { base: 'T3-b', head: H('T3-h') } },
+  });
+  m.setup_result = { ...m.setup_result, setup_skipped: ['beta'] };
+  const { result } = await run(m, {
+    ...noFindings({ verify: [verified(TIP)] }),
+    ...taskScript(['T1', 'T2', 'T4']),
+  });
+  assert.deepEqual(result.setup_skipped, ['beta']);
+  assert.deepEqual(result.check_policy.task_checks, { T2: { test: ['node --test t2'] } });
+  assert.deepEqual(result.check_policy.widen_paths, ['package.json']);
+  assert.deepEqual(result.final.repairs, []);
+  const plain = await run(manifest(), { ...noFindings({ verify: [verified(TIP)] }), ...taskScript(ALL) });
+  assert.deepEqual(plain.result.setup_skipped, []);
+});

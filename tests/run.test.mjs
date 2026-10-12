@@ -843,7 +843,7 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.deepEqual(result.final, {
     findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: H('T5-h'),
     lens_heads: ['superpowers', 'security', 'correctness'].map((lens) => ({ lens, head: H('T5-h') })),
-    task_minors_open: [],
+    task_minors_open: [], repairs: [],
   });
   assert.equal(result.delivered_sha, H('T5-h'));
   assert.ok(!labels(calls).includes('e2e recheck'), 'the e2e result already covers the delivered revision');
@@ -2210,8 +2210,12 @@ test('acceptance: an e2e that fails twice keeps a complete run from being accept
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['e2e_failed']);
 });
 
+// A run whose repairs are spent (1.6.0, spec 4.5): a failing verify is not
+// repaired, so these tests still see the failure itself.
+const noRepairs = (overrides = {}) => manifest({ repairs_spent: 2, ...overrides });
+
 test('acceptance: a failing check at the delivered revision rejects the run, whatever the fixer said', async () => {
-  const result = await acceptanceOf({ verify: [verified(H('f1'), 1)] });
+  const result = await acceptanceOf({ verify: [verified(H('f1'), 1)] }, noRepairs());
   assert.equal(result.acceptance.status, 'rejected');
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_failed']);
   assert.match(result.acceptance.reasons[0].detail, /npm test \(exit 1\)/);
@@ -2273,7 +2277,7 @@ test('a lane-only check runs at the delivered revision', async () => {
 });
 
 test('a final fix that breaks a lane check is not accepted', async () => {
-  const m = manifest({ lane_commands: { beta: { test: ['node --test'] } } });
+  const m = noRepairs({ lane_commands: { beta: { test: ['node --test'] } } });
   const verify = [laneChecked(H('f1'), [
     { group: 'test', command: 'npm test', exit: 0 }, { group: 'test', command: 'node --test', exit: 1 },
   ])];
@@ -2492,7 +2496,7 @@ test('the rechecks and post-integrate are told the project checks already ran th
 });
 
 test('a failing verify is passed on as failed, and acceptance still rejects', async () => {
-  const { result, calls } = await run(manifest(), { ...phaseScript({ verify: [verified(H('f1'), 1)] }), ...taskScript(ALL) });
+  const { result, calls } = await run(noRepairs(), { ...phaseScript({ verify: [verified(H('f1'), 1)] }), ...taskScript(ALL) });
   const rr = promptOf(calls, 'final re-review');
   assert.ok(rr.includes(`The project checks already ran at ${H('f1')}: FAILED: npm test (exit 1). Do not rerun them.`), rr);
   assert.ok(promptOf(calls, 'e2e recheck').includes('FAILED: npm test (exit 1)'));
