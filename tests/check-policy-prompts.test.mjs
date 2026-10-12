@@ -10,11 +10,17 @@ import { loadHelpers, H } from './harness.mjs';
 const {
   implementPrompt, reviewPrompt, reReviewPrompt, fixPrompt, laneChecks, wideChecks, taskChecksCommand,
   taskEvidenceLine, fixMessagesLines, fallbackImplementer, fallbackFixer, laneWhere, featureWhere, batchUnit,
-  repairFixMessage,
+  repairFixMessage, procedureLines, reserveCommand, waitCommand, longCheckRuleLines, resultPath, agentRules,
+  preflightPrompt, integratePrompt, resolveConflictsPrompt, postIntegrateFixPrompt, postIntegrateReReviewPrompt,
+  postIntegratePrompt, e2ePrompt, finalReviewPrompt, combinedFinalReviewPrompt, finalFixPrompt, finalReReviewPrompt,
+  verifyPrompt, verifyRepairPrompt, adjudicatorPrompt,
 } = await loadHelpers([
   'implementPrompt', 'reviewPrompt', 'reReviewPrompt', 'fixPrompt', 'laneChecks', 'wideChecks', 'taskChecksCommand',
   'taskEvidenceLine', 'fixMessagesLines', 'fallbackImplementer', 'fallbackFixer', 'laneWhere', 'featureWhere',
-  'batchUnit', 'repairFixMessage',
+  'batchUnit', 'repairFixMessage', 'procedureLines', 'reserveCommand', 'waitCommand', 'longCheckRuleLines',
+  'resultPath', 'agentRules', 'preflightPrompt', 'integratePrompt', 'resolveConflictsPrompt', 'postIntegrateFixPrompt',
+  'postIntegrateReReviewPrompt', 'postIntegratePrompt', 'e2ePrompt', 'finalReviewPrompt', 'combinedFinalReviewPrompt',
+  'finalFixPrompt', 'finalReReviewPrompt', 'verifyPrompt', 'verifyRepairPrompt', 'adjudicatorPrompt',
 ]);
 
 function task(id, extra = {}) {
@@ -69,7 +75,7 @@ test('an implement prompt carries the task-checks call with the entry', () => {
     "--wide-cmd 'test' 'npm test'",
   ]) assert.ok(p.includes(part), part);
   const text = flat(p);
-  assert.ok(text.includes('Before you commit, run the task checks once, as one call.'));
+  assert.ok(text.includes('Before you commit, run the task checks once, with the procedure below.'));
   assert.ok(text.includes('While iterating, run only the focused tests for what you change.'));
   assert.ok(text.includes('--force-full'));
   assert.ok(!p.includes('- every check at once'));
@@ -192,4 +198,155 @@ test('the fix fallback is not the implement fallback', () => {
 
 test('fixMessagesLines names the repair message', () => {
   assert.ok(flat(fixMessagesLines().join('\n')).includes(`\`${repairFixMessage()}\``));
+});
+
+// ---- 1.6.1: one procedure for every check an agent runs (spec 4.1, 4.4)
+
+const RESERVE = "'python3' '/skills/parallel-lanes/scripts/await-checks' reserve --ledger '/work/ledger' --name ";
+const WAIT = "'python3' '/skills/parallel-lanes/scripts/await-checks' wait '<P>'";
+
+// Every prompt the engine builds, over the standard manifest (with hooks so
+// the hook prompts have their instructions).
+function everyPrompt() {
+  const m = manifest({ hooks: { post_integrate: 'POST-HOOK', e2e: 'E2E-HOOK' } });
+  const supervised = manifest({ autonomy: 'supervised', hooks: { post_integrate: 'POST-HOOK' } });
+  const where = laneWhere(m, lane(m, 'alpha'));
+  const finding = { id: 'F1', severity: 'important', file: 'src/T2.js', line: 1, issue: 'x', fix: 'y' };
+  const verify = { head: H('v1'), ok: false, results: [{ group: 'test', command: 'npm test', exit: 1 }] };
+  const ctx = { kind: 'blocked', task: t(m, 'T2'), where, details: 'Blocked: which key?', findings: [] };
+  return {
+    implement: implementPrompt(m, t(m, 'T2'), where, H('b')),
+    implementBatch: implementPrompt(m, batchUnit([t(m, 'T2'), t(m, 'T3')]), where, H('b')),
+    review: reviewPrompt(m, t(m, 'T2'), where, H('a'), H('b')),
+    reReview: reReviewPrompt(m, t(m, 'T2'), where, H('b'), H('c'), [finding]),
+    fix: fixPrompt(m, t(m, 'T2'), where, [finding], { status: 'done' }, H('b')),
+    preflight: preflightPrompt(m),
+    integrate: integratePrompt(m, H('pre')),
+    integrateHeal: integratePrompt(m, H('pre'), { testFailure: 'heal', joinStartPoint: true }),
+    resolve: resolveConflictsPrompt(m, H('pre'), ['src/a.js']),
+    postIntegrateFixHook: postIntegrateFixPrompt(m, 'the hook failed', 'hook'),
+    postIntegrateFixTests: postIntegrateFixPrompt(m, 'npm test failed', 'tests'),
+    postIntegrateReReview: postIntegrateReReviewPrompt(m, H('a'), H('b')),
+    postIntegrate: postIntegratePrompt(m),
+    postIntegrateRecheck: postIntegratePrompt(m, true, verify),
+    e2e: e2ePrompt(m),
+    finalReviewSp: finalReviewPrompt(m, 'sp', null),
+    finalReviewSecurity: finalReviewPrompt(m, 'security', null),
+    finalReviewCorrectness: finalReviewPrompt(m, 'correctness', null),
+    combinedFinalReview: combinedFinalReviewPrompt(m, { e2e: null }),
+    finalFix: finalFixPrompt(m, [finding], H('tip')),
+    finalFixSupervised: finalFixPrompt(supervised, [finding], H('tip')),
+    finalReReview: finalReReviewPrompt(m, H('tip'), H('f1'), [{ ...finding, dispositions: [] }], verify),
+    verify: verifyPrompt(m, H('d1')),
+    verifyFrom: verifyPrompt(m, H('d1'), H('d0')),
+    verifyRepair: verifyRepairPrompt(m, verify, H('v1'), 1),
+    adjudicator: adjudicatorPrompt(m, ctx),
+  };
+}
+
+test('the implementer reserves task-<id> and starts task-checks with --evidence in the background', () => {
+  const m = manifest();
+  const where = laneWhere(m, lane(m, 'alpha'));
+  const p = implementPrompt(m, t(m, 'T2'), where, H('base'));
+  assert.ok(p.includes(`${RESERVE}'task-T2'`), p);
+  assert.ok(!p.includes(`${RESERVE}'task-T2' --exact`), 'a task check never reserves an exact path');
+  const start = p.split('\n').find((l) => l.includes("/scripts/task-checks' "));
+  assert.ok(start.includes("--evidence '<P>'"), start);
+  assert.ok(taskChecksCommand(m, t(m, 'T2'), where, H('base')).includes("--evidence '<P>'"));
+  // The reserve comes first, then the start in the background, then the wait.
+  const reserveAt = p.indexOf(`${RESERVE}'task-T2'`);
+  const startAt = p.indexOf(start);
+  const waitAt = p.indexOf(WAIT, startAt);
+  assert.ok(reserveAt >= 0 && reserveAt < startAt && startAt < waitAt, 'reserve, start, wait in order');
+  const text = flat(p.slice(reserveAt, waitAt));
+  assert.ok(text.includes('run_in_background set to true'), text);
+  // A batch reserves under its unit id.
+  const batch = implementPrompt(m, batchUnit([t(m, 'T2'), t(m, 'T3')]), where, H('base'));
+  assert.ok(batch.includes(`${RESERVE}'task-T2-T3'`), batch);
+  // The logs stay with the evidence.
+  assert.ok(flat(p).includes("kept with the run's evidence: read the log instead of rerunning a command, and leave the"
+    + ' file in place'), p);
+});
+
+test('procedureLines names reserve, run_in_background, wait and its exit codes 4 and 5', () => {
+  const m = manifest();
+  const start = "cd '/work/repo' && 'python3' '/skills/parallel-lanes/scripts/run-checks' '/work/repo' --out '<P>'";
+  const lines = procedureLines(m, { name: 'probe', start });
+  const text = flat(lines.join('\n'));
+  assert.equal(reserveCommand(m, 'probe'), `${RESERVE}'probe'`);
+  assert.equal(reserveCommand(m, 'probe', true), `${RESERVE}'probe' --exact`);
+  assert.equal(waitCommand(m), WAIT);
+  assert.equal(resultPath(), "'<P>'");
+  // The five points of spec 4.1, in order.
+  const at = (s) => {
+    const i = text.indexOf(s);
+    assert.ok(i >= 0, `${s}: ${text}`);
+    return i;
+  };
+  const points = [
+    at(`${RESERVE}'probe'`),
+    at('replace <P> with the path it printed, keeping the single quotes'),
+    at("with the Bash tool's run_in_background set to true"),
+    at(start),
+    at('with a 600000 ms timeout'),
+    at(WAIT),
+    at('Exit 4 means the check is still running: run the wait again'),
+    at('change nothing in that checkout'),
+    at('never finish your turn'),
+    at('Exit 5 means the check stopped without a result: reserve and start it once more'),
+    at('After a second stop'),
+  ];
+  assert.deepEqual(points, [...points].sort((a, b) => a - b), 'in the order of spec 4.1');
+  assert.ok(text.includes('Every run, a rerun after a fix included, starts with its own reserve'), text);
+  assert.ok(text.includes('the checkout changed while the checks ran'), text);
+  // No busy handling without --exact; with it, wait on the file reserve names.
+  assert.ok(!text.includes('busy'), text);
+  const exact = flat(procedureLines(m, { name: 'verify-x', exact: true, start }).join('\n'));
+  assert.ok(exact.includes(`${RESERVE}'verify-x' --exact`), exact);
+  assert.ok(exact.includes('If reserve exits 4 with status busy'), exact);
+  assert.ok(exact.includes('run the wait on the file it names until the wait no longer exits 4, ignore that report, '
+    + 'then reserve again'), exact);
+  // A caller can say what a second stop returns.
+  const own = flat(procedureLines(m, { name: 'x', start, stop: 'return STOP-TEXT.' }).join('\n'));
+  assert.ok(own.includes('After a second stop, do not start it again: return STOP-TEXT.'), own);
+});
+
+test('no prompt mentions Monitor, sleep or an output file', () => {
+  for (const [name, p] of Object.entries(everyPrompt())) {
+    assert.ok(!/monitor/i.test(p), `${name}: Monitor`);
+    assert.ok(!/\bsleep/i.test(p), `${name}: sleep`);
+    assert.ok(!/output file/i.test(p), `${name}: output file`);
+    assert.ok(!/\.output\b/.test(p), `${name}: .output`);
+  }
+});
+
+test('the general long-command rule reaches implementers and phase agents but not the adjudicator', () => {
+  const m = manifest();
+  const rule = longCheckRuleLines(m).join('\n');
+  const text = flat(rule);
+  assert.ok(text.includes('longer than 9 minutes'), text);
+  assert.ok(text.includes(`${RESERVE}'long'`), text);
+  assert.ok(text.includes("cd 'DIR' && 'python3' '/skills/parallel-lanes/scripts/run-checks' 'DIR' --out '<P>' "
+    + "--root '/work/ledger' --cmd 'GROUP' 'COMMAND'"), text);
+  assert.ok(text.includes(WAIT), text);
+  // It left the shared agent rules, which have no manifest.
+  assert.ok(!agentRules().includes('600000'), agentRules());
+  for (const [name, p] of Object.entries(everyPrompt())) {
+    if (name === 'adjudicator') {
+      assert.ok(!p.includes(rule) && !p.includes('longer than 9 minutes'), name);
+    } else {
+      assert.ok(p.includes(rule), name);
+    }
+  }
+});
+
+test('the result placeholder is single-quoted in every start command', () => {
+  for (const [name, p] of Object.entries(everyPrompt())) {
+    const flags = p.match(/--(out|evidence) \S+/g) || [];
+    for (const f of flags) assert.ok(/^--(out|evidence) '<P>'$/.test(f), `${name}: ${f}`);
+    // Outside the instruction that names it, <P> only ever appears quoted.
+    assert.ok(!/[^']<P>|<P>[^']/.test(p.replace(/replace <P> /g, '')), `${name}: an unquoted <P>`);
+  }
+  const all = Object.values(everyPrompt()).join('\n');
+  assert.ok(all.includes("--evidence '<P>'") && all.includes("--out '<P>'"));
 });

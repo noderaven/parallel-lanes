@@ -10,10 +10,10 @@ import { loadHelpers, H } from './harness.mjs';
 
 const {
   integratePrompt, postIntegrateFixPrompt, finalFixPrompt, verifyPrompt, verifySchema, verifyRepairPrompt,
-  repairSchema, finalReReviewPrompt, finalChecks, finalSetup, repairFixMessage,
+  repairSchema, finalReReviewPrompt, finalChecks, finalSetup, repairFixMessage, postIntegratePrompt,
 } = await loadHelpers([
   'integratePrompt', 'postIntegrateFixPrompt', 'finalFixPrompt', 'verifyPrompt', 'verifySchema', 'verifyRepairPrompt',
-  'repairSchema', 'finalReReviewPrompt', 'finalChecks', 'finalSetup', 'repairFixMessage',
+  'repairSchema', 'finalReReviewPrompt', 'finalChecks', 'finalSetup', 'repairFixMessage', 'postIntegratePrompt',
 ]);
 
 function task(id) {
@@ -50,7 +50,13 @@ function manifest(overrides = {}) {
 }
 
 const flat = (s) => s.replace(/\s+/g, ' ');
-const runChecksLines = (p) => p.split('\n').filter((l) => l.includes("/scripts/run-checks' "));
+// The run-checks calls a prompt hands out, without the general long-command
+// rule's template (its DIR, GROUP and COMMAND are placeholders).
+const runChecksLines = (p) => p.split('\n')
+  .filter((l) => l.includes("/scripts/run-checks' ") && !l.includes("--cmd 'GROUP' 'COMMAND'"));
+const RESERVE = "'python3' '/skills/parallel-lanes/scripts/await-checks' reserve --ledger '/work/ledger' --name ";
+const WAIT = "'python3' '/skills/parallel-lanes/scripts/await-checks' wait '<P>'";
+const LOGS = "kept with the run's evidence. Read the log instead of rerunning a command, and leave the file in place.";
 // The --cmd pairs of a run-checks line, in order.
 function cmdPairs(line) {
   const out = [];
@@ -78,7 +84,7 @@ test('integration runs finalSetup and one run-checks over finalChecks', () => {
     assert.deepEqual(finalSetup(m), ['npm ci', 'npm ci -w alpha']);
     assert.ok(!p.includes('Lane alpha commands') && !p.includes('Lane beta commands'), p);
     assert.ok(!p.includes('- every check at once'), p);
-    assert.ok(flat(p).includes('in a new temporary directory each call'), 'the log note is there');
+    assert.ok(flat(p).includes(LOGS), 'the log note is there');
   }
 });
 
@@ -151,7 +157,7 @@ test('verify with from appends --descends-from and asks for descends_from', () =
   const p = verifyPrompt(m, H('d1'), H('d0'));
   const line = runChecksLines(p)[0];
   assert.ok(line.endsWith(`--descends-from '${H('d0')}'`), line);
-  assert.ok(line.includes(`--out '/work/ledger/checks/verify-${H('d1')}.json'`), line);
+  assert.ok(line.includes("--out '<P>' --root '/work/ledger'"), line);
   assert.ok(flat(p).includes('untracked_before, untracked_after, descends_from'), p);
 });
 
@@ -163,6 +169,88 @@ test('verifySchema accepts log and tail in results, and descends_from', () => {
   assert.deepEqual(item.required, ['group', 'command', 'exit']);
   assert.deepEqual(s.properties.descends_from.required, ['sha', 'ok']);
   assert.ok(!s.required.includes('descends_from'));
+  // 1.6.1: tree_changed and stopped are optional.
+  assert.deepEqual(s.properties.tree_changed, { type: 'boolean' });
+  assert.deepEqual(s.properties.stopped, { type: 'string' });
+  assert.ok(!s.required.includes('tree_changed') && !s.required.includes('stopped'));
+});
+
+// ---- 1.6.1: the long-check procedure in phase prompts (spec 4.1, 4.4)
+
+test('integrate reserves integrate and keeps logs with the evidence', () => {
+  const m = manifest();
+  for (const opts of [{ conflictMode: 'abort' }, { testFailure: 'heal' }, {}]) {
+    const p = integratePrompt(m, H('pre'), opts);
+    const text = flat(p);
+    const line = runChecksLines(p)[0];
+    assert.ok(line.includes("--out '<P>' --root '/work/ledger'"), line);
+    assert.ok(text.includes(`${RESERVE}'integrate'`), text);
+    assert.ok(!text.includes(`${RESERVE}'integrate' --exact`), text);
+    assert.ok(text.indexOf(`${RESERVE}'integrate'`) < text.indexOf(flat(line)), 'reserve before the start');
+    assert.ok(text.indexOf(flat(line)) < text.indexOf(WAIT), 'the wait after the start');
+    assert.ok(text.includes("run_in_background set to true"), text);
+    assert.ok(text.includes(LOGS), text);
+    assert.ok(!text.includes('temporary directory') && !text.includes('remove that directory'), text);
+  }
+});
+
+test('verify reserves verify-<sha> with --exact and still writes under the ledger with --root', () => {
+  const m = manifest();
+  const p = verifyPrompt(m, H('d1'));
+  const text = flat(p);
+  const line = runChecksLines(p)[0];
+  assert.equal(runChecksLines(p).length, 1);
+  assert.ok(text.includes(`${RESERVE}'verify-${H('d1')}' --exact`), text);
+  assert.ok(line.includes("--out '<P>' --root '/work/ledger'"), line);
+  assert.ok(!line.includes('--descends-from'), line);
+  assert.ok(text.includes('If reserve exits 4 with status busy'), text);
+  assert.ok(text.includes(WAIT), text);
+  // tree_changed when printed; what to return after a second stop.
+  assert.ok(text.includes('tree_changed when run-checks printed true or false'), text);
+  assert.ok(text.includes('After a second stop, do not start it again: return results [], ok false, clean = whether '
+    + `git -C '/work/repo' status --porcelain --untracked-files=all prints nothing, empty tracked_before, tracked_after, `
+    + 'untracked_before and untracked_after lists, head = the output of'), text);
+  assert.ok(text.includes('and stopped naming both outcomes the wait printed'), text);
+});
+
+test('the repair\'s verify (from set) also uses --exact and --descends-from', () => {
+  const m = manifest();
+  const p = verifyPrompt(m, H('r1'), H('f1'));
+  const text = flat(p);
+  const line = runChecksLines(p)[0];
+  assert.ok(text.includes(`${RESERVE}'verify-${H('r1')}' --exact`), text);
+  assert.ok(line.includes("--out '<P>' --root '/work/ledger'"), line);
+  assert.ok(line.endsWith(`--descends-from '${H('f1')}'`), line);
+});
+
+test('post-integrate, post-integrate-fix (hook) and supervised final-fix use their reserve names', () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-HOOK' } });
+  const f = [{ id: 'F1', severity: 'important', file: 'src/a.js', line: 1, issue: 'x', fix: 'y' }];
+  const cases = {
+    'post-integrate': postIntegratePrompt(m),
+    'post-integrate-fix': postIntegrateFixPrompt(m, 'the hook failed', 'hook'),
+    'final-fix': finalFixPrompt(manifest({ autonomy: 'supervised' }), f, H('tip')),
+  };
+  for (const [name, p] of Object.entries(cases)) {
+    const text = flat(p);
+    assert.ok(text.includes(`${RESERVE}'${name}'`), `${name}: ${text}`);
+    assert.ok(!text.includes(`${RESERVE}'${name}' --exact`), name);
+    const lines = runChecksLines(p);
+    assert.equal(lines.length, 1, name);
+    assert.ok(lines[0].includes("--out '<P>' --root '/work/ledger'"), lines[0]);
+    assert.ok(text.includes('- every check at once'), name);
+    assert.ok(text.includes(LOGS), name);
+  }
+});
+
+test('the autonomous final fix and the tests-path post-integrate fixer get no every-check call', () => {
+  const m = manifest();
+  const f = [{ id: 'F1', severity: 'important', file: 'src/a.js', line: 1, issue: 'x', fix: 'y' }];
+  for (const p of [finalFixPrompt(m, f, H('tip')), postIntegrateFixPrompt(m, 'npm test failed', 'tests')]) {
+    assert.ok(!p.includes('- every check at once'), p);
+    assert.equal(runChecksLines(p).length, 0, p);
+    for (const name of ['final-fix', 'post-integrate-fix']) assert.ok(!p.includes(`${RESERVE}'${name}'`), name);
+  }
 });
 
 test('the repair prompt names each failing command, its log and tail, and forbids weakening checks', () => {

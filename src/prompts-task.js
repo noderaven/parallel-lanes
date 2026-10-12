@@ -102,12 +102,14 @@ function finalSetup(m) {
 
 // The scripts/run-checks call that runs each check of a [{group, command}]
 // list in dir, separately, and exits non-zero when any one fails. out
-// (optional) is the evidence file it writes under the ledger dir. null for
-// an empty list.
+// (optional) is the evidence file it writes under the ledger dir:
+// resultPath() goes in as given (already quoted), for the path the agent's
+// reserve prints. null for an empty list.
 function runChecksCommand(m, dir, checks, out = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
-  const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
+  const target = out === resultPath() ? out : shellQuote(out);
+  const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
 }
@@ -151,30 +153,101 @@ function checksCommand(m, laneId, dir, out = null) {
   return runChecksCommand(m, dir, laneChecks(m, laneId), out);
 }
 
-// What an agent handed a run-checks call without --out is told about its
-// output and logs.
+// What an agent handed a run-checks call is told about its output and logs:
+// the call writes beside its reserved ledger file, and the logs stay there
+// with the evidence (spec 4.4).
 function checksLogLines() {
   return [
-    '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
-    '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
-    '  (the log\'s parent) once you have read what you need.',
+    "  Its result is one JSON line: each command's full output is in the file its result names as log, kept with",
+    "  the run's evidence. Read the log instead of rerunning a command, and leave the file in place.",
+  ];
+}
+
+// The placeholder for a check's result file in a start command (spec 4.1):
+// the agent replaces <P> with the path await-checks reserve printed, inside
+// the quotes, so a path with a space still works. A function, not a
+// constant: loadHelpers returns before top-level bindings initialize.
+function resultPath() {
+  return "'<P>'";
+}
+
+// The await-checks reserve call: it creates a fresh, empty result file
+// <ledger>/checks/<name>.<n>.json and prints its path. exact (verify): the
+// path is <ledger>/checks/<name>.json, emptied again, or busy (exit 4) while
+// an earlier writer still holds it.
+function reserveCommand(m, name, exact = false) {
+  return `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/await-checks`)} reserve --ledger `
+    + `${shellQuote(m.repo.ledger_dir)} --name ${shellQuote(name)}${exact ? ' --exact' : ''}`;
+}
+
+// The await-checks wait call on the reserved result file.
+function waitCommand(m) {
+  return `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/await-checks`)} wait ${resultPath()}`;
+}
+
+// The procedure for every check an agent runs, whatever its length (spec
+// 4.1): reserve a result file under name (exact: verify's fixed path, with
+// the busy case), start start (a check command carrying resultPath()) in the
+// background, wait for it, change nothing while it runs, and start once more
+// after a stop. stop (optional) says what the agent does after a second
+// stop; by default it reports the checks failed.
+function procedureLines(m, { name, exact = false, start, stop = null }) {
+  const second = stop === null ? 'report the checks as failed (never as passed), with both outcomes the wait printed'
+    + ' in your notes.' : stop;
+  return [
+    'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
+    'the new path.',
+    `1. Reserve a result file (a short call): ${reserveCommand(m, name, exact)}`,
+    '   It prints a path. In the start command below, replace <P> with the path it printed, keeping the single',
+    '   quotes around it.',
+    ...(exact ? [
+      '   If reserve exits 4 with status busy, an earlier run still writes that file: run the wait on the file it',
+      '   names until the wait no longer exits 4, ignore that report, then reserve again.',
+    ] : []),
+    "2. Right after reserving, start the check with the Bash tool's run_in_background set to true:",
+    `   ${start}`,
+    '3. Wait for it in the foreground, with a 600000 ms timeout on the call:',
+    `   ${waitCommand(m)}`,
+    '   Exit 4 means the check is still running: run the wait again, as often as it takes. Exit 0 (passed), 1',
+    "   (failed) or 3 (an error record) prints the check's result, its one JSON line. If the wait also says the",
+    '   checkout changed while the checks ran, run them again, starting with a new reserve.',
+    '4. While a check runs, change nothing in that checkout (no edits, commits or other checks), and never finish',
+    '   your turn or return your result.',
+    '5. Exit 5 means the check stopped without a result: reserve and start it once more, as above. After a',
+    `   second stop, do not start it again: ${second}`,
+  ];
+}
+
+// The general rule for any other long command (spec 4.4): it runs through
+// run-checks with the same procedure, under the reserve name long. Task
+// prompts (taskContext) and phase prompts (phaseRules) carry it.
+function longCheckRuleLines(m) {
+  const start = `cd 'DIR' && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)} 'DIR' `
+    + `--out ${resultPath()} --root ${shellQuote(m.repo.ledger_dir)} --cmd 'GROUP' 'COMMAND'`;
+  return [
+    'Long commands: any command you expect to run longer than 9 minutes that this prompt does not already hand you',
+    'as a check (a wide test filter, a long hook step) runs through run-checks, with DIR the checkout it runs in,',
+    'GROUP a label such as test, and COMMAND the command, each single-quoted.',
+    ...procedureLines(m, { name: 'long', start }),
   ];
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
-// runs every check there at once.
-function commandsText(m, laneId, dir = null) {
-  const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
-  const all = dir === null ? null : checksCommand(m, laneId, dir);
+// runs every check there at once, with the procedure under the reserve name
+// name.
+function commandsText(m, laneId, dir = null, name = 'checks') {
+  const lines = ['setup', 'test', 'lint', 'build'].map((group) => `- ${group}: ${commandList(m, laneId, group)}`);
+  const all = dir === null ? null : checksCommand(m, laneId, dir, resultPath());
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
-      ...checksLogLines());
+    lines.push("- every check at once (each command's exit status is kept; it exits non-zero when any fails).",
+      ...procedureLines(m, { name, start: all }).map((l) => `  ${l}`), ...checksLogLines());
   }
   return lines.join('\n');
 }
 
 // The scripts/task-checks call a task's implementer runs once before
-// committing (spec 4.2, 4.3), in where.dir for the unit's range from base;
+// committing (spec 4.2, 4.3), in where.dir for the unit's range from base,
+// writing to the result file the agent reserved (--evidence resultPath());
 // null when the ledger lane has no test, lint or build command.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
@@ -184,7 +257,8 @@ function taskChecksCommand(m, task, where, base) {
   const entry = taskChecksEntry(m, task, where.lane);
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
-    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--lane', q(where.lane),
+    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
+    '--lane', q(where.lane),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
@@ -195,16 +269,20 @@ function taskChecksCommand(m, task, where, base) {
   ].join(' ');
 }
 
-// The implementer's task-checks instructions (spec 4.3); [] when there is no
+// The implementer's task-checks instructions (spec 4.3), with the procedure
+// under the reserve name task-<unit id> (spec 4.4); [] when there is no
 // task-checks call.
 function taskChecksLines(m, task, where, base) {
   const cmd = taskChecksCommand(m, task, where, base);
   if (cmd === null) return [];
   return [
-    'Task checks. Before you commit, run the task checks once, as one call. This replaces the full-suite run the',
-    "instructions above ask for, and the test-driven-development skill's rule that your verification is the whole",
-    'project suite. The full project checks run at integration and at delivery.',
-    `  ${cmd}`,
+    'Task checks. Before you commit, run the task checks once, with the procedure below. This replaces the',
+    "full-suite run the instructions above ask for, and the test-driven-development skill's rule that your",
+    'verification is the whole project suite. The full project checks run at integration and at delivery.',
+    ...procedureLines(m, {
+      name: `task-${task.id}`, start: cmd,
+      stop: 'report blocked, with both outcomes the wait printed in your notes.',
+    }),
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
     'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
@@ -214,8 +292,8 @@ function taskChecksLines(m, task, where, base) {
     "<what>'.",
     ...(isBatch(task) ? ['This is a batch: run the call once, before the last commit of the batch; earlier commits use',
       'focused tests.'] : []),
-    "It prints one JSON line; each command's full output is in the file its result names as log, kept with the run's",
-    'evidence: read the log instead of rerunning a command, and leave the file in place.',
+    "Its result is one JSON line; each command's full output is in the file its result names as log, kept with the",
+    "run's evidence: read the log instead of rerunning a command, and leave the file in place.",
   ];
 }
 
@@ -382,6 +460,7 @@ function taskContext(m, task, where, guidance = null) {
     'Never commit anything under .superpowers/.',
     'Never push, open pull requests, merge into the base branch, or copy work back to the project.',
     agentRules(),
+    ...longCheckRuleLines(m),
     '',
     'Contracts: report blocked for any change to a contract another lane consumes; ' +
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',

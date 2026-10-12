@@ -1160,7 +1160,7 @@ test('every prompt carries the history rule, the skill rule, and the checkout ru
       assert.match(c.prompt, /every shell command starts with cd '[^']+' &&/i, `${where}: cd rule`);
       assert.match(c.prompt, /every project file path you read or write is absolute under /, `${where}: path rule`);
       assert.match(c.prompt, /rev-parse --abbrev-ref HEAD/, `${where}: branch check`);
-      assert.ok(c.prompt.includes('ask for a 600000 ms (10 minute)'), `${where}: check rule`);
+      assert.ok(c.prompt.includes("await-checks' reserve --ledger '/work/ledger' --name 'long'"), `${where}: check rule`);
       assert.ok(c.prompt.includes('Change file contents with your file-editing tools (Edit, Write).'),
         `${where}: edit rule`);
     }
@@ -2232,6 +2232,36 @@ test('acceptance: checks run at another revision, or not all of them, are missin
   assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_missing']);
 });
 
+// 1.6.1 (spec 4.1): a verify agent whose checks stopped twice returns
+// stopped; the run takes the missing-verify path, starts no repair, and the
+// report keeps the reason.
+test('a verify result with stopped is treated as missing and recorded in verify_stopped', async () => {
+  const why = 'stopped twice: {"status": "stopped", "reason": "died"}, then {"status": "stopped", "reason": "not_started"}';
+  const stopped = {
+    head: H('f1'), results: [], ok: false, clean: true, tracked_before: [], tracked_after: [], untracked_before: [],
+    untracked_after: [], stopped: why,
+  };
+  // Autonomous, repairs not spent: a failing verify would start 'verify repair 1', which is unscripted here.
+  const { result, calls } = await run(manifest(), { ...phaseScript({ verify: [stopped] }), ...taskScript(ALL) });
+  assert.ok(!labels(calls).some((l) => /repair/.test(l)), labels(calls).join(', '));
+  assert.ok(!labels(calls).includes('verify retry'), 'a stopped result is a result: no retry');
+  assert.equal(result.status, 'complete');
+  assert.equal(result.verify, null);
+  assert.equal(result.verify_stopped, why);
+  assert.equal(result.acceptance.status, 'unverified');
+  assert.deepEqual(result.acceptance.reasons.map((r) => r.kind), ['checks_missing']);
+});
+
+test('verify_stopped is null on a normal run', async () => {
+  const result = await acceptanceOf({});
+  assert.equal(result.verify_stopped, null);
+  assert.ok('verify_stopped' in result);
+  assert.equal(result.verify.head, H('f1'));
+  const invalid = await acceptanceOf({}, manifest({ version: 99 }));
+  assert.equal(invalid.status, 'invalid');
+  assert.equal(invalid.verify_stopped, null);
+});
+
 test('a passing verify on an uncommitted edit does not accept the run', async () => {
   const result = await acceptanceOf({ verify: [{ ...verified(H('f1')), tracked_before: [' M value.txt'] }] });
   assert.equal(result.status, 'complete', 'the run executed to the end');
@@ -2255,7 +2285,8 @@ test('the verify schema requires the untracked lists and the verify prompt names
     assert.deepEqual(verify.schema.properties[field], { type: 'array', items: { type: 'string' } }, field);
   }
   assert.ok(verify.prompt.includes('Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean,'
-    + ' tracked_before,\ntracked_after, untracked_before, untracked_after.'), verify.prompt);
+    + ' tracked_before,\ntracked_after, untracked_before, untracked_after, and tree_changed when\nrun-checks printed true or'
+    + ' false.'), verify.prompt);
 });
 
 // ---- Lane checks in the final verify (1.4.0, F3) ----

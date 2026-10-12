@@ -5,14 +5,16 @@ function gitAdmin(m) {
     : `git -C ${shellQuote(m.repo.root)}`;
 }
 
-// Rules every phase agent gets. checkout (optional) replaces the checkout
-// rules for the feature checkout (setup works in several checkouts).
+// Rules every phase agent gets, the general long-command rule included.
+// checkout (optional) replaces the checkout rules for the feature checkout
+// (setup works in several checkouts).
 function phaseRules(m, checkout = null) {
   return [
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'Never commit anything under .superpowers/.',
     `Never push, open pull requests, merge into ${m.repo.base_ref}, or copy work back to the project folder.`,
     agentRules(),
+    ...longCheckRuleLines(m),
     checkout === null ? checkoutRules(featureDir(m), m.repo.branch) : checkout,
   ].join('\n');
 }
@@ -209,6 +211,11 @@ function verifySchema() {
         properties: { sha: { type: 'string' }, ok: { type: 'boolean' } },
         required: ['sha', 'ok'],
       },
+      // 1.6.1: whether the tree changed while the checks ran (run-checks;
+      // left out when it printed null), and why the checks stopped twice
+      // without a result (spec 4.1; verifyAt treats it as no result).
+      tree_changed: { type: 'boolean' },
+      stopped: { type: 'string' },
     },
     required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
@@ -293,14 +300,18 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
   // Step 3 runs the delivery inventory once (spec 4.4): the project's setup
   // and the lanes' distinct ones, then every distinct check of the project
-  // and the lane_commands overrides.
+  // and the lane_commands overrides, with the long-check procedure (1.6.1)
+  // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m));
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     checks === null ? '   checks: (no test, lint or build command)'
-      : `   checks, as one call (each command's exit status is kept; it exits non-zero when any fails):\n     ${checks}`,
-    ...(checks === null ? [] : checksLogLines().map((l) => ` ${l}`)),
+      : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
+    ...(checks === null ? [] : [
+      ...procedureLines(m, { name: 'integrate', start: checks }).map((l) => `   ${l}`),
+      ...checksLogLines().map((l) => ` ${l}`),
+    ]),
   ];
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
@@ -475,7 +486,7 @@ function postIntegrateFixPrompt(m, failure, path = 'hook') {
       'command.',
     ] : [
       'Rerun every project command afterwards and confirm they pass:',
-      commandsText(m, null, featureDir(m)),
+      commandsText(m, null, featureDir(m), 'post-integrate-fix'),
     ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
@@ -524,7 +535,7 @@ function postIntegratePrompt(m, checkOnly = false, checks = null) {
   ] : [
     'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
     'the project commands afterwards:',
-    commandsText(m, null, featureDir(m)),
+    commandsText(m, null, featureDir(m), 'post-integrate'),
   ];
   return [
     `You are the post-integration agent for parallel-lanes run ${m.run_id}.`,
@@ -685,7 +696,7 @@ function finalFixPrompt(m, findings, base) {
       'check at the delivered revision right after you, and a failure there goes to a repair agent.',
     ] : [
       'decline. Rerun every project command afterwards:',
-      commandsText(m, null, featureDir(m)),
+      commandsText(m, null, featureDir(m), 'final-fix'),
     ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
@@ -770,29 +781,41 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
 
 // The verify step: every check of the final inventory (project and lane
 // commands, finalChecks) at the delivered revision, through one
-// scripts/run-checks call, whose JSON the agent returns as it printed it.
-// from (spec 4.5): the head a repair started at; the checks then run only
-// when sha descends from it (run-checks --descends-from).
+// scripts/run-checks call with the long-check procedure, whose JSON the
+// agent returns as the wait printed it. Its result file is reserved with
+// --exact as verify-<sha>.json under the ledger, where check-verify reads
+// it. from (spec 4.5): the head a repair started at; the checks then run
+// only when sha descends from it (run-checks --descends-from). After a
+// second stop the agent returns stopped (spec 4.1), which verifyAt treats
+// as no result.
 function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
-  const base = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
-  const cmd = from === null ? base : `${base} --descends-from ${shellQuote(from)}`;
+  const q = shellQuote;
+  const base = runChecksCommand(m, dir, finalChecks(m), resultPath());
+  const cmd = from === null ? base : `${base} --descends-from ${q(from)}`;
   const setup = finalSetup(m);
+  const stop = [
+    `return results [], ok false, clean = whether git -C ${q(dir)} status --porcelain --untracked-files=all prints`,
+    'nothing, empty tracked_before, tracked_after, untracked_before and untracked_after lists, head = the output',
+    `of git -C ${q(dir)} rev-parse HEAD, and stopped naming both outcomes the wait printed.`,
+  ].join('\n      ');
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
-    `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
+    `1. git -C ${q(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
     `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
-    `3. Run, as one call: ${cmd}`,
+    '3. Run the checks, as one run-checks call:',
+    ...procedureLines(m, { name: `verify-${sha}`, exact: true, start: cmd, stop }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
     phaseRules(m),
     '',
-    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    "The wait prints run-checks' JSON: each command's output is in the file its result names as log, and its",
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}.`,
+    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}, and tree_changed when`,
+    'run-checks printed true or false.',
   ].join('\n');
 }
 
