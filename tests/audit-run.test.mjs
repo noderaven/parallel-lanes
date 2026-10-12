@@ -225,7 +225,7 @@ test('the final re-review covers the final fix', () => {
     { repo: r.dir });
 
   // A recorded re-review head.
-  let s = run(accepted(r.fix, { final }), { launch: { journal: [{ label: 'final re-review', result: { head: r.fix, results: [] } }] } });
+  let s = run(accepted(r.fix, { final }), { launch: { journal: [{ label: 'final re-review', result: { head: r.fix, results: [], new_findings: [] } }] } });
   let cov = coverage(s);
   assert.deepEqual(Object.keys(cov), [r.merge, r.fix]);
   assert.equal(cov[r.merge].state, 'present');
@@ -260,6 +260,41 @@ test('the final re-review covers the final fix', () => {
   assert.equal(entry.unreviewed_fix.quote, `the final fix ${r.merge}..${r.fix} was not re-reviewed: <check:test#1> zqreason`);
   assert.equal(entry.unreviewed_fix.commands_replaced, true);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd/);
+});
+
+test('a repair commit counts as reviewed only through a valid final re-review', () => {
+  // fix is the repair commit past the lenses' head (merge), delivered by a
+  // 1.6.0 run whose final re-review judged it.
+  const r = fixtureRepo();
+  const final = finalAt(r.fix, { lens_heads: [{ lens: 'superpowers', head: r.merge }] });
+  const unreviewed = `the repair reported ${r.fix}, which was not re-reviewed`;
+  const covered = (rr, fix = null) => {
+    const result = accepted(r.fix, { version: '1.6.0', final: fix ? { ...final, unreviewed_fix: fix } : final });
+    const s = sections(makeRun({ ledger: rangedLedger(r), launches: [launch(result, { journal: [{ label: 'final re-review', result: rr }] })] }),
+      { repo: r.dir });
+    return coverage(s)[r.fix];
+  };
+  const valid = covered({ head: r.fix, results: [], new_findings: [] });
+  assert.deepEqual([valid.value, valid.state], ['final re-review', 'inferred']);
+  assert.deepEqual(valid.sources, [{ path: 'transcript:wf_aaaaaa/final re-review', at: null }]);
+  // Anything else gives no coverage: the commit falls through to
+  // final.unreviewed_fix (which the engine sets then) or to no evidence.
+  const invalid = {
+    null: null,
+    'another head': { head: r.merge, results: [], new_findings: [] },
+    'no results': { head: r.fix, new_findings: [] },
+    'no new_findings': { head: r.fix, results: [] },
+    'results not a list': { head: r.fix, results: 'none', new_findings: [] },
+    'not an object': [r.fix],
+  };
+  for (const [name, rr] of Object.entries(invalid)) {
+    const cov = covered(rr, unreviewed);
+    assert.deepEqual([cov.value, cov.state], ['final.unreviewed_fix', 'missing'], name);
+  }
+  for (const name of ['another head', 'no results', 'no new_findings', 'results not a list']) {
+    const cov = covered(invalid[name]);
+    assert.deepEqual([cov.value, cov.state], ['no review evidence', 'missing'], name);
+  }
 });
 
 test('lens heads fall back to structured results', () => {

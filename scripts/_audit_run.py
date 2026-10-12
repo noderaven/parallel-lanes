@@ -462,7 +462,11 @@ def _lens_heads(launch, final):
 
 def _re_review_head(launch):
     """(head, source) of the last 'final re-review' structured result that
-    records a head (a budget retry included), or None."""
+    records a head (a budget retry included), when that result is a valid
+    review: an object with a string head and results and new_findings
+    lists (spec 5.5). False when the last result that records a head is not
+    valid: it covers nothing, and no head-less rule may stand in for it.
+    None when no result records a head."""
     found = None
     for entry in c.structured_results(launch):
         label, result = entry["label"], entry["result"]
@@ -470,7 +474,8 @@ def _re_review_head(launch):
             continue
         head = result.get("head") if isinstance(result, dict) else None
         if isinstance(head, str) and head:
-            found = (head, c.src("transcript:%s/%s" % (launch["wf"], label)))
+            valid = isinstance(result.get("results"), list) and isinstance(result.get("new_findings"), list)
+            found = (head, c.src("transcript:%s/%s" % (launch["wf"], label))) if valid else False
     return found
 
 
@@ -535,7 +540,7 @@ def _code_outside(run, git, git_note, launch, why, pairs):
         lens_hit = next(((head, source) for head, source in lens if git.is_ancestor(sha, head)), None)
         if lens_hit is not None:
             entry["coverage"] = c.ref("final review", "present", [lens_hit[1], c.src("git:" + lens_hit[0])])
-        elif rr is not None and git.is_ancestor(sha, rr[0]):
+        elif rr and git.is_ancestor(sha, rr[0]):
             entry["coverage"] = c.ref("final re-review", "inferred", [rr[1]])
         elif no_head_rule and git.is_ancestor(sha, final_head):
             sources = [_wf_src(launch, "final", "head")] + ([v_src] if v_src is not None else [])

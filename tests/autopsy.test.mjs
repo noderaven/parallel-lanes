@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 4);
+  assert.equal(A.autopsy_version, 5);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -1031,7 +1031,7 @@ test('a check that may not have run is inferred', () => {
   assert.deepEqual(res.json.checks.by_check['test#1'], { runs: 2, inferred: 1, untimed: 0, total_s: 200 });
   const md = runCli(dir).md;
   assert.match(md, /^\| test#1 \| 2 \| 1 \| 200\.0 s \|$/m);
-  assert.match(md, /^Full-suite runs: 3 \(\+1 inferred\)$/m);
+  assert.match(md, /^Check calls with a test group: 3 \(\+1 inferred\)$/m);
 });
 
 test('the r150 parser probes are not check runs', () => {
@@ -1090,6 +1090,7 @@ test('checks without tool events are unavailable, not zero', () => {
   assert.deepEqual(res.json.checks, {
     executions: 'unavailable', by_check: 'unavailable',
     full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
+    task_check_calls: 'unavailable', project_test_runs: 'unavailable', repairs: 'unavailable', setup: 'unavailable',
   });
 });
 
@@ -1125,7 +1126,7 @@ test('autopsy.md has every section in order', () => {
   assert.match(md, /^\| test#1 \| 3 \| 0 \| 160\.0 s \|$/m);
   assert.ok(md.includes('Check ids name manifest commands: test#1 is commands.test[0], '
     + '<lane>.test#1 is lane_commands.<lane>.test[0].'));
-  assert.match(md, /^Full-suite runs: 3$/m);
+  assert.match(md, /^Check calls with a test group: 3$/m);
   assert.match(md, /implement: 3/);
   // One open-questions line per unexplained entry.
   const open = md.split('## Open questions')[1].split('\n').filter((l) => l.startsWith('- '));
