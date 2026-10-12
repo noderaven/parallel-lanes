@@ -470,8 +470,9 @@ function postIntegrateFixPrompt(m, failure, path = 'hook') {
     'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
     commitWithLine(postIntegrateFixMessage()),
     ...(focused ? [
-      'Then run the focused tests that cover your change; do not run the full project commands: the integration',
-      'rerun after you runs every command.',
+      'You may rerun the failing command named above to reproduce the failure. Then run the focused tests that',
+      'cover your change; do not run the full project commands: the integration rerun after you runs every',
+      'command.',
     ] : [
       'Rerun every project command afterwards and confirm they pass:',
       commandsText(m, null, featureDir(m)),
@@ -727,30 +728,43 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
       findings.map((f) => `${findingsText([f])}\n${said(f)}`).join('\n'),
     ] : ['No findings are under verification: judge the repair commits in the range.']),
     ...(repairs.length > 0 ? [
-      'Repairs after a failing verify, in the range (each fixed the failing checks it lists):',
-      ...repairs.map((r) => `- repair ${r.attempt}: ${r.from}..${r.head}; failing then: `
-        + `${(r.failed || []).join(', ') || '(none listed)'}`),
-      'Judge the repair commits as fix code: correct, no new critical or important problem, and no check, test',
-      'or acceptance criterion weakened, skipped or deleted to get a pass; report anything else as a new finding.',
+      'Repairs after a failing verify, in the range (each addressed the failing checks it lists):',
+      ...repairs.map((r) => `- repair ${r.attempt}: ${r.from}..${r.head}, status ${r.status || 'unknown'}; failing then: `
+        + `${(r.failed || []).join(', ') || '(none listed)'} (evidence ${m.repo.ledger_dir}/checks/verify-${r.from}.json)`
+        + `${present(r.notes) ? `; the repair said: ${r.notes}` : ''}`),
+      'Judge the repair commits as fix code: correct, no new critical or important problem, no check, test or',
+      'acceptance criterion weakened, skipped or deleted to get a pass, and nothing that worked around a flaky,',
+      'environment or out-of-scope failure (a retry, a raised timeout, a mocked-out dependency) instead of fixing it.',
+      'Repairs have no id: report any problem in a repair only in new_findings; a weakened, skipped or deleted check',
+      'is at least important.',
     ] : []),
     '',
     ...(verify ? [
       checksResultText(verify),
-      'Still judge every finding yourself; a failing check is evidence, not a verdict.',
+      findings.length > 0 ? 'Still judge every finding yourself; a failing check is evidence, not a verdict.'
+        : 'A failing check is evidence, not a verdict.',
       '',
     ] : []),
-    'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
-    'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
-    'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
-    'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ...(findings.length > 0 ? [
+      'For every id above decide at the current head: resolved (the defect no longer exists, or the decline is',
+      'right: a false positive, out of scope, or a commit message) or open; cite file:line evidence. Judge the',
+      'defect, not its wording or line: a defect that moved or was reworded is still the same finding. Then',
+      'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
+    ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
-    `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
-    '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
-    'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
-    'fix}.',
+    ...(findings.length > 0 ? [
+      `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}), results = one`,
+      '{id, status "resolved" or "open", evidence} per id above (an id you leave out counts as open; two different',
+      'results for one id leave it open), and new_findings = the new problems, each {severity, file, line, issue,',
+      'fix}.',
+    ] : [
+      `Return head = git -C ${dir} rev-parse HEAD (the revision you judged; it must be ${head}),`,
+      'results = [] (no finding is under verification), and new_findings = the problems you found, each',
+      '{severity, file, line, issue, fix} (empty when the repairs are sound).',
+    ]),
   ].join('\n');
 }
 
@@ -802,8 +816,9 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     '',
     'Find the cause and fix it with the smallest change that is correct, so the checks pass for the right reason.',
     'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
-    "manifest's commands. If the failure is a timeout, crash or environment failure rather than a failing check,",
-    'or lies outside this run\'s scope, change nothing: report blocked with the evidence.',
+    'commands above, or the scripts and config they run, to make them pass. If the failure is a flaky, timeout,',
+    "crash or environment failure rather than a failing check, or lies outside this run's scope, change nothing:",
+    'report blocked with the evidence.',
     'Run the focused checks that cover your fix; do not run the full project commands: verify runs them all at',
     'your head right after you.',
     commitWithLine(repairFixMessage()),

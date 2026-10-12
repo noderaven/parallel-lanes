@@ -69,6 +69,11 @@ test('integration runs finalSetup and one run-checks over finalChecks', () => {
     const lines = runChecksLines(p);
     assert.equal(lines.length, 1, lines.join('\n'));
     assert.deepEqual(cmdPairs(lines[0]), finalChecks(m));
+    // The union of 1.5.2's blocks, each distinct pair once (checked by hand).
+    assert.deepEqual(cmdPairs(lines[0]), [
+      { group: 'test', command: 'npm test' }, { group: 'lint', command: 'npm run lint' },
+      { group: 'test', command: 'npm test -- alpha' },
+    ]);
     assert.ok(p.includes(finalSetup(m).join(' && ')), p);
     assert.deepEqual(finalSetup(m), ['npm ci', 'npm ci -w alpha']);
     assert.ok(!p.includes('Lane alpha commands') && !p.includes('Lane beta commands'), p);
@@ -173,7 +178,7 @@ test('the repair prompt names each failing command, its log and tail, and forbid
   const text = flat(p);
   assert.ok(text.includes('npm test (exit 1)') && text.includes('/work/ledger/checks/verify-x.1.log') && text.includes('TAIL-ONE'), p);
   assert.ok(!text.includes('npm run lint (exit 0)'), 'a passing check is not listed');
-  assert.ok(text.includes('npm run e2e (exit 2)') && text.includes(`/work/ledger/checks/verify-${H('f1')}.json`), p);
+  assert.ok(text.includes('npm run e2e (exit 2)') && text.includes(`log: beside /work/ledger/checks/verify-${H('f1')}.json`), p);
   assert.ok(text.includes(`\`${repairFixMessage()}\``), p);
   assert.ok(/never weaken, skip or delete a check, test or acceptance criterion/i.test(text), p);
   assert.ok(text.includes('report blocked'), p);
@@ -197,6 +202,41 @@ test('the re-review lists repairs and handles no findings', () => {
   assert.ok(withFindings.includes('[F1]') && withFindings.includes('repair 1:'), withFindings);
   const none = flat(finalReReviewPrompt(m, H('tip'), H('f1'), f));
   assert.ok(!none.includes('repair 1:'), none);
+});
+
+// ---- F2 review fixes (2026-10-11) ----
+
+test('a repair problem has no id: the re-reviewer reports it in new_findings', () => {
+  const m = manifest();
+  const repairs = [{ attempt: 1, from: H('f1'), head: H('r1'), failed: ['npm test'], status: 'done', notes: 'fixed the parser' }];
+  const p = flat(finalReReviewPrompt(m, H('tip'), H('r1'), [], null, repairs));
+  assert.ok(p.includes('Repairs have no id: report any problem in a repair only in new_findings; a weakened, skipped '
+    + 'or deleted check is at least important.'), p);
+  assert.ok(p.includes('results = [] (no finding is under verification)'), p);
+  assert.ok(!p.includes('For every id above'), p);
+  assert.ok(!p.includes('one {id, status "resolved" or "open", evidence} per id above'), p);
+  // Each repair entry carries its status, notes and evidence path, and the
+  // criteria name work-arounds.
+  assert.ok(p.includes('status done') && p.includes('fixed the parser'), p);
+  assert.ok(p.includes(`/work/ledger/checks/verify-${H('f1')}.json`), p);
+  assert.ok(/worked around a flaky, environment or out-of-scope failure/.test(p), p);
+  assert.ok(p.includes('the failing checks it addressed') || p.includes('addressed'), p);
+  // With findings and repairs, the per-id text stays and the repair rule is added.
+  const f = [{ id: 'F1', severity: 'important', file: 'src/a.js', line: 1, issue: 'x', fix: 'y', dispositions: [] }];
+  const both = flat(finalReReviewPrompt(m, H('tip'), H('r1'), f, null, repairs));
+  assert.ok(both.includes('For every id above') && both.includes('Repairs have no id'), both);
+});
+
+test('the tests-path post-integration fixer may rerun the failing command to reproduce it', () => {
+  const p = flat(postIntegrateFixPrompt(manifest(), 'npm test failed', 'tests'));
+  assert.ok(p.includes('You may rerun the failing command named above to reproduce the failure.'), p);
+});
+
+test('the repair prompt forbids changing the commands or what they run, and names flaky failures', () => {
+  const verify = { head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 1 }] };
+  const p = flat(verifyRepairPrompt(manifest(), verify, H('f1'), 1));
+  assert.ok(p.includes('never change the commands above, or the scripts and config they run, to make them pass'), p);
+  assert.ok(/flaky, timeout, crash or environment failure/.test(p), p);
 });
 
 test('integration with no check commands says so in step 3', () => {
