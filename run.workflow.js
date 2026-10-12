@@ -49,7 +49,9 @@ function repairFixMessage() {
   return 'fix: make the delivery checks pass';
 }
 
-// Rules every agent gets, task and phase alike.
+// Rules every agent gets, task and phase alike. How checks and other long
+// commands run is longCheckRuleLines (prompts-task.js): it names the
+// manifest's scripts, which these rules cannot.
 function agentRules() {
   return [
     'Never amend, rebase, reset, or force-update a branch. Decline commit-message findings with a reason; ' +
@@ -57,13 +59,6 @@ function agentRules() {
     'Do not invoke parallel-lanes or any plan-execution skill.',
     'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
       "previous one's output: every separate call costs a full turn.",
-    'When your role requires running project checks or tests: ask for a 600000 ms (10 minute) timeout on each ' +
-      'such command, and read the tool result to see whether the command finished, moved to the background, or ' +
-      'was stopped by the timeout. A command running in the background has finished only when its completion ' +
-      'notice or exit status says so, never when a line of its output appears (a failing run may never print ' +
-      "that line). Before you start a check again, read the earlier run's result, or stop that run and confirm " +
-      'it has ended. Do not finish your work while a check you were asked to run is still running or its ' +
-      'result is unread.',
     'Change file contents with your file-editing tools (Edit, Write). Text written through shell heredocs, ' +
       'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
@@ -1123,12 +1118,14 @@ function finalSetup(m) {
 
 // The scripts/run-checks call that runs each check of a [{group, command}]
 // list in dir, separately, and exits non-zero when any one fails. out
-// (optional) is the evidence file it writes under the ledger dir. null for
-// an empty list.
+// (optional) is the evidence file it writes under the ledger dir:
+// resultPath() goes in as given (already quoted), for the path the agent's
+// reserve prints. null for an empty list.
 function runChecksCommand(m, dir, checks, out = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
-  const evidence = out === null ? [] : ['--out', shellQuote(out), '--root', shellQuote(m.repo.ledger_dir)];
+  const target = out === resultPath() ? out : shellQuote(out);
+  const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...parts].join(' ');
 }
@@ -1172,30 +1169,110 @@ function checksCommand(m, laneId, dir, out = null) {
   return runChecksCommand(m, dir, laneChecks(m, laneId), out);
 }
 
-// What an agent handed a run-checks call without --out is told about its
-// output and logs.
+// What an agent handed a run-checks call is told about its output and logs:
+// the call writes beside its reserved ledger file, and the logs stay there
+// with the evidence (spec 4.4).
 function checksLogLines() {
   return [
-    '  It prints only one JSON line: each command\'s full output is in the file its result names as log, in a new',
-    '  temporary directory each call. Read the log instead of rerunning a command, and remove that directory',
-    '  (the log\'s parent) once you have read what you need.',
+    "  Its result is one JSON line: each command's full output is in the file its result names as log, kept with",
+    "  the run's evidence. Read the log instead of rerunning a command, and leave the file in place.",
+  ];
+}
+
+// The placeholder for a check's result file in a start command (spec 4.1):
+// the agent replaces <P> with the path await-checks reserve printed, inside
+// the quotes, so a path with a space still works. A function, not a
+// constant: loadHelpers returns before top-level bindings initialize.
+function resultPath() {
+  return "'<P>'";
+}
+
+// The await-checks reserve call: it creates a fresh, empty result file
+// <ledger>/checks/<name>.<n>.json and prints its path. exact (verify): the
+// path is <ledger>/checks/<name>.json, emptied again, or busy (exit 4) while
+// an earlier writer still holds it.
+function reserveCommand(m, name, exact = false) {
+  return `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/await-checks`)} reserve --ledger `
+    + `${shellQuote(m.repo.ledger_dir)} --name ${shellQuote(name)}${exact ? ' --exact' : ''}`;
+}
+
+// The await-checks wait call on the reserved result file.
+function waitCommand(m) {
+  return `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/await-checks`)} wait ${resultPath()}`;
+}
+
+// The procedure for every check an agent runs, whatever its length (spec
+// 4.1): reserve a result file under name (exact: verify's fixed path, with
+// the busy case), start start (a check command carrying resultPath()) in the
+// background, wait for it, change nothing while it runs, and start once more
+// after a stop. stop (optional) says what the agent does after a second
+// stop; by default it reports the checks failed. A run that changed the
+// checkout is rerun once only, so checks that write files into the checkout
+// cannot loop: changed (optional) says what the agent does with the rerun's
+// result when it changed the checkout again; by default it keeps that result
+// and says so in its notes.
+function procedureLines(m, { name, exact = false, start, stop = null, changed = null }) {
+  const second = stop === null ? 'report the checks as failed (never as passed), with both outcomes the wait printed'
+    + ' in your notes.' : stop;
+  const again = changed === null ? 'keep that result (it carries tree_changed true) and say in your notes that'
+    + ' the checks themselves change the checkout.' : changed;
+  return [
+    'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
+    'the new path.',
+    `1. Reserve a result file (a short call): ${reserveCommand(m, name, exact)}`,
+    '   It prints a path. In the start command below, replace <P> with the path it printed, keeping the single',
+    '   quotes around it.',
+    ...(exact ? [
+      '   If reserve exits 4 with status busy, an earlier run still writes that file: run the wait on the file it',
+      '   names until the wait no longer exits 4, ignore that report, then reserve again.',
+    ] : []),
+    "2. Right after reserving, start the check with the Bash tool's run_in_background set to true:",
+    `   ${start}`,
+    '3. Wait for it in the foreground, with a 600000 ms timeout on the call:',
+    `   ${waitCommand(m)}`,
+    '   Exit 4 means the check is still running: run the wait again, as often as it takes. Exit 0 (passed), 1',
+    "   (failed) or 3 (an error record) prints the check's result, its one JSON line. If the wait also says the",
+    '   checkout changed while the checks ran, run them once more, starting with a new reserve. Rerun only once:',
+    '   if the checkout changed again on that rerun, do not run the checks a third time;',
+    `   ${again}`,
+    '4. While a check runs, change nothing in that checkout (no edits, commits or other checks), and never finish',
+    '   your turn or return your result.',
+    '5. Exit 5 means the check stopped without a result: reserve and start it once more, as above. After a',
+    `   second stop, do not start it again: ${second}`,
+  ];
+}
+
+// The general rule for any other long command (spec 4.4): it runs through
+// run-checks with the same procedure, under the reserve name long. Task
+// prompts (taskContext) and phase prompts (phaseRules) carry it.
+function longCheckRuleLines(m) {
+  const start = `cd 'DIR' && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)} 'DIR' `
+    + `--out ${resultPath()} --root ${shellQuote(m.repo.ledger_dir)} --cmd 'GROUP' 'COMMAND'`;
+  return [
+    'Long commands: any command you expect to run longer than 9 minutes that this prompt does not already hand you',
+    'as a check (a wide test filter, a long hook step) runs through run-checks, with DIR the checkout it runs in,',
+    'GROUP a label such as test, and COMMAND the command, each single-quoted, writing any single quote inside',
+    "COMMAND as '\\'' (close the quotes, an escaped quote, reopen them).",
+    ...procedureLines(m, { name: 'long', start }),
   ];
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
-// runs every check there at once.
-function commandsText(m, laneId, dir = null) {
-  const lines = ['setup', 'test', 'lint', 'build'].map((name) => `- ${name}: ${commandList(m, laneId, name)}`);
-  const all = dir === null ? null : checksCommand(m, laneId, dir);
+// runs every check there at once, with the procedure under the reserve name
+// name.
+function commandsText(m, laneId, dir = null, name = 'checks') {
+  const lines = ['setup', 'test', 'lint', 'build'].map((group) => `- ${group}: ${commandList(m, laneId, group)}`);
+  const all = dir === null ? null : checksCommand(m, laneId, dir, resultPath());
   if (all !== null) {
-    lines.push(`- every check at once (each command's exit status is kept; it exits non-zero when any fails):\n  ${all}`,
-      ...checksLogLines());
+    lines.push("- every check at once (each command's exit status is kept; it exits non-zero when any fails).",
+      ...procedureLines(m, { name, start: all }).map((l) => `  ${l}`), ...checksLogLines());
   }
   return lines.join('\n');
 }
 
 // The scripts/task-checks call a task's implementer runs once before
-// committing (spec 4.2, 4.3), in where.dir for the unit's range from base;
+// committing (spec 4.2, 4.3), in where.dir for the unit's range from base,
+// writing to the result file the agent reserved (--evidence resultPath());
 // null when the ledger lane has no test, lint or build command.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
@@ -1205,7 +1282,8 @@ function taskChecksCommand(m, task, where, base) {
   const entry = taskChecksEntry(m, task, where.lane);
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
-    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--lane', q(where.lane),
+    '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
+    '--lane', q(where.lane),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
@@ -1216,16 +1294,20 @@ function taskChecksCommand(m, task, where, base) {
   ].join(' ');
 }
 
-// The implementer's task-checks instructions (spec 4.3); [] when there is no
+// The implementer's task-checks instructions (spec 4.3), with the procedure
+// under the reserve name task-<unit id> (spec 4.4); [] when there is no
 // task-checks call.
 function taskChecksLines(m, task, where, base) {
   const cmd = taskChecksCommand(m, task, where, base);
   if (cmd === null) return [];
   return [
-    'Task checks. Before you commit, run the task checks once, as one call. This replaces the full-suite run the',
-    "instructions above ask for, and the test-driven-development skill's rule that your verification is the whole",
-    'project suite. The full project checks run at integration and at delivery.',
-    `  ${cmd}`,
+    'Task checks. Before you commit, run the task checks once, with the procedure below. This replaces the',
+    "full-suite run the instructions above ask for, and the test-driven-development skill's rule that your",
+    'verification is the whole project suite. The full project checks run at integration and at delivery.',
+    ...procedureLines(m, {
+      name: `task-${task.id}`, start: cmd,
+      stop: 'report blocked, with both outcomes the wait printed in your notes.',
+    }),
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
     'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
@@ -1235,8 +1317,8 @@ function taskChecksLines(m, task, where, base) {
     "<what>'.",
     ...(isBatch(task) ? ['This is a batch: run the call once, before the last commit of the batch; earlier commits use',
       'focused tests.'] : []),
-    "It prints one JSON line; each command's full output is in the file its result names as log, kept with the run's",
-    'evidence: read the log instead of rerunning a command, and leave the file in place.',
+    "Its result is one JSON line; each command's full output is in the file its result names as log, kept with the",
+    "run's evidence: read the log instead of rerunning a command, and leave the file in place.",
   ];
 }
 
@@ -1403,6 +1485,7 @@ function taskContext(m, task, where, guidance = null) {
     'Never commit anything under .superpowers/.',
     'Never push, open pull requests, merge into the base branch, or copy work back to the project.',
     agentRules(),
+    ...longCheckRuleLines(m),
     '',
     'Contracts: report blocked for any change to a contract another lane consumes; ' +
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
@@ -1871,14 +1954,16 @@ function gitAdmin(m) {
     : `git -C ${shellQuote(m.repo.root)}`;
 }
 
-// Rules every phase agent gets. checkout (optional) replaces the checkout
-// rules for the feature checkout (setup works in several checkouts).
+// Rules every phase agent gets, the general long-command rule included.
+// checkout (optional) replaces the checkout rules for the feature checkout
+// (setup works in several checkouts).
 function phaseRules(m, checkout = null) {
   return [
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'Never commit anything under .superpowers/.',
     `Never push, open pull requests, merge into ${m.repo.base_ref}, or copy work back to the project folder.`,
     agentRules(),
+    ...longCheckRuleLines(m),
     checkout === null ? checkoutRules(featureDir(m), m.repo.branch) : checkout,
   ].join('\n');
 }
@@ -2075,6 +2160,11 @@ function verifySchema() {
         properties: { sha: { type: 'string' }, ok: { type: 'boolean' } },
         required: ['sha', 'ok'],
       },
+      // 1.6.1: whether the tree changed while the checks ran (run-checks;
+      // left out when it printed null), and why the checks stopped twice
+      // without a result (spec 4.1; verifyAt treats it as no result).
+      tree_changed: { type: 'boolean' },
+      stopped: { type: 'string' },
     },
     required: ['head', 'results', 'ok', 'clean', 'tracked_before', 'tracked_after', 'untracked_before', 'untracked_after'],
   };
@@ -2159,14 +2249,18 @@ function integratePrompt(m, preludeTip, opts = {}) {
     `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
   // Step 3 runs the delivery inventory once (spec 4.4): the project's setup
   // and the lanes' distinct ones, then every distinct check of the project
-  // and the lane_commands overrides.
+  // and the lane_commands overrides, with the long-check procedure (1.6.1)
+  // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m));
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     checks === null ? '   checks: (no test, lint or build command)'
-      : `   checks, as one call (each command's exit status is kept; it exits non-zero when any fails):\n     ${checks}`,
-    ...(checks === null ? [] : checksLogLines().map((l) => ` ${l}`)),
+      : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
+    ...(checks === null ? [] : [
+      ...procedureLines(m, { name: 'integrate', start: checks }).map((l) => `   ${l}`),
+      ...checksLogLines().map((l) => ` ${l}`),
+    ]),
   ];
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
@@ -2341,7 +2435,7 @@ function postIntegrateFixPrompt(m, failure, path = 'hook') {
       'command.',
     ] : [
       'Rerun every project command afterwards and confirm they pass:',
-      commandsText(m, null, featureDir(m)),
+      commandsText(m, null, featureDir(m), 'post-integrate-fix'),
     ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
@@ -2390,7 +2484,7 @@ function postIntegratePrompt(m, checkOnly = false, checks = null) {
   ] : [
     'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
     'the project commands afterwards:',
-    commandsText(m, null, featureDir(m)),
+    commandsText(m, null, featureDir(m), 'post-integrate'),
   ];
   return [
     `You are the post-integration agent for parallel-lanes run ${m.run_id}.`,
@@ -2551,7 +2645,7 @@ function finalFixPrompt(m, findings, base) {
       'check at the delivered revision right after you, and a failure there goes to a repair agent.',
     ] : [
       'decline. Rerun every project command afterwards:',
-      commandsText(m, null, featureDir(m)),
+      commandsText(m, null, featureDir(m), 'final-fix'),
     ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
@@ -2636,29 +2730,44 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
 
 // The verify step: every check of the final inventory (project and lane
 // commands, finalChecks) at the delivered revision, through one
-// scripts/run-checks call, whose JSON the agent returns as it printed it.
-// from (spec 4.5): the head a repair started at; the checks then run only
-// when sha descends from it (run-checks --descends-from).
+// scripts/run-checks call with the long-check procedure, whose JSON the
+// agent returns as the wait printed it. Its result file is reserved with
+// --exact as verify-<sha>.json under the ledger, where check-verify reads
+// it. from (spec 4.5): the head a repair started at; the checks then run
+// only when sha descends from it (run-checks --descends-from). After a
+// second stop the agent returns stopped (spec 4.1), which verifyAt treats
+// as no result.
 function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
-  const base = runChecksCommand(m, dir, finalChecks(m), `${m.repo.ledger_dir}/checks/verify-${sha}.json`);
-  const cmd = from === null ? base : `${base} --descends-from ${shellQuote(from)}`;
+  const q = shellQuote;
+  const base = runChecksCommand(m, dir, finalChecks(m), resultPath());
+  const cmd = from === null ? base : `${base} --descends-from ${q(from)}`;
   const setup = finalSetup(m);
+  const stop = [
+    `return results [], ok false, clean = whether git -C ${q(dir)} status --porcelain --untracked-files=all prints`,
+    'nothing, empty tracked_before, tracked_after, untracked_before and untracked_after lists, head = the output',
+    `of git -C ${q(dir)} rev-parse HEAD, and stopped naming both outcomes the wait printed.`,
+  ].join('\n      ');
   return [
     `You are the verifier for parallel-lanes run ${m.run_id}: run the project checks at the delivered revision.`,
     `Work in ${dir} on ${m.repo.branch}; do not switch branches, change files, or commit.`,
-    `1. git -C ${shellQuote(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
+    `1. git -C ${q(dir)} rev-parse HEAD must print ${sha}; if it does not, return its output as head`,
     '   with results [] and ok false.',
     `2. Run the setup commands first (the project's, then the lanes' own): ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
-    `3. Run, as one call: ${cmd}`,
+    '3. Run the checks, as one run-checks call:',
+    ...procedureLines(m, {
+      name: `verify-${sha}`, exact: true, start: cmd, stop,
+      changed: 'return the JSON of that rerun as the wait printed it, with tree_changed true.',
+    }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
     phaseRules(m),
     '',
-    'run-checks prints only its JSON: each command\'s output is in the file its result names as log, and its',
+    "The wait prints run-checks' JSON: each command's output is in the file its result names as log, and its",
     'last 20 lines are in tail. Do not rerun a command to see its output; read the log instead.',
     'Return exactly the JSON fields run-checks printed: checkout, branch, head, results, ok, clean, tracked_before,',
-    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}.`,
+    `tracked_after, untracked_before, untracked_after${from === null ? '' : ', descends_from'}, and tree_changed when`,
+    'run-checks printed true or false.',
   ].join('\n');
 }
 
@@ -4195,6 +4304,8 @@ function scheduleFix(m, entry) {
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
 //    review_problem?, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
+//  verify_stopped (why the last verify's checks stopped twice without a
+//  result, spec 4.1; verify is then null)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
@@ -4222,8 +4333,8 @@ async function runAll(manifest, io) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
-      integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
+      integrate: null, e2e: null, final: null, verify: null, verify_stopped: null, delivered_sha: null,
+      acceptance: null, agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
@@ -4284,6 +4395,8 @@ async function runAll(manifest, io) {
   let e2e = null;
   let final = null;
   let verify = null;
+  // Why the last verify stopped without a result (verifyAt), or null.
+  let verifyStopped = null;
   let post = null;
   let delivered = null;
   let acceptance = null;
@@ -4301,6 +4414,7 @@ async function runAll(manifest, io) {
     e2e,
     final,
     verify,
+    verify_stopped: verifyStopped,
     delivered_sha: delivered,
     acceptance,
     agents_spawned: state.agents,
@@ -4603,8 +4717,16 @@ async function runAll(manifest, io) {
   // The project checks at sha (scripts/run-checks through the verify agent).
   // They are cheap and deterministic, so they run past the agent cap: after
   // the last change the run has evidence even when the budget is spent.
-  const verifyAt = (sha, from = null) => callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
-    { ...sonnetHigh, overBudget: true });
+  // A result with stopped (the checks stopped twice without a result, spec
+  // 4.1) is no result: the missing-verify path, never a repair, since no
+  // command failed. verifyStopped keeps the last verify call's stop text
+  // for the report (null when it did not stop).
+  const verifyAt = async (sha, from = null) => {
+    const r = await callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
+      { ...sonnetHigh, overBudget: true });
+    verifyStopped = r && typeof r === 'object' && present(r.stopped) ? r.stopped : null;
+    return verifyStopped === null ? r : null;
+  };
   // Repairs after a failing verify (spec 4.5): autonomous only, at most
   // repairLimit(m) per run (repairs_spent carries earlier launches'), and
   // each admitted only while repairReserve(m) agents are free, so the
