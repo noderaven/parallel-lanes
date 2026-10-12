@@ -9,7 +9,10 @@ Import with:
 The writer of FILE (the outermost one: run-checks, or task-checks, which
 passes run-checks --lock-held) holds hold(FILE) from start to finish. hold
 keeps an OS lock (_oslock) on the sidecar FILE + SIDECAR, writes nothing to
-it, and deletes it after releasing the lock. The writer replaces FILE in one
+it, and deletes it: on POSIX while it still holds the lock (a departure from
+the order spec 4.3 gives, release then delete: in that gap a second holder
+could lock the inode that is about to be deleted), on Windows after releasing
+the lock, since an open file cannot be deleted there. The writer replaces FILE in one
 step (_shell.write_text_atomic) before it releases the lock.
 
 A waiter never holds anything between polls. writer_alive(FILE) takes the
@@ -66,8 +69,10 @@ def hold(path):
 
     The sidecar is opened, created if missing (never through a symlink where
     the platform can refuse one), and locked; the lock is retried every 0.05
-    s for up to 5 s, then OSError is raised. On the way out the lock is
-    released, the sidecar closed, then deleted; a failed delete is ignored.
+    s for up to 5 s, then OSError is raised. On the way out on POSIX
+    the sidecar is deleted while the lock is still held, then the lock is
+    released and the sidecar closed; on Windows the lock is released and the
+    sidecar closed, then deleted. A failed delete is ignored.
     """
     lock = path + SIDECAR
     flags = os.O_RDWR | os.O_CREAT | _BINARY | _NOFOLLOW
@@ -102,11 +107,18 @@ def hold(path):
     try:
         yield lock
     finally:
+        if not windows:
+            # POSIX: delete while the lock is still held, so a process that
+            # then locks the old inode fails _same_file and retries.
+            with contextlib.suppress(OSError):
+                os.remove(lock)
         with contextlib.suppress(OSError):
             _oslock.unlock(fd)
         os.close(fd)
-        with contextlib.suppress(OSError):
-            os.remove(lock)
+        if windows:
+            # Windows cannot delete an open file: release and close first.
+            with contextlib.suppress(OSError):
+                os.remove(lock)
 
 
 def writer_alive(path):

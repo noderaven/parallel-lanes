@@ -247,7 +247,11 @@ def fingerprint(directory):
         streamed, never held in memory whole;
       - for each untracked, non-ignored path (git ls-files --others
         --exclude-standard -z, sorted), path + "\\0" + its blob sha + "\\n",
-        the shas from one git hash-object --stdin-paths fed the list. Two
+        the shas from one git hash-object --no-filters --stdin-paths fed the
+        list (the raw bytes: the fingerprint changes when the content does,
+        and a Git LFS clean filter would run once per untracked asset; timed
+        on a clone of a Unity project with 100 untracked 200 KB images, 0.1 s
+        without the filter and 0.9 s with it). Two
         kinds of path hash-object cannot hash (it fails on them, which
         would make every fingerprint of the tree None) are kept out of
         that list: a path ending in "/" (an untracked nested repository)
@@ -285,7 +289,7 @@ def fingerprint(directory):
         if files:
             # One path per line: a name holding a newline cannot be fed, and
             # makes hash-object fail or the count differ, so None.
-            hashed = _git_bytes(directory, "hash-object", "--stdin-paths", input=b"\n".join(files) + b"\n")
+            hashed = _git_bytes(directory, "hash-object", "--no-filters", "--stdin-paths", input=b"\n".join(files) + b"\n")
             shas = hashed.stdout.split()
             if hashed.returncode != 0 or len(shas) != len(files):
                 return None
@@ -359,10 +363,13 @@ def main(argv):
             # FILE is valid: from here every failure leaves its error record
             # there, and the lock is held until the report is written.
             _record = out
-            try:
-                parent = os.path.dirname(out)
-                if parent:
+            parent = os.path.dirname(out)
+            if parent:
+                try:
                     os.makedirs(parent, exist_ok=True)
+                except OSError as e:
+                    fail(3, f"cannot create the folder of {out!r}: {e}")
+            try:
                 stack.enter_context(_await.hold(out))
             except OSError as e:
                 fail(3, f"cannot lock {out!r}: {e}")

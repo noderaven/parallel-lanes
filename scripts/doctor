@@ -103,7 +103,7 @@ def render_text(result):
 
 
 def inside(path, root):
-    """True when path is root or under it, both resolved as run-checks' contained() does."""
+    """True when path is root or under it, both resolved as _shell.contained() does."""
     root = os.path.normcase(os.path.realpath(root))
     head, tail = os.path.abspath(path), []
     # The nearest existing ancestor is resolved; the rest is joined on unresolved.

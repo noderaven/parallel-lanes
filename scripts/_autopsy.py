@@ -1594,19 +1594,6 @@ def _procedures(calls):
     return out
 
 
-def _waits_for(agent, path, start=None):
-    """The Bash calls of an agent that run 'await-checks wait' on a file with
-    path's basename: after the start call (one of _calls(agent), compared by
-    value) and before the next procedure start on that basename; with no
-    start, every one."""
-    calls = _calls(agent)
-    name = _basename(path)
-    if start is None:
-        return [c for c in calls if wait_file(c) is not None and _basename(wait_file(c)) == name]
-    i = next((k for k, c in enumerate(calls) if c == start), None)
-    return [] if i is None else [calls[j] for j in _wait_indexes(calls, i, name)]
-
-
 def _report_span(ledger, path):
     """(first started, last ended) of the results in the archived result file
     with path's basename (<ledger>/checks/<name>); None when there is no
@@ -2147,8 +2134,7 @@ def checks_section(run):
     and waits (waits_section). A procedure execution starts and ends with
     its report's results (_execution_times). Without any tool event in the
     run the executions and their counts cannot be derived and are
-    unavailable, and waits is left out (the shape of that case is the one
-    autopsy 5 wrote).
+    unavailable, and so is waits.
 
     A task-checks execution gets selected from its matched evidence
     (_match_evidence), else 'unavailable'. With evidence it surely ran
@@ -2161,7 +2147,7 @@ def checks_section(run):
         return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
                 "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE},
                 "task_check_calls": UNAVAILABLE, "project_test_runs": UNAVAILABLE,
-                "repairs": repairs, "setup": setup}
+                "repairs": repairs, "setup": setup, "waits": UNAVAILABLE}
     checks = configured_checks(run["manifest"])
     on_path = set(id(a) for a in critical_agents(run))
     ledger = find_ledger(run["folder"])

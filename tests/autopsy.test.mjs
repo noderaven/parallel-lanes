@@ -1091,6 +1091,7 @@ test('checks without tool events are unavailable, not zero', () => {
     executions: 'unavailable', by_check: 'unavailable',
     full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
     task_check_calls: 'unavailable', project_test_runs: 'unavailable', repairs: 'unavailable', setup: 'unavailable',
+    waits: 'unavailable',
   });
 });
 

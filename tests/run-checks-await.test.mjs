@@ -281,6 +281,35 @@ test('--out is written atomically', async () => {
   assert.ok(last.length > 80000, `report of ${last.length} chars`);
 });
 
+test('emit and the error record write through _shell.write_text_atomic', () => {
+  const out = join(fresh('seam'), 'task-1.1.json');
+  const code = [
+    'import importlib.machinery, importlib.util, json, sys',
+    'sys.dont_write_bytecode = True',
+    "loader = importlib.machinery.SourceFileLoader('run_checks', sys.argv[1])",
+    'mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))',
+    'loader.exec_module(mod)',
+    'calls = []',
+    'mod._shell.write_text_atomic = lambda path, text: calls.append([path, text])',
+    'try:',
+    "    mod.emit({'ok': True, 'results': []}, sys.argv[2])",
+    'except SystemExit:',
+    '    pass',
+    "mod._record = sys.argv[2]",
+    "mod.write_record('boom')",
+    'print(json.dumps(calls), file=sys.stderr)',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, RUN_CHECKS, out], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  const calls = JSON.parse(res.stderr.trim().split('\n').pop());
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], out);
+  assert.equal(JSON.parse(calls[0][1]).ok, true);
+  assert.equal(calls[1][0], out);
+  assert.equal(JSON.parse(calls[1][1]).error, 'boom');
+  assert.equal(existsSync(out), false, 'nothing was written in place');
+});
+
 // ---- error records ----
 
 test('a failure after validation leaves an error record: no bash', { skip: !IS_WINDOWS && !SYMLINKS && 'symlinks unavailable' }, () => {

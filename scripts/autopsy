@@ -244,7 +244,11 @@ untimed, total_s}}, full_suite_runs {total, inferred, by_role: {<role>:
 n}}, task_check_calls {total, by_selected: {targeted, lane, widened,
 unavailable}, failed, reasons: {<code>: n}}, project_test_runs {total,
 by_role: {<role>: n}, unavailable}, repairs {attempts, eligible,
-by_status: {<status>: n}} and setup {skipped, no_setup_commands}.
+by_status: {<status>: n}}, setup {skipped, no_setup_commands} and waits
+{checks_via_procedure, wait_calls, stopped, improvised: {monitor_errors,
+sleep_blocked, harness_output_reads}} (the long-check procedure;
+checks_via_procedure is unavailable for a run that could not have used it,
+and waits is unavailable for a run without tool events).
 - A check id names a configured command: <group>#<n> is
   commands.<group>[n - 1] (test#1 is commands.test[0]),
   <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1] and

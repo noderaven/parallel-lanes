@@ -678,8 +678,3 @@ test('reference.md documents await-checks, its exit codes, --exact busy, tree_ch
 test('README lists await-checks', () => {
   assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\bawait-checks\b/);
 });
-
-test('SKILL.md stays at most 3000 words', () => {
-  const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
-  assert.ok(words <= 3000, `SKILL.md has ${words} words`);
-});

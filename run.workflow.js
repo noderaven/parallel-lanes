@@ -1220,8 +1220,9 @@ function procedureLines(m, { name, exact = false, start, stop = null, changed = 
     'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
     'the new path.',
     `1. Reserve a result file (a short call): ${reserveCommand(m, name, exact)}`,
-    '   It prints a path. In the start command below, replace <P> with the path it printed, keeping the single',
-    '   quotes around it.',
+    '   It prints a path. In the start and wait commands below, replace <P> with the path it printed, keeping the',
+    "   single quotes around it (write any single quote inside the path as '\\'': close the quotes, an escaped",
+    '   quote, reopen them).',
     ...(exact ? [
       '   If reserve exits 4 with status busy, an earlier run still writes that file: run the wait on the file it',
       '   names until the wait no longer exits 4, ignore that report, then reserve again.',

@@ -288,6 +288,25 @@ test('wait treats a slow start as running inside the grace', () => {
   assert.equal(existsSync(file + '.lock'), false, 'wait made no sidecar');
 });
 
+test('the grace runs from the later of the mtime and the start of the wait', () => {
+  // An old mtime: the grace counts from the wait's start (from the mtime alone it
+  // would be over at once, exit 5).
+  const stale = resultFile('');
+  const old = Date.now() / 1000 - 120;
+  utimesSync(stale, old, old);
+  const first = run(['wait', stale, '--max', '3']);
+  assert.equal(first.status, 4, first.stderr);
+  assert.equal(oneJson(first.stdout).status, 'running');
+  // A later mtime: the grace counts from it (from the start alone, a 1 s grace
+  // would be over within the 3 s of the wait, exit 5).
+  const fresh = resultFile('');
+  const ahead = Date.now() / 1000 + 100;
+  utimesSync(fresh, ahead, ahead);
+  const second = run(['wait', fresh, '--max', '3'], { AWAIT_CHECKS_GRACE_S: '1' });
+  assert.equal(second.status, 4, second.stderr);
+  assert.equal(oneJson(second.stdout).status, 'running');
+});
+
 test('wait says not_started after the grace', () => {
   const file = resultFile('');
   const old = Date.now() / 1000 - 120;

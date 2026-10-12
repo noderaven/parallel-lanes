@@ -488,7 +488,7 @@ not contend for it. A leftover sidecar is harmless.
 after the last. The report's `tree_changed` is true when they differ, false when equal and
 null when a fingerprint could not be taken. The `git status` lists cannot see an edit to a file
 that is already modified or untracked; the fingerprint can. `await-checks wait` prints one
-line on stderr when it is true: `the checkout changed while the checks ran; rerun them`.
+line on stderr when it is true: `await-checks: the checkout changed while the checks ran; rerun them`.
 
 **Evidence files.** `task-checks --evidence FILE` writes its evidence to the reserved FILE
 (which must be empty, directly in `<ledger>/checks` and named `task-<unit>.<n>.json`; else exit
@@ -638,10 +638,10 @@ checkout dirty or did not say) never block. The checks evidence is the
 JSON is saved under `<ledger_dir>/checks/` for the user to compare): the session
 compares that report with the saved JSON at hand-back; it does not re-run the checks (see
 "Verify evidence"). `run-checks` keeps the commands' output out of its own stdout and
-stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`,
-or a new temporary directory without `--out`, which the caller removes once it has read the logs:
-agents are told to), and each result carries `log` (its path) and `tail` (its last 20 lines, kept
-to the last 4096 characters and starting with `[truncated] ` when cut, so one long line stays
+stderr: each command's combined output goes to a log file beside that JSON (`<out stem>.<N>.log`;
+every call the engine hands an agent passes `--out`, so the logs stay with the evidence). Only a
+manual call without `--out` writes them to a new temporary directory, which its caller may remove.
+Each result carries `log` (its path) and `tail` (its last 20 lines, kept to the last 4096 characters and starting with `[truncated] ` when cut, so one long line stays
 out too). `--root` checks the JSON and its logs only with `--out`. Verify runs once at the delivered revision, after the final fix and
 before the final re-review, which gets its result and does not rerun the checks; the E2E and
 post-integrate rechecks are told the project checks already ran at that commit and run only
@@ -1029,7 +1029,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 5, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 6, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1048,8 +1048,13 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     runs too, so compare across versions with it.
   - `task_check_calls` (`total`, `by_selected` with `targeted`, `lane`, `widened` and
     `unavailable`, `failed`, `reasons` by code): every `task-checks` call, matched to its
-    evidence (`<ledger>/checks/task-<unit>.<n>.json`) by unit and `policy.started`; a call with
-    missing or malformed evidence is `unavailable`, never a default.
+    evidence (`<ledger>/checks/task-<unit>.<n>.json`): a call with `--evidence` by its file's
+    basename, any other call by unit and `policy.started`; a call with missing or malformed
+    evidence is `unavailable`, never a default.
+  - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`) counts the long-check
+    procedure ("Long checks"): executions that reserved, started and waited, the `await-checks wait`
+    calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
+    `harness_output_reads`); `unavailable` for a run without tool events.
   - `repairs` (`attempts`, `eligible`, `by_status`, from `final.repairs`) and `setup`
     (`skipped`, `no_setup_commands`, from `setup_result.setup_skipped`) are `unavailable` for
     runs before 1.6.0.

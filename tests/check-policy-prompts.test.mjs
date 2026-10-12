@@ -298,6 +298,8 @@ test('procedureLines names reserve, run_in_background, wait and its exit codes 4
   ];
   assert.deepEqual(points, [...points].sort((a, b) => a - b), 'in the order of spec 4.1');
   assert.ok(text.includes('Every run, a rerun after a fix included, starts with its own reserve'), text);
+  assert.ok(text.includes('In the start and wait commands below, replace <P> with the path it printed'), text);
+  assert.ok(text.includes("write any single quote inside the path as '\\''"), text);
   assert.ok(text.includes('the checkout changed while the checks ran, run them once more, starting with a new '
     + 'reserve. Rerun only once: if the checkout changed again on that rerun, do not run the checks a third time; '
     + 'keep that result (it carries tree_changed true) and say in your notes that the checks themselves change the '
