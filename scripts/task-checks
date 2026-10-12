@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Run a task's checks before it commits: targeted, the lane's, or widened.
+
+usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE
+                   --task ID [--task ID ...] [--declared PATH ...] [--widen PATH ...]
+                   [--project-test CMD ...]
+                   [--entry TASK_ID --targeted GROUP CMD [--targeted GROUP CMD ...]]
+                   --lane-cmd GROUP CMD [...] --wide-cmd GROUP CMD [...]
+                   [--force-full REASON]
+
+Options come in any order. The workflow builds the call (spec 4.2 of the
+1.6.0 check policy); the task's implementer runs it once before committing.
+
+Selection (policy.selected):
+  lane      no --entry: the unit has no task_checks entry, so the --lane-cmd
+            list runs (the lane's checks, as before 1.6.0);
+  widened   an entry, but a widening reason holds: the --wide-cmd list runs
+            (the project's checks plus the lane's own additions);
+  targeted  an entry and no widening reason: the --targeted list runs.
+policy.reasons lists every reason that applies, as {code, detail}, in this
+order: no_entry, no_files (no --declared), outside_files (a changed path the
+Files list does not cover), widen_path (a changed path a --widen entry
+covers), forced (--force-full, its REASON as detail), git_failed (the changed
+paths could not be listed).
+
+Changed paths: git diff --name-only --no-renames -z BASE (the working tree,
+staged and unstaged, against BASE; a rename counts both paths) plus git
+ls-files --others --exclude-standard -z (untracked files that are not
+ignored), NUL-delimited, unique and sorted. Changes to ignored files are not
+seen: widening for them is the agent's --force-full.
+
+Coverage: '\\' becomes '/'; an entry ending in '/' is a directory and covers
+every path under it; any other entry covers the equal path. Paths are
+normalized (posixpath.normpath) and compared case-sensitively, so on a
+case-insensitive filesystem a case mismatch only widens. A --declared or
+--widen value that is absolute or leaves the project after normalizing is a
+usage error.
+
+The chosen list runs through run-checks (DIR --out FILE --root LEDGER_DIR).
+FILE is LEDGER_DIR/checks/task-<UNIT_ID>.<n>.json, n the first number from 1
+whose file can be created exclusively; it must resolve inside LEDGER_DIR.
+run-checks writes its JSON there and its logs beside it; this helper adds
+policy:
+  {unit, tasks, lane, base, started, entry, selected, reasons, changed,
+   offered: {targeted, lane, wide}, project_test_executed}
+started is the UTC time this helper began (ISO 8601, milliseconds, Z);
+project_test_executed is true when an executed command equals a
+--project-test value. The file is rewritten (temporary file, then replace)
+and printed as one JSON line. When run-checks prints no JSON (a crash, or
+its exit 3), the file holds {"results": [], "ok": false, "error": <its
+stderr tail>, "policy": ...}, printed too.
+
+This evidence covers a working tree before a commit. Nothing reads it to
+accept, skip or reuse checks: it is a record and a count.
+
+UNIT_ID, LANE and every --task and --entry id must match
+^[A-Za-z0-9_][A-Za-z0-9._-]*$.
+
+Exit: run-checks' exit when it printed JSON (0 every check passed, 1 a check
+failed); 2 on a usage error (nothing is written); 3 when the evidence path is
+outside LEDGER_DIR, or run-checks printed no JSON.
+"""
+
+import json
+import os
+import posixpath
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import _shell  # noqa: E402
+
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+SAFE_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+ERROR_TAIL = 2000
+USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
+         "--task ID [...] [--declared PATH ...] [--widen PATH ...] [--project-test CMD ...] "
+         "[--entry TASK_ID --targeted GROUP CMD ...] --lane-cmd GROUP CMD [...] "
+         "--wide-cmd GROUP CMD [...] [--force-full REASON]")
+SINGLE = {"--base": "base", "--ledger": "ledger", "--unit": "unit", "--lane": "lane",
+          "--entry": "entry", "--force-full": "forced"}
+REPEATED = {"--task": "tasks", "--declared": "declared", "--widen": "widen",
+            "--project-test": "project_tests"}
+PAIRS = {"--targeted": "targeted", "--lane-cmd": "lane_cmds", "--wide-cmd": "wide_cmds"}
+
+
+def fail(code, message):
+    print(f"task-checks: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def utc_stamp():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def entry_key(path):
+    """(normalized path, is_directory) for a --declared or --widen value, or
+    None when it is absolute or leaves the project."""
+    p = path.replace("\\", "/")
+    is_dir = p.endswith("/")
+    if p.startswith("/") or re.match(r"^[A-Za-z]:", p):
+        return None
+    norm = posixpath.normpath(p)
+    if norm == ".." or norm.startswith("../"):
+        return None
+    return norm, is_dir
+
+
+def parse(argv):
+    if not argv or not argv[0] or argv[0].startswith("-"):
+        fail(2, USAGE)
+    args = {"dir": argv[0], "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
+            "forced": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
+            "targeted": [], "lane_cmds": [], "wide_cmds": []}
+    rest = argv[1:]
+    while rest:
+        flag = rest[0]
+        if flag in SINGLE and len(rest) >= 2 and rest[1]:
+            if args[SINGLE[flag]] is not None:
+                fail(2, f"{flag} given twice")
+            args[SINGLE[flag]] = rest[1]
+            rest = rest[2:]
+        elif flag in REPEATED and len(rest) >= 2 and rest[1]:
+            args[REPEATED[flag]].append(rest[1])
+            rest = rest[2:]
+        elif flag in PAIRS and len(rest) >= 3 and rest[1] and rest[2]:
+            args[PAIRS[flag]].append((rest[1], rest[2]))
+            rest = rest[3:]
+        else:
+            fail(2, USAGE)
+    for key in ("base", "ledger", "unit", "lane"):
+        if args[key] is None:
+            fail(2, f"--{key} is required")
+    if not args["tasks"]:
+        fail(2, "at least one --task is required")
+    if not args["lane_cmds"] or not args["wide_cmds"]:
+        fail(2, "--lane-cmd and --wide-cmd are required")
+    if (args["entry"] is None) != (not args["targeted"]):
+        fail(2, "--entry and --targeted come together")
+    for value in [args["unit"], args["lane"], *args["tasks"]] + ([args["entry"]] if args["entry"] else []):
+        if not SAFE_ID.match(value):
+            fail(2, f"unsafe id {value!r}")
+    for flag, key in (("--declared", "declared"), ("--widen", "widen")):
+        keys = []
+        for value in args[key]:
+            k = entry_key(value)
+            if k is None:
+                fail(2, f"{flag} {value!r} is not a project-relative path")
+            keys.append(k)
+        args[key] = keys
+    args["dir"] = _shell.native_path(args["dir"])
+    args["ledger"] = _shell.native_path(args["ledger"])
+    return args
+
+
+def git_paths(directory, *git_args):
+    """NUL-delimited paths a git command prints, or None when it fails."""
+    res = subprocess.run(["git", "-C", directory, *git_args], capture_output=True, env=ENV)
+    if res.returncode != 0:
+        return None
+    text = res.stdout.decode("utf-8", errors="surrogateescape")
+    return [p for p in text.split("\0") if p]
+
+
+def changed_paths(directory, base):
+    tracked = git_paths(directory, "diff", "--name-only", "--no-renames", "-z", base, "--")
+    untracked = git_paths(directory, "ls-files", "--others", "--exclude-standard", "-z")
+    if tracked is None or untracked is None:
+        return None
+    return sorted(set(tracked) | set(untracked))
+
+
+def covered(path, entries):
+    norm = posixpath.normpath(path.replace("\\", "/"))
+    for entry, is_dir in entries:
+        if norm == entry or (is_dir and (entry == "." or norm.startswith(entry + "/"))):
+            return True
+    return False
+
+
+def select(args, changed):
+    """(selected, reasons) per the docstring's rules."""
+    reasons = []
+    if args["entry"] is None:
+        reasons.append({"code": "no_entry", "detail": "no task_checks entry for this unit"})
+    if not args["declared"]:
+        reasons.append({"code": "no_files", "detail": "the unit has no Files list"})
+    if changed is not None:
+        if args["declared"]:
+            outside = [p for p in changed if not covered(p, args["declared"])]
+            if outside:
+                reasons.append({"code": "outside_files", "detail": "outside the Files list: " + ", ".join(outside)})
+        shared = [p for p in changed if covered(p, args["widen"])]
+        if shared:
+            reasons.append({"code": "widen_path", "detail": "shared path: " + ", ".join(shared)})
+    if args["forced"] is not None:
+        reasons.append({"code": "forced", "detail": args["forced"]})
+    if changed is None:
+        reasons.append({"code": "git_failed", "detail": "could not list the changed files"})
+    if args["entry"] is None:
+        return "lane", reasons
+    return ("widened" if reasons else "targeted"), reasons
+
+
+def contained(path, root):
+    root = os.path.realpath(root)
+    path = os.path.abspath(path)
+    head, tail = path, []
+    while not os.path.lexists(head) and head != os.path.dirname(head):
+        head, name = os.path.split(head)
+        tail.insert(0, name)
+    resolved = os.path.join(os.path.realpath(head), *tail)
+    return os.path.commonpath([resolved, root]) == root
+
+
+def reserve(ledger, unit):
+    """Create LEDGER/checks/task-<unit>.<n>.json exclusively; its path."""
+    checks = os.path.join(ledger, "checks")
+    n = 1
+    while True:
+        path = os.path.join(checks, f"task-{unit}.{n}.json")
+        if not contained(path, ledger):
+            fail(3, f"evidence path {path!r} is outside {ledger!r}")
+        os.makedirs(checks, exist_ok=True)
+        if not contained(path, ledger):
+            fail(3, f"evidence path {path!r} is outside {ledger!r}")
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return _shell.native_path(path)
+        except FileExistsError:
+            n += 1
+
+
+def save(path, data):
+    fd, tmp = tempfile.mkstemp(prefix=".task-checks-", dir=os.path.dirname(path))
+    os.close(fd)
+    _shell.write_text(tmp, json.dumps(data) + "\n")
+    os.replace(tmp, path)
+
+
+def main(argv):
+    _shell.setup_io()
+    started = utc_stamp()
+    args = parse(argv)
+    changed = changed_paths(args["dir"], args["base"])
+    selected, reasons = select(args, changed)
+    chosen = {"targeted": args["targeted"], "lane": args["lane_cmds"], "widened": args["wide_cmds"]}[selected]
+    as_list = lambda pairs: [{"group": g, "command": c} for g, c in pairs]  # noqa: E731
+    policy = {
+        "unit": args["unit"], "tasks": args["tasks"], "lane": args["lane"], "base": args["base"],
+        "started": started, "entry": args["entry"], "selected": selected, "reasons": reasons,
+        "changed": changed if changed is not None else [],
+        "offered": {"targeted": as_list(args["targeted"]) if args["entry"] is not None else None,
+                    "lane": as_list(args["lane_cmds"]), "wide": as_list(args["wide_cmds"])},
+        "project_test_executed": False,
+    }
+    out = reserve(args["ledger"], args["unit"])
+    cmd = [sys.executable, os.path.join(HERE, "run-checks"), args["dir"], "--out", out, "--root", args["ledger"]]
+    for group, command in chosen:
+        cmd += ["--cmd", group, command]
+    res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)
+    try:
+        report = json.loads(res.stdout)
+        if not isinstance(report, dict):
+            raise ValueError("not an object")
+    except ValueError:
+        report = {"results": [], "ok": False,
+                  "error": (res.stderr.strip() or f"run-checks exited {res.returncode} with no JSON")[-ERROR_TAIL:]}
+        report["policy"] = policy
+        save(out, report)
+        print(json.dumps(report))
+        sys.exit(3)
+    executed = {r.get("command") for r in report.get("results", []) if isinstance(r, dict)}
+    policy["project_test_executed"] = any(c in executed for c in args["project_tests"])
+    report["policy"] = policy
+    save(out, report)
+    print(json.dumps(report))
+    sys.exit(res.returncode if res.returncode in (0, 1) else 3)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
