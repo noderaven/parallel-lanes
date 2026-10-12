@@ -198,3 +198,71 @@ function taskState(m, id) {
 function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
 }
+
+// The task_checks entry a unit uses (spec 4.1): its task's, or for a batch
+// unit its last task's; null when there is none. checks lists test, lint and
+// build in that order: a group the entry has replaces the ledger lane's
+// (commandGroup), an absent one inherits it. laneId is the ledger lane (a
+// lane id, prelude or join).
+function taskChecksEntry(m, unit, laneId) {
+  const tasks = Array.isArray(unit.tasks) ? unit.tasks : [unit];
+  const id = tasks[tasks.length - 1].id;
+  const all = m.task_checks;
+  if (!all || typeof all !== 'object' || !Object.prototype.hasOwnProperty.call(all, id)) return null;
+  const entry = all[id];
+  const checks = [];
+  for (const group of ['test', 'lint', 'build']) {
+    const own = Object.prototype.hasOwnProperty.call(entry, group) ? entry[group] : commandGroup(m, laneId, group);
+    for (const command of own) checks.push({ group, command });
+  }
+  return { id, checks };
+}
+
+// The repairs a run may make after a failing verify (spec 4.5): 2 in an
+// autonomous run, none in a supervised one. Per run: the caller subtracts
+// m.repairs_spent.
+function repairLimit(m) {
+  return effectiveAutonomy(m) === 'autonomous' ? 2 : 0;
+}
+
+// The agent slots a repair attempt needs free before it starts (spec 4.5):
+// the repair, its verify (over budget but counted) and the re-review that
+// must follow, each with makeIo's one automatic retry.
+function repairReserve() {
+  return 6;
+}
+
+// The dry run's checks summary (spec 4.9). Units are the units with work,
+// built as planAgents builds them.
+function checksSummary(m) {
+  const withEntry = [];
+  const withoutEntry = [];
+  const groups = [['prelude', m.prelude], ...m.lanes.map((l) => [l.id, l.tasks]), ['join', m.join]];
+  for (const [laneId, tasks] of groups) {
+    for (let i = 0; i < tasks.length;) {
+      const group = batchGroup(m, tasks, i);
+      i += group.length;
+      if (taskState(m, group[0].id) === 'skip') continue;
+      const unit = group.length > 1 ? batchUnit(group) : group[0];
+      (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+    }
+  }
+  const project = (group, command) => commandGroup(m, null, group).includes(command);
+  const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
+    lane: m.lanes.find((l) => commandGroup(m, l.id, c.group).includes(c.command)).id,
+    group: c.group,
+    command: c.command,
+  }));
+  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
+  const hasEntries = Boolean(m.task_checks) && Object.keys(m.task_checks).length > 0;
+  return {
+    final_count: finalChecks(m).length,
+    final_added_by_lane_commands: added,
+    units_with_entry: withEntry,
+    units_without_entry: withoutEntry,
+    widen_paths_count: widen.length,
+    repair_limit: repairLimit(m),
+    repairs_spent: m.repairs_spent || 0,
+    warnings: hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : [],
+  };
+}

@@ -27,6 +27,13 @@ function isSha(v) {
   return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
 }
 
+// The message a repair after a failing verify commits with (spec 4.5). A
+// function, not a constant: loadHelpers returns before top-level bindings
+// initialize.
+function repairFixMessage() {
+  return 'fix: make the delivery checks pass';
+}
+
 // Rules every agent gets, task and phase alike.
 function agentRules() {
   return [

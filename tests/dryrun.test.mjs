@@ -379,3 +379,91 @@ test('the dry run lists verify before the final re-review', async () => {
   assert.equal(result.agents.length, planAgents(m).length);
   assert.equal(result.agents.length, 22, 'the count is unchanged');
 });
+
+// ---- 1.6.0 check policy (spec 4.1, 4.9) ----
+
+const {
+  taskChecksEntry, finalChecks, finalSetup, expectedChecks, repairLimit, repairReserve, repairFixMessage,
+} = await loadHelpers([
+  'taskChecksEntry', 'finalChecks', 'finalSetup', 'expectedChecks', 'repairLimit', 'repairReserve', 'repairFixMessage',
+]);
+
+function policyManifest(overrides = {}) {
+  return batchedManifest({
+    task_checks: { T3: { test: ['node --test t3'] }, T5: { test: ['node --test t5'] } },
+    lane_commands: { beta: { test: ['npm test -- beta'] } },
+    widen_paths: ['package.json', 'tests/'],
+    ...overrides,
+  });
+}
+
+test('the dry run reports a checks summary', async () => {
+  const { result } = await dryRun(policyManifest());
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.checks, {
+    final_count: 2,
+    final_added_by_lane_commands: [{ lane: 'beta', group: 'test', command: 'npm test -- beta' }],
+    units_with_entry: ['T2-T3', 'T5'],
+    units_without_entry: ['T1', 'T4'],
+    widen_paths_count: 2,
+    repair_limit: 2,
+    repairs_spent: 0,
+    warnings: [],
+  });
+});
+
+test('the summary warns when task_checks has entries and widen_paths is empty', async () => {
+  const m = policyManifest();
+  delete m.widen_paths;
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.checks.warnings, ['changes to shared files will not widen task checks']);
+  assert.equal(result.checks.widen_paths_count, 0);
+  const plain = await dryRun(manifest());
+  assert.deepEqual(plain.result.checks.warnings, []);
+  assert.deepEqual(plain.result.checks.units_with_entry, []);
+});
+
+test('an invalid manifest has no checks summary', async () => {
+  const { result } = await dryRun(manifest({ task_checks: 'x' }));
+  assert.ok(result.errors.length > 0);
+  assert.equal(result.checks, null);
+});
+
+test('repair_limit is 0 for a supervised manifest and 2 for an autonomous one', async () => {
+  assert.equal(repairLimit(manifest()), 2);
+  assert.equal(repairLimit(manifest({ autonomy: 'autonomous' })), 2);
+  assert.equal(repairLimit(manifest({ autonomy: 'supervised' })), 0);
+  assert.equal(repairReserve(), 6);
+  assert.equal(repairFixMessage(), 'fix: make the delivery checks pass');
+  const { result } = await dryRun(policyManifest({ autonomy: 'supervised', repairs_spent: 1 }));
+  assert.equal(result.checks.repair_limit, 0);
+  assert.equal(result.checks.repairs_spent, 1);
+});
+
+test('taskChecksEntry inherits lint from the lane and keeps an empty build', () => {
+  const m = manifest({
+    commands: { setup: [], test: ['npm test'], lint: ['npm run lint'], build: ['npm run build'] },
+    lane_commands: { beta: { lint: ['lint-beta'] } },
+    task_checks: { T2: { test: ['t2'], build: [] }, T4: { test: ['t4'] } },
+  });
+  const t = (id) => [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join].find((x) => x.id === id);
+  assert.deepEqual(taskChecksEntry(m, t('T2'), 'alpha'), {
+    id: 'T2', checks: [{ group: 'test', command: 't2' }, { group: 'lint', command: 'npm run lint' }],
+  });
+  assert.deepEqual(taskChecksEntry(m, t('T4'), 'beta'), {
+    id: 'T4',
+    checks: [{ group: 'test', command: 't4' }, { group: 'lint', command: 'lint-beta' }, { group: 'build', command: 'npm run build' }],
+  });
+  assert.equal(taskChecksEntry(m, t('T3'), 'alpha'), null);
+  // A batch unit uses its last task's entry.
+  const unit = { id: 'T1-T2', tasks: [t('T1'), t('T2')] };
+  assert.equal(taskChecksEntry(m, unit, 'alpha').id, 'T2');
+});
+
+test('task_checks leaves finalChecks, finalSetup and expectedChecks unchanged', () => {
+  const base = manifest({ lane_commands: { beta: { test: ['npm test -- beta'], setup: ['npm ci -w beta'] } } });
+  const withChecks = { ...base, task_checks: { T2: { test: ['t2'], lint: ['l2'] } }, widen_paths: ['src/'] };
+  assert.deepEqual(finalChecks(withChecks), finalChecks(base));
+  assert.deepEqual(finalSetup(withChecks), finalSetup(base));
+  assert.deepEqual(expectedChecks(withChecks), expectedChecks(base));
+});

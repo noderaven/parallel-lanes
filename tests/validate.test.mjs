@@ -697,3 +697,56 @@ test('startCommand ignores inherited consumes_extra entries', async () => {
   m.consumes_extra = { T2: ['producer.md'] };
   assert.match(startCommand(m, t2, where), /--also 'T2' 'producer\.md'/);
 });
+
+// ---- 1.6.0 check policy fields (spec 4.1, 4.5, 4.8) ----
+
+test('task_checks accepts task ids with test and inherits lint and build', () => {
+  const m = { ...validManifest(), task_checks: { T2: { test: ['node --test tests/a.test.mjs'] } } };
+  assert.deepEqual(validateManifest(m), []);
+});
+
+test('task_checks rejects lane ids, prelude and join as keys', () => {
+  for (const key of ['alpha', 'prelude', 'join']) {
+    const errors = validateManifest({ ...validManifest(), task_checks: { [key]: { test: ['t'] } } });
+    assertError(errors, `task_checks.${key}: unknown task id`);
+  }
+});
+
+test('task_checks requires a non-empty test and rejects setup and non-object entries', () => {
+  const errs = (tc) => validateManifest({ ...validManifest(), task_checks: tc });
+  assertError(errs('x'), 'task_checks: must be an object');
+  assertError(errs({ T2: 'x' }), 'task_checks.T2: must be an object');
+  assertError(errs({ T2: { lint: ['l'] } }), 'task_checks.T2.test: missing');
+  assertError(errs({ T2: { test: [] } }), 'task_checks.T2.test: must name at least one command');
+  assertError(errs({ T2: { test: ['t'], setup: ['s'] } }), 'task_checks.T2.setup: unknown command group');
+  assertError(errs({ T2: { test: ['t'], lint: 'l' } }), 'task_checks.T2.lint: must be a list of non-empty strings');
+});
+
+test('widen_paths rejects absolute paths and ..', () => {
+  assert.deepEqual(validateManifest({ ...validManifest(), widen_paths: ['tests/harness.mjs', 'src/', 'package.json'] }), []);
+  for (const bad of [['/x'], ['C:/x'], ['c:\\x'], ['\\x'], ['a/../b'], ['..'], [''], [5], 'tests/']) {
+    assertError(validateManifest({ ...validManifest(), widen_paths: bad }),
+      'widen_paths: must be a list of project-relative paths');
+  }
+});
+
+test('repairs_spent must be a non-negative integer', () => {
+  for (const ok of [0, 2]) assert.deepEqual(validateManifest({ ...validManifest(), repairs_spent: ok }), []);
+  for (const bad of [-1, 1.5, '1', null]) {
+    assertError(validateManifest({ ...validManifest(), repairs_spent: bad }), 'repairs_spent: must be a non-negative integer');
+  }
+});
+
+test('setup_skipped must name lanes without pending work', () => {
+  const m = validManifest();
+  m.done = ['T2'];
+  m.backfill = { T2: { base: 'a', head: 'b' } };
+  m.setup_result = { ...m.setup_result, setup_skipped: ['alpha'] };
+  assertError(validateManifest(m), 'setup_result.setup_skipped: lane alpha has pending work');
+  m.reviewed = ['T2'];
+  assert.deepEqual(validateManifest(m), []);
+  m.setup_result = { ...m.setup_result, setup_skipped: ['gamma'] };
+  assertError(validateManifest(m), 'setup_result.setup_skipped: must be a list of lane ids');
+  m.setup_result = { ...m.setup_result, setup_skipped: 'alpha' };
+  assertError(validateManifest(m), 'setup_result.setup_skipped: must be a list of lane ids');
+});

@@ -42,6 +42,13 @@ function isSha(v) {
   return typeof v === 'string' && /^[0-9a-f]{7,40}$/.test(v);
 }
 
+// The message a repair after a failing verify commits with (spec 4.5). A
+// function, not a constant: loadHelpers returns before top-level bindings
+// initialize.
+function repairFixMessage() {
+  return 'fix: make the delivery checks pass';
+}
+
 // Rules every agent gets, task and phase alike.
 function agentRules() {
   return [
@@ -524,6 +531,45 @@ function validateManifest(m) {
     }
   }
 
+  // task_checks (spec 4.1): per task id, the targeted checks it runs before
+  // committing. test is required and names at least one command, so an
+  // entry always narrows the test group; lint and build are optional.
+  if ('task_checks' in m) {
+    if (!isObject(m.task_checks)) {
+      err('task_checks: must be an object');
+    } else {
+      for (const [id, entry] of Object.entries(m.task_checks)) {
+        const where = `task_checks.${id}`;
+        if (!taskIds.has(id)) err(`${where}: unknown task id`);
+        if (!isObject(entry)) {
+          err(`${where}: must be an object`);
+          continue;
+        }
+        for (const name of Object.keys(entry)) {
+          if (!['test', 'lint', 'build'].includes(name)) err(`${where}.${name}: unknown command group`);
+          else if (!isTextList(entry[name])) err(`${where}.${name}: must be a list of non-empty strings`);
+        }
+        if (!('test' in entry)) err(`${where}.test: missing`);
+        else if (Array.isArray(entry.test) && entry.test.length === 0) err(`${where}.test: must name at least one command`);
+      }
+    }
+  }
+
+  // widen_paths (spec 4.1): project-relative paths; no absolute path, drive
+  // letter or '..' segment.
+  if ('widen_paths' in m) {
+    const relative = (p) => isText(p) && !/^[\\/]/.test(p) && !/^[A-Za-z]:/.test(p)
+      && !p.split(/[\\/]/).includes('..');
+    if (!Array.isArray(m.widen_paths) || !m.widen_paths.every(relative)) {
+      err('widen_paths: must be a list of project-relative paths');
+    }
+  }
+
+  // repairs_spent (spec 4.5): repairs earlier launches of this run made.
+  if ('repairs_spent' in m && !(Number.isInteger(m.repairs_spent) && m.repairs_spent >= 0)) {
+    err('repairs_spent: must be a non-negative integer');
+  }
+
   if ('hooks' in m) {
     if (!isObject(m.hooks)) {
       err('hooks: must be an object');
@@ -639,6 +685,22 @@ function validateManifest(m) {
       if ('preserved' in r && !(Array.isArray(r.preserved) && r.preserved.every((p) => isObject(p)
         && isText(p.worktree) && isText(p.ref) && isText(p.commit)))) {
         err('setup_result.preserved: must be a list of {worktree, ref, commit}');
+      }
+      // setup_skipped (spec 4.8): lanes whose setup commands setup skipped.
+      // None may have pending work under the manifest's current done and
+      // reviewed (a relaunch with stale lists would have skipped too much).
+      if ('setup_skipped' in r) {
+        const skipped = r.setup_skipped;
+        if (!Array.isArray(skipped) || !skipped.every((id) => typeof id === 'string' && laneIds.has(id))) {
+          err('setup_result.setup_skipped: must be a list of lane ids');
+        } else if (Array.isArray(m.done) && Array.isArray(m.reviewed) && Array.isArray(m.lanes)) {
+          for (const id of skipped) {
+            const lane = m.lanes.find((l) => isObject(l) && l.id === id);
+            if (lane && Array.isArray(lane.tasks) && hasWork(m, lane.tasks.filter(isObject))) {
+              err(`setup_result.setup_skipped: lane ${id} has pending work`);
+            }
+          }
+        }
       }
       if (!isObject(r.worktrees)) {
         err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');
@@ -884,6 +946,74 @@ function taskState(m, id) {
 // Tasks of a group (prelude, a lane, join) that still need an agent.
 function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
+}
+
+// The task_checks entry a unit uses (spec 4.1): its task's, or for a batch
+// unit its last task's; null when there is none. checks lists test, lint and
+// build in that order: a group the entry has replaces the ledger lane's
+// (commandGroup), an absent one inherits it. laneId is the ledger lane (a
+// lane id, prelude or join).
+function taskChecksEntry(m, unit, laneId) {
+  const tasks = Array.isArray(unit.tasks) ? unit.tasks : [unit];
+  const id = tasks[tasks.length - 1].id;
+  const all = m.task_checks;
+  if (!all || typeof all !== 'object' || !Object.prototype.hasOwnProperty.call(all, id)) return null;
+  const entry = all[id];
+  const checks = [];
+  for (const group of ['test', 'lint', 'build']) {
+    const own = Object.prototype.hasOwnProperty.call(entry, group) ? entry[group] : commandGroup(m, laneId, group);
+    for (const command of own) checks.push({ group, command });
+  }
+  return { id, checks };
+}
+
+// The repairs a run may make after a failing verify (spec 4.5): 2 in an
+// autonomous run, none in a supervised one. Per run: the caller subtracts
+// m.repairs_spent.
+function repairLimit(m) {
+  return effectiveAutonomy(m) === 'autonomous' ? 2 : 0;
+}
+
+// The agent slots a repair attempt needs free before it starts (spec 4.5):
+// the repair, its verify (over budget but counted) and the re-review that
+// must follow, each with makeIo's one automatic retry.
+function repairReserve() {
+  return 6;
+}
+
+// The dry run's checks summary (spec 4.9). Units are the units with work,
+// built as planAgents builds them.
+function checksSummary(m) {
+  const withEntry = [];
+  const withoutEntry = [];
+  const groups = [['prelude', m.prelude], ...m.lanes.map((l) => [l.id, l.tasks]), ['join', m.join]];
+  for (const [laneId, tasks] of groups) {
+    for (let i = 0; i < tasks.length;) {
+      const group = batchGroup(m, tasks, i);
+      i += group.length;
+      if (taskState(m, group[0].id) === 'skip') continue;
+      const unit = group.length > 1 ? batchUnit(group) : group[0];
+      (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+    }
+  }
+  const project = (group, command) => commandGroup(m, null, group).includes(command);
+  const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
+    lane: m.lanes.find((l) => commandGroup(m, l.id, c.group).includes(c.command)).id,
+    group: c.group,
+    command: c.command,
+  }));
+  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
+  const hasEntries = Boolean(m.task_checks) && Object.keys(m.task_checks).length > 0;
+  return {
+    final_count: finalChecks(m).length,
+    final_added_by_lane_commands: added,
+    units_with_entry: withEntry,
+    units_without_entry: withoutEntry,
+    widen_paths_count: widen.length,
+    repair_limit: repairLimit(m),
+    repairs_spent: m.repairs_spent || 0,
+    warnings: hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : [],
+  };
 }
 
 // The tasks a unit of work covers. A batch unit (spec D3) is consecutive
@@ -4220,6 +4350,8 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     lanes_effective: errors.length === 0 ? lanesEffective(dry, agents) : 0,
     // The exact lines the session prints at the launch; null when invalid.
     notices: errors.length === 0 ? launchNotices(dry, agents) : null,
+    // The check policy at a glance (spec 4.9); null when invalid.
+    checks: errors.length === 0 ? checksSummary(dry) : null,
   };
 }
 
