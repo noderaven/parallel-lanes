@@ -2984,8 +2984,10 @@ function linkSameLocation(findings) {
 // ctx = {kind: 'blocked'|'question'|'round_cap'|'preflight', task|null,
 // where: {dir, branch, lane}|null, details, findings}. The result is always a
 // usable outcome object: a missing result is a stop marked unavailable (an
-// agent error), and an invalid one (a budget refusal included) is a
-// plan_broken stop marked invalid, never approval. Neither is a ruling.
+// agent error), a refused call (the budget sentinel, under the
+// agents-unavailable latch too) a stop marked refused with the refusal text
+// and no stop condition, and an invalid one a plan_broken stop marked
+// invalid, never approval. None of them is a ruling.
 
 function adjudicatorOutcomes() {
   return ['answer', 'clarify_plan', 'park', 'unblock', 'stop'];
@@ -3125,6 +3127,11 @@ async function adjudicate(m, ctx, io = { agent, log }) {
   if (r === null || r === undefined) {
     return { outcome: 'stop', text: `no result from ${label}`, stop_condition: 'plan_broken', unavailable: true };
   }
+  // The refusal sentinel (the budget cap or the agents-unavailable latch):
+  // no adjudicator ran, so there is no ruling and no stop condition.
+  if (r.__budget) {
+    return { outcome: 'stop', refused: true, text: refusalText({ unavailable: Boolean(r.__unavailable) }, label) };
+  }
   const valid = adjudicatorResult(r);
   if (valid === null) {
     return {
@@ -3191,7 +3198,7 @@ function makeIo(m, baseIo, state) {
   const PROBE_LABEL = 'availability probe';
   const refuse = (label) => {
     state.refused.push(label);
-    baseIo.log(`parallel-lanes: budget exhausted: ${label} was not run`);
+    baseIo.log(`parallel-lanes: ${refusalText(state, label)}`);
     return state.unavailable ? { __budget: true, __unavailable: true } : { __budget: true };
   };
   const isRuling = (label) => / adjudicate( retry)?$/.test(label);
@@ -3298,6 +3305,20 @@ function makeIo(m, baseIo, state) {
       return afterDeadPair(opts, r);
     },
   };
+}
+
+// Why a refused agent call was not run (spec 4.1): 'agents unavailable' once
+// state.unavailable is set (makeIo's latch), else 'budget exhausted'. Code
+// that holds only the refusal sentinel passes {unavailable:
+// Boolean(r.__unavailable)}: every sentinel under the latch carries it.
+function refusalCause(state) {
+  return state && state.unavailable ? 'agents unavailable' : 'budget exhausted';
+}
+
+// The sentence for a refused call: '<cause>: <label> was not run' (the
+// refuse() log line, task notes and a lane's stop reason).
+function refusalText(state, label) {
+  return `${refusalCause(state)}: ${label} was not run`;
 }
 
 // The custom agent type for a spawn: m.agent_type, except for the hook agents
@@ -3412,12 +3433,14 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   };
   // Why an implement or fix result did not move the branch past from, as
   // {kind: 'budget'|'blocked'|'question', reason}; null when it did. A budget
-  // refusal (the sentinel the run budget returns once the agent cap is hit)
-  // ends the task without adjudication: no agent can be spawned to settle it.
+  // refusal (the sentinel the run budget returns once the agent cap is hit,
+  // or once agents are unavailable) ends the task without adjudication: no
+  // agent can be spawned to settle it. Its reason (refusalText) names why.
   // In supervised mode a question is just a blocked result.
+  const refusedBy = (r, label) => ({ kind: 'budget', reason: refusalText({ unavailable: Boolean(r.__unavailable) }, label) });
   const failure = (r, label, from) => {
     const blockedBy = (reason) => ({ kind: 'blocked', reason });
-    if (r && r.__budget) return { kind: 'budget', reason: `${label} was not run` };
+    if (r && r.__budget) return refusedBy(r, label);
     if (r === null || r === undefined) return blockedBy(`no result from ${label}`);
     if (r.status === 'question') {
       const q = present(r.question) ? r.question : (present(r.notes) ? r.notes : '(no question text)');
@@ -3544,13 +3567,15 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     // A park or unblock the policy refuses never took effect, so it is listed
     // as refused, not as a ruling made on the user's behalf.
-    if (!out.unavailable && !out.invalid) {
+    // An adjudication the run refused (out.refused: the budget or agents
+    // unavailable) ran no adjudicator: no ruling, and its text is the stop.
+    if (!out.unavailable && !out.invalid && !out.refused) {
       rulings.push(refused === 'security' ? `refused (security-gated): ${out.text}`
         : refused !== null ? `refused (${refused}): ${out.text}` : out.text);
     }
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
-      return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
+      return result('blocked', out.unavailable || out.refused ? out.text : `adjudicator_stop: ${out.stop_condition}`);
     }
     if (refused !== null) {
       io.log(`${task.id}: ${out.outcome} refused (${refused})`);
@@ -3601,7 +3626,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       verdict = await review();
     }
     if (verdict && verdict.__budget) {
-      need = { kind: 'budget', reason: `${task.id} ${reviewLabel} was not run` };
+      need = refusedBy(verdict, `${task.id} ${reviewLabel}`);
       continue;
     }
     if (!verdict || verdict.invalid) {
@@ -4133,7 +4158,9 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
-  if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
+  // A refused call says why (refusalCause: the budget, or agents unavailable).
+  const cause = (r) => refusalCause({ unavailable: Boolean(r.__unavailable) });
+  if (!fix || fix.__budget) return settle([], null, fix ? `final fix not run: ${cause(fix)}` : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   if (badHead(fix)) {
     const why = noHead(fix, 'the final fix');
@@ -4160,7 +4187,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
-    settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
+    settle(dispositions, null, rr && rr.__budget ? `final re-review not run: ${cause(rr)}`
       : 'no result from final re-review');
   } else {
     settle(dispositions, rr, undefined, final.head);
@@ -4216,7 +4243,8 @@ function repairHeadEligible(verify, sha, from) {
 // nothing to keep open, so this check is what closes the result.
 function validRepairReview(rr, delivered) {
   if (!rr || typeof rr !== 'object' || rr.__budget) {
-    return rr && rr.__budget ? 'the final re-review was not run: budget exhausted' : 'the final re-review returned no result';
+    return rr && rr.__budget ? `the final re-review was not run: ${refusalCause({ unavailable: Boolean(rr.__unavailable) })}`
+      : 'the final re-review returned no result';
   }
   if (rr.head !== delivered) {
     return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
@@ -4243,9 +4271,11 @@ async function runRepairs(m, io, ctx) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
     const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
       { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
+    // A refused repair's status says why: budget, or unavailable (spec 4.1).
+    const refusedAs = r && r.__budget ? (r.__unavailable ? 'unavailable' : 'budget') : null;
     const entry = {
       attempt: n, from: head, observed_head: r && !r.__budget && present(r.head) ? r.head : null, eligible: false,
-      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (r && r.__budget ? 'budget' : 'no result'),
+      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (refusedAs || 'no result'),
       notes: r && !r.__budget && typeof r.notes === 'string' ? r.notes : '',
     };
     repairs.push(entry);
@@ -4445,6 +4475,8 @@ function scheduleFix(m, entry) {
 //  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
 //  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
+//  agents_unavailable:{trigger, probe, results_before} (reason
+//  agents_unavailable only: makeIo's latch, state.unavailableInfo),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
@@ -4567,16 +4599,22 @@ async function runAll(manifest, io) {
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
       : {}),
+    ...(reason === 'agents_unavailable' && state.unavailableInfo
+      ? { agents_unavailable: { ...state.unavailableInfo } }
+      : {}),
     ...(state.untyped ? { agent_type_fallback: true } : {}),
   });
   // The run stops (resumable) once an agent was refused: runAll checks
   // state.refused after every phase step, ahead of any other stop reason.
-  // Each task whose agent was refused says so in its notes.
+  // Each task whose agent was refused says so in its notes. Under makeIo's
+  // agents-unavailable latch (spec 4.1) the reason is agents_unavailable,
+  // the report carries agents_unavailable {trigger, probe, results_before},
+  // and the notes say agents unavailable (refusalText).
   const budgetReport = () => {
     const notes = new Map();
     for (const label of state.refused) {
       for (const id of labelTasks(m, label)) {
-        notes.set(id, [...(notes.get(id) || []), `budget exhausted: ${label} was not run`]);
+        notes.set(id, [...(notes.get(id) || []), refusalText(state, label)]);
       }
     }
     for (const [id, lines] of notes) {
@@ -4584,7 +4622,7 @@ async function runAll(manifest, io) {
       const text = lines.join('\n');
       t.notes = t.status === 'done' && t.notes ? `${t.notes}\n${text}` : text;
     }
-    return report('stopped', 'budget');
+    return report('stopped', state.unavailable ? 'agents_unavailable' : 'budget');
   };
 
   const notices = launchNotices(m, planAgents(m));
@@ -4858,11 +4896,14 @@ async function runAll(manifest, io) {
   // A result with stopped (the checks stopped twice without a result, spec
   // 4.1) is no result: the missing-verify path, never a repair, since no
   // command failed. verifyStopped keeps the last verify call's stop text
-  // for the report (null when it did not stop).
+  // for the report (null when it did not stop). A refused verify (the
+  // agents-unavailable latch refuses even this one) is no result either: the
+  // refusal sentinel never reaches verify or final.verify.
   const verifyAt = async (sha, from = null) => {
     const r = await callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
       { ...sonnetHigh, overBudget: true });
     verifyStopped = r && typeof r === 'object' && present(r.stopped) ? r.stopped : null;
+    if (r && r.__budget) return null;
     return verifyStopped === null ? r : null;
   };
   // Repairs after a failing verify (spec 4.5): autonomous only, at most
@@ -4881,9 +4922,10 @@ async function runAll(manifest, io) {
   };
   const repair = autonomous ? { admit, first: spent + 1 } : null;
   // A budget stop once every task is in: the checks still run at the
-  // feature head the run reached, and the stopped report carries them.
+  // feature head the run reached, and the stopped report carries them; not
+  // once agents are unavailable (the verify agent would be refused too).
   const budgetStopWithChecks = async (sha) => {
-    if (hasChecks && present(sha)) {
+    if (hasChecks && present(sha) && !state.unavailable) {
       io.phase('Verify');
       verify = await verifyAt(sha);
     }
@@ -4936,6 +4978,9 @@ async function runAll(manifest, io) {
   // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
   if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  // A verify refused under the agents-unavailable latch must not let the run
+  // report complete with its checks missing (spec 4.1).
+  if (state.refused.length > 0) return budgetReport();
   // No final findings and a failing verify (autonomous): the same bounded
   // repairs (spec 4.5). A repair that moved the head gets a final re-review
   // of its range with no findings under verification; anything but a valid

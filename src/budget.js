@@ -55,7 +55,7 @@ function makeIo(m, baseIo, state) {
   const PROBE_LABEL = 'availability probe';
   const refuse = (label) => {
     state.refused.push(label);
-    baseIo.log(`parallel-lanes: budget exhausted: ${label} was not run`);
+    baseIo.log(`parallel-lanes: ${refusalText(state, label)}`);
     return state.unavailable ? { __budget: true, __unavailable: true } : { __budget: true };
   };
   const isRuling = (label) => / adjudicate( retry)?$/.test(label);
@@ -162,6 +162,20 @@ function makeIo(m, baseIo, state) {
       return afterDeadPair(opts, r);
     },
   };
+}
+
+// Why a refused agent call was not run (spec 4.1): 'agents unavailable' once
+// state.unavailable is set (makeIo's latch), else 'budget exhausted'. Code
+// that holds only the refusal sentinel passes {unavailable:
+// Boolean(r.__unavailable)}: every sentinel under the latch carries it.
+function refusalCause(state) {
+  return state && state.unavailable ? 'agents unavailable' : 'budget exhausted';
+}
+
+// The sentence for a refused call: '<cause>: <label> was not run' (the
+// refuse() log line, task notes and a lane's stop reason).
+function refusalText(state, label) {
+  return `${refusalCause(state)}: ${label} was not run`;
 }
 
 // The custom agent type for a spawn: m.agent_type, except for the hook agents
