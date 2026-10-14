@@ -23,9 +23,10 @@ then write_index.
 
 The index lock is an OS lock on <history dir>/index.lock, a file that is
 created once and never deleted (do not delete it by hand either: a holder
-keeps its lock on the old file). On POSIX it is fcntl.flock(LOCK_EX) on the
-whole file; on Windows it is msvcrt.locking on one byte at _WIN_LOCK_OFFSET
-(1 GiB, past the end of the file), so the text stays readable. The OS
+keeps its lock on the old file). The lock itself is _oslock's: on POSIX it
+is fcntl.flock(LOCK_EX) on the whole file; on Windows it is msvcrt.locking on
+one byte at _oslock.WIN_LOCK_OFFSET (1 GiB, past the end of the file), so the
+text stays readable. The OS
 releases the lock when the holder's process ends, however it ends, so there
 is no stale lock to take over and the file's age means nothing. The holder
 writes its pid, time and host into the file for people reading it; the
@@ -40,7 +41,6 @@ protocols is unsupported, and there is no guard against it.
 """
 
 import contextlib
-import errno
 import json
 import os
 import socket
@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 
+import _oslock
 import _shell
 
 INDEX = "index.json"
@@ -68,16 +69,6 @@ ENTRY_KEYS = (
 
 # How often index_lock retries while another process holds the lock.
 _RETRY_S = 0.2
-
-# On Windows index_lock locks the one byte at this offset, past the holder
-# details at the start of the file: msvcrt.locking locks are mandatory, so a
-# lock on the text itself would keep others from reading who holds it.
-_WIN_LOCK_OFFSET = 2 ** 30
-
-if _shell._is_windows(sys.platform):
-    import msvcrt
-else:
-    import fcntl
 
 
 class HistoryError(Exception):
@@ -239,36 +230,6 @@ def _read_lock(path):
         return ""
 
 
-def _held(e):
-    """Whether OSError e from a non-blocking lock means another holder."""
-    return e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK)
-
-
-def _try_lock(fd):
-    """Take the lock on fd without waiting; whether it was taken. Raises
-    OSError for any failure but another holder."""
-    try:
-        if _shell._is_windows(sys.platform):
-            # msvcrt.locking locks from the current position.
-            os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as e:
-        if _held(e):
-            return False
-        raise
-    return True
-
-
-def _unlock(fd):
-    if _shell._is_windows(sys.platform):
-        os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-    else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-
-
 @contextlib.contextmanager
 def index_lock(hdir, wait_s=30):
     """Hold <hdir>/index.lock, an exclusive lock on index.json; yields its path.
@@ -308,7 +269,7 @@ def index_lock(hdir, wait_s=30):
                     raise HistoryError("cannot create " + path + ": not a regular file")
             if fd is not None:
                 try:
-                    if _try_lock(fd):
+                    if _oslock.try_lock(fd):
                         break
                 except OSError as e:
                     raise HistoryError("cannot lock " + path + ": " + str(e))
@@ -332,7 +293,7 @@ def index_lock(hdir, wait_s=30):
             # Closing the file releases the lock too; unlocking first ends
             # it before anything else this process does on the way out.
             with contextlib.suppress(OSError):
-                _unlock(fd)
+                _oslock.unlock(fd)
     finally:
         if fd is not None:
             os.close(fd)

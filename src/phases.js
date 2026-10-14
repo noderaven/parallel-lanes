@@ -403,6 +403,8 @@ function scheduleFix(m, entry) {
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
 //    review_problem?, task_minors_open},
 //  verify (the run-checks result at the delivered revision, run once)|null,
+//  verify_stopped (why the last verify's checks stopped twice without a
+//  result, spec 4.1; verify is then null)|null,
 //  delivered_sha, acceptance:{status, delivered_sha, reasons, warnings}|null
 //  (complete runs only: status complete says the run executed to the end,
 //  acceptance says whether the delivered revision meets the gates;
@@ -430,8 +432,8 @@ async function runAll(manifest, io) {
     const runId = m !== null && typeof m === 'object' && typeof m.run_id === 'string' ? m.run_id : null;
     return {
       status: 'invalid', run_id: runId, errors, tasks: {}, stopped_lanes: [], preflight: null,
-      integrate: null, e2e: null, final: null, verify: null, delivered_sha: null, acceptance: null,
-      agents_spawned: 0, rulings_spent: 0, agent_settings: [],
+      integrate: null, e2e: null, final: null, verify: null, verify_stopped: null, delivered_sha: null,
+      acceptance: null, agents_spawned: 0, rulings_spent: 0, agent_settings: [],
     };
   }
 
@@ -492,6 +494,8 @@ async function runAll(manifest, io) {
   let e2e = null;
   let final = null;
   let verify = null;
+  // Why the last verify stopped without a result (verifyAt), or null.
+  let verifyStopped = null;
   let post = null;
   let delivered = null;
   let acceptance = null;
@@ -509,6 +513,7 @@ async function runAll(manifest, io) {
     e2e,
     final,
     verify,
+    verify_stopped: verifyStopped,
     delivered_sha: delivered,
     acceptance,
     agents_spawned: state.agents,
@@ -811,8 +816,16 @@ async function runAll(manifest, io) {
   // The project checks at sha (scripts/run-checks through the verify agent).
   // They are cheap and deterministic, so they run past the agent cap: after
   // the last change the run has evidence even when the budget is spent.
-  const verifyAt = (sha, from = null) => callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
-    { ...sonnetHigh, overBudget: true });
+  // A result with stopped (the checks stopped twice without a result, spec
+  // 4.1) is no result: the missing-verify path, never a repair, since no
+  // command failed. verifyStopped keeps the last verify call's stop text
+  // for the report (null when it did not stop).
+  const verifyAt = async (sha, from = null) => {
+    const r = await callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
+      { ...sonnetHigh, overBudget: true });
+    verifyStopped = r && typeof r === 'object' && present(r.stopped) ? r.stopped : null;
+    return verifyStopped === null ? r : null;
+  };
   // Repairs after a failing verify (spec 4.5): autonomous only, at most
   // repairLimit(m) per run (repairs_spent carries earlier launches'), and
   // each admitted only while repairReserve(m) agents are free, so the

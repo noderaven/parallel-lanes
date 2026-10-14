@@ -67,6 +67,22 @@ counts the executions that ran an exact commands.test entry: a run-checks
 '--cmd test CMD' pair whose CMD is one, a task-checks call whose evidence
 says project_test_executed, or a configured command line whose full_suite
 ran.
+
+Long checks (the 1.6.1 procedure). A procedure start is a Bash call made
+with run_in_background true whose line runs run-checks with --out F or
+task-checks with --evidence F (procedure_file); with at least one later
+'await-checks wait' call on a file with F's basename it is one procedure
+execution, recognised by the script names and the flag, never by prose:
+- it is timed from its archived report (<ledger>/checks/<F's basename>):
+  the first result's started to the last result's ended, measured; without
+  a readable report of its own it is unavailable, never a pass;
+- neither the start nor its waits are a timeout, background_check or
+  long_tool_call, and an await-checks call that exits non-zero (still
+  running, stopped, busy) is no repeated_failure;
+- a task-checks call with --evidence F gets the evidence file named F, or
+  none; calls without --evidence keep the unit and start-time matching.
+checks.waits (waits_section) counts the executions whose agent reserved a
+path first, the wait calls, the stops and the improvised waits.
 """
 import functools
 import glob
@@ -83,7 +99,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 5
+AUTOPSY_VERSION = 6
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -699,6 +715,7 @@ NOTICE_TOOLS = ("Bash",)
 HEREDOC = "<<"
 RUN_CHECKS = "run-checks"
 TASK_CHECKS = "task-checks"
+AWAIT_CHECKS = "await-checks"
 LONG_CALL_S = 120
 TOP_UNEXPLAINED = 5
 WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -1077,16 +1094,26 @@ def _completion_after(agent, call):
 
 def tool_slowdowns(agent, checks):
     """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
-    configured_checks(manifest)."""
+    configured_checks(manifest). A procedure execution's start and its wait
+    calls (_procedures) are no timeout, background_check or long_tool_call:
+    they are one check execution (checks_section). An await-checks call that
+    exits non-zero reports a status (still running, stopped, busy), so it is
+    no repeated_failure either."""
     calls = _calls(agent)
     out = []
-    counted = set()
+    procedures = _procedures(calls)
+    counted = set(procedures)
+    for waits in procedures.values():
+        counted.update(waits)
+    procedure_calls = set(counted)
 
     def add(kind, indexes, start, end, cost_kind, call, marker=None):
         out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker))
         counted.update(indexes)
 
     for i, c in enumerate(calls):
+        if i in procedure_calls:
+            continue
         timeout = notice("timeout", c)
         if timeout:
             add("timeout", [i], c["start"], c["end"], "measured", c, timeout)
@@ -1103,7 +1130,7 @@ def tool_slowdowns(agent, checks):
 
     failures = {}
     for i, c in enumerate(calls):
-        if _bash_failed(c):
+        if _bash_failed(c) and _await_call(c) is None:
             failures.setdefault(" ".join(_command(c).split()), []).append(i)
     for indexes in failures.values():
         if len(indexes) >= 2:
@@ -1441,6 +1468,250 @@ def _task_checks_args(words):
     return _script_args(words, TASK_CHECKS)
 
 
+# ---- the long-check procedure (1.6.1) ----
+
+# await-checks wait's exit code for a check that stopped without a result.
+STOPPED_EXIT = 5
+# A harness output file an agent may poll: tasks/<id>.output, either slash.
+_HARNESS_OUTPUT = re.compile(r"(?<![A-Za-z0-9_.-])tasks[/\\]+[A-Za-z0-9_-]+\.output(?![A-Za-z0-9_-])")
+# What Claude Code may put before a tool error's own text.
+_TOOL_ERROR_PREFIX = re.compile(r"\s*(?:<tool_use_error>\s*)?(?:Error:\s*)?")
+MONITOR_ERROR = "No such tool available: Monitor"
+SLEEP_BLOCKED = "Blocked: sleep"
+PROCEDURE_VERSION = (1, 6, 1)
+_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+
+
+def _option(args, flag):
+    """The value of the last 'flag VALUE' or 'flag=VALUE' in args, else
+    None (also for an empty value)."""
+    value = None
+    for i, word in enumerate(args):
+        if word == flag and i + 1 < len(args):
+            value = args[i + 1]
+        elif word.startswith(flag + "="):
+            value = word[len(flag) + 1:]
+    return value or None
+
+
+def _bash_words(call):
+    """The words of each simple command of a Bash call's line, read as
+    _simple_commands reads it (a backslash before a path character as '/');
+    [] for another tool or a line whose quoting does not parse."""
+    command = _command(call) if call.get("name") == "Bash" else None
+    if command is None:
+        return []
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return []
+    return [words for _ops, _lead, words in simple]
+
+
+def procedure_file(call):
+    """The result path F of a procedure start: a Bash call made with
+    run_in_background true whose line runs run-checks with --out F or
+    task-checks with --evidence F; else None."""
+    if call.get("name") != "Bash" or (call.get("input") or {}).get("run_in_background") is not True:
+        return None
+    for words in _bash_words(call):
+        args = _run_checks_args(words)
+        if args is not None:
+            path = _option(args, "--out")
+        else:
+            args = _task_checks_args(words)
+            path = _option(args, "--evidence") if args is not None else None
+        if path:
+            return path
+    return None
+
+
+def evidence_file(call):
+    """The --evidence path of a Bash call that runs task-checks, in the
+    background or not; else None."""
+    for words in _bash_words(call):
+        args = _task_checks_args(words)
+        if args is not None:
+            return _option(args, "--evidence")
+    return None
+
+
+def _await_call(call):
+    """(subcommand, the words after it) of a Bash call that runs
+    await-checks, else None."""
+    for words in _bash_words(call):
+        args = _script_args(words, AWAIT_CHECKS)
+        if args:
+            return args[0], args[1:]
+    return None
+
+
+def wait_file(call):
+    """The FILE of a Bash call that runs 'await-checks wait FILE', else
+    None."""
+    found = _await_call(call)
+    if found is None or found[0] != "wait":
+        return None
+    args = found[1]
+    i = 0
+    while i < len(args):
+        if args[i] == "--max":
+            i += 2
+        elif args[i].startswith("-"):
+            i += 1
+        else:
+            return args[i]
+    return None
+
+
+def _wait_indexes(calls, i, name):
+    """The indexes of the calls after calls[i] that wait on a file with
+    basename name, up to the next procedure start on that basename (an
+    --exact reserve reuses its path)."""
+    out = []
+    for j in range(i + 1, len(calls)):
+        started = procedure_file(calls[j])
+        if started is not None and _basename(started) == name:
+            break
+        waited = wait_file(calls[j])
+        if waited is not None and _basename(waited) == name:
+            out.append(j)
+    return out
+
+
+def _procedures(calls):
+    """{start index: [wait indexes]}: the procedure executions among an
+    agent's calls, each a procedure start (procedure_file) with at least one
+    wait on its file (_wait_indexes)."""
+    out = {}
+    for i, c in enumerate(calls):
+        path = procedure_file(c)
+        if path is None:
+            continue
+        waits = _wait_indexes(calls, i, _basename(path))
+        if waits:
+            out[i] = waits
+    return out
+
+
+def _report_span(ledger, path):
+    """(first started, last ended) of the results in the archived result file
+    with path's basename (<ledger>/checks/<name>); None when there is no
+    ledger, or the file is missing, empty or unreadable, is an error record
+    (no results), has no boolean ok, or holds a result without both stamps."""
+    name = _basename(path or "")
+    if not ledger or name in ("", ".", ".."):
+        return None
+    try:
+        with open(os.path.join(ledger, "checks", name), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results or not isinstance(data.get("ok"), bool):
+        return None
+    starts, ends = [], []
+    for r in results:
+        start = parse_ts(r.get("started")) if isinstance(r, dict) else None
+        end = parse_ts(r.get("ended")) if isinstance(r, dict) else None
+        if start is None or end is None:
+            return None
+        starts.append(start)
+        ends.append(end)
+    return min(starts), max(ends)
+
+
+def _procedure_times(calls, i, waits, ledger):
+    """(start, end, timing) of the procedure execution started by calls[i]
+    and waited on by calls[waits]: its report's first started to last ended
+    ('measured'). Unavailable when a wait said stopped (no report of its
+    own: an --exact path may hold a later run's), when the report cannot be
+    read, or when its span is not inside this execution (from the start call
+    to the last wait's result), which would be another run's."""
+    call = calls[i]
+    unavailable = (call["start"], None, UNAVAILABLE)
+    if any(calls[j]["end"] is not None and exit_code(calls[j]["text"]) == STOPPED_EXIT for j in waits):
+        return unavailable
+    span = _report_span(ledger, procedure_file(call))
+    last = calls[waits[-1]]["end"]
+    if span is None or span[0] < call["start"] or (last is not None and span[1] > last):
+        return unavailable
+    return span[0], span[1], "measured"
+
+
+def _result_starts(call, prefix):
+    """Whether a call's result text starts with prefix, after Claude Code's
+    <tool_use_error> wrapper and an 'Error:' word."""
+    if call["end"] is None:
+        return False
+    text = call["text"] or ""
+    return text[_TOOL_ERROR_PREFIX.match(text).end():].startswith(prefix)
+
+
+def _names_harness_output(call):
+    """Whether a Bash command or a Read path names a harness
+    tasks/<id>.output file (the call blocked or not)."""
+    if call["name"] == "Bash":
+        value = _command(call)
+    elif call["name"] == "Read":
+        value = call["input"].get("file_path")
+    else:
+        return False
+    return isinstance(value, str) and _HARNESS_OUTPUT.search(value) is not None
+
+
+def _at_least(version, wanted):
+    m = _VERSION.match(version) if isinstance(version, str) else None
+    return m is not None and tuple(int(g) for g in m.groups()) >= wanted
+
+
+def waits_section(run):
+    """{checks_via_procedure, wait_calls, stopped, improvised} over every
+    agent's calls; unavailable without any tool event in the run.
+
+    checks_via_procedure counts the procedure executions (_procedures) with
+    an 'await-checks reserve' call of the same agent before the start: the
+    reserve, the start and a wait all seen. It is unavailable for a run with
+    no await-checks call whose engine is before 1.6.1 or unknown, which
+    could not have used it. wait_calls counts the 'await-checks wait' calls
+    and stopped those whose result exited 5 (stopped without a result).
+
+    improvised holds three counts per call, never summed (one call can count
+    in two): monitor_errors, results that start 'No such tool available:
+    Monitor'; sleep_blocked, results that start 'Blocked: sleep'; and
+    harness_output_reads, Bash or Read calls whose input names a harness
+    tasks/<id>.output file, with either slash, blocked calls included."""
+    if not _has_tool_events(run):
+        return UNAVAILABLE
+    via = waits = stopped = 0
+    seen = False
+    improvised = {"monitor_errors": 0, "sleep_blocked": 0, "harness_output_reads": 0}
+    for a in _all_agents(run):
+        calls = _calls(a)
+        procedures = _procedures(calls)
+        reserved = False
+        for i, c in enumerate(calls):
+            found = _await_call(c)
+            if found is not None:
+                seen = True
+                reserved = reserved or found[0] == "reserve"
+                if found[0] == "wait":
+                    waits += 1
+                    if c["end"] is not None and exit_code(c["text"]) == STOPPED_EXIT:
+                        stopped += 1
+            if i in procedures and reserved:
+                via += 1
+            if _result_starts(c, MONITOR_ERROR):
+                improvised["monitor_errors"] += 1
+            if _result_starts(c, SLEEP_BLOCKED):
+                improvised["sleep_blocked"] += 1
+            if _names_harness_output(c):
+                improvised["harness_output_reads"] += 1
+    if not seen and not _at_least(_engine_version(run), PROCEDURE_VERSION):
+        via = UNAVAILABLE
+    return {"checks_via_procedure": via, "wait_calls": waits, "stopped": stopped, "improvised": improvised}
+
+
 # A backslash before a path character (a Windows path separator); shlex
 # would drop it.
 _WINDOWS_SEPARATOR = re.compile(r"\\(?=[A-Za-z0-9_.-])")
@@ -1668,13 +1939,40 @@ def _call_exit(call):
     return code
 
 
-def _execution_end(agent, call):
-    """(background, end, timing) of a check call. A backgrounded call ends
-    at its observed completion (_completion_after), an upper bound on the
-    real end ('bound'); without one its end is unknown (None,
-    'unavailable'). A call without a result has no known end either: a
-    missing result says nothing about the finish. Any other call ends at
-    its result ('measured')."""
+def _execution_times(agent, call, ledger=None):
+    """(background, start, end, timing) of a check call. A procedure start
+    with a wait (_procedures) is timed from its archived report in ledger
+    (_procedure_times); without a ledger or a readable report its end is
+    unknown. Any other call starts at the call and ends as _execution_end
+    says."""
+    path = procedure_file(call)
+    if path is not None:
+        calls = _calls(agent)
+        i = next((k for k, c in enumerate(calls) if c == call), None)
+        waits = [] if i is None else _wait_indexes(calls, i, _basename(path))
+        if waits:
+            start, end, timing = _procedure_times(calls, i, waits, ledger)
+            return True, start, end, timing
+    background, end, timing = _call_end(agent, call)
+    return background, call["start"], end, timing
+
+
+def _execution_end(agent, call, ledger=None):
+    """(background, end, timing) of a check call: a procedure execution (a
+    procedure start with a wait) ends at its report's last ended, measured
+    (_execution_times; unavailable without ledger); any other call as
+    _call_end says."""
+    background, _start, end, timing = _execution_times(agent, call, ledger)
+    return background, end, timing
+
+
+def _call_end(agent, call):
+    """(background, end, timing) of a check call that is no procedure
+    execution. A backgrounded call ends at its observed completion
+    (_completion_after), an upper bound on the real end ('bound'); without
+    one its end is unknown (None, 'unavailable'). A call without a result
+    has no known end either: a missing result says nothing about the
+    finish. Any other call ends at its result ('measured')."""
     background = call["input"].get("run_in_background") is True \
         or notice("background_check", call) is not None
     if call["end"] is None:
@@ -1746,12 +2044,24 @@ def task_check_evidence(run):
 
 def _match_evidence(found, evidence):
     """Give each task-checks execution of found (sorted by start) its
-    evidence: the unused entry whose unit equals the agent's unit id and
-    whose policy.started is the earliest inside the call's span (from the
-    call to its end; with no known end, any time from the call)."""
+    evidence. A call with --evidence F (meta evidence_file) gets the entry
+    whose file has F's basename, or none: an empty or malformed F is not
+    valid evidence, and another file is another run's. Then each call
+    without --evidence gets, as in 1.6.0, the unused entry whose unit equals
+    the agent's unit id and whose policy.started is the earliest inside the
+    call's span (from the call to its end; with no known end, any time from
+    the call)."""
     used = set()
     for _key, x, meta in found:
-        if x["check"] != TASK_CHECKS or meta["unit"] is None:
+        if x["check"] != TASK_CHECKS or meta.get("evidence_file") is None:
+            continue
+        name = _basename(meta["evidence_file"])
+        i = next((k for k, ev in enumerate(evidence) if k not in used and _basename(ev["path"]) == name), None)
+        if i is not None:
+            used.add(i)
+            meta["evidence"] = evidence[i]
+    for _key, x, meta in found:
+        if x["check"] != TASK_CHECKS or meta["unit"] is None or meta.get("evidence_file") is not None:
             continue
         best = None
         for i, ev in enumerate(evidence):
@@ -1820,9 +2130,11 @@ def checks_section(run):
     without a duration and total_s sums the timed ones (bound durations are
     upper bounds); full-suite runs per role (the legacy count of check calls
     with a test group); task_check_calls and project_test_runs (see the
-    module docstring); repairs (repairs_section) and setup (setup_section).
-    Without any tool event in the run the executions and their counts
-    cannot be derived and are unavailable.
+    module docstring); repairs (repairs_section), setup (setup_section)
+    and waits (waits_section). A procedure execution starts and ends with
+    its report's results (_execution_times). Without any tool event in the
+    run the executions and their counts cannot be derived and are
+    unavailable, and so is waits.
 
     A task-checks execution gets selected from its matched evidence
     (_match_evidence), else 'unavailable'. With evidence it surely ran
@@ -1835,9 +2147,10 @@ def checks_section(run):
         return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
                 "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE},
                 "task_check_calls": UNAVAILABLE, "project_test_runs": UNAVAILABLE,
-                "repairs": repairs, "setup": setup}
+                "repairs": repairs, "setup": setup, "waits": UNAVAILABLE}
     checks = configured_checks(run["manifest"])
     on_path = set(id(a) for a in critical_agents(run))
+    ledger = find_ledger(run["folder"])
     found = []
     for order, a in enumerate(_all_agents(run)):
         e = a["entry"]
@@ -1845,15 +2158,16 @@ def checks_section(run):
             match = _match(_command(call), checks, _call_exit(call)) if call["name"] == "Bash" else None
             if match is None:
                 continue
-            background, end, timing = _execution_end(a, call)
+            background, start, end, timing = _execution_times(a, call, ledger)
             found.append(((call["start"], order), {
                 "agent": e["label"], "phase": _phase_name(e), "role": e["role"], "check": match["check"],
                 "certainty": match["certainty"], "full_suite": match["full_suite"],
-                "start": iso(call["start"]), "end": iso(end),
-                "s": seconds(None if end is None else end - call["start"]),
+                "start": iso(start), "end": iso(end),
+                "s": seconds(None if end is None else end - start),
                 "timing": timing, "background": background, "on_critical_path": id(a) in on_path,
             }, {"unit": e["task"], "start": call["start"], "end": end, "project_test": match["project_test"],
-                "evidence": None}))
+                "evidence": None,
+                "evidence_file": evidence_file(call) if match["check"] == TASK_CHECKS else None}))
     found.sort(key=lambda f: f[0])
     _match_evidence(found, task_check_evidence(run)[0])
     calls = {"total": 0, "by_selected": dict((s, 0) for s in SELECTIONS + (UNAVAILABLE,)), "failed": 0,
@@ -1903,7 +2217,8 @@ def checks_section(run):
             "full_suite_runs": {"total": sum(by_role.values()),
                                 "inferred": sum(1 for x in executions if x["full_suite"] == INFERRED),
                                 "by_role": by_role},
-            "task_check_calls": calls, "project_test_runs": project, "repairs": repairs, "setup": setup}
+            "task_check_calls": calls, "project_test_runs": project, "repairs": repairs, "setup": setup,
+            "waits": waits_section(run)}
 
 
 # ---- suggestions ----
@@ -2588,6 +2903,30 @@ def _md_counters(checks):
         lines.append("Setup: unavailable")
     lines.append("  Lanes whose setup commands were skipped (no pending work), apart from lanes that have no "
                  "setup commands.")
+    return lines + [""] + _md_waits(checks.get("waits", UNAVAILABLE))
+
+
+def _md_waits(waits):
+    """The procedure and improvised-wait counters, each a line and then its
+    definition, indented."""
+    if isinstance(waits, dict):
+        lines = ["Checks via the procedure: %s; %s; %d stopped" % (
+            _cell(waits["checks_via_procedure"]), _count_word(waits["wait_calls"], "wait call"), waits["stopped"])]
+    else:
+        lines = ["Checks via the procedure: unavailable"]
+    lines.append("  Checks started in the background on a path from await-checks reserve, then waited on with "
+                 "await-checks wait; the wait calls, and those that said stopped (exit 5). Unavailable for an "
+                 "engine before 1.6.1 that made no await-checks call.")
+    lines.append("")
+    improvised = waits.get("improvised") if isinstance(waits, dict) else None
+    if isinstance(improvised, dict):
+        lines.append("Improvised waits: Monitor errors %d, blocked sleeps %d, harness output reads %d" % (
+            improvised["monitor_errors"], improvised["sleep_blocked"], improvised["harness_output_reads"]))
+    else:
+        lines.append("Improvised waits: unavailable")
+    lines.append("  Calls that waited another way, counted per call and never summed (one call may count twice): "
+                 "results saying Monitor is no tool here, blocked sleeps, and Bash or Read calls naming a "
+                 "harness tasks/<id>.output file.")
     return lines
 
 

@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 5);
+  assert.equal(A.autopsy_version, 6);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -1091,6 +1091,7 @@ test('checks without tool events are unavailable, not zero', () => {
     executions: 'unavailable', by_check: 'unavailable',
     full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
     task_check_calls: 'unavailable', project_test_runs: 'unavailable', repairs: 'unavailable', setup: 'unavailable',
+    waits: 'unavailable',
   });
 });
 

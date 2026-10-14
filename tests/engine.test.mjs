@@ -429,16 +429,21 @@ test('no task prompt carries the every-check call; the implementer gets task-che
   for (const name of ['review', 'fix', 'reReview']) assert.ok(!p[name].includes('task-checks\''), name);
 });
 
-test('a phase agent handed the every-check run-checks call is told where its logs go and to remove them', async () => {
+// 1.6.1 (spec 4.4): the call now writes beside a reserved ledger file, so
+// its logs are kept with the evidence instead of removed.
+test('a phase agent handed the every-check run-checks call is told its logs are kept with the evidence', async () => {
   const { commandsText } = await loadHelpers(['commandsText']);
   const text = commandsText(manifest(), null, '/work/repo');
   const lines = text.split('\n');
-  const call = lines[lines.findIndex((l) => l.includes('- every check at once')) + 1];
-  assert.match(call, /scripts\/run-checks' /);
-  assert.ok(!/ --out | --root /.test(call), call);
+  const from = lines.findIndex((l) => l.includes('- every check at once'));
+  assert.ok(from >= 0, text);
+  const call = lines.slice(from).find((l) => /scripts\/run-checks' /.test(l));
+  assert.match(call, /scripts\/run-checks' '\/work\/repo' --out '<P>' --root '\/work\/ledger' /);
+  assert.ok(text.includes("await-checks' reserve --ledger '/work/ledger' --name 'checks'"), text);
   const flat = text.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('in a new temporary directory each call'));
-  assert.ok(flat.includes("remove that directory (the log's parent)"));
+  assert.ok(flat.includes("kept with the run's evidence. Read the log instead of rerunning a command, and leave the file"
+    + ' in place.'), flat);
+  assert.ok(!flat.includes('temporary directory') && !flat.includes('remove that directory'), flat);
 });
 
 test('every Python command uses the manifest python', () => {
@@ -1263,16 +1268,13 @@ test('every agent gets the combine-commands rule', () => {
   assert.ok(agentRules().includes('Combine independent shell commands into one call'));
 });
 
-test('every agent gets the check-execution rule', () => {
+// 1.6.1 (spec 4.4): the check-execution rule left agentRules (it has no
+// manifest to name the scripts); longCheckRuleLines replaces it in the task
+// and phase prompts.
+test('the long-check rule is no longer in the shared agent rules', () => {
   const r = agentRules();
-  for (const phrase of [
-    'When your role requires running project checks or tests',
-    'ask for a 600000 ms (10 minute)',
-    'never when a line of its output appears',
-    'stop that run and confirm it has ended',
-    'Do not finish your work while a check you were asked to run is still running',
-  ]) {
-    assert.ok(r.includes(phrase), phrase);
+  for (const phrase of ['600000', 'completion notice', 'moved to the background']) {
+    assert.ok(!r.includes(phrase), phrase);
   }
 });
 

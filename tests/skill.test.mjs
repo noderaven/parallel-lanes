@@ -663,3 +663,18 @@ test('SKILL.md lists checks among the dry-run fields and points to the check pol
 test('README names task-checks among the scripts', () => {
   assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\btask-checks\b/);
 });
+
+test('reference.md documents await-checks, its exit codes, --exact busy, tree_changed and the procedure', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const long = section(ref, 'Long checks');
+  for (const word of ['await-checks', 'reserve', 'wait', '--exact', 'busy', 'tree_changed',
+    'exit 4', 'exit 5', 'not_started', 'died', 'run_in_background', 'verify_stopped',
+    'AWAIT_CHECKS_GRACE_S', '--evidence', '--lock-held', 'rerun']) {
+    assert.ok(long.includes(word), `Long checks lacks ${word}`);
+  }
+  assert.ok(section(ref, 'Check ownership').includes('Long checks'), 'Check ownership does not point to Long checks');
+});
+
+test('README lists await-checks', () => {
+  assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\bawait-checks\b/);
+});

@@ -430,11 +430,35 @@ test('legacy full_suite_runs is unchanged on the existing fixtures', () => {
   assert.ok(existsSync(join(dir, 'autopsy.md')));
 });
 
-test('AUTOPSY_VERSION is 5', () => {
+test('AUTOPSY_VERSION is 6', () => {
   assert.deepEqual(python(['print(json.dumps([_autopsy.AUTOPSY_VERSION, _autopsy.SUGGESTIONS["long_tool_call"]]))']), [
-    5, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
+    6, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
       + 'checks once before committing.',
   ]);
   const dir = buildRun({ launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 5);
+  assert.equal(autopsy(dir).json.autopsy_version, 6);
+});
+
+test('autopsy counts an empty task evidence file as malformed and unmatched', () => {
+  // A reserved file that was never written is empty. A call that names it with
+  // --evidence stays unmatched even when another valid file of the same unit
+  // starts inside the call's span.
+  const call = `${taskChecks('A1')} --evidence '/l/checks/task-A1.1.json'`;
+  const dir = buildRun({
+    launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:05:00',
+      calls: [{ command: call, start: '10:00:10', end: '10:00:40' }] }] }],
+    evidenceFiles: {
+      'task-A1.1.json': '',
+      'task-A1.2.json': evidence({ unit: 'A1', started: T('10:00:11') }),
+    },
+  });
+  const { json } = autopsy(dir);
+  assert.deepEqual(json.checks.executions.map((x) => [x.agent, x.selected]), [['A1 implement', 'unavailable']]);
+  assert.deepEqual(json.checks.task_check_calls,
+    { total: 1, by_selected: { ...NONE, unavailable: 1 }, failed: 0, reasons: {} });
+  const found = python([
+    'entries, malformed = _autopsy.task_check_evidence(_autopsy.load(sys.argv[1]))',
+    'print(json.dumps([[e["path"].replace(chr(92), "/").split("/")[-1] for e in entries], malformed]))',
+  ], [dir]);
+  assert.deepEqual(found, [['task-A1.2.json'], 1]);
 });
