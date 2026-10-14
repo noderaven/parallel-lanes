@@ -1921,6 +1921,62 @@ test('autonomous post-integration test failure that stays red after one rerun st
   assert.ok(!labels(calls).includes('post-integrate'), 'the hook never runs');
 });
 
+// 1.6.2 (spec 4.3): checks that timed out or found the project busy are not
+// a defect a fix agent can address, and a relaunch would hit the same.
+test('autonomous integrate with checks_unfinished starts no fix and stops for good', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'npm test exited 124', tests_failed: true, checks_unfinished: true },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'integration checks did not finish: npm test exited 124');
+  for (const prefix of ['no result from', 'error:', 'setup failed', 'integration failed']) {
+    assert.ok(!result.reason.startsWith(prefix), `${prefix}: ${result.reason}`);
+  }
+  const l = labels(calls);
+  assert.ok(!l.includes('post-integration fix') && !l.includes('post-integrate fix'), l.join(', '));
+  assert.ok(!l.includes('post-integrate'), 'the hook never runs');
+  assert.equal(l.filter((x) => x === 'integrate').length, 2, 'no rerun of the integrate step');
+  // No notes: the stop still says why.
+  const bare = await run(m, {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: '', tests_failed: true, checks_unfinished: true },
+      ],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(bare.result.reason, 'integration checks did not finish: a check timed out or found the project busy');
+});
+
+test('autonomous integrate with checks_unfinished false heals as before', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true, checks_unfinished: false },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  const l = labels(calls).filter((x) => ['integrate', 'post-integrate fix', 'post-integrate re-review'].includes(x));
+  assert.deepEqual(l, ['integrate', 'integrate', 'post-integrate fix', 'post-integrate re-review', 'integrate']);
+});
+
 test('autonomous post_integrate hook failure: opus fix + re-review, then the hook reruns', async () => {
   const script = {
     ...phaseScript({

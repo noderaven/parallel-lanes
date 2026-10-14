@@ -10,10 +10,11 @@ import { loadHelpers, H } from './harness.mjs';
 
 const {
   integratePrompt, postIntegrateFixPrompt, finalFixPrompt, verifyPrompt, verifySchema, verifyRepairPrompt,
-  repairSchema, finalReReviewPrompt, finalChecks, finalSetup, repairFixMessage, postIntegratePrompt,
+  repairSchema, finalReReviewPrompt, finalChecks, finalSetup, repairFixMessage, postIntegratePrompt, statusSchema,
 } = await loadHelpers([
   'integratePrompt', 'postIntegrateFixPrompt', 'finalFixPrompt', 'verifyPrompt', 'verifySchema', 'verifyRepairPrompt',
   'repairSchema', 'finalReReviewPrompt', 'finalChecks', 'finalSetup', 'repairFixMessage', 'postIntegratePrompt',
+  'statusSchema',
 ]);
 
 function task(id) {
@@ -173,6 +174,15 @@ test('verifySchema accepts log and tail in results, and descends_from', () => {
   assert.deepEqual(s.properties.tree_changed, { type: 'boolean' });
   assert.deepEqual(s.properties.stopped, { type: 'string' });
   assert.ok(!s.required.includes('tree_changed') && !s.required.includes('stopped'));
+  // 1.6.2 (spec 4.3): a busy retry's record is kept, and is optional.
+  assert.deepEqual(item.properties.busy_retry, { type: 'object' });
+});
+
+test('statusSchema has an optional checks_unfinished for integrate (spec 4.3)', () => {
+  const s = statusSchema();
+  assert.deepEqual(s.properties.checks_unfinished, { type: 'boolean' });
+  assert.ok(!s.required.includes('checks_unfinished'));
+  assert.deepEqual(s.required, ['status', 'head', 'notes']);
 });
 
 // ---- 1.6.1: the long-check procedure in phase prompts (spec 4.1, 4.4)

@@ -1210,12 +1210,19 @@ function waitCommand(m) {
 // checkout is rerun once only, so checks that write files into the checkout
 // cannot loop: changed (optional) says what the agent does with the rerun's
 // result when it changed the checkout again; by default it keeps that result
-// and says so in its notes.
-function procedureLines(m, { name, exact = false, start, stop = null, changed = null }) {
+// and says so in its notes. Every caller gets the exit-code contract (1.6.2
+// spec 4.3): what 75, 124 and a signal mean, then exits (optional lines),
+// what this caller does with a failure made only of them; by default
+// (fixers, hook agents, long commands) it changes nothing for it and says so.
+function procedureLines(m, { name, exact = false, start, stop = null, changed = null, exits = null }) {
   const second = stop === null ? 'report the checks as failed (never as passed), with both outcomes the wait printed'
     + ' in your notes.' : stop;
   const again = changed === null ? 'keep that result (it carries tree_changed true) and say in your notes that'
     + ' the checks themselves change the checkout.' : changed;
+  const action = exits === null ? [
+    `A check that failed only with such exits is not a defect: ${changeNothing()}`,
+    'for it, and say so in your notes.',
+  ] : exits;
   return [
     'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
     'the new path.',
@@ -1240,7 +1247,17 @@ function procedureLines(m, { name, exact = false, start, stop = null, changed = 
     '   your turn or return your result.',
     '5. Exit 5 means the check stopped without a result: reserve and start it once more, as above. After a',
     `   second stop, do not start it again: ${second}`,
+    'Exit codes in the result: a command that exits 124 timed out, one that exits 75 found the project busy, and',
+    'one that exits 128 or above (or a negative code) was killed by a signal.',
+    ...action,
   ];
+}
+
+// What a fixer or any agent changes for a check that failed only with a
+// non-defect exit (1.6.2 spec 4.3): nothing. (A function, not a const: the
+// test harness loads helpers without running top-level bindings.)
+function changeNothing() {
+  return 'do not change code, tests, timeouts or commands';
 }
 
 // The general rule for any other long command (spec 4.4): it runs through
@@ -1308,6 +1325,11 @@ function taskChecksLines(m, task, where, base) {
     ...procedureLines(m, {
       name: `task-${task.id}`, start: cmd,
       stop: 'report blocked, with both outcomes the wait printed in your notes.',
+      exits: [
+        'When the task checks failed only with such exits, that is not a defect:',
+        `${changeNothing()} for it, and do not rerun the call to get a pass: report blocked, naming the exits`,
+        'and the result file the wait read.',
+      ],
     }),
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
@@ -1988,6 +2010,8 @@ function layoutText(m) {
 // status/head/notes; conflict_files (optional) lists files a merge left
 // conflicting, and tests_failed (optional) says a project command still fails
 // after the merges so a fix agent is needed instead of a hard stop.
+// checks_unfinished (optional, 1.6.2 spec 4.3) says every failing command
+// exited 75, 124, 128 or above: the checks did not finish, and no fix runs.
 function statusSchema() {
   return {
     type: 'object',
@@ -1997,6 +2021,7 @@ function statusSchema() {
       notes: { type: 'string' },
       conflict_files: { type: 'array', items: { type: 'string' } },
       tests_failed: { type: 'boolean' },
+      checks_unfinished: { type: 'boolean' },
     },
     required: ['status', 'head', 'notes'],
   };
@@ -2145,6 +2170,9 @@ function verifySchema() {
             // run-checks prints them; a repair agent reads the failures' logs.
             log: { type: 'string' },
             tail: { type: 'string' },
+            // A command that exited 75 and was run once more (1.6.2 spec 4.3):
+            // {first_exit, waited_s}; kept so it is not dropped.
+            busy_retry: { type: 'object' },
           },
           required: ['group', 'command', 'exit'],
         },
@@ -2254,12 +2282,21 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
   const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
+  // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
+  // engine then starts no fix and stops. The other modes keep the general
+  // exit-code rule.
+  const exits = testFailure === 'heal' ? [
+    'When every failing command exited 75, 124, 128 or above (or a negative code), the checks did not finish,',
+    `which is not a defect: ${changeNothing()} for it. Return status done with`,
+    'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
+    'is a real failure: checks_unfinished false.',
+  ] : null;
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
-      ...procedureLines(m, { name: 'integrate', start: checks }).map((l) => `   ${l}`),
+      ...procedureLines(m, { name: 'integrate', start: checks, exits }).map((l) => `   ${l}`),
       ...checksLogLines().map((l) => ` ${l}`),
     ]),
   ];
@@ -2306,7 +2343,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const returnTail = conflictMode === 'abort'
     ? ', and conflict_files (the conflicting files on an aborted merge, else []).'
     : testFailure === 'heal'
-      ? ', and tests_failed (true when a project command still fails after the merges).'
+      ? ', and tests_failed (true when a project command still fails after the merges) and checks_unfinished (true'
+        + ' when every failing command exited 75, 124, 128 or above, see step 3).'
       : '.';
   const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
     '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
@@ -2759,6 +2797,8 @@ function verifyPrompt(m, sha, from = null) {
     ...procedureLines(m, {
       name: `verify-${sha}`, exact: true, start: cmd, stop,
       changed: 'return the JSON of that rerun as the wait printed it, with tree_changed true.',
+      // The engine decides what the exits mean (nonDefectFailure, 1.6.2).
+      exits: ['These are results like any other: report each exit as the wait printed it.'],
     }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
@@ -2794,8 +2834,8 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
     'commands, lane_commands or task_checks, or the test runner configuration, to make them pass. Fixing a wrong',
     'test is allowed when the test, not the code, is wrong: say why in notes. If the failure is a flaky, timeout,',
-    "crash or environment failure rather than a failing check, or lies outside this run's scope, change nothing:",
-    'report blocked with the evidence.',
+    'crash or environment failure rather than a failing check (exit 124 is a timeout, exit 75 a busy project), or',
+    "lies outside this run's scope, change nothing: report blocked with the evidence.",
     'Run the focused checks that cover your fix; do not run the full project commands: verify runs them all at',
     'your head right after you.',
     commitWithLine(repairFixMessage()),
@@ -3025,6 +3065,9 @@ function adjudicatorPrompt(m, ctx) {
     'repo) is allowed.',
     `Commit rules the task works under: ${m.commit_rules}`,
     agentRules(),
+    // The exit-code contract (1.6.2 spec 4.3).
+    'A check that failed only with exit 75 (the project was busy), 124 (it timed out), or 128 or above (killed by',
+    'a signal) is not a defect to fix: never rule a change to code, tests, timeouts or commands for it.',
     '',
     'Outcomes (pick exactly one):',
     '- answer: your text answers the question or settles the blocker; it is given to the task as its note and',
@@ -4054,11 +4097,20 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   return final;
 }
 
+// The exit-code contract (1.6.2 spec 4.3): true when at least one command
+// failed and every failing exit marks no defect: 75 (the project was busy),
+// 124 (a timeout), 128 and above or negative (a signal), or not a number. A
+// busy machine, a hang or a kill is not an assertion an agent should fix.
+function nonDefectFailure(results) {
+  const failing = (Array.isArray(results) ? results : []).filter((r) => r && r.exit !== 0);
+  return failing.length > 0 && failing.every((r) => typeof r.exit !== 'number'
+    || r.exit === 75 || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+}
+
 // Whether a verify result calls for a repair (spec 4.5): results at sha, of
 // exactly the configured inventory, with no head_after, on a clean checkout,
-// with a failing exit and no failing exit that marks a timeout or a signal
-// (124, 128 and above, or negative): a hang or a kill is not an assertion a
-// repair agent should fix.
+// with a failing exit, and not a failure made only of exits that mark no
+// defect (nonDefectFailure). A real failure beside a timeout is still due.
 function repairDue(m, verify, sha) {
   if (!verify || typeof verify !== 'object' || verify.head !== sha || !Array.isArray(verify.results)) return false;
   const want = expectedChecks(m);
@@ -4067,9 +4119,8 @@ function repairDue(m, verify, sha) {
     || want.some((w, i) => !results[i] || results[i].group !== w.group || results[i].command !== w.command)) return false;
   if (present(verify.head_after)) return false;
   if (uncleanChecksDetail(verify, sha) !== null) return false;
-  const failing = results.filter((r) => r.exit !== 0);
-  if (failing.length === 0) return false;
-  return !failing.some((r) => typeof r.exit !== 'number' || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+  if (!results.some((r) => r.exit !== 0)) return false;
+  return !nonDefectFailure(results);
 }
 
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
@@ -4647,6 +4698,13 @@ async function runAll(manifest, io) {
     integrate = integrateReport(integ);
     if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
     tip = integ.head;
+    // Checks that only timed out, found the project busy or were killed
+    // (1.6.2 spec 4.3) are no defect a fix agent can address, and a relaunch
+    // would hit the same: a real stop, not a transient one.
+    if (autonomous && integ.tests_failed === true && integ.checks_unfinished === true) {
+      return report('stopped', 'integration checks did not finish: '
+        + (integrate.notes || 'a check timed out or found the project busy'));
+    }
     // Post-integration test failures (autonomous, C2): fix + re-review, then
     // rerun the integrate step once; still failing stops the run.
     if (autonomous && integ.tests_failed === true) {

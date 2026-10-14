@@ -152,11 +152,20 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   return final;
 }
 
+// The exit-code contract (1.6.2 spec 4.3): true when at least one command
+// failed and every failing exit marks no defect: 75 (the project was busy),
+// 124 (a timeout), 128 and above or negative (a signal), or not a number. A
+// busy machine, a hang or a kill is not an assertion an agent should fix.
+function nonDefectFailure(results) {
+  const failing = (Array.isArray(results) ? results : []).filter((r) => r && r.exit !== 0);
+  return failing.length > 0 && failing.every((r) => typeof r.exit !== 'number'
+    || r.exit === 75 || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+}
+
 // Whether a verify result calls for a repair (spec 4.5): results at sha, of
 // exactly the configured inventory, with no head_after, on a clean checkout,
-// with a failing exit and no failing exit that marks a timeout or a signal
-// (124, 128 and above, or negative): a hang or a kill is not an assertion a
-// repair agent should fix.
+// with a failing exit, and not a failure made only of exits that mark no
+// defect (nonDefectFailure). A real failure beside a timeout is still due.
 function repairDue(m, verify, sha) {
   if (!verify || typeof verify !== 'object' || verify.head !== sha || !Array.isArray(verify.results)) return false;
   const want = expectedChecks(m);
@@ -165,9 +174,8 @@ function repairDue(m, verify, sha) {
     || want.some((w, i) => !results[i] || results[i].group !== w.group || results[i].command !== w.command)) return false;
   if (present(verify.head_after)) return false;
   if (uncleanChecksDetail(verify, sha) !== null) return false;
-  const failing = results.filter((r) => r.exit !== 0);
-  if (failing.length === 0) return false;
-  return !failing.some((r) => typeof r.exit !== 'number' || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+  if (!results.some((r) => r.exit !== 0)) return false;
+  return !nonDefectFailure(results);
 }
 
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
@@ -745,6 +753,13 @@ async function runAll(manifest, io) {
     integrate = integrateReport(integ);
     if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
     tip = integ.head;
+    // Checks that only timed out, found the project busy or were killed
+    // (1.6.2 spec 4.3) are no defect a fix agent can address, and a relaunch
+    // would hit the same: a real stop, not a transient one.
+    if (autonomous && integ.tests_failed === true && integ.checks_unfinished === true) {
+      return report('stopped', 'integration checks did not finish: '
+        + (integrate.notes || 'a check timed out or found the project busy'));
+    }
     // Post-integration test failures (autonomous, C2): fix + re-review, then
     // rerun the integrate step once; still failing stops the run.
     if (autonomous && integ.tests_failed === true) {

@@ -7,8 +7,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript, H } from './harness.mjs';
 
-const { repairDue, repairHeadEligible, validRepairReview } = await loadHelpers([
-  'repairDue', 'repairHeadEligible', 'validRepairReview',
+const { repairDue, repairHeadEligible, validRepairReview, nonDefectFailure } = await loadHelpers([
+  'repairDue', 'repairHeadEligible', 'validRepairReview', 'nonDefectFailure',
 ]);
 
 function task(id) {
@@ -111,6 +111,24 @@ async function run(m, script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 const kinds = (result) => result.acceptance.reasons.map((r) => r.kind);
+
+// ---- 1.6.2: 75 and 124 start no repair and still fail (spec 4.3) ----
+
+test('a verify failing only with 75 or 124 starts no repair and the run is rejected for failed checks', async () => {
+  for (const exit of [75, 124]) {
+    const { result, calls } = await run(manifest(), {
+      ...withFix({
+        verify: [verified(H('f1'), exit)],
+        'final re-review': [resolved(H('f1'))],
+      }),
+      ...taskScript(ALL),
+    });
+    assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')), `exit ${exit}: ${labels(calls)}`);
+    assert.equal(result.acceptance.status, 'rejected', `exit ${exit}`);
+    assert.ok(kinds(result).includes('checks_failed'), `exit ${exit}: ${kinds(result)}`);
+    assert.deepEqual(result.final.repairs, [], `exit ${exit}`);
+  }
+});
 
 // ---- after a final fix ----
 
@@ -328,8 +346,36 @@ test('repairDue: only a complete, clean, exact inventory with an ordinary failin
   const other = verified(sha, 1);
   other.results[0].command = 'npm run other';
   assert.equal(repairDue(m, other, sha), false, 'inventory mismatch');
-  for (const exit of [124, 128, 137, 255, -9]) assert.equal(repairDue(m, verified(sha, exit), sha), false, `exit ${exit}`);
+  for (const exit of [75, 124, 128, 137, 255, -9]) assert.equal(repairDue(m, verified(sha, exit), sha), false, `exit ${exit}`);
   assert.equal(repairDue(m, verified(sha, 2), sha), true, 'exit 2');
+  assert.equal(repairDue(m, verified(sha, 8), sha), true, 'exit 8');
+});
+
+// 1.6.2 (spec 4.3): one predicate for the exits that mark no defect.
+test('nonDefectFailure: a failure made only of 75, 124, 128 and above, or negative exits', () => {
+  const exits = (...codes) => codes.map((exit) => ({ group: 'test', command: `c${exit}`, exit }));
+  for (const codes of [[75], [124], [137], [-9], [75, 124], [0, 75]]) {
+    assert.equal(nonDefectFailure(exits(...codes)), true, JSON.stringify(codes));
+  }
+  for (const codes of [[1], [8], [1, 124], [0], []]) {
+    assert.equal(nonDefectFailure(exits(...codes)), false, JSON.stringify(codes));
+  }
+  assert.equal(nonDefectFailure([{ exit: null }]), true, 'a non-number counts as non-defect');
+});
+
+test('repairDue: a mix of a real failure and a timeout is still due; 75 and 124 together are not', () => {
+  const m = manifest({ commands: { setup: [], test: ['npm test'], lint: ['npm run lint'], build: [] } });
+  const sha = H('f1');
+  const two = (a, b) => ({
+    ...verified(sha, a), ok: false, results: [
+      { group: 'test', command: 'npm test', exit: a, log: '/work/ledger/checks/a.log', tail: '' },
+      { group: 'lint', command: 'npm run lint', exit: b, log: '/work/ledger/checks/b.log', tail: '' },
+    ],
+  });
+  assert.equal(repairDue(m, two(1, 124), sha), true, '1 and 124');
+  assert.equal(repairDue(m, two(75, 124), sha), false, '75 and 124');
+  assert.equal(repairDue(m, two(0, 75), sha), false, '0 and 75');
+  assert.equal(repairDue(m, two(0, 8), sha), true, '0 and 8');
 });
 
 test('repairHeadEligible needs the reported head and a descends_from ok for the repair start', () => {
