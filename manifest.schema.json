@@ -299,10 +299,29 @@
               },
               "commit": {
                 "$ref": "#/$defs/text"
+              },
+              "index_commit": {
+                "description": "The staged version (git write-tree on the worktree's index), committed on the worktree's HEAD; commit's parent. Null when nothing was staged or write-tree failed.",
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/text"
+                  }
+                ]
+              },
+              "index_saved": {
+                "description": "False when write-tree on the index failed (an unmerged index, a held index.lock): the staged version is not saved, and the working-copy snapshot still is.",
+                "type": "boolean"
+              },
+              "index_error": {
+                "description": "git's message when index_saved is false.",
+                "$ref": "#/$defs/text"
               }
             }
           },
-          "description": "Commits under refs/parallel-lanes/<run_id>/abandoned/ holding changes setup discarded."
+          "description": "Commits under refs/parallel-lanes/<run_id>/abandoned/ holding changes setup discarded: commit holds the working copy (every tracked change and untracked, non-ignored file) on top of index_commit, or on the worktree's HEAD when index_commit is null. When write-tree on the index fails (an unmerged index, a held index.lock), index_saved is false and setup goes on with the working-copy snapshot; a held index.lock then also fails the following reset --hard, so setup exits 1 and the changes stay both in the worktree and in the saved ref. Restore in the worktree with git checkout <commit> -- . (the files), then git read-tree <index_commit> (what was staged; git read-tree HEAD when index_commit is null). Intent-to-add entries come back untracked. index_commit, index_saved and index_error are absent in results of setup before 1.6.2."
         }
       }
     },

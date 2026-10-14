@@ -103,6 +103,7 @@ function fixture() {
 const CHECK_NAMES = [
   'git_identity', 'base_not_current', 'python', 'dirty_checkout', 'shadow_repo', 'memory',
   'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
+  'usage_limit_pause',
 ];
 
 // No scenario may leave a check unrecorded: every result the helpers return
@@ -475,16 +476,46 @@ const FAKE_SNIPPET = [
   '    else:',
   '        env[k] = v',
   'fakes = dict((n, fake(n, v)) for n, v in spec["fakes"].items())',
+  // claude: which() answers the claude names from spec["claude"]["which"]
+  // (other names from the real PATH), and run() answers --version on a fake
+  // claude path; read_json() answers from spec["settings"] by path.
+  'real = _doctor.Probes(env=env, platform=spec["platform"])',
+  'claude = spec["claude"]',
+  'def which(name):',
+  '    if name.startswith("claude"):',
+  '        called.append("which:" + name)',
+  '        return claude["which"].get(name)',
+  '    return real.which(name)',
+  'def run(argv, timeout):',
+  '    if argv[0] in claude["which"].values():',
+  '        called.append("run:" + " ".join(argv))',
+  '        v = claude["version"]',
+  '        return None if v is None else _doctor.Result(v["code"], v["out"])',
+  '    return real.run(argv, timeout)',
+  'def read_json(path):',
+  '    called.append("read_json:" + path)',
+  '    value = spec["settings"].get(path)',
+  '    if value == "raise":',
+  '        raise ValueError("malformed")',
+  '    return value',
+  'fakes.setdefault("which", which)',
+  'fakes.setdefault("run", run)',
+  'fakes.setdefault("read_json", read_json)',
   'probes = _doctor.Probes(env=env, platform=spec["platform"], **fakes)',
   'result = _doctor.run_checks(manifest, probes)',
   'print(json.dumps({"result": result, "called": sorted(set(called))}))',
 ].join('\n');
 
-function fakeDoctor(manifest, { fakes = {}, platform = process.platform, env = {} } = {}) {
+// A claude on PATH that reports a version with the pause.
+const CLAUDE = { which: { claude: '/fake/bin/claude' }, version: { code: 0, out: '2.1.296 (Claude Code)\n' } };
+
+function fakeDoctor(manifest, { fakes = {}, platform = process.platform, env = {}, claude = CLAUDE, settings = {} } = {}) {
   const spec = {
     platform,
     fakes: { ...QUIET, ...fakes },
     env: { CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: '16', ...env },
+    claude,
+    settings,
   };
   const r = spawnSync('python3', ['-c', FAKE_SNIPPET, join(SKILL_DIR, 'scripts'), manifest, JSON.stringify(spec)],
     { encoding: 'utf8', env: ENV });
@@ -506,7 +537,7 @@ function snippet(lines, ...args) {
 test('every check records exactly one outcome', () => {
   const f = fixture();
   const r = fakeDoctor(f.manifest());
-  assert.equal(r.checks.length, 12, JSON.stringify(r.checks));
+  assert.equal(r.checks.length, 13, JSON.stringify(r.checks));
   assert.deepEqual(r.checks.map((c) => c.check), CHECK_NAMES);
   const expected = {};
   for (const x of r.failures) expected[x.check] = 'failed';
@@ -590,7 +621,7 @@ test('an unrecorded check is never passed', () => {
       assert.deepEqual(r.skipped.filter((s) => s.check === check), [{ check, reason: 'not_recorded' }]);
     }
   }
-  assert.equal(r.skipped.length, 11);
+  assert.equal(r.skipped.length, 12);
   assert.equal(r.status, 'ok');
 });
 
@@ -731,4 +762,184 @@ test('real probes run on this platform without error', () => {
   }
   // No other run is locked in the empty active dir.
   assert.equal(named(r.out.warnings, 'active_runs'), undefined, JSON.stringify(r.out));
+});
+
+// usage_limit_pause: claude and the settings files are fakes (see FAKE_SNIPPET).
+
+const pauseOf = (r) => r.usage_limit_pause;
+
+test('usage_limit_pause passes for a current Claude Code with the setting unset', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest());
+  assert.deepEqual(pauseOf(r), { pause: 'yes', reasons: [], version: '2.1.296', setting: null });
+  assert.equal(outcome(r, 'usage_limit_pause'), 'passed');
+  assert.equal(named(r.warnings, 'usage_limit_pause'), undefined, JSON.stringify(r));
+  assert.ok(r.called.includes('run:/fake/bin/claude --version'), JSON.stringify(r.called));
+
+  // At and above 2.1.271 the run pauses.
+  for (const out of ['2.1.271 (Claude Code)', '2.2.0', '3.0.1-beta']) {
+    const at = fakeDoctor(f.manifest(), { claude: { ...CLAUDE, version: { code: 0, out } } });
+    assert.equal(pauseOf(at).pause, 'yes', out);
+    assert.equal(outcome(at, 'usage_limit_pause'), 'passed', out);
+  }
+});
+
+test('usage_limit_pause warns for a Claude Code older than 2.1.271', () => {
+  const f = fixture();
+  const r = fakeDoctor(f.manifest(), { claude: { ...CLAUDE, version: { code: 0, out: '2.1.270 (Claude Code)\n' } } });
+  assert.equal(r.status, 'ok', JSON.stringify(r));
+  assert.equal(pauseOf(r).pause, 'no');
+  assert.equal(pauseOf(r).version, '2.1.270');
+  assert.match(pauseOf(r).reasons.join(' '), /2\.1\.271/);
+  assert.equal(outcome(r, 'usage_limit_pause'), 'warning');
+  assert.match(named(r.warnings, 'usage_limit_pause').detail, /will not pause.*2\.1\.271/);
+});
+
+test('usage_limit_pause is unknown without a claude or its version', () => {
+  const f = fixture();
+  const none = fakeDoctor(f.manifest(), { claude: { which: {}, version: null } });
+  assert.equal(none.status, 'ok', JSON.stringify(none));
+  assert.equal(pauseOf(none).pause, 'unknown');
+  assert.equal(pauseOf(none).version, null);
+  assert.match(pauseOf(none).reasons.join(' '), /PATH/);
+  assert.equal(outcome(none, 'usage_limit_pause'), 'warning');
+  assert.match(named(none.warnings, 'usage_limit_pause').detail, /^unknown whether/);
+
+  for (const version of [null, { code: 1, out: '' }, { code: 0, out: 'Claude Code\n' }]) {
+    const r = fakeDoctor(f.manifest(), { claude: { ...CLAUDE, version } });
+    assert.equal(pauseOf(r).pause, 'unknown', JSON.stringify(version));
+    assert.match(pauseOf(r).reasons.join(' '), /--version/);
+  }
+
+  // A raising probe is a failed read too.
+  const raised = fakeDoctor(f.manifest(), { fakes: { which: RAISE } });
+  assert.equal(pauseOf(raised).pause, 'unknown');
+
+  // The setting off says no even when the version is unknown.
+  const off = fakeDoctor(f.manifest(), {
+    claude: { which: {}, version: null }, platform: 'linux',
+    settings: { '/etc/claude-code/managed-settings.json': { autoContinueAtUsageLimit: false } },
+  });
+  assert.equal(pauseOf(off).pause, 'no');
+});
+
+test('usage_limit_pause reads autoContinueAtUsageLimit from the user and managed settings', () => {
+  const f = fixture();
+  const config = join(f.dir, 'claude-config');
+  const user = join(config, 'settings.json');
+  const env = { CLAUDE_CONFIG_DIR: config };
+  const off = fakeDoctor(f.manifest(), { env, settings: { [user]: { autoContinueAtUsageLimit: false } } });
+  assert.equal(pauseOf(off).pause, 'no');
+  assert.equal(pauseOf(off).setting, false);
+  assert.match(pauseOf(off).reasons.join(' '), /autoContinueAtUsageLimit is false in the user settings/);
+  assert.equal(outcome(off, 'usage_limit_pause'), 'warning');
+  assert.ok(off.called.includes(`read_json:${user}`), JSON.stringify(off.called));
+
+  const on = fakeDoctor(f.manifest(), { env, settings: { [user]: { autoContinueAtUsageLimit: true } } });
+  assert.deepEqual(pauseOf(on), { pause: 'yes', reasons: [], version: '2.1.296', setting: true });
+
+  // The managed file of each platform, and it stands above the user's.
+  const managed = {
+    linux: '/etc/claude-code/managed-settings.json',
+    darwin: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    win32: 'C:\\Program Files\\ClaudeCode\\managed-settings.json',
+  };
+  for (const [platform, path] of Object.entries(managed)) {
+    const m = fakeDoctor(f.manifest(), {
+      env, platform, settings: { [path]: { autoContinueAtUsageLimit: false }, [user]: { autoContinueAtUsageLimit: true } },
+    });
+    assert.equal(pauseOf(m).pause, 'no', platform);
+    assert.equal(pauseOf(m).setting, false, platform);
+    assert.match(pauseOf(m).reasons.join(' '), /false in the managed settings/, platform);
+  }
+  const managedOn = fakeDoctor(f.manifest(), {
+    env, platform: 'linux',
+    settings: { [managed.linux]: { autoContinueAtUsageLimit: true }, [user]: { autoContinueAtUsageLimit: false } },
+  });
+  assert.equal(pauseOf(managedOn).pause, 'yes');
+  assert.equal(pauseOf(managedOn).setting, true);
+
+  // A settings file that exists but lacks the key counts as unset, with no reason.
+  const bare = fakeDoctor(f.manifest(), { env, settings: { [user]: { model: 'x' } } });
+  assert.equal(pauseOf(bare).pause, 'yes');
+  assert.equal(pauseOf(bare).setting, null);
+  assert.deepEqual(pauseOf(bare).reasons, []);
+  assert.equal(outcome(bare, 'usage_limit_pause'), 'passed');
+  const empty = fakeDoctor(f.manifest(), { env, settings: { [user]: {} } });
+  assert.equal(pauseOf(empty).pause, 'yes');
+  assert.equal(pauseOf(empty).setting, null);
+  assert.deepEqual(pauseOf(empty).reasons, []);
+
+  // A malformed file counts as unset, with a reason that it could not be read.
+  const bad = fakeDoctor(f.manifest(), { env, settings: { [user]: 'raise' } });
+  assert.equal(pauseOf(bad).pause, 'yes');
+  assert.equal(pauseOf(bad).setting, null);
+  assert.match(pauseOf(bad).reasons.join(' '), /user settings file .* could not be read/);
+  assert.equal(outcome(bad, 'usage_limit_pause'), 'warning');
+  // A value that is not true or false counts as unset too.
+  const odd = fakeDoctor(f.manifest(), { env, settings: { [user]: { autoContinueAtUsageLimit: 'no' } } });
+  assert.equal(pauseOf(odd).pause, 'yes');
+  assert.equal(pauseOf(odd).setting, null);
+  assert.match(pauseOf(odd).reasons.join(' '), /not true or false/);
+});
+
+test('usage_limit_pause finds claude.cmd on Windows when claude is not found', () => {
+  const f = fixture();
+  const cmd = 'C:/fake/bin/claude.cmd';
+  const claude = { which: { 'claude.cmd': cmd }, version: { code: 0, out: '2.1.296 (Claude Code)\r\n' } };
+  const w = fakeDoctor(f.manifest(), { platform: 'win32', claude });
+  assert.equal(pauseOf(w).pause, 'yes', JSON.stringify(w));
+  assert.equal(pauseOf(w).version, '2.1.296');
+  assert.ok(w.called.includes('which:claude.exe') && w.called.includes(`run:${cmd} --version`), JSON.stringify(w.called));
+  // Elsewhere only claude is looked up.
+  const linux = fakeDoctor(f.manifest(), { platform: 'linux', claude });
+  assert.equal(pauseOf(linux).pause, 'unknown');
+  assert.ok(!linux.called.includes('which:claude.cmd'), JSON.stringify(linux.called));
+});
+
+test('read_json reads a JSON object, None for no file, and raises otherwise', () => {
+  const f = fixture();
+  const good = join(f.dir, 'good.json');
+  const bad = join(f.dir, 'bad.json');
+  const list = join(f.dir, 'list.json');
+  writeFileSync(good, '{"autoContinueAtUsageLimit": false}');
+  writeFileSync(bad, '{not json');
+  writeFileSync(list, '[]');
+  const r = snippet([
+    'p = _doctor.Probes()',
+    'out = []',
+    'for path in sys.argv[2:]:',
+    '    try:',
+    '        out.append(p.read_json(path))',
+    '    except Exception:',
+    '        out.append("raised")',
+    'print(json.dumps(out))',
+  ], good, join(f.dir, 'missing.json'), bad, list);
+  assert.deepEqual(r, [{ autoContinueAtUsageLimit: false }, null, 'raised', 'raised']);
+});
+
+test('usage_limit_pause with a real claude on PATH and malformed settings never blocks', () => {
+  const f = fixture();
+  const bin = join(f.dir, 'bin');
+  mkdirSync(bin);
+  if (IS_WINDOWS) {
+    writeFileSync(join(bin, 'claude.cmd'), '@echo 2.1.270 (Claude Code)\r\n');
+  } else {
+    writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "2.1.270 (Claude Code)"\n', { mode: 0o755 });
+  }
+  const config = join(f.dir, 'claude-config');
+  mkdirSync(config);
+  writeFileSync(join(config, 'settings.json'), '{not json');
+  const env = { ...ENV, CLAUDE_CONFIG_DIR: config };
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  env[pathKey] = `${bin}${IS_WINDOWS ? ';' : ':'}${env[pathKey] || ''}`;
+  const r = doctor(f.manifest(), { env });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(r.out.status, 'ok');
+  assert.equal(r.out.usage_limit_pause.pause, 'no', JSON.stringify(r.out.usage_limit_pause));
+  assert.equal(r.out.usage_limit_pause.version, '2.1.270');
+  assert.match(r.out.usage_limit_pause.reasons.join(' '), /user settings file .* could not be read/);
+  assert.equal(outcome(r.out, 'usage_limit_pause'), 'warning');
+  assert.equal(named(r.out.failures, 'usage_limit_pause'), undefined);
+  assert.equal(r.out.checks.length, 13);
 });

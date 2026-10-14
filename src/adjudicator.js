@@ -5,8 +5,10 @@
 // ctx = {kind: 'blocked'|'question'|'round_cap'|'preflight', task|null,
 // where: {dir, branch, lane}|null, details, findings}. The result is always a
 // usable outcome object: a missing result is a stop marked unavailable (an
-// agent error), and an invalid one (a budget refusal included) is a
-// plan_broken stop marked invalid, never approval. Neither is a ruling.
+// agent error), a refused call (the budget sentinel, under the
+// agents-unavailable latch too) a stop marked refused with the refusal text
+// and no stop condition, and an invalid one a plan_broken stop marked
+// invalid, never approval. None of them is a ruling.
 
 function adjudicatorOutcomes() {
   return ['answer', 'clarify_plan', 'park', 'unblock', 'stop'];
@@ -88,6 +90,9 @@ function adjudicatorPrompt(m, ctx) {
     'repo) is allowed.',
     `Commit rules the task works under: ${m.commit_rules}`,
     agentRules(),
+    // The exit-code contract (1.6.2 spec 4.3).
+    'A check that failed only with exit 75 (the project was busy), 124 (it timed out), or 128 or above (killed by',
+    'a signal) or a negative code is not a defect to fix: never rule a change to code, tests, timeouts or commands for it.',
     '',
     'Outcomes (pick exactly one):',
     '- answer: your text answers the question or settles the blocker; it is given to the task as its note and',
@@ -142,6 +147,11 @@ async function adjudicate(m, ctx, io = { agent, log }) {
     { label, phase: phaseName, schema: adjudicatorSchema(), model: 'opus', effort: 'high' });
   if (r === null || r === undefined) {
     return { outcome: 'stop', text: `no result from ${label}`, stop_condition: 'plan_broken', unavailable: true };
+  }
+  // The refusal sentinel (the budget cap or the agents-unavailable latch):
+  // no adjudicator ran, so there is no ruling and no stop condition.
+  if (r.__budget) {
+    return { outcome: 'stop', refused: true, text: refusalText({ unavailable: Boolean(r.__unavailable) }, label) };
   }
   const valid = adjudicatorResult(r);
   if (valid === null) {

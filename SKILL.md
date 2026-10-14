@@ -133,7 +133,8 @@ Fields: reference.md "Manifest fields". In order:
 
 Before the dry run: `<python> <skill_dir>/scripts/doctor <manifest file> --save
 <scratchpad>/doctor-<run_id>.json` (`<run_dir>/doctor-<run_id>.json` with no scratchpad). Exit 2 or
-3 stops the flow (show each failure and its fix, and wait); its warnings go in the table header.
+3 stops the flow (show each failure and its fix, and wait); its warnings go in the table header,
+and `usage_limit_pause` gives its usage-limit line (reference.md "Usage limit").
 Each check and what it means: reference.md "Doctor" and "Launch conditions".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
@@ -194,8 +195,7 @@ this. Say the table is the one required check, show it, and wait.
    never stops the run; keep the latest launch's refusal code for `tool-outcomes`.
 5. Record each launch's spend (reference.md "Budgets"), a relaunch included, never a dry run:
    `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned>
-   <rulings_spent>` (`<status>`: the run status, `unaccepted` for a complete run that is not accepted or whose
-   hand-back gate (check-verify) fails).
+   <rulings_spent>` (`<status>`: reference.md "Budgets").
    After a launch that a transient relaunch follows, record only the spend (keep the lock
    through the relaunch). At the end, record the spend and release the lock in one command
    line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)
@@ -209,9 +209,13 @@ this. Say the table is the one required check, show it, and wait.
 ## Transient stops (relaunch once, no prompt)
 
 A stop is transient when status is `stopped`, `reason` is not `budget`, and every cause is
-an agent error, a missing result, or setup-command retry exhaustion (reference.md "Transient
-stops" says how the causes are read, which texts count, and which causes are NOT transient:
-never relaunch those; stop and notify).
+an agent error, a missing result, setup-command retry exhaustion, or agents unavailable
+(`agents_unavailable`; reference.md "Transient stops" says how the causes are read, which texts
+count, and which causes are NOT transient: never relaunch those; stop and notify). After an
+`agents_unavailable` stop, run `scripts/stop-cause` as reference.md "Usage limit" says.
+
+Before any relaunch, compare the stopped launch's result `version` with `<skill_dir>/VERSION`:
+different or missing means Resume instead (reference.md "Transient stops").
 
 Before recording the stopped launch's end, run doctor again with `--save` (Confirmation): the
 earlier snapshot belongs to the earlier launch.
@@ -221,13 +225,12 @@ earlier snapshot belongs to the earlier launch.
   command line (Launch step 5), show the failures, notify, and keep the failed check names for
   `--relaunch-blocked`.
 
-Relaunch once with the relaunch notice: carry budgets over (lower `limits.max_agents` by the
-stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0). If
-fewer than 1 agent would remain, treat it as a budget cap: stop and notify. Set
+Relaunch once with the relaunch notice: carry budgets over (reference.md "Transient stops"). Set
 `repairs_spent` to the repairs in the stopped run's `final.repairs` plus the earlier value.
 First recompute `done`, `reviewed`, `deferred`, the `carry` notes and `backfill` as in Resume
 steps 2-3, then rerun `scripts/setup --owner <token>` and take `start_points`; if validation
-rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient stop is a real stop.
+rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient
+stop is a real stop, unless it is a usage-limit stop (reference.md "Usage limit").
 
 ## Notify
 

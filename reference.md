@@ -116,17 +116,49 @@ for 9 of 12 units; delivery runs 3 checks (1 added by lane_commands); repairs up
 `warnings` follow it (today one: "changes to shared files will not widen task checks", when
 `task_checks` has entries and `widen_paths` is empty).
 
+One line says whether the run pauses at the usage limit (see "Usage limit"), from doctor's
+`usage_limit_pause` (`pause`, `reasons`) and what the session knows of itself:
+- "Usage limit: the run pauses at the limit and continues by itself" when `pause` is `yes` and
+  the session is none of the kinds the platform does not pause;
+- "Usage limit: the run will not pause (<reasons>); on a limit it stops cleanly and is
+  relaunched after the reset" when `pause` is `no`, or when the session's own context says it
+  runs with Remote Control connected, in the background, or headless (`claude -p`, the Agent
+  SDK), which doctor, a plain script, cannot see;
+- "Usage limit: unknown (<what is unknown>)" otherwise, for example no `claude` on PATH.
+When the run will not pause, name the options under the line and leave them to the user:
+disconnect Remote Control for the run, set `autoContinueAtUsageLimit` back on, or update Claude
+Code. Change nothing yourself.
+
 ### Transient stops
 
 SKILL.md gives the rule; this is how it reads the causes. Not transient, so never relaunched
 (stop and notify): `review_rounds`, a supervised blocked or question task, `adjudication_cap`,
-`adjudicator_stop`, `budget`, a failed integration or post-integrate on real failures, and
-status `invalid` or `preflight_conflicts`. The causes are every
-`stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, or `join
-stopped`, else `reason` itself. A cause is transient only if it starts with `no result from`,
-`error:`, or `setup failed`, or reads `integration failed: no result from ...` or
-`post-integrate failed: no result from ...`. The doctor rerun before a relaunch is described
-under "Launch conditions".
+`adjudicator_stop`, `budget`, a failed integration or post-integrate on real failures,
+`integration checks did not finish: ...` (see "Exit codes"), and status `invalid` or
+`preflight_conflicts`. The causes are every `stopped_lanes[].reason` when `reason` is `prelude
+stopped`, `lanes stopped`, `join stopped`, or `agents_unavailable`, else `reason` itself. A
+cause is transient only if it starts with `no result from`, `error:`, or `setup failed`, or
+reads `integration failed: no result from ...` or `post-integrate failed: no result from ...`,
+and, under `agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
+agent the latch refused). So `agents_unavailable` is transient only when every other cause is
+transient too: a lane already stopped at `review_rounds`, a supervised question and the like
+keep their own cause, the stop is real, and Resume step 4 applies. A stop with
+`agents_unavailable` and no `stopped_lanes` entry (the latch hit outside a lane: pre-flight, run
+adjudicate, integration, post-integrate, E2E or the final phase) is transient. Then run stop-cause and follow "Usage limit". The doctor rerun before a
+relaunch is described under "Launch conditions".
+
+**Budget carry-over** (SKILL.md's relaunch step): lower `limits.max_agents` by the
+stopped run's `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0. If
+fewer than 1 agent would remain, treat it as a budget cap: stop and notify.
+
+**Engine version.** Before any relaunch, compare the stopped launch's workflow result `version`
+(the skill version `run.workflow.js` was built from; results carry it since 1.4.3) with
+`<skill_dir>/VERSION`. Different, or missing (no result, or an engine before 1.4.3): it is not a
+relaunch but a Resume (SKILL.md "Resume"): `done` and `reviewed` recomputed from `ledger
+status`, budgets as a resume carries them, answers for blocked tasks if any, doctor, setup, the
+dry run, the table and a plain yes. The new engine may plan different agents, check
+differently or need manifest changes, and the earlier yes covered the old behaviour. A resume
+starts a fresh allowance of transient relaunches.
 
 ## Building lanes
 
@@ -301,7 +333,8 @@ raised it).
   need no second table are `setup_result`, `start_points`, and the relaunch carry-over (budgets
   and `repairs_spent`).
 - Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while
-  `repairReserve` agents are free (6, plus 4 with an e2e hook and 2 with a post-integrate hook),
+  `repairReserve` agents are free (7, plus 4 with an e2e hook and 2 with a post-integrate hook;
+  the 7 include one availability probe, see "Usage limit"),
   so neither the repair nor the checks it makes necessary are ever refused: with less room
   there is no repair, and the run ends as it would without one.
 - The `verify` agent (the project checks through `scripts/run-checks`) runs even past
@@ -310,6 +343,11 @@ raised it).
   the final review), the stopped report carries `verify` at the feature head it reached; it
   counts in `agents_spawned`, which can then exceed the cap by one, or two when a verify that
   returned nothing is retried.
+- Agents unavailable (see "Usage limit") uses the same refusal path: once the availability
+  probe found no agent answering, every later spawn is refused, `verify` included (a refused
+  verify is never stored as evidence), and the run stops with reason `agents_unavailable`
+  instead of `budget`, resumable, never accepted. The probe counts as one agent in
+  `agents_spawned`, never as a ruling. A probe the budget itself refuses is a budget stop.
 - A relaunch after a transient stop lowers `max_agents` by the stopped run's
   `agents_spawned` and `max_rulings` by its `rulings_spent`, the adjudications that ran
   (floor 0). Use `rulings_spent` here, not a count of ledger `ruling` events (implementers
@@ -385,11 +423,13 @@ checks.
 
 **Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
 - Due only when verify ran at the head, with exactly the configured inventory, no
-  `head_after`, a clean checkout, and a failing exit that is not 124, 128 or above, or
-  negative (a timeout or a signal is not a defect to fix).
+  `head_after`, a clean checkout, and a failure that is not made only of exits 75, 124, 128 or
+  above, or negative (a busy project, a timeout or a signal is not a defect to fix; see "Exit
+  codes").
 - Admitted only while `repairReserve` agents are free and fewer than 2 repairs were made in the
-  run (`repairs_spent` carries earlier launches'). The reserve is 6 (the repair, its verify and
-  the re-review that must follow, each with one retry), plus 4 with an e2e hook and 2 with a
+  run (`repairs_spent` carries earlier launches'). The reserve is 7 (the repair, its verify and
+  the re-review that must follow, each with one retry, and the availability probe a dead pair
+  among them may start; see "Usage limit"), plus 4 with an e2e hook and 2 with a
   post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
   is ever refused.
 - One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
@@ -502,6 +542,55 @@ times the execution from the archived report, not as a timeout or a background c
 `checks.waits` counts the executions that reserved first, the waits, the stops and the waits an
 agent improvised.
 
+## Exit codes
+
+The contract for the exit codes of commands run through `scripts/run-checks` (task checks,
+integration, verify and the rechecks, fixers' and repairs' checks, long commands). It does not
+cover setup commands and hook commands: their exits are read as before.
+
+| Exit | Means | What the run does |
+|---|---|---|
+| `0` | passed | nothing more |
+| `124` | timed out | no repair or fix agent for it |
+| `75` | busy or temporary (sysexits `EX_TEMPFAIL`), for example another program holds the project open | `run-checks` waits 60 s and runs the command once more; the second exit is its result. Still `75`: no repair or fix agent for it |
+| `128` and above, or negative | killed by a signal | no repair or fix agent for it |
+| any other non-zero | a real failure | repair and fix as before |
+
+The engine decides with one predicate (`nonDefectFailure`): a failure made only of `75`,
+`124`, `128` and above, negative exits, or exits that are not numbers marks no defect. A real
+failure beside a timeout is still a real failure. The codes steer repair, fix and retry, never
+acceptance: a check that exits `75` or `124` has still failed (`ok` false), and acceptance reads
+it as `checks_failed` like any other failure. Per caller:
+- **Verify:** returns `run-checks`' result as printed. A repair after a failing verify (see
+  "Check ownership") is not due for a failure made only of these exits.
+- **Integration:** the integrate agent sets `checks_unfinished` true (beside `tests_failed`)
+  when every failing command exited `75`, `124`, `128` and above or negative. The engine then
+  starts no post-integration fix and stops with `integration checks did not finish: <notes>`,
+  a real stop, not a transient one: a timeout needs a longer timeout or a faster suite, a busy
+  machine needs the user, and a relaunch would hit the same. A mix of a real failure and a
+  timeout is not `checks_unfinished`; the heal round runs as before.
+- **Implementer task checks:** a task check that failed only with these exits is reported
+  blocked, naming the exits and the result file; the agent changes no code, tests, timeouts
+  or commands for it. The adjudicator, told that such a failure is no defect to fix, decides
+  as before (it may defer or park the task).
+- **Fixers** (task fix, final fix, post-integrate fix, repair) **and long commands:** such a
+  failure is no defect; they change nothing for it and say so in their notes.
+
+**The busy retry.** Only exit `75` is retried, and only once. The entry keeps `started` from
+the first attempt and `ended` from the second, so `duration_s` spans both and the wait, and
+carries `busy_retry: {first_exit: 75, waited_s: 60}`; the log keeps both outputs after a
+separator line. `check-verify` compares only group, command and exit, so it is unaffected; the
+check-file lock is held a little longer. `RUN_CHECKS_BUSY_WAIT_S` overrides the wait, for
+tests only.
+
+**Mapping a project's tools.** A tool rarely exits with these codes by itself: a project maps
+its tools to the contract in a wrapper. Thistledown's `unity-batch.sh` is the example: it turns
+the Unity CLI's timeout into `124` and its preflight that finds another Unity holding the
+project open into `75`. A tool's own `--timeout` is not its wall time: it may bound only one
+phase and exit with a code of its own (sc1's Unity CLI timeout exited `6`, read as a test
+failure), so a wrapper that needs a wall-time limit times the whole command and exits `124`
+itself.
+
 ## Active-run markers and stops
 
 Markers live in `<config dir>/parallel-lanes/active/` (`$PL_ACTIVE_DIR` overrides).
@@ -534,12 +623,82 @@ exits 3 with `active-run: <path> is held; if no active-run is running, remove it
 directory only when no `active-run` is running.
 
 Transient vs real stops (SKILL.md "Transient stops"): only agent errors, missing results
-(`no result from ...`, `error: ...`), and setup-command retry exhaustion (`setup failed`) are
+(`no result from ...`, `error: ...`), setup-command retry exhaustion (`setup failed`), and
+`agents_unavailable` under the conditions in "Transient stops" and "Usage limit" are
 transient and relaunch once without asking. `review_rounds`, a supervised blocked or question
 task, `adjudication_cap`, `adjudicator_stop: <condition>`, `budget`, failed integration or
 post-integrate on real failures, `invalid`, and `preflight_conflicts` always stop for the
 user. The session notifies (PushNotification, else a chat notice) on completion, any real
-stop, a budget cap, and a failed relaunch.
+stop, a budget cap, and a failed relaunch. `agents_unavailable` is transient only as "Transient
+stops" (under Flow details) and "Usage limit" say; `integration checks did not finish: ...` is
+a real stop.
+
+## Usage limit
+
+**The platform's pause.** Claude Code pauses a workflow at the usage limit by itself, under
+conditions. Its documentation (code.claude.com, "Dynamic workflows", section "When a run hits
+your usage limit", read 2026-10-13): "When an agent hits your claude.ai usage limit, the run
+pauses rather than failing that agent: the agents that hit the limit wait for the reset, and
+no new agents start. Shortly after the limit resets, the waiting agents run again and the run
+continues on its own. Requires Claude Code v2.1.271 or later." It pauses only when all of
+these hold:
+- the session is interactive and signed in with a claude.ai subscription: not `claude -p`, the
+  Agent SDK, a background session, or a Remote Control or agent-team teammate session;
+- `autoContinueAtUsageLimit` is on (on by default in interactive subscription sessions since
+  v2.1.234: "Interactive mode", "Wait for a usage limit to reset"; its scope is user or
+  managed settings);
+- the limit resets within 24 hours (a weekly limit may not);
+- the run has not already waited twice (the third hit fails the agent).
+While it waits, the task panel and `/workflows` show the reset time. parallel-lanes does
+nothing during a pause: the waiting agents are not dead, so no missing result reaches the
+engine, a check already running in the background keeps running, and the long-check waits
+(see "Long checks") go on.
+
+**Before a launch.** Doctor's `usage_limit_pause` (see "Doctor") reads the Claude Code version
+and the setting, and the session adds what doctor cannot see, its own session type. The
+confirmation header's usage-limit line (see "Confirmation header" under Flow details) says
+which of three it is: the run pauses; it will not pause, with the reasons and the user's
+options; or unknown. The session only reports and recommends; it changes no setting and no
+session setup.
+
+**The fallback.** Where the platform does not pause (a Remote Control, background or headless
+session, an older Claude Code, the setting off, a third hit, a limit beyond 24 hours), every
+running agent dies at the limit and the Workflow tool's `agent()` returns null. The engine sees
+a call whose spawn and automatic retry both returned nothing, starts one small `availability
+probe` agent on that call's model (one agent, never a ruling), and when the probe returns
+nothing too it starts no further agent (no adjudicator, retry, fix or verify): the launch stops
+with reason `agents_unavailable`, every lane keeps its own cause, refused work reads `agents
+unavailable: <label> was not run`, and the result carries `agents_unavailable: {trigger,
+probe, results_before}` (see "Report"). A probe that answers means the agent died for its own
+reasons, and the run goes on as before.
+
+**Telling a usage limit from other deaths.** After an `agents_unavailable` stop, run
+`<python> <skill_dir>/scripts/stop-cause <transcript dir>` (Launch step 4's transcript dir). It
+reads the launch's workflow result file and its logs, read-only, and prints one line
+`{"usage_limit": true|false, "resets": "<text>"|null, "lines": N}`: `usage_limit` is true
+when the Workflow tool logged an agent call that failed on a usage limit, and `resets` is the
+reset time as the message gave it (for example `11:20pm (America/Los_Angeles)`), never
+turned into an absolute time. Wording it does not know reads `usage_limit: false`. Exit 3 (no
+readable result file or logs) leaves the stop unlabelled: treat it as another transient stop.
+Put `resets` in the stop notice when there is one.
+
+**When to relaunch.** The session shares the account's limit, so a session that can run a turn
+is past the reset. The relaunch happens at the session's next turn after the stop (the workflow
+notification, or the user's return), whatever stop-cause says: stop-cause only labels the stop
+and gives the user the reset text; its exit 3 is no reason to wait or to relaunch sooner.
+
+**How often.** A usage-limit stop (stop-cause `usage_limit` true) may be relaunched without a
+table once after each reset, while budgets allow, however many relaunches came before it. Not
+when the stopped launch got no agent result before the latch (`results_before` 0 in the
+result's `agents_unavailable`): that launch died at once, so it is a real stop (notify). Every other transient stop keeps
+the rule "relaunch once; a second transient stop is a real stop".
+
+**Which session.** The relaunch without a table belongs to the session that holds the launch
+lock (Launch step 2's owner token). A new session finds the lock held and, after the user
+confirms the old session ended, takes the Resume path with a table, as for any locked run.
+
+Every relaunch also runs the doctor rerun, the engine version check and the budget carry-over
+in "Transient stops" (under Flow details).
 
 ## Report
 
@@ -569,7 +728,22 @@ and call out any agent whose `resolved_models` names a model other than the one 
 
 `run-checks` stamps each result with `started` and `ended` (UTC ISO 8601 with milliseconds) and
 `duration_s` (seconds, from a monotonic clock). They are additive: `check-verify` compares only
-group, command and exit per result. `autopsy` reads them in its `checks` section.
+group, command and exit per result. `autopsy` reads them in its `checks` section. A result
+that exited 75 and was run once more also carries `busy_retry: {first_exit, waited_s}` (see
+"Exit codes"), kept in the verify result.
+
+Fields added in 1.6.2, all optional and additive:
+- `agents_unavailable: {trigger, probe, results_before}` on a run that stopped with reason
+  `agents_unavailable` (see "Usage limit"): `trigger` is the label of the call whose spawn and
+  retry both returned nothing, `probe` the probe's label (`availability probe`), and
+  `results_before` the number of agent calls that had returned a result before the latch (the
+  probe not counted). A refused task's notes, a lane's stop reason and the final phase's open
+  reasons say `agents unavailable` where a budget stop says `budget exhausted`, and a refused
+  repair has status `unavailable`.
+- `checks_unfinished` in the integrate agent's result (see "Exit codes"); the run then stops
+  with `integration checks did not finish: <notes>`.
+- `index_commit` (a sha or null), `index_saved` and, when that is false, `index_error` in each
+  `setup_result.preserved` entry (see "Cleanup").
 
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
 lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with
@@ -1258,8 +1432,9 @@ Warnings: `memory` (under 4 GB available, or the commit charge near its limit), 
 5 GB free on the worktree root's drive), `python_alias` (Windows: python resolves through the
 WindowsApps alias), `heavy_processes` (Windows: AppXSvc over 1500 MB; elsewhere a load average
 above the CPU count), `active_runs` (another run holds a launch lock on this machine),
-`defender` (Windows) and `concurrency`
-(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once). A read that
+`defender` (Windows), `concurrency`
+(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once) and
+`usage_limit_pause` (Claude Code may not pause the run at the usage limit; below). A read that
 fails is a warning with detail `unknown`.
 
 - **Platforms:** the checks that exist only on Windows (`python_alias`, `defender`, AppXSvc)
@@ -1269,13 +1444,27 @@ fails is a warning with detail `unknown`.
 - **Defender:** `defender` reports only `covered`, `not covered` or `unknown` for the worktree
   root. Reading the exclusion list needs elevation, so without it the answer is `unknown`. It
   never prints the exclusion list and never suggests excluding `AppData\Local\Temp`.
+- **Usage limit pause:** `usage_limit_pause` says whether Claude Code will pause this run at the
+  usage limit (see "Usage limit"), as far as a plain script can tell. It reads the version
+  from `claude --version` (on Windows also `claude.exe` and `claude.cmd` on PATH): below
+  2.1.271 means no pause, no executable or no version means unknown. It reads
+  `autoContinueAtUsageLimit` from the managed settings file (macOS `/Library/Application
+  Support/ClaudeCode/managed-settings.json`, Windows `C:\Program Files\ClaudeCode\managed-settings.json`,
+  elsewhere `/etc/claude-code/managed-settings.json`) and the user settings
+  (`${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`); a managed value wins, an explicit `false`
+  means no pause, and unset means on (the documented default). A file that cannot be read, or a
+  value that is not true or false, counts as unset, with a reason. The session type (Remote
+  Control, background, headless) is not visible to doctor, so the session supplies it in the
+  confirmation header. It is a warning only, never a stop: it passes only when the pause is
+  `yes` with no reason. Its finding is also in the result as `usage_limit_pause: {"pause":
+  "yes"|"no"|"unknown", "reasons": [...], "version": "x.y.z"|null, "setting": true|false|null}`.
 
 Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: doctor itself could not run
 (a usage error or an unreadable manifest); it stops the flow like exit 3, since no check ran.
 `--json` prints `{"status": "ok" | "blocked", "failures": [...],
 "warnings": [...], "skipped": [...], "checks": [...], "observed_at": ..., "doctor_version": ...,
-"run_id": ...}`.
-- **`checks`:** one entry `{"check", "outcome"}` for each of the twelve checks, in run order,
+"run_id": ..., "usage_limit_pause": {...}}`.
+- **`checks`:** one entry `{"check", "outcome"}` for each of the thirteen checks, in run order,
   with outcome `passed`, `warning`, `failed` or `skipped`. A check that recorded nothing
   is `skipped` and also appears in `skipped` with reason `not_recorded`; a check recorded more
   than once keeps its worst outcome (failed, warning, skipped, passed).
@@ -1302,6 +1491,10 @@ cause.
 launch's Workflow call has printed its transcript directory. The wf id is that launch's, never
 the dry run's: a dry run prints a transcript directory with a wf id of its own, and binding it
 would leave the real launch with no conditions (its snapshot would show as an orphan).
+The snapshot holds every check, `usage_limit_pause` included (its outcome in `checks`, and the
+result's `usage_limit_pause` object), so a later look at a usage-limit stop can see whether
+the launch was set to pause. `autopsy` shows `usage_limit_pause` with its outcome only, and it
+has no related slowdown kind (below).
 
 **`ledger conditions`.** It writes `<ledger_dir>/doctor-<wf id>.json`:
 `{"launch": {"wf", "setup_event", "setup_head"}, "recorded_at", "doctor": <the saved result>}`.
@@ -1474,8 +1667,17 @@ run; "cannot be written" = permissions (in both nothing was written; show them a
 "writeback failed at" = a write failed midway; show the paths it lists as already written.
 
 A worktree with uncommitted files stays; list it for the user. Changes setup discarded are
-saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`): restore one
-with `git -C <wt> checkout <commit> -- .`, and once the user no longer needs it, delete it
+saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`). Each entry's
+`commit` holds the working copy; when something was staged, its parent `index_commit` holds the
+staged version (from `git write-tree` on the worktree's index), otherwise `index_commit` is null
+and the parent is the worktree's HEAD. `write-tree` on the index can fail (an unmerged index, a
+held `index.lock`): `index_saved` is then false with git's message in `index_error`, the staged
+version is not saved, and setup goes on with the working-copy snapshot. A held `index.lock`
+then also fails the `reset --hard` that follows, as before, so setup exits 1 and the changes
+stay both in the worktree and in the saved ref. Restore one with `git -C <wt> checkout <commit>
+-- .` (the files), then `git -C <wt> read-tree <index_commit>` (what was staged; `git -C <wt>
+read-tree HEAD` when `index_commit` is null: nothing was staged, or, with `index_saved` false,
+the staged version could not be saved); intent-to-add files come back untracked. Once the user no longer needs it, delete it
 with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove`, then run `shadow remove` (it deletes the shadow

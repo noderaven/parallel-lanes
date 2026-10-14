@@ -433,8 +433,8 @@ test('repair_limit is 0 for a supervised manifest and 2 for an autonomous one', 
   assert.equal(repairLimit(manifest()), 2);
   assert.equal(repairLimit(manifest({ autonomy: 'autonomous' })), 2);
   assert.equal(repairLimit(manifest({ autonomy: 'supervised' })), 0);
-  assert.equal(repairReserve(manifest()), 6);
-  assert.equal(repairReserve(manifest({ hooks: { e2e: 'x', post_integrate: 'y' } })), 12);
+  assert.equal(repairReserve(manifest()), 7);
+  assert.equal(repairReserve(manifest({ hooks: { e2e: 'x', post_integrate: 'y' } })), 13);
   assert.equal(repairFixMessage(), 'fix: make the delivery checks pass');
   const { result } = await dryRun(policyManifest({ autonomy: 'supervised', repairs_spent: 1 }));
   assert.equal(result.checks.repair_limit, 0);

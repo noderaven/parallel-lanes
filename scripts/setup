@@ -44,12 +44,25 @@ locks.
 A reused worktree (the run's own: the shadow feature worktree or a lane
 worktree) must be a worktree of this repo on its branch. Before its
 uncommitted changes are discarded (reset --hard HEAD and clean -fd; ignored
-files stay), they are saved: every tracked change and untracked, non-ignored
-file goes into a commit on top of the worktree's HEAD, referenced by
+files stay), they are saved. First the staged version: git write-tree on the
+worktree's index; when that tree differs from HEAD's it is committed on HEAD
+(index_commit). Then every tracked change and untracked, non-ignored file
+goes into a commit on top of index_commit (or of HEAD when nothing was
+staged), referenced by
 refs/parallel-lanes/<run_id>/abandoned/<worktree name>-<UTC time> and listed in
-preserved as {"worktree", "ref", "commit"}; each discarded change is also
-listed in discarded as "<worktree>: <git status --porcelain line>". Restore
-one with git checkout <commit> -- . in that worktree. An existing non-empty
+preserved as {"worktree", "ref", "commit", "index_commit": <sha or null>,
+"index_saved": <bool>} plus "index_error" (git's message) when index_saved is
+false; each discarded change is also listed in discarded as "<worktree>: <git
+status --porcelain line>". write-tree on the index can fail (an unmerged
+index, a held index.lock): index_saved is then false, the staged version is
+not saved, and setup goes on with the working-copy snapshot. A held
+index.lock then also fails the reset --hard that follows, so setup exits 1
+and the changes stay both in the worktree and in the saved ref. Restore one
+in that worktree with git checkout <commit> -- . (the files), then git
+read-tree <index_commit> (what was staged; git read-tree HEAD when
+index_commit is null: nothing was staged, or, with index_saved false, the
+staged version could not be saved). Intent-to-add entries are not
+in the index tree and come back untracked. An existing non-empty
 directory that is not such a worktree is refused (exit 3) and left alone. No
 worktree is removed and no branch is deleted.
 
@@ -303,12 +316,27 @@ def worktree_state(repo, path, branch):
 
 
 def snapshot(path, run_id):
-    """Commit every tracked change and untracked, non-ignored file of the
-    worktree at path on top of its HEAD (through a temporary index, so the
-    worktree and its index are untouched) and point a run ref at it.
-    Returns {"worktree", "ref", "commit"}."""
+    """Save the changes of the worktree at path in commits and point a run
+    ref at the last one; the files in the worktree are untouched.
+
+    The staged version first: git write-tree on the worktree's own index.
+    When that tree differs from HEAD's, it is committed on HEAD (the index
+    commit). Then every tracked change and untracked, non-ignored file goes,
+    through a temporary index, into a commit on top of the index commit, or
+    of HEAD when nothing was staged. write-tree can fail (an unmerged index,
+    a held index.lock): index_saved is then false, index_error holds git's
+    message, and the working snapshot is still made on HEAD.
+    Returns {"worktree", "ref", "commit", "index_commit", "index_saved"} and,
+    when index_saved is false, "index_error"."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     ref = f"refs/parallel-lanes/{run_id}/abandoned/{os.path.basename(path)}-{stamp}"
+    # Outside the raising helper: a failed write-tree is recorded, never fatal.
+    # It may refresh the index file, which the reset --hard after the snapshot
+    # replaces anyway.
+    staged = subprocess.run(["git", "-C", path, "write-tree"], capture_output=True, text=True,
+                            encoding="utf-8", errors="surrogateescape", env=ENV)
+    index_saved = staged.returncode == 0
+    index_commit = None
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(ENV, GIT_INDEX_FILE=os.path.join(tmp, "index"))
 
@@ -319,14 +347,21 @@ def snapshot(path, run_id):
                 raise Failure(1, f"saving the changes in {path} failed: git {args[0]}: {res.stderr.strip()}")
             return res.stdout.strip()
 
+        identity = ("-c", "user.name=parallel-lanes", "-c", "user.email=parallel-lanes@localhost")
+        if index_saved and staged.stdout.strip() != git("rev-parse", "--verify", "HEAD^{tree}"):
+            index_commit = git(*identity, "commit-tree", staged.stdout.strip(), "-p", "HEAD", "-m",
+                               f"parallel-lanes {run_id}: staged changes in {path} saved before setup discarded them")
         git("read-tree", "HEAD")
         git("add", "-A")
         tree = git("write-tree")
-        commit = git("-c", "user.name=parallel-lanes", "-c", "user.email=parallel-lanes@localhost",
-                     "commit-tree", tree, "-p", "HEAD", "-m",
+        commit = git(*identity, "commit-tree", tree, "-p", index_commit or "HEAD", "-m",
                      f"parallel-lanes {run_id}: uncommitted changes in {path} saved before setup discarded them")
         git("update-ref", ref, commit)
-    return {"worktree": path, "ref": ref, "commit": commit}
+    entry = {"worktree": path, "ref": ref, "commit": commit, "index_commit": index_commit,
+             "index_saved": index_saved}
+    if not index_saved:
+        entry["index_error"] = staged.stderr.strip() or f"git write-tree exited {staged.returncode}"
+    return entry
 
 
 def discard_changes(path, run_id, discarded, preserved):

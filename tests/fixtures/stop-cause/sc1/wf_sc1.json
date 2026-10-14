@@ -1,0 +1,16 @@
+{
+  "runId": "wf_sc1",
+  "workflowName": "parallel-lanes",
+  "status": "completed",
+  "result": {
+    "status": "stopped",
+    "run_id": "sc1",
+    "version": "1.6.0"
+  },
+  "logs": [
+    "CV2: adjudicated question -> clarify_plan",
+    "[CR5 review] failed: You've hit your session limit \u00b7 resets 11:20pm (America/Los_Angeles)",
+    "[CR5 review retry] failed: You've hit your session limit \u00b7 resets 11:20pm (America/Los_Angeles)",
+    "CR5: adjudicated blocked -> stop"
+  ]
+}

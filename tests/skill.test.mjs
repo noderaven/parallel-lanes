@@ -82,10 +82,12 @@ function manifest(extra = {}) {
 }
 
 // The notice lines the script logs before its first agent (pre-flight
-// returns null, so the run stops right after).
+// returns null, so the run stops right after; the availability probe that
+// dead pair starts answers, so no agents-unavailable line is logged).
 async function loggedNotices(m) {
   const logs = [];
-  await loadScript({ args: m, agent: async () => null, log: (msg) => logs.push(msg) });
+  const agent = async (prompt, opts) => (opts.label === 'availability probe' ? { ok: true } : null);
+  await loadScript({ args: m, agent, log: (msg) => logs.push(msg) });
   // The fixed notices start with 'parallel-lanes:'; the version line
   // ('parallel-lanes v<version> loaded') is not one of them.
   return logs.filter((l) => l.startsWith('parallel-lanes:'));
@@ -677,4 +679,83 @@ test('reference.md documents await-checks, its exit codes, --exact busy, tree_ch
 
 test('README lists await-checks', () => {
   assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\bawait-checks\b/);
+});
+
+// ---- 1.6.2 clean stops (spec 4.0, 4.2, 4.3, 4.5) ----
+
+test('SKILL.md: the transient rule covers agents_unavailable, stop-cause and the engine version', () => {
+  const transient = section(read(SKILL_MD).toString('utf8'), 'Transient stops');
+  for (const word of ['`agents_unavailable`', 'scripts/stop-cause', '`<skill_dir>/VERSION`', 'Resume']) {
+    assert.ok(transient.includes(word), `Transient stops lacks ${word}: ${transient}`);
+  }
+  // The second-stop rule keeps the usage-limit exception wherever it appears.
+  const second = [...transient.matchAll(/A second transient stop is a real stop([^.]*)\./g)];
+  assert.ok(second.length > 0, transient);
+  for (const m of second) assert.match(m[1], /^, unless it is a usage-limit stop/, m[0]);
+  // The carry-over arithmetic moved whole to reference.md.
+  assert.ok(!transient.includes('floor 0'), transient);
+  assert.ok(transient.includes('reference.md "Transient stops"'), transient);
+});
+
+test('SKILL.md: the confirmation header shows the usage-limit pause', () => {
+  const confirmation = section(read(SKILL_MD).toString('utf8'), 'Confirmation');
+  assert.ok(confirmation.includes('`usage_limit_pause`'), confirmation);
+  assert.ok(confirmation.includes('reference.md "Usage limit"'), confirmation);
+});
+
+test('reference.md has the Usage limit and Exit codes sections', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  assert.match(ref, /^## Usage limit$/m);
+  assert.match(ref, /^## Exit codes$/m);
+  const codes = section(ref, 'Exit codes');
+  for (const row of [/\| `124` \|/, /\| `75` \|/, /\| `128` and above[^|]*\|/]) {
+    assert.match(codes, row, codes);
+  }
+  assert.ok(codes.includes('steer repair, fix and retry, never acceptance'), codes);
+  for (const word of ['run-checks', 'unity-batch.sh', '`--timeout`', 'wall time', 'busy_retry',
+    'checks_unfinished', 'setup commands', 'hook commands']) {
+    assert.ok(codes.includes(word), `Exit codes lacks ${word}`);
+  }
+  assert.ok(section(ref, 'Check ownership').includes('"Exit codes"'), 'Check ownership does not link Exit codes');
+});
+
+test('reference.md "Usage limit" quotes the platform pause and says when and how often to relaunch', () => {
+  const usage = section(read(REFERENCE_MD).toString('utf8'), 'Usage limit');
+  for (const word of ['"Dynamic workflows"', 'read 2026-10-13', 'v2.1.271', '`autoContinueAtUsageLimit`',
+    'Remote Control', '24 hours', 'scripts/stop-cause <transcript dir>', 'next turn', 'once after each reset',
+    '`results_before`', 'launch lock', 'Resume']) {
+    assert.ok(usage.includes(word), `Usage limit lacks ${word}`);
+  }
+});
+
+test('reference.md: the header pause line, the transient causes and the moved carry-over', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const header = ref.slice(ref.indexOf('### Confirmation header'), ref.indexOf('### Transient stops')).replace(/\s+/g, ' ');
+  assert.ok(header.includes('"Usage limit: the run pauses at the limit and continues by itself"'), header);
+  assert.ok(header.includes('"Usage limit: the run will not pause (<reasons>); on a limit it stops cleanly and is relaunched after the reset"'), header);
+  assert.ok(header.includes('`usage_limit_pause`'), header);
+  const tail = ref.slice(ref.indexOf('### Transient stops'));
+  const transient = tail.slice(0, tail.indexOf('\n## ')).replace(/\s+/g, ' ');
+  for (const word of ['`agents_unavailable`', 'agents unavailable:', '`<skill_dir>/VERSION`',
+    'lower `limits.max_agents` by the stopped run\'s `agents_spawned` and `limits.max_rulings` by its `rulings_spent`, floor 0',
+    'If fewer than 1 agent would remain, treat it as a budget cap: stop and notify.']) {
+    assert.ok(transient.includes(word), `Transient stops lacks ${word}`);
+  }
+});
+
+test('reference.md documents the 1.6.2 report fields, doctor check and repair reserve', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  const report = section(ref, 'Report');
+  for (const word of ['agents_unavailable', 'results_before', 'busy_retry', 'checks_unfinished', 'index_commit', 'index_saved']) {
+    assert.ok(report.includes(word), `Report lacks ${word}`);
+  }
+  const doctor = section(ref, 'Doctor');
+  assert.ok(doctor.includes('`usage_limit_pause`') && doctor.includes('thirteen checks'), doctor);
+  assert.ok(section(ref, 'Launch conditions').includes('usage_limit_pause'), 'Launch conditions lacks usage_limit_pause');
+  assert.ok(section(ref, 'Budgets').includes('(7, plus 4 with an e2e hook'), 'Budgets reserve');
+  assert.ok(section(ref, 'Check ownership').includes('The reserve is 7'), 'Check ownership reserve');
+});
+
+test('README lists stop-cause', () => {
+  assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\bstop-cause\b/);
 });
