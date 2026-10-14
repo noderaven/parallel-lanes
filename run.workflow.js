@@ -3171,7 +3171,9 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 // a dead pair starts one availability probe: a direct spawn (no retry, no
 // agent type) on the dead call's model and in its phase, at low effort,
 // labelled 'availability probe', counted as an agent and
-// never as a ruling. Concurrent dead pairs share the probe in flight. A probe
+// never as a ruling; the probe of an overBudget call is overBudget too (it
+// runs past the agent cap; a refusal still skips it). Concurrent dead pairs
+// share the probe in flight. A probe
 // that answers means the deaths were the task's own: the call returns null
 // and a later dead pair probes again. A probe the budget refuses returns its
 // budget sentinel, with no latch. A probe that returns null sets the latch:
@@ -3222,9 +3224,11 @@ function makeIo(m, baseIo, state) {
     const prompt = 'Availability check for a parallel-lanes run. Read no files and run no commands:'
       + ' reply only with {"ok": true}.';
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] };
-    // In the dead call's phase, on its model.
+    // In the dead call's phase, on its model; an overBudget call's probe is
+    // overBudget too, so a verify past the agent cap still gets its answer.
     probing = spawn(prompt, {
       label: PROBE_LABEL,
+      ...(dead.overBudget ? { overBudget: true } : {}),
       ...(dead.phase === undefined ? {} : { phase: dead.phase }),
       ...(dead.model === undefined ? {} : { model: dead.model }),
       effort: 'low',

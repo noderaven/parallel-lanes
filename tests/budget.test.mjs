@@ -476,6 +476,46 @@ test('a probe refused by the budget returns the budget sentinel and sets no latc
   assert.deepEqual(state.refused, [PROBE]);
 });
 
+test('an overBudget verify that dies at the agent cap probes past the cap', async (t) => {
+  const cap = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
+  await t.test('live probe: the verify returns null and nothing is refused', async () => {
+    const { io, calls } = baseIo({ a: [1], verify: [null], 'verify retry': [null], [PROBE]: [LIVE] });
+    const state = newState();
+    const wrapped = makeIo(cap, io, state);
+    await wrapped.agent('P', { label: 'a' });
+    assert.equal(await wrapped.agent('P', { label: 'verify', overBudget: true }), null);
+    assert.deepEqual(labels(calls), ['a', 'verify', 'verify retry', PROBE]);
+    assert.ok(!('overBudget' in calls[3]), 'the flag is not passed on');
+    assert.deepEqual(state.refused, []);
+    assert.ok(!state.unavailable);
+    assert.equal(state.agents, 4);
+  });
+  await t.test('dead probe: the latch is set', async () => {
+    const { io, calls } = baseIo({ a: [1], verify: [null], 'verify retry': [null], [PROBE]: [null] });
+    const state = newState();
+    const wrapped = makeIo(cap, io, state);
+    await wrapped.agent('P', { label: 'a' });
+    assert.deepEqual(await wrapped.agent('P', { label: 'verify', overBudget: true }), UNAVAILABLE);
+    assert.deepEqual(labels(calls), ['a', 'verify', 'verify retry', PROBE]);
+    assert.equal(state.unavailable, true);
+    assert.deepEqual(state.refused, ['verify']);
+  });
+});
+
+test('a probe that throws rejects the call, sets no latch, and a later dead pair probes again', async () => {
+  const { io, calls } = baseIo({
+    X: [null], 'X retry': [null], [PROBE]: [new Error('probe failed'), LIVE], Y: [null], 'Y retry': [null],
+  });
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  await assert.rejects(wrapped.agent('P', { label: 'X' }), /probe failed/);
+  assert.ok(!state.unavailable);
+  assert.equal(state.unavailableInfo, undefined);
+  assert.deepEqual(state.refused, []);
+  assert.equal(await wrapped.agent('P', { label: 'Y' }), null);
+  assert.deepEqual(labels(calls), ['X', 'X retry', PROBE, 'Y', 'Y retry', PROBE]);
+});
+
 test('in a typed run the probe is untyped and leaves the agent type alone', async (t) => {
   await t.test('typed null, untyped retry null', async () => {
     const { io, calls } = baseIo({ 'T2 implement': [null], 'T2 implement retry': [null], [PROBE]: [null] });
