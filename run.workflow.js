@@ -971,12 +971,14 @@ function repairLimit(m) {
 
 // The agent slots a repair attempt needs free before it starts (spec 4.5):
 // the repair, its verify (over budget but counted) and the re-review that
-// must follow, each with makeIo's one automatic retry (6); plus the hook
-// rechecks a moved head makes necessary: the e2e recheck (a FAIL reruns it,
-// each with a retry: 4) and the post-integrate recheck (2; none under lite).
+// must follow, each with makeIo's one automatic retry (6), and the
+// availability probe a dead pair among them may start (1, spec 4.1): 7; plus
+// the hook rechecks a moved head makes necessary: the e2e recheck (a FAIL
+// reruns it, each with a retry: 4) and the post-integrate recheck (2; none
+// under lite).
 function repairReserve(m) {
   const hooks = (m && m.hooks) || {};
-  return 6 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
+  return 7 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
 }
 
 // The dry run's checks summary (spec 4.9). Units are the units with work,
@@ -3136,7 +3138,8 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 //
 // makeIo wraps io.agent so every spawn of the run goes through one place:
 // it retries a dead agent (null result) once, counts agents and rulings in
-// state ({agents, rulings, refused, spawned?, untyped?, typedNulls?}),
+// state ({agents, rulings, refused, spawned?, untyped?, typedNulls?,
+// results?, unavailable?, unavailableInfo?}),
 // records each agent it starts as {label, model, effort} in state.spawned
 // (created on first use; in start order; refused calls add nothing), and
 // refuses calls past the limits of effectiveLimits(m). A refused call spawns nothing and returns the
@@ -3161,17 +3164,39 @@ async function adjudicate(m, ctx, io = { agent, log }) {
 // agent alone is not a sign of a broken type). runAll reports the latch as
 // agent_type_fallback. Untyped spawns retry on null only; their throw
 // propagates.
+//
+// Agents unavailable (spec 4.1): a dead pair is one call whose spawn and its
+// automatic retry both returned null (a typed spawn that throws and whose
+// untyped retry returns null is one too). While neither latched nor refused,
+// a dead pair starts one availability probe: a direct spawn (no retry, no
+// agent type) on the dead call's model and in its phase, at low effort,
+// labelled 'availability probe', counted as an agent and
+// never as a ruling. Concurrent dead pairs share the probe in flight. A probe
+// that answers means the deaths were the task's own: the call returns null
+// and a later dead pair probes again. A probe the budget refuses returns its
+// budget sentinel, with no latch. A probe that returns null sets the latch:
+// state.unavailable = true, state.unavailableInfo = {trigger, probe,
+// results_before} (results_before is state.results at the latch), the
+// trigger's label goes onto state.refused at once and the label of every call
+// that shared the probe after it; those calls and every later spawn,
+// overBudget included, return {__budget: true, __unavailable: true}. A dead
+// pair seen once the latch is set (a retry that was in flight) returns null
+// as before and probes nothing. A probe that throws is an untyped
+// throw: it propagates. state.results (created on first use) counts the
+// spawns that returned a result, the probe aside.
 function makeIo(m, baseIo, state) {
   const limits = effectiveLimits(m);
+  const PROBE_LABEL = 'availability probe';
   const refuse = (label) => {
     state.refused.push(label);
     baseIo.log(`parallel-lanes: budget exhausted: ${label} was not run`);
-    return { __budget: true };
+    return state.unavailable ? { __budget: true, __unavailable: true } : { __budget: true };
   };
   const isRuling = (label) => / adjudicate( retry)?$/.test(label);
-  const spawn = (prompt, given) => {
+  const spawn = async (prompt, given) => {
     const { overBudget, ...opts } = given;
     const label = opts.label;
+    if (state.unavailable) return refuse(label);
     if (!overBudget && (state.refused.length > 0 || state.agents >= limits.max_agents)) return refuse(label);
     const ruling = isRuling(label);
     if (ruling && state.rulings >= limits.max_rulings) return refuse(label);
@@ -3184,39 +3209,89 @@ function makeIo(m, baseIo, state) {
       model: opts.model === undefined ? null : opts.model,
       effort: opts.effort === undefined ? null : opts.effort,
     });
-    return baseIo.agent(prompt, opts);
+    const r = await baseIo.agent(prompt, opts);
+    if (r !== null && r !== undefined && label !== PROBE_LABEL) state.results = (state.results || 0) + 1;
+    return r;
+  };
+  // The probe in flight, shared by concurrent dead pairs; cleared when the
+  // probe answers or throws, kept once it returned null (the latch is set).
+  let probing = null;
+  const probeOnce = (dead) => {
+    if (probing) return probing;
+    const trigger = dead.label;
+    const prompt = 'Availability check for a parallel-lanes run. Read no files and run no commands:'
+      + ' reply only with {"ok": true}.';
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] };
+    // In the dead call's phase, on its model.
+    probing = spawn(prompt, {
+      label: PROBE_LABEL,
+      ...(dead.phase === undefined ? {} : { phase: dead.phase }),
+      ...(dead.model === undefined ? {} : { model: dead.model }),
+      effort: 'low',
+      schema,
+    }).then((p) => {
+      if (p !== null && p !== undefined) {
+        probing = null;
+        return p;
+      }
+      state.unavailable = true;
+      state.unavailableInfo = { trigger, probe: PROBE_LABEL, results_before: state.results || 0 };
+      state.refused.push(trigger);
+      baseIo.log(`parallel-lanes: agents unavailable: ${trigger} and its retry returned no result,`
+        + ` and the ${PROBE_LABEL} did not answer; no further agents start`);
+      return p;
+    }, (e) => {
+      probing = null;
+      throw e;
+    });
+    return probing;
+  };
+  const afterDeadPair = async (opts, r) => {
+    if (state.unavailable || state.refused.length > 0) return r;
+    const shared = probing !== null;
+    const p = await probeOnce(opts);
+    if (p !== null && p !== undefined) return p.__budget ? p : r;
+    // The latch pushed the trigger; a call that shared the probe adds its own.
+    if (shared) state.refused.push(opts.label);
+    return { __budget: true, __unavailable: true };
+  };
+  const call = async (prompt, opts) => {
+    const retry = () => spawn(prompt, { ...opts, label: `${opts.label} retry` });
+    const agentType = state.untyped ? null : agentTypeFor(m, opts.label);
+    if (agentType === null) {
+      const r = await spawn(prompt, opts);
+      if (r !== null && r !== undefined) return r;
+      return retry();
+    }
+    const fallBack = (why) => {
+      if (!state.untyped) {
+        baseIo.log(`parallel-lanes: ${opts.label} failed as agent type ${agentType} (${why});`
+          + ' it and every later agent run on the default type');
+      }
+      state.untyped = true;
+    };
+    let r;
+    try {
+      r = await spawn(prompt, { ...opts, agentType });
+    } catch (e) {
+      fallBack(e && e.message ? e.message : String(e));
+      return retry();
+    }
+    if (r !== null && r !== undefined) return r;
+    const again = await retry();
+    if (again !== null && again !== undefined && !(again && again.__budget)) {
+      state.typedNulls = (state.typedNulls || 0) + 1;
+      if (state.typedNulls >= 2) fallBack('a second typed agent returned no result and its untyped retry did');
+    }
+    return again;
   };
   return {
     ...baseIo,
     agent: async (prompt, opts) => {
-      const retry = () => spawn(prompt, { ...opts, label: `${opts.label} retry` });
-      const agentType = state.untyped ? null : agentTypeFor(m, opts.label);
-      if (agentType === null) {
-        const r = await spawn(prompt, opts);
-        if (r !== null && r !== undefined) return r;
-        return retry();
-      }
-      const fallBack = (why) => {
-        if (!state.untyped) {
-          baseIo.log(`parallel-lanes: ${opts.label} failed as agent type ${agentType} (${why});`
-            + ' it and every later agent run on the default type');
-        }
-        state.untyped = true;
-      };
-      let r;
-      try {
-        r = await spawn(prompt, { ...opts, agentType });
-      } catch (e) {
-        fallBack(e && e.message ? e.message : String(e));
-        return retry();
-      }
+      // Every null result has been retried once: a null here is a dead pair.
+      const r = await call(prompt, opts);
       if (r !== null && r !== undefined) return r;
-      const again = await retry();
-      if (again !== null && again !== undefined && !(again && again.__budget)) {
-        state.typedNulls = (state.typedNulls || 0) + 1;
-        if (state.typedNulls >= 2) fallBack('a second typed agent returned no result and its untyped retry did');
-      }
-      return again;
+      return afterDeadPair(opts, r);
     },
   };
 }

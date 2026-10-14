@@ -82,10 +82,12 @@ function manifest(extra = {}) {
 }
 
 // The notice lines the script logs before its first agent (pre-flight
-// returns null, so the run stops right after).
+// returns null, so the run stops right after; the availability probe that
+// dead pair starts answers, so no agents-unavailable line is logged).
 async function loggedNotices(m) {
   const logs = [];
-  await loadScript({ args: m, agent: async () => null, log: (msg) => logs.push(msg) });
+  const agent = async (prompt, opts) => (opts.label === 'availability probe' ? { ok: true } : null);
+  await loadScript({ args: m, agent, log: (msg) => logs.push(msg) });
   // The fixed notices start with 'parallel-lanes:'; the version line
   // ('parallel-lanes v<version> loaded') is not one of them.
   return logs.filter((l) => l.startsWith('parallel-lanes:'));

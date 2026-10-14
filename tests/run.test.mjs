@@ -99,7 +99,9 @@ function taskScript(ids) {
 }
 
 // Run the whole script body with stub globals. Unscripted agent labels
-// throw, so unexpected calls fail the test.
+// throw, so unexpected calls fail the test. The one exception is makeIo's
+// availability probe after a dead pair (a null and a null retry): unless a
+// test scripts it, it answers, as on a platform whose agents are available.
 async function run(m, script) {
   const calls = [];
   const logs = [];
@@ -107,6 +109,7 @@ async function run(m, script) {
   const agent = async (prompt, opts) => {
     calls.push({ prompt, ...opts });
     const queue = script[opts.label];
+    if (opts.label === 'availability probe' && !queue) return { ok: true };
     if (!queue || queue.length === 0) throw new Error(`unscripted agent call: ${opts.label}`);
     return queue.shift();
   };
@@ -348,7 +351,7 @@ test('a pre-flight agent that returns null twice stops the run', async () => {
     phaseScript({ 'pre-flight': [null], 'pre-flight retry': [null] }));
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'no result from pre-flight');
-  assert.deepEqual(labels(calls), ['pre-flight', 'pre-flight retry']);
+  assert.deepEqual(labels(calls), ['pre-flight', 'pre-flight retry', 'availability probe']);
 });
 
 test('setup lists discarded changes and the refs that saved them via log', async () => {
@@ -494,7 +497,7 @@ test('a stopped prelude stops the run before any lane', async () => {
   const script = { ...phaseScript(), 'T1 implement': [null], 'T1 implement retry': [null] };
   const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
   assert.equal(result.status, 'stopped');
-  assert.deepEqual(labels(calls), ['pre-flight', 'T1 implement', 'T1 implement retry']);
+  assert.deepEqual(labels(calls), ['pre-flight', 'T1 implement', 'T1 implement retry', 'availability probe']);
   assert.deepEqual(result.stopped_lanes.map((s) => s.lane), ['prelude']);
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
 });

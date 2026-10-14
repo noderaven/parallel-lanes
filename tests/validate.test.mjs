@@ -75,10 +75,10 @@ test('harness runs the script body with stubs: a run starts with the pre-flight 
     args: validManifest(),
     agent: async (prompt, opts) => {
       labels.push(opts.label);
-      return null;
+      return opts.label === 'availability probe' ? { ok: true } : null;
     },
   });
-  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry']);
+  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry', 'availability probe']);
   assert.equal(result.status, 'stopped');
 });
 
@@ -106,10 +106,10 @@ test('a manifest without hooks validates and runs as if hooks were {}', async ()
     args: m,
     agent: async (prompt, opts) => {
       labels.push(opts.label);
-      return null;
+      return opts.label === 'availability probe' ? { ok: true } : null;
     },
   });
-  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry']);
+  assert.deepEqual(labels, ['pre-flight', 'pre-flight retry', 'availability probe']);
   assert.equal(result.status, 'stopped');
   // A hooks value that is present is still checked.
   assertError(validateManifest({ ...m, hooks: null }), 'hooks: must be an object');

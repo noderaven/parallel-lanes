@@ -388,8 +388,9 @@ checks.
   `head_after`, a clean checkout, and a failing exit that is not 124, 128 or above, or
   negative (a timeout or a signal is not a defect to fix).
 - Admitted only while `repairReserve` agents are free and fewer than 2 repairs were made in the
-  run (`repairs_spent` carries earlier launches'). The reserve is 6 (the repair, its verify and
-  the re-review that must follow, each with one retry), plus 4 with an e2e hook and 2 with a
+  run (`repairs_spent` carries earlier launches'). The reserve is 7 (the repair, its verify and
+  the re-review that must follow, each with one retry, and the availability probe a dead pair
+  among them may start), plus 4 with an e2e hook and 2 with a
   post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
   is ever refused.
 - One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
