@@ -536,12 +536,180 @@ test('setup: changes it discards are saved first in a commit under a run ref', (
   assert.match(saved.ref, /^refs\/parallel-lanes\/r1\/abandoned\/lane-a-\d{8}T\d+Z$/);
   assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
   assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), laneHead);
+  // Nothing staged (index equal to HEAD, untracked files aside): one commit.
+  assert.equal(saved.index_commit, null);
+  assert.equal(saved.index_saved, true);
   assert.equal(git(c.project, 'show', `${saved.commit}:README.md`), 'edited');
   assert.equal(git(c.project, 'show', `${saved.commit}:new file.txt`), 'untracked');
   assert.equal(sh('git', ['-C', c.project, 'cat-file', '-e', `${saved.commit}:scratch/keep.txt`]).code === 0, false);
   // The worktree itself was discarded, ignored scratch kept.
   assert.equal(git(laneDir(c, 'a'), 'status', '--porcelain'), '');
   assert.equal(readFileSync(join(laneDir(c, 'a'), 'scratch', 'keep.txt'), 'utf8'), 'ignored\n');
+});
+
+// --- C3: the recovery snapshot keeps the staged version ------------------------
+
+// A case whose lane a was set up once, so the next setup reuses it and
+// discards its changes. Every case path has a space in it ('wt root').
+function reusedLane() {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  const wt = laneDir(c, 'a');
+  return { c, m, wt, head: git(wt, 'rev-parse', 'HEAD') };
+}
+
+// git status --porcelain, untrimmed (a leading space is part of a status).
+const porcelain = (wt) => sh('git', ['-C', wt, 'status', '--porcelain']).stdout.replace(/\r\n/g, '\n');
+
+// The documented restore: the files from commit, then the index from
+// index_commit (HEAD when it is null: nothing was staged).
+function restore(wt, saved) {
+  git(wt, 'checkout', saved.commit, '--', '.');
+  git(wt, 'read-tree', saved.index_commit || 'HEAD');
+}
+
+// Asserts that saved holds an index commit on head with the staged content
+// and a working commit on top of it with the working content, for file rel.
+function assertTwoCommits(c, saved, head, rel, staged, working) {
+  assert.equal(saved.index_saved, true);
+  assert.equal('index_error' in saved, false);
+  assert.match(saved.index_commit, /^[0-9a-f]{40,64}$/);
+  assert.notEqual(saved.index_commit, saved.commit);
+  assert.equal(git(c.project, 'rev-parse', `${saved.index_commit}^`), head);
+  assert.equal(git(c.project, 'show', `${saved.index_commit}:${rel}`), staged);
+  assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
+  assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), saved.index_commit);
+  assert.equal(git(c.project, 'show', `${saved.commit}:${rel}`), working);
+}
+
+for (const [label, rel, status] of [['a staged then edited file (MM)', 'README.md', 'MM'],
+  ['a new staged then edited file (AM)', 'added file.txt', 'AM']]) {
+  test(`setup: ${label} is saved as an index commit under the working snapshot, and both restore`, () => {
+    const { c, m, wt, head } = reusedLane();
+    assert.match(wt, / /);
+    write(wt, rel, 'staged\n');
+    git(wt, 'add', '--', rel);
+    write(wt, rel, 'working\n');
+    const before = porcelain(wt);
+    assert.match(before, new RegExp(`^${status} `));
+    const result = setupOk(c, m);
+    assert.equal(result.preserved.length, 1);
+    const [saved] = result.preserved;
+    assert.ok(samePath(saved.worktree, wt), saved.worktree);
+    assertTwoCommits(c, saved, head, rel, 'staged', 'working');
+    assert.equal(porcelain(wt), '');
+    restore(wt, saved);
+    assert.equal(porcelain(wt), before);
+    assert.match(git(wt, 'diff', '--cached'), /^\+staged$/m);
+    assert.equal(readFileSync(join(wt, rel), 'utf8'), 'working\n');
+  });
+}
+
+test('setup: a staged file with no further edit (A ) still gives an index commit', () => {
+  const { c, m, wt, head } = reusedLane();
+  write(wt, 'only staged.txt', 'staged\n');
+  git(wt, 'add', '--', 'only staged.txt');
+  assert.equal(porcelain(wt), 'A  "only staged.txt"\n');
+  const [saved] = setupOk(c, m).preserved;
+  assertTwoCommits(c, saved, head, 'only staged.txt', 'staged', 'staged');
+  restore(wt, saved);
+  assert.equal(porcelain(wt), 'A  "only staged.txt"\n');
+});
+
+test('setup: an unstaged edit only gives one commit on the lane HEAD and restores unstaged', () => {
+  const { c, m, wt, head } = reusedLane();
+  write(wt, 'README.md', 'edited\n');
+  assert.equal(porcelain(wt), ' M README.md\n');
+  const [saved] = setupOk(c, m).preserved;
+  assert.equal(saved.index_commit, null);
+  assert.equal(saved.index_saved, true);
+  assert.equal('index_error' in saved, false);
+  assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), head);
+  restore(wt, saved);
+  assert.equal(porcelain(wt), ' M README.md\n');
+});
+
+test('setup: an intent-to-add file (git add -N) comes back untracked after the restore', () => {
+  const { c, m, wt, head } = reusedLane();
+  write(wt, 'intent.txt', 'not staged yet\n');
+  git(wt, 'add', '-N', '--', 'intent.txt');
+  assert.equal(porcelain(wt), ' A intent.txt\n');
+  const [saved] = setupOk(c, m).preserved;
+  assert.equal(saved.index_saved, true);
+  assert.equal(saved.index_commit, null, 'an intent-to-add entry is not in the index tree');
+  assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), head);
+  assert.equal(git(c.project, 'show', `${saved.commit}:intent.txt`), 'not staged yet');
+  assert.equal(existsSync(join(wt, 'intent.txt')), false);
+  restore(wt, saved);
+  assert.equal(porcelain(wt), '?? intent.txt\n');
+  assert.equal(readFileSync(join(wt, 'intent.txt'), 'utf8'), 'not staged yet\n');
+});
+
+test('setup: an unmerged index is not saved (git says why), the working copy is, and setup succeeds', () => {
+  const { c, m, wt } = reusedLane();
+  git(wt, 'branch', 'side');
+  write(wt, 'README.md', 'ours\n');
+  git(wt, 'commit', '-qam', 'ours');
+  git(wt, 'switch', '-q', 'side');
+  write(wt, 'README.md', 'theirs\n');
+  git(wt, 'commit', '-qam', 'theirs');
+  git(wt, 'switch', '-q', 'pl-r1-a');
+  const head = git(wt, 'rev-parse', 'HEAD');
+  assert.equal(sh('git', ['-C', wt, 'merge', '-q', 'side']).code, 1);
+  assert.equal(porcelain(wt), 'UU README.md\n');
+  const result = setupOk(c, m);
+  assert.equal(result.preserved.length, 1);
+  const [saved] = result.preserved;
+  assert.equal(saved.index_saved, false);
+  assert.equal(saved.index_commit, null);
+  assert.match(saved.index_error, /unmerged/);
+  assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
+  assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), head);
+  assert.match(git(c.project, 'show', `${saved.commit}:README.md`), /^<<<<<<< .*\nours\n=======\ntheirs\n>>>>>>> side$/s);
+  assert.equal(porcelain(wt), '');
+});
+
+// snapshot(path, run_id) of scripts/setup, called directly (its main does not
+// run); prints the preserved entry it returns.
+const CALL_SNAPSHOT = [
+  'import importlib.machinery, importlib.util, json, sys',
+  'sys.dont_write_bytecode = True',
+  "loader = importlib.machinery.SourceFileLoader('setup_script', sys.argv[1])",
+  'mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))',
+  'loader.exec_module(mod)',
+  'print(json.dumps(mod.snapshot(sys.argv[2], sys.argv[3])))',
+];
+
+test('setup: a held index.lock fails the staged save and then the reset; the changes stay saved and on disk', () => {
+  const { c, m, wt, head } = reusedLane();
+  write(wt, 'README.md', 'edited\n');
+  const lock = git(wt, 'rev-parse', '--path-format=absolute', '--git-path', 'index.lock');
+  writeFileSync(lock, '');
+  try {
+    // The snapshot itself: no index commit, git's message, the working snapshot made.
+    const out = sh('python3', ['-c', CALL_SNAPSHOT.join('\n'), join(SCRIPTS, 'setup'), wt, 'r1']);
+    assert.equal(out.code, 0, out.stderr);
+    const saved = JSON.parse(out.stdout);
+    assert.equal(saved.index_saved, false);
+    assert.equal(typeof saved.index_error, 'string');
+    assert.ok(saved.index_error.length > 0, 'git says why');
+    assert.equal(saved.index_commit, null);
+    assert.equal(git(c.project, 'rev-parse', saved.ref), saved.commit);
+    assert.equal(git(c.project, 'rev-parse', `${saved.commit}^`), head);
+    // setup on the same state: the reset --hard fails on the lock after the save.
+    const res = setup(c, m);
+    assert.equal(res.code, 1, res.stderr);
+    assert.equal(res.stdout, '');
+    assert.match(res.stderr, /git .*reset -q --hard HEAD failed/);
+    const refs = git(c.project, 'for-each-ref', '--format=%(refname)', 'refs/parallel-lanes/r1/abandoned/')
+      .split('\n').filter((r) => /\/lane-a-\d{8}T\d+Z$/.test(r) && r !== saved.ref);
+    assert.equal(refs.length, 1, 'setup saved the changes before the reset failed');
+    assert.equal(git(c.project, 'show', `${refs[0]}:README.md`), 'edited');
+    assert.equal(readFileSync(join(wt, 'README.md'), 'utf8'), 'edited\n');
+  } finally {
+    rmSync(lock, { force: true });
+  }
 });
 
 test('setup: run_started records the plan and spec hashes', () => {

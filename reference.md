@@ -1474,8 +1474,17 @@ run; "cannot be written" = permissions (in both nothing was written; show them a
 "writeback failed at" = a write failed midway; show the paths it lists as already written.
 
 A worktree with uncommitted files stays; list it for the user. Changes setup discarded are
-saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`): restore one
-with `git -C <wt> checkout <commit> -- .`, and once the user no longer needs it, delete it
+saved under `refs/parallel-lanes/<run_id>/abandoned/` (`setup_result.preserved`). Each entry's
+`commit` holds the working copy; when something was staged, its parent `index_commit` holds the
+staged version (from `git write-tree` on the worktree's index), otherwise `index_commit` is null
+and the parent is the worktree's HEAD. `write-tree` on the index can fail (an unmerged index, a
+held `index.lock`): `index_saved` is then false with git's message in `index_error`, the staged
+version is not saved, and setup goes on with the working-copy snapshot. A held `index.lock`
+then also fails the `reset --hard` that follows, as before, so setup exits 1 and the changes
+stay both in the worktree and in the saved ref. Restore one with `git -C <wt> checkout <commit>
+-- .` (the files), then `git -C <wt> read-tree <index_commit>` (what was staged; `git -C <wt>
+read-tree HEAD` when `index_commit` is null, as nothing was staged); intent-to-add files come
+back untracked. Once the user no longer needs it, delete it
 with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove`, then run `shadow remove` (it deletes the shadow
