@@ -25,7 +25,10 @@ without --out):
                 "log": <absolute path of its log>,
                 "tail": <its last 20 lines, joined with \\n; at most the
                          last 4096 characters of them, starting with
-                         "[truncated] " when cut>}],
+                         "[truncated] " when cut>,
+                "busy_retry": <only when the command was retried (below):
+                               {"first_exit": 75, "waited_s": <the
+                               seconds waited, an integer>}>}],
    "ok": <true when every exit is 0>, "clean": <true when the after
    snapshot is empty>,
    "tracked_before": [<the before snapshot's lines that do not start with
@@ -39,6 +42,17 @@ without --out):
    "tree_changed": <true when the content fingerprints taken before the
                     first command and after the last differ, false when
                     they are equal, null when either could not be taken>}
+
+The busy retry: a command that exits 75 (sysexits EX_TEMPFAIL, busy or
+temporary, for example another program holding the project open) is waited
+on for 60 s (RUN_CHECKS_BUSY_WAIT_S, a non-negative integer, overrides the
+wait, for tests) and run once more, with its output appended to the same log
+after a separator line; the second exit is its result, even 75 again. Its
+entry keeps started from the first attempt and ended from the second, so
+duration_s spans both attempts and the wait, and carries busy_retry. Only
+exit 75 is retried, and only once; every other exit, 124 (a timeout)
+included, is the result of a single run. The snapshots and fingerprints are
+taken once around the whole command list, as for any command.
 
 The fingerprint (fingerprint below) is a sha256 over HEAD, the output of
 git diff HEAD --binary --no-ext-diff --no-textconv, and each untracked,
@@ -127,6 +141,8 @@ TAIL_LINES = 20
 TAIL_CHARS = 4096
 TAIL_WINDOW = 65536  # bytes read from the end of a log for its tail
 TRUNCATED = "[truncated] "
+BUSY_EXIT = 75  # sysexits EX_TEMPFAIL: busy or temporary, retried once
+BUSY_WAIT_S = 60
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] [--lock-held] "
          "--cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
@@ -352,6 +368,22 @@ def tail_of(path):
     return TRUNCATED + tail if cut else tail
 
 
+def busy_wait_s():
+    """The seconds to wait before a busy command's one retry:
+    RUN_CHECKS_BUSY_WAIT_S when it is a non-negative integer (for tests),
+    else BUSY_WAIT_S."""
+    value = os.environ.get("RUN_CHECKS_BUSY_WAIT_S", "").strip()
+    return int(value) if value.isascii() and value.isdigit() else BUSY_WAIT_S
+
+
+def run_command(command, directory, f):
+    """Run command with bash -c in directory, its stdout and stderr to the
+    open log f; return its exit code."""
+    res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV,
+                         stdout=f, stderr=subprocess.STDOUT)
+    return res.returncode
+
+
 def main(argv):
     global _record
     _shell.setup_io()
@@ -411,14 +443,28 @@ def run(directory, out, root, cmds, descends=None):
     fingerprint_before = fingerprint(directory)
     results = []
     for (group, command), log in zip(cmds, logs):
+        retry = None
         with open(log, "wb") as f:
             started, t0 = utc_stamp(), time.monotonic()
-            res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV,
-                                 stdout=f, stderr=subprocess.STDOUT)
+            code = run_command(command, directory, f)
+            if code == BUSY_EXIT:
+                # Busy or temporary: wait, then run it once more into the same
+                # log; the second exit is the result.
+                waited = busy_wait_s()
+                f.seek(0, os.SEEK_END)
+                f.write(f"\n[run-checks: exit {BUSY_EXIT} (busy); waiting {waited} s, "
+                        f"then running the command once more]\n".encode("ascii"))
+                f.flush()
+                time.sleep(waited)
+                retry = {"first_exit": code, "waited_s": waited}
+                code = run_command(command, directory, f)
             duration, ended = time.monotonic() - t0, utc_stamp()
-        results.append({"group": group, "command": command, "exit": res.returncode,
-                        "started": started, "ended": ended, "duration_s": round(duration, 3),
-                        "log": log, "tail": tail_of(log)})
+        result = {"group": group, "command": command, "exit": code,
+                  "started": started, "ended": ended, "duration_s": round(duration, 3),
+                  "log": log, "tail": tail_of(log)}
+        if retry is not None:
+            result["busy_retry"] = retry
+        results.append(result)
     fingerprint_after = fingerprint(directory)
     finish = snapshot(directory)
     tracked_after = tracked_lines(directory, finish)
