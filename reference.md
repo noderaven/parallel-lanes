@@ -143,8 +143,8 @@ and, under `agents_unavailable` only, if it starts with `agents unavailable:` (a
 agent the latch refused). So `agents_unavailable` is transient only when every other cause is
 transient too: a lane already stopped at `review_rounds`, a supervised question and the like
 keep their own cause, the stop is real, and Resume step 4 applies. A stop with
-`agents_unavailable` and no `stopped_lanes` entry (the latch hit in integration or the final
-phase) is transient. Then run stop-cause and follow "Usage limit". The doctor rerun before a
+`agents_unavailable` and no `stopped_lanes` entry (the latch hit outside a lane: pre-flight, run
+adjudicate, integration, post-integrate, E2E or the final phase) is transient. Then run stop-cause and follow "Usage limit". The doctor rerun before a
 relaunch is described under "Launch conditions".
 
 **Budget carry-over** (SKILL.md's relaunch step): lower `limits.max_agents` by the
@@ -623,7 +623,8 @@ exits 3 with `active-run: <path> is held; if no active-run is running, remove it
 directory only when no `active-run` is running.
 
 Transient vs real stops (SKILL.md "Transient stops"): only agent errors, missing results
-(`no result from ...`, `error: ...`), and setup-command retry exhaustion (`setup failed`) are
+(`no result from ...`, `error: ...`), setup-command retry exhaustion (`setup failed`), and
+`agents_unavailable` under the conditions in "Transient stops" and "Usage limit" are
 transient and relaunch once without asking. `review_rounds`, a supervised blocked or question
 task, `adjudication_cap`, `adjudicator_stop: <condition>`, `budget`, failed integration or
 post-integrate on real failures, `invalid`, and `preflight_conflicts` always stop for the
@@ -1675,8 +1676,8 @@ version is not saved, and setup goes on with the working-copy snapshot. A held `
 then also fails the `reset --hard` that follows, as before, so setup exits 1 and the changes
 stay both in the worktree and in the saved ref. Restore one with `git -C <wt> checkout <commit>
 -- .` (the files), then `git -C <wt> read-tree <index_commit>` (what was staged; `git -C <wt>
-read-tree HEAD` when `index_commit` is null, as nothing was staged); intent-to-add files come
-back untracked. Once the user no longer needs it, delete it
+read-tree HEAD` when `index_commit` is null: nothing was staged, or, with `index_saved` false,
+the staged version could not be saved); intent-to-add files come back untracked. Once the user no longer needs it, delete it
 with `git -C <root> update-ref -d <ref>`. In shadow mode remove the lane
 worktrees first, then `<worktree_root>/feature` with the same status check and
 `git --git-dir="<git_dir>" -c status.showUntrackedFiles=all worktree remove`, then run `shadow remove` (it deletes the shadow

@@ -48,7 +48,7 @@ USAGE = "usage: stop-cause TRANSCRIPT_DIR"
 #        5am (America/Los_Angeles)
 # The first entry whose line pattern matches decides for that line.
 LIMIT_PATTERNS = (
-    (re.compile(r"^\[[^\]]+\] failed: .*\bhit your (?:\w+ )?limit\b"),
+    (re.compile(r"^\[[^\]]+\] failed: .*\bhit your (?:\w+ ){0,3}limit\b"),
      re.compile(r"resets (.+?)\s*$")),
 )
 

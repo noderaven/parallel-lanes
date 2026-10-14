@@ -60,7 +60,8 @@ index.lock then also fails the reset --hard that follows, so setup exits 1
 and the changes stay both in the worktree and in the saved ref. Restore one
 in that worktree with git checkout <commit> -- . (the files), then git
 read-tree <index_commit> (what was staged; git read-tree HEAD when
-index_commit is null, as nothing was staged). Intent-to-add entries are not
+index_commit is null: nothing was staged, or, with index_saved false, the
+staged version could not be saved). Intent-to-add entries are not
 in the index tree and come back untracked. An existing non-empty
 directory that is not such a worktree is refused (exit 3) and left alone. No
 worktree is removed and no branch is deleted.

@@ -92,7 +92,7 @@ function adjudicatorPrompt(m, ctx) {
     agentRules(),
     // The exit-code contract (1.6.2 spec 4.3).
     'A check that failed only with exit 75 (the project was busy), 124 (it timed out), or 128 or above (killed by',
-    'a signal) is not a defect to fix: never rule a change to code, tests, timeouts or commands for it.',
+    'a signal) or a negative code is not a defect to fix: never rule a change to code, tests, timeouts or commands for it.',
     '',
     'Outcomes (pick exactly one):',
     '- answer: your text answers the question or settles the blocker; it is given to the task as its note and',

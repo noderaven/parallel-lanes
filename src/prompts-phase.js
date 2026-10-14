@@ -39,7 +39,7 @@ function layoutText(m) {
 // conflicting, and tests_failed (optional) says a project command still fails
 // after the merges so a fix agent is needed instead of a hard stop.
 // checks_unfinished (optional, 1.6.2 spec 4.3) says every failing command
-// exited 75, 124, 128 or above: the checks did not finish, and no fix runs.
+// exited 75, 124, 128 or above, or a negative code: the checks did not finish, and no fix runs.
 function statusSchema() {
   return {
     type: 'object',
@@ -372,7 +372,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ? ', and conflict_files (the conflicting files on an aborted merge, else []).'
     : testFailure === 'heal'
       ? ', and tests_failed (true when a project command still fails after the merges) and checks_unfinished (true'
-        + ' when every failing command exited 75, 124, 128 or above, see step 3).'
+        + ' when every failing command exited 75, 124, 128 or above, or a negative code, see step 3).'
       : '.';
   const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
     '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
@@ -416,7 +416,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...(testFailure === 'heal' ? [
       '6. Only when steps 1-5 passed and you return tests_failed false (every project command passes), clean',
       '   up each lane. When you return tests_failed true, skip this step entirely: a fix agent and a rerun of',
-      '   these steps follow, and the rerun cleans up. Cleanup:',
+      '   these steps follow and the rerun cleans up (with checks_unfinished true the run stops instead and the',
+      '   lanes stay for the user). Cleanup:',
     ] : ['6. Only when steps 1-5 passed, clean up each lane:']),
     ...cleanup,
     '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',

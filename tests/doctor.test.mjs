@@ -859,6 +859,17 @@ test('usage_limit_pause reads autoContinueAtUsageLimit from the user and managed
   assert.equal(pauseOf(managedOn).pause, 'yes');
   assert.equal(pauseOf(managedOn).setting, true);
 
+  // A settings file that exists but lacks the key counts as unset, with no reason.
+  const bare = fakeDoctor(f.manifest(), { env, settings: { [user]: { model: 'x' } } });
+  assert.equal(pauseOf(bare).pause, 'yes');
+  assert.equal(pauseOf(bare).setting, null);
+  assert.deepEqual(pauseOf(bare).reasons, []);
+  assert.equal(outcome(bare, 'usage_limit_pause'), 'passed');
+  const empty = fakeDoctor(f.manifest(), { env, settings: { [user]: {} } });
+  assert.equal(pauseOf(empty).pause, 'yes');
+  assert.equal(pauseOf(empty).setting, null);
+  assert.deepEqual(pauseOf(empty).reasons, []);
+
   // A malformed file counts as unset, with a reason that it could not be read.
   const bad = fakeDoctor(f.manifest(), { env, settings: { [user]: 'raise' } });
   assert.equal(pauseOf(bad).pause, 'yes');

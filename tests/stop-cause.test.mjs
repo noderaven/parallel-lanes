@@ -86,6 +86,11 @@ test('a limit line without "resets" counts, with resets null', () => {
   assert.deepEqual(cause(dir), { usage_limit: true, resets: null, lines: 2 });
 });
 
+test('a limit line with a two-word wording counts', () => {
+  const dir = withLogs(["[A1 implement] failed: You've hit your weekly usage limit, resets 9am (Europe/Paris)"]);
+  assert.deepEqual(cause(dir), { usage_limit: true, resets: '9am (Europe/Paris)', lines: 1 });
+});
+
 test('the first limit line that names a reset gives resets', () => {
   const dir = withLogs([
     "[A1 implement] failed: You've hit your session limit",

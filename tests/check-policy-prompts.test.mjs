@@ -408,7 +408,7 @@ test('the adjudicator is told such a failure is not a defect to fix', () => {
   const where = laneWhere(m, lane(m, 'alpha'));
   const p = flat(adjudicatorPrompt(m, { kind: 'blocked', task: t(m, 'T2'), where, details: 'x', findings: [] }));
   assert.ok(p.includes('A check that failed only with exit 75 (the project was busy), 124 (it timed out), or 128 or '
-    + 'above (killed by a signal) is not a defect to fix'), p);
+    + 'above (killed by a signal) or a negative code is not a defect to fix'), p);
 });
 
 test('no prompt mentions Monitor, sleep or an output file', () => {
