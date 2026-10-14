@@ -89,12 +89,12 @@ test('a null result is retried once with the same opts and the retry result is u
 });
 
 test('a null retry result is returned as null and not retried again', async () => {
-  const { io, calls } = baseIo({ setup: [null], 'setup retry': [null] });
+  const { io, calls } = baseIo({ setup: [null], 'setup retry': [null], 'availability probe': [{ ok: true }] });
   const state = newState();
   const r = await makeIo(manifest(), io, state).agent('P', { label: 'setup' });
   assert.equal(r, null);
-  assert.deepEqual(labels(calls), ['setup', 'setup retry']);
-  assert.equal(state.agents, 2);
+  assert.deepEqual(labels(calls), ['setup', 'setup retry', 'availability probe'], 'the probe is no retry');
+  assert.equal(state.agents, 3);
 });
 
 test('a call past max_agents is refused without spawning, and every later call too', async () => {
@@ -299,6 +299,7 @@ test('a typed null whose retry also fails does not count toward the fallback', a
   const { io } = baseIo({
     'T2 implement': [null], 'T2 implement retry': [null],
     'T3 implement': [null], 'T3 implement retry': [null],
+    'availability probe': [{ ok: true }, { ok: true }],
   });
   const state = newState();
   const wrapped = makeIo(typed(), io, state);
@@ -337,6 +338,278 @@ test("makeIo lets an untyped spawn's throw propagate", async () => {
   await assert.rejects(makeIo(manifest(), io, state).agent('P', { label: 'T2 implement' }), /boom/);
   assert.deepEqual(labels(calls), ['T2 implement']);
   assert.ok(!state.untyped);
+});
+
+// ---- Agents unavailable (spec 4.1) ----
+
+const PROBE = 'availability probe';
+const UNAVAILABLE = { __budget: true, __unavailable: true };
+const LIVE = { ok: true };
+
+// A promise the test resolves by hand, to script the order in which
+// concurrent agents finish.
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
+// Let every pending continuation run.
+const settle = () => new Promise((res) => setImmediate(res));
+
+// baseIo with queued promises: the stub awaits a queued value, so a test can
+// hold an agent in flight until it resolves its deferred.
+function gatedIo(script) {
+  const made = baseIo(script);
+  const agent = made.io.agent;
+  made.io.agent = async (prompt, opts) => {
+    const queue = script[opts.label];
+    if (queue && queue.length > 0 && queue[0] && typeof queue[0].then === 'function') {
+      made.calls.push({ prompt, ...opts });
+      return queue.shift();
+    }
+    return agent(prompt, opts);
+  };
+  return made;
+}
+
+test('a dead pair with a live probe returns null, and later calls spawn as usual', async () => {
+  const { io, calls } = baseIo({
+    X: [null], 'X retry': [null], [PROBE]: [LIVE, LIVE], Y: [{ status: 'done' }], Z: [null], 'Z retry': [null],
+  });
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  assert.equal(await wrapped.agent('P', { label: 'X' }), null);
+  assert.deepEqual(labels(calls), ['X', 'X retry', PROBE]);
+  assert.ok(!state.unavailable);
+  assert.equal(state.unavailableInfo, undefined);
+  assert.deepEqual(state.refused, []);
+  assert.deepEqual(await wrapped.agent('P', { label: 'Y' }), { status: 'done' });
+  assert.equal(await wrapped.agent('P', { label: 'Z' }), null, 'a later dead pair probes again');
+  assert.deepEqual(labels(calls), ['X', 'X retry', PROBE, 'Y', 'Z', 'Z retry', PROBE]);
+  assert.equal(state.agents, 7);
+  assert.equal(state.results, 1, 'the probe answer is not a result');
+});
+
+test('a dead pair with a dead probe latches: every later call is refused, the verify too', async () => {
+  const { io, calls, logs } = baseIo({ W: [{ status: 'done' }], X: [null], 'X retry': [null], [PROBE]: [null] });
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  await wrapped.agent('P', { label: 'W' });
+  assert.deepEqual(await wrapped.agent('P', { label: 'X' }), UNAVAILABLE);
+  assert.equal(state.unavailable, true);
+  assert.deepEqual(state.refused, ['X']);
+  assert.deepEqual(state.unavailableInfo, { trigger: 'X', probe: PROBE, results_before: 1 });
+  assert.equal(logs.filter((l) => l.includes('agents unavailable')).length, 1);
+  assert.ok(logs.includes('parallel-lanes: agents unavailable: X and its retry returned no result,'
+    + ' and the availability probe did not answer; no further agents start'), logs.join('\n'));
+  assert.deepEqual(await wrapped.agent('P', { label: 'T2 implement' }), UNAVAILABLE);
+  assert.deepEqual(await wrapped.agent('P', { label: 'verify', overBudget: true }), UNAVAILABLE);
+  assert.deepEqual(labels(calls), ['W', 'X', 'X retry', PROBE]);
+  assert.deepEqual(state.refused, ['X', 'T2 implement', 'verify']);
+  assert.equal(state.agents, 4);
+  assert.equal(state.results, 1);
+});
+
+test('two concurrent dead pairs share one probe', async (t) => {
+  for (const [answer, expected] of [[null, UNAVAILABLE], [LIVE, null]]) {
+    await t.test(`probe ${answer === null ? 'dead' : 'live'}`, async () => {
+      const d = {};
+      for (const k of ['A', 'A retry', 'B', 'B retry', PROBE]) d[k] = deferred();
+      const script = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, [v.promise]]));
+      const { io, calls } = gatedIo(script);
+      const state = newState();
+      const wrapped = makeIo(manifest(), io, state);
+      const a = wrapped.agent('P', { label: 'A' });
+      const b = wrapped.agent('P', { label: 'B' });
+      d.A.resolve(null);
+      d.B.resolve(null);
+      await settle();
+      d['A retry'].resolve(null);
+      d['B retry'].resolve(null);
+      await settle();
+      assert.equal(labels(calls).filter((l) => l === PROBE).length, 1);
+      d[PROBE].resolve(answer);
+      assert.deepEqual(await a, expected);
+      assert.deepEqual(await b, expected);
+      assert.deepEqual(labels(calls), ['A', 'B', 'A retry', 'B retry', PROBE]);
+      if (answer === null) {
+        assert.equal(state.unavailableInfo.trigger, 'A');
+        assert.deepEqual(state.refused, ['A', 'B']);
+      } else {
+        assert.deepEqual(state.refused, []);
+      }
+    });
+  }
+});
+
+test('a single null with a live retry runs no probe', async () => {
+  const { io, calls } = baseIo({ X: [null], 'X retry': [{ status: 'done' }] });
+  const state = newState();
+  assert.deepEqual(await makeIo(manifest(), io, state).agent('P', { label: 'X' }), { status: 'done' });
+  assert.deepEqual(labels(calls), ['X', 'X retry']);
+  assert.ok(!state.unavailable);
+  assert.equal(state.results, 1);
+});
+
+test('after a budget refusal a dead pair runs no probe', async () => {
+  const { io, calls } = baseIo({ a: [1], verify: [null], 'verify retry': [null] });
+  const state = newState();
+  const wrapped = makeIo(manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } }), io, state);
+  await wrapped.agent('P', { label: 'a' });
+  assert.deepEqual(await wrapped.agent('P', { label: 'b' }), { __budget: true });
+  assert.equal(await wrapped.agent('P', { label: 'verify', overBudget: true }), null);
+  assert.deepEqual(labels(calls), ['a', 'verify', 'verify retry']);
+  assert.ok(!state.unavailable);
+  assert.deepEqual(state.refused, ['b']);
+});
+
+test('a probe refused by the budget returns the budget sentinel and sets no latch', async () => {
+  const { io, calls } = baseIo({ X: [null], 'X retry': [null] });
+  const state = newState();
+  const wrapped = makeIo(manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 2 } }), io, state);
+  const r = await wrapped.agent('P', { label: 'X' });
+  assert.deepEqual(r, { __budget: true });
+  assert.ok(!('__unavailable' in r));
+  assert.deepEqual(labels(calls), ['X', 'X retry']);
+  assert.ok(!state.unavailable);
+  assert.equal(state.unavailableInfo, undefined);
+  assert.deepEqual(state.refused, [PROBE]);
+});
+
+test('an overBudget verify that dies at the agent cap probes past the cap', async (t) => {
+  const cap = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 1 } });
+  await t.test('live probe: the verify returns null and nothing is refused', async () => {
+    const { io, calls } = baseIo({ a: [1], verify: [null], 'verify retry': [null], [PROBE]: [LIVE] });
+    const state = newState();
+    const wrapped = makeIo(cap, io, state);
+    await wrapped.agent('P', { label: 'a' });
+    assert.equal(await wrapped.agent('P', { label: 'verify', overBudget: true }), null);
+    assert.deepEqual(labels(calls), ['a', 'verify', 'verify retry', PROBE]);
+    assert.ok(!('overBudget' in calls[3]), 'the flag is not passed on');
+    assert.deepEqual(state.refused, []);
+    assert.ok(!state.unavailable);
+    assert.equal(state.agents, 4);
+  });
+  await t.test('dead probe: the latch is set', async () => {
+    const { io, calls } = baseIo({ a: [1], verify: [null], 'verify retry': [null], [PROBE]: [null] });
+    const state = newState();
+    const wrapped = makeIo(cap, io, state);
+    await wrapped.agent('P', { label: 'a' });
+    assert.deepEqual(await wrapped.agent('P', { label: 'verify', overBudget: true }), UNAVAILABLE);
+    assert.deepEqual(labels(calls), ['a', 'verify', 'verify retry', PROBE]);
+    assert.equal(state.unavailable, true);
+    assert.deepEqual(state.refused, ['verify']);
+  });
+});
+
+test('a probe that throws rejects the call, sets no latch, and a later dead pair probes again', async () => {
+  const { io, calls } = baseIo({
+    X: [null], 'X retry': [null], [PROBE]: [new Error('probe failed'), LIVE], Y: [null], 'Y retry': [null],
+  });
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  await assert.rejects(wrapped.agent('P', { label: 'X' }), /probe failed/);
+  assert.ok(!state.unavailable);
+  assert.equal(state.unavailableInfo, undefined);
+  assert.deepEqual(state.refused, []);
+  assert.equal(await wrapped.agent('P', { label: 'Y' }), null);
+  assert.deepEqual(labels(calls), ['X', 'X retry', PROBE, 'Y', 'Y retry', PROBE]);
+});
+
+test('in a typed run the probe is untyped and leaves the agent type alone', async (t) => {
+  await t.test('typed null, untyped retry null', async () => {
+    const { io, calls } = baseIo({ 'T2 implement': [null], 'T2 implement retry': [null], [PROBE]: [null] });
+    const state = newState();
+    assert.deepEqual(await makeIo(typed(), io, state).agent('P', { label: 'T2 implement' }), UNAVAILABLE);
+    assert.deepEqual(labels(calls), ['T2 implement', 'T2 implement retry', PROBE]);
+    assert.ok(!('agentType' in calls[2]));
+    assert.ok(!state.untyped);
+  });
+  await t.test('typed throw, untyped retry null', async () => {
+    const { io, calls } = baseIo({
+      'T2 implement': [new Error('broken definition')], 'T2 implement retry': [null], [PROBE]: [LIVE],
+    });
+    const state = newState();
+    assert.equal(await makeIo(typed(), io, state).agent('P', { label: 'T2 implement' }), null);
+    assert.deepEqual(labels(calls), ['T2 implement', 'T2 implement retry', PROBE]);
+    assert.ok(!('agentType' in calls[2]));
+  });
+});
+
+test("the probe runs on the dead call's model at low effort and is never a ruling", async () => {
+  const { io, calls } = baseIo({ 'T2 adjudicate': [null], 'T2 adjudicate retry': [null], [PROBE]: [LIVE] });
+  const state = newState();
+  const opts = { label: 'T2 adjudicate', phase: 'Lane alpha', model: 'opus', effort: 'high', schema: { type: 'object' } };
+  assert.equal(await makeIo(manifest(), io, state).agent('P', opts), null);
+  const probe = calls[2];
+  assert.equal(probe.label, PROBE);
+  assert.equal(probe.phase, 'Lane alpha');
+  assert.equal(probe.model, 'opus');
+  assert.equal(probe.effort, 'low');
+  assert.deepEqual(probe.schema,
+    { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] });
+  assert.equal(state.agents, 3);
+  assert.equal(state.rulings, 2);
+  assert.deepEqual(state.spawned[2], { label: PROBE, model: 'opus', effort: 'low' });
+});
+
+// A lane's reaction to a missing result, cut to what makeIo sees: it asks
+// the adjudicator. The adjudicate call is made after a refusal too, so the
+// replays see that no adjudicator starts once the latch is set.
+async function laneCall(wrapped, id, label) {
+  const r = await wrapped.agent('P', { label, model: 'opus' });
+  const missing = r === null || (r && r.__budget);
+  return [r, missing ? await wrapped.agent('P', { label: `${id} adjudicate`, model: 'opus' }) : null];
+}
+
+test('replay of sc1 launch 1: 6 agents and 0 rulings', async () => {
+  // Journal order: CR5 review dies, its retry dies; the implements of CV4,
+  // CH2 and CA4, already spawned, die after.
+  const names = ['CR5 review', 'CR5 review retry', PROBE, 'CV4 implement', 'CH2 implement', 'CA4 implement'];
+  const d = Object.fromEntries(names.map((n) => [n, deferred()]));
+  const { io, calls } = gatedIo(Object.fromEntries(names.map((n) => [n, [d[n].promise]])));
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  const runs = [
+    laneCall(wrapped, 'CR5', 'CR5 review'),
+    laneCall(wrapped, 'CV4', 'CV4 implement'),
+    laneCall(wrapped, 'CH2', 'CH2 implement'),
+    laneCall(wrapped, 'CA4', 'CA4 implement'),
+  ];
+  for (const n of names) {
+    d[n].resolve(null);
+    await settle();
+  }
+  const out = await Promise.all(runs);
+  for (const [r, adj] of out) {
+    assert.deepEqual(r, UNAVAILABLE);
+    assert.deepEqual(adj, UNAVAILABLE);
+  }
+  assert.deepEqual(labels(calls), ['CR5 review', 'CV4 implement', 'CH2 implement', 'CA4 implement',
+    'CR5 review retry', PROBE]);
+  assert.equal(state.agents, 6);
+  assert.equal(state.rulings, 0);
+  assert.equal(state.unavailableInfo.trigger, 'CR5 review');
+  assert.equal(state.unavailableInfo.results_before, 0);
+});
+
+test('replay of m1a launch 1: 4 agents and 0 rulings', async () => {
+  // I3 dies, its retry dies; PL2, in flight, dies later.
+  const names = ['I3 implement', 'I3 implement retry', PROBE, 'PL2 implement'];
+  const d = Object.fromEntries(names.map((n) => [n, deferred()]));
+  const { io, calls } = gatedIo(Object.fromEntries(names.map((n) => [n, [d[n].promise]])));
+  const state = newState();
+  const wrapped = makeIo(manifest(), io, state);
+  const runs = [laneCall(wrapped, 'I3', 'I3 implement'), laneCall(wrapped, 'PL2', 'PL2 implement')];
+  for (const n of names) {
+    d[n].resolve(null);
+    await settle();
+  }
+  await Promise.all(runs);
+  assert.deepEqual(labels(calls), ['I3 implement', 'PL2 implement', 'I3 implement retry', PROBE]);
+  assert.equal(state.agents, 4);
+  assert.equal(state.rulings, 0);
+  assert.equal(state.unavailable, true);
 });
 
 // ---- Whole runs ----

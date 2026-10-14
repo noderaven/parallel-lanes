@@ -38,6 +38,8 @@ function layoutText(m) {
 // status/head/notes; conflict_files (optional) lists files a merge left
 // conflicting, and tests_failed (optional) says a project command still fails
 // after the merges so a fix agent is needed instead of a hard stop.
+// checks_unfinished (optional, 1.6.2 spec 4.3) says every failing command
+// exited 75, 124, 128 or above: the checks did not finish, and no fix runs.
 function statusSchema() {
   return {
     type: 'object',
@@ -47,6 +49,7 @@ function statusSchema() {
       notes: { type: 'string' },
       conflict_files: { type: 'array', items: { type: 'string' } },
       tests_failed: { type: 'boolean' },
+      checks_unfinished: { type: 'boolean' },
     },
     required: ['status', 'head', 'notes'],
   };
@@ -195,6 +198,9 @@ function verifySchema() {
             // run-checks prints them; a repair agent reads the failures' logs.
             log: { type: 'string' },
             tail: { type: 'string' },
+            // A command that exited 75 and was run once more (1.6.2 spec 4.3):
+            // {first_exit, waited_s}; kept so it is not dropped.
+            busy_retry: { type: 'object' },
           },
           required: ['group', 'command', 'exit'],
         },
@@ -304,12 +310,21 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
   const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
+  // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
+  // engine then starts no fix and stops. The other modes keep the general
+  // exit-code rule.
+  const exits = testFailure === 'heal' ? [
+    'When every failing command exited 75, 124, 128 or above (or a negative code), the checks did not finish,',
+    `which is not a defect: ${changeNothing()} for it. Return status done with`,
+    'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
+    'is a real failure: checks_unfinished false.',
+  ] : null;
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
-      ...procedureLines(m, { name: 'integrate', start: checks }).map((l) => `   ${l}`),
+      ...procedureLines(m, { name: 'integrate', start: checks, exits }).map((l) => `   ${l}`),
       ...checksLogLines().map((l) => ` ${l}`),
     ]),
   ];
@@ -356,7 +371,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const returnTail = conflictMode === 'abort'
     ? ', and conflict_files (the conflicting files on an aborted merge, else []).'
     : testFailure === 'heal'
-      ? ', and tests_failed (true when a project command still fails after the merges).'
+      ? ', and tests_failed (true when a project command still fails after the merges) and checks_unfinished (true'
+        + ' when every failing command exited 75, 124, 128 or above, see step 3).'
       : '.';
   const overlaps = Array.isArray(m.overlaps) && m.overlaps.length > 0 ? [
     '   Deliberate overlaps (more than one lane changes these files by plan; a merge conflict in them is expected):',
@@ -809,6 +825,8 @@ function verifyPrompt(m, sha, from = null) {
     ...procedureLines(m, {
       name: `verify-${sha}`, exact: true, start: cmd, stop,
       changed: 'return the JSON of that rerun as the wait printed it, with tree_changed true.',
+      // The engine decides what the exits mean (nonDefectFailure, 1.6.2).
+      exits: ['These are results like any other: report each exit as the wait printed it.'],
     }).map((l) => `   ${l}`),
     '',
     keepFilesRule(),
@@ -844,8 +862,8 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
     'commands, lane_commands or task_checks, or the test runner configuration, to make them pass. Fixing a wrong',
     'test is allowed when the test, not the code, is wrong: say why in notes. If the failure is a flaky, timeout,',
-    "crash or environment failure rather than a failing check, or lies outside this run's scope, change nothing:",
-    'report blocked with the evidence.',
+    'crash or environment failure rather than a failing check (exit 124 is a timeout, exit 75 a busy project), or',
+    "lies outside this run's scope, change nothing: report blocked with the evidence.",
     'Run the focused checks that cover your fix; do not run the full project commands: verify runs them all at',
     'your head right after you.',
     commitWithLine(repairFixMessage()),

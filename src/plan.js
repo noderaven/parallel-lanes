@@ -227,12 +227,14 @@ function repairLimit(m) {
 
 // The agent slots a repair attempt needs free before it starts (spec 4.5):
 // the repair, its verify (over budget but counted) and the re-review that
-// must follow, each with makeIo's one automatic retry (6); plus the hook
-// rechecks a moved head makes necessary: the e2e recheck (a FAIL reruns it,
-// each with a retry: 4) and the post-integrate recheck (2; none under lite).
+// must follow, each with makeIo's one automatic retry (6), and the
+// availability probe a dead pair among them may start (1, spec 4.1): 7; plus
+// the hook rechecks a moved head makes necessary: the e2e recheck (a FAIL
+// reruns it, each with a retry: 4) and the post-integrate recheck (2; none
+// under lite).
 function repairReserve(m) {
   const hooks = (m && m.hooks) || {};
-  return 6 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
+  return 7 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
 }
 
 // The dry run's checks summary (spec 4.9). Units are the units with work,

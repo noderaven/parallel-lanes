@@ -7,8 +7,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript, H } from './harness.mjs';
 
-const { repairDue, repairHeadEligible, validRepairReview } = await loadHelpers([
-  'repairDue', 'repairHeadEligible', 'validRepairReview',
+const { repairDue, repairHeadEligible, validRepairReview, nonDefectFailure } = await loadHelpers([
+  'repairDue', 'repairHeadEligible', 'validRepairReview', 'nonDefectFailure',
 ]);
 
 function task(id) {
@@ -96,11 +96,14 @@ function noFindings(extra = {}) {
 
 const resolved = (head) => ({ head, results: [{ id: 'F1', status: 'resolved', evidence: 'gone' }], new_findings: [] });
 
+// Unscripted labels throw, except makeIo's availability probe after a dead
+// pair: unless a test scripts it, it answers (the agents are available).
 async function run(m, script) {
   const calls = [];
   const agent = async (prompt, opts) => {
     calls.push({ prompt, ...opts });
     const queue = script[opts.label];
+    if (opts.label === 'availability probe' && !queue) return { ok: true };
     if (!queue || queue.length === 0) throw new Error(`unscripted agent call: ${opts.label}`);
     return queue.shift();
   };
@@ -111,6 +114,24 @@ async function run(m, script) {
 
 const labels = (calls) => calls.map((c) => c.label);
 const kinds = (result) => result.acceptance.reasons.map((r) => r.kind);
+
+// ---- 1.6.2: 75 and 124 start no repair and still fail (spec 4.3) ----
+
+test('a verify failing only with 75 or 124 starts no repair and the run is rejected for failed checks', async () => {
+  for (const exit of [75, 124]) {
+    const { result, calls } = await run(manifest(), {
+      ...withFix({
+        verify: [verified(H('f1'), exit)],
+        'final re-review': [resolved(H('f1'))],
+      }),
+      ...taskScript(ALL),
+    });
+    assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')), `exit ${exit}: ${labels(calls)}`);
+    assert.equal(result.acceptance.status, 'rejected', `exit ${exit}`);
+    assert.ok(kinds(result).includes('checks_failed'), `exit ${exit}: ${kinds(result)}`);
+    assert.deepEqual(result.final.repairs, [], `exit ${exit}`);
+  }
+});
 
 // ---- after a final fix ----
 
@@ -271,7 +292,7 @@ test('no reserve left: no repair, completed and rejected, nothing refused', asyn
 test('the reserve keeps the re-review affordable after every retry', async () => {
   // Exactly the reserve is left: the repair and its verify each need their
   // retry, and the re-review still runs.
-  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: BEFORE_REPAIR + 6 } });
+  const m = manifest({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: BEFORE_REPAIR + 7 } });
   const { result, calls } = await run(m, {
     ...withFix({
       verify: [verified(H('f1'), 1), null],
@@ -328,8 +349,36 @@ test('repairDue: only a complete, clean, exact inventory with an ordinary failin
   const other = verified(sha, 1);
   other.results[0].command = 'npm run other';
   assert.equal(repairDue(m, other, sha), false, 'inventory mismatch');
-  for (const exit of [124, 128, 137, 255, -9]) assert.equal(repairDue(m, verified(sha, exit), sha), false, `exit ${exit}`);
+  for (const exit of [75, 124, 128, 137, 255, -9]) assert.equal(repairDue(m, verified(sha, exit), sha), false, `exit ${exit}`);
   assert.equal(repairDue(m, verified(sha, 2), sha), true, 'exit 2');
+  assert.equal(repairDue(m, verified(sha, 8), sha), true, 'exit 8');
+});
+
+// 1.6.2 (spec 4.3): one predicate for the exits that mark no defect.
+test('nonDefectFailure: a failure made only of 75, 124, 128 and above, or negative exits', () => {
+  const exits = (...codes) => codes.map((exit) => ({ group: 'test', command: `c${exit}`, exit }));
+  for (const codes of [[75], [124], [137], [-9], [75, 124], [0, 75]]) {
+    assert.equal(nonDefectFailure(exits(...codes)), true, JSON.stringify(codes));
+  }
+  for (const codes of [[1], [8], [1, 124], [0], []]) {
+    assert.equal(nonDefectFailure(exits(...codes)), false, JSON.stringify(codes));
+  }
+  assert.equal(nonDefectFailure([{ exit: null }]), true, 'a non-number counts as non-defect');
+});
+
+test('repairDue: a mix of a real failure and a timeout is still due; 75 and 124 together are not', () => {
+  const m = manifest({ commands: { setup: [], test: ['npm test'], lint: ['npm run lint'], build: [] } });
+  const sha = H('f1');
+  const two = (a, b) => ({
+    ...verified(sha, a), ok: false, results: [
+      { group: 'test', command: 'npm test', exit: a, log: '/work/ledger/checks/a.log', tail: '' },
+      { group: 'lint', command: 'npm run lint', exit: b, log: '/work/ledger/checks/b.log', tail: '' },
+    ],
+  });
+  assert.equal(repairDue(m, two(1, 124), sha), true, '1 and 124');
+  assert.equal(repairDue(m, two(75, 124), sha), false, '75 and 124');
+  assert.equal(repairDue(m, two(0, 75), sha), false, '0 and 75');
+  assert.equal(repairDue(m, two(0, 8), sha), true, '0 and 8');
 });
 
 test('repairHeadEligible needs the reported head and a descends_from ok for the repair start', () => {
@@ -349,16 +398,16 @@ const { repairReserve } = await loadHelpers(['repairReserve']);
 const HOOKS = { post_integrate: 'POST: check contracts', e2e: 'E2E: run it' };
 
 test('repairReserve counts the hook rechecks a repair makes necessary', () => {
-  assert.equal(repairReserve(manifest()), 6);
-  assert.equal(repairReserve(manifest({ hooks: { e2e: 'x' } })), 10);
-  assert.equal(repairReserve(manifest({ hooks: { post_integrate: 'x' } })), 8);
-  assert.equal(repairReserve(manifest({ hooks: HOOKS })), 12);
+  assert.equal(repairReserve(manifest()), 7);
+  assert.equal(repairReserve(manifest({ hooks: { e2e: 'x' } })), 11);
+  assert.equal(repairReserve(manifest({ hooks: { post_integrate: 'x' } })), 9);
+  assert.equal(repairReserve(manifest({ hooks: HOOKS })), 13);
 });
 
 test('with hooks and only 6 free agents, no repair: the run completes rejected, never stops on budget', async () => {
   // Agents up to the failing verify with both hooks and no findings:
   // pre-flight, 4 implement + 4 review, integrate, post-integrate, e2e,
-  // 3 lenses, verify = 16; 6 free is below the reserve of 12.
+  // 3 lenses, verify = 16; 6 free is below the reserve of 13.
   const m = manifest({ hooks: HOOKS, limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 22 } });
   const { result, calls } = await run(m, {
     ...noFindings({ verify: [verified(TIP, 1)] }),
@@ -370,7 +419,7 @@ test('with hooks and only 6 free agents, no repair: the run completes rejected, 
   assert.equal(result.status, 'complete', JSON.stringify(result.reason));
   assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')));
   assert.deepEqual(kinds(result), ['checks_failed']);
-  assert.equal(result.check_policy.repair_reserve, 12);
+  assert.equal(result.check_policy.repair_reserve, 13);
 });
 
 test('a repair head whose verify returned nothing is unreviewed with its own sentence', async () => {
@@ -537,7 +586,7 @@ test('stopped reports carry final.repairs and check_policy', async () => {
   assert.equal(result.status, 'stopped');
   assert.deepEqual(result.final.repairs, []);
   assert.deepEqual(result.check_policy, {
-    task_checks: {}, widen_paths: [], repair_limit: 2, repairs_spent: 0, repair_reserve: 6,
+    task_checks: {}, widen_paths: [], repair_limit: 2, repairs_spent: 0, repair_reserve: 7,
     final_inventory_count: 1, autonomy: 'autonomous',
   });
 });

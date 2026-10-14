@@ -194,12 +194,19 @@ function waitCommand(m) {
 // checkout is rerun once only, so checks that write files into the checkout
 // cannot loop: changed (optional) says what the agent does with the rerun's
 // result when it changed the checkout again; by default it keeps that result
-// and says so in its notes.
-function procedureLines(m, { name, exact = false, start, stop = null, changed = null }) {
+// and says so in its notes. Every caller gets the exit-code contract (1.6.2
+// spec 4.3): what 75, 124 and a signal mean, then exits (optional lines),
+// what this caller does with a failure made only of them; by default
+// (fixers, hook agents, long commands) it changes nothing for it and says so.
+function procedureLines(m, { name, exact = false, start, stop = null, changed = null, exits = null }) {
   const second = stop === null ? 'report the checks as failed (never as passed), with both outcomes the wait printed'
     + ' in your notes.' : stop;
   const again = changed === null ? 'keep that result (it carries tree_changed true) and say in your notes that'
     + ' the checks themselves change the checkout.' : changed;
+  const action = exits === null ? [
+    `A check that failed only with such exits is not a defect: ${changeNothing()}`,
+    'for it, and say so in your notes.',
+  ] : exits;
   return [
     'Run it with this procedure. Every run, a rerun after a fix included, starts with its own reserve and uses',
     'the new path.',
@@ -224,7 +231,17 @@ function procedureLines(m, { name, exact = false, start, stop = null, changed = 
     '   your turn or return your result.',
     '5. Exit 5 means the check stopped without a result: reserve and start it once more, as above. After a',
     `   second stop, do not start it again: ${second}`,
+    'Exit codes in the result: a command that exits 124 timed out, one that exits 75 found the project busy, and',
+    'one that exits 128 or above (or a negative code) was killed by a signal.',
+    ...action,
   ];
+}
+
+// What a fixer or any agent changes for a check that failed only with a
+// non-defect exit (1.6.2 spec 4.3): nothing. (A function, not a const: the
+// test harness loads helpers without running top-level bindings.)
+function changeNothing() {
+  return 'do not change code, tests, timeouts or commands';
 }
 
 // The general rule for any other long command (spec 4.4): it runs through
@@ -292,6 +309,11 @@ function taskChecksLines(m, task, where, base) {
     ...procedureLines(m, {
       name: `task-${task.id}`, start: cmd,
       stop: 'report blocked, with both outcomes the wait printed in your notes.',
+      exits: [
+        'When the task checks failed only with such exits, that is not a defect:',
+        `${changeNothing()} for it, and do not rerun the call to get a pass: report blocked, naming the exits`,
+        'and the result file the wait read.',
+      ],
     }),
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',

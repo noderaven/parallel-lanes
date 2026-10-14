@@ -181,6 +181,17 @@ test('failing checks on a dirty checkout are rejected, not just unverified', () 
   assert.deepEqual(kinds(a), [['checks_failed', 'failed'], ['checks_unclean', 'missing']]);
 });
 
+test('a check that exits 75 (busy) or 124 (timed out) at the delivered head still rejects the run', () => {
+  // 1.6.2 (spec 4.3): the exit codes steer repair, fix and retry, never acceptance.
+  for (const exit of [75, 124]) {
+    const input = passing();
+    input.verify = { ...input.verify, ok: false, results: [{ group: 'test', command: 'npm test', exit }] };
+    const a = acceptanceOf(input);
+    assert.equal(a.status, 'rejected', `exit ${exit}`);
+    assert.deepEqual(kinds(a), [['checks_failed', 'failed']], `exit ${exit}`);
+  }
+});
+
 test('untracked build output stays a warning', () => {
   const input = passing();
   input.verify = { ...input.verify, clean: false, tracked_before: [], tracked_after: [] };

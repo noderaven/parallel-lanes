@@ -99,7 +99,9 @@ function taskScript(ids) {
 }
 
 // Run the whole script body with stub globals. Unscripted agent labels
-// throw, so unexpected calls fail the test.
+// throw, so unexpected calls fail the test. The one exception is makeIo's
+// availability probe after a dead pair (a null and a null retry): unless a
+// test scripts it, it answers, as on a platform whose agents are available.
 async function run(m, script) {
   const calls = [];
   const logs = [];
@@ -107,6 +109,7 @@ async function run(m, script) {
   const agent = async (prompt, opts) => {
     calls.push({ prompt, ...opts });
     const queue = script[opts.label];
+    if (opts.label === 'availability probe' && !queue) return { ok: true };
     if (!queue || queue.length === 0) throw new Error(`unscripted agent call: ${opts.label}`);
     return queue.shift();
   };
@@ -348,7 +351,7 @@ test('a pre-flight agent that returns null twice stops the run', async () => {
     phaseScript({ 'pre-flight': [null], 'pre-flight retry': [null] }));
   assert.equal(result.status, 'stopped');
   assert.equal(result.reason, 'no result from pre-flight');
-  assert.deepEqual(labels(calls), ['pre-flight', 'pre-flight retry']);
+  assert.deepEqual(labels(calls), ['pre-flight', 'pre-flight retry', 'availability probe']);
 });
 
 test('setup lists discarded changes and the refs that saved them via log', async () => {
@@ -494,7 +497,7 @@ test('a stopped prelude stops the run before any lane', async () => {
   const script = { ...phaseScript(), 'T1 implement': [null], 'T1 implement retry': [null] };
   const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script);
   assert.equal(result.status, 'stopped');
-  assert.deepEqual(labels(calls), ['pre-flight', 'T1 implement', 'T1 implement retry']);
+  assert.deepEqual(labels(calls), ['pre-flight', 'T1 implement', 'T1 implement retry', 'availability probe']);
   assert.deepEqual(result.stopped_lanes.map((s) => s.lane), ['prelude']);
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ')));
 });
@@ -1919,6 +1922,62 @@ test('autonomous post-integration test failure that stays red after one rerun st
   assert.equal(result.status, 'stopped');
   assert.match(result.reason, /integration failed/);
   assert.ok(!labels(calls).includes('post-integrate'), 'the hook never runs');
+});
+
+// 1.6.2 (spec 4.3): checks that timed out or found the project busy are not
+// a defect a fix agent can address, and a relaunch would hit the same.
+test('autonomous integrate with checks_unfinished starts no fix and stops for good', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'npm test exited 124', tests_failed: true, checks_unfinished: true },
+      ],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.reason, 'integration checks did not finish: npm test exited 124');
+  for (const prefix of ['no result from', 'error:', 'setup failed', 'integration failed']) {
+    assert.ok(!result.reason.startsWith(prefix), `${prefix}: ${result.reason}`);
+  }
+  const l = labels(calls);
+  assert.ok(!l.includes('post-integration fix') && !l.includes('post-integrate fix'), l.join(', '));
+  assert.ok(!l.includes('post-integrate'), 'the hook never runs');
+  assert.equal(l.filter((x) => x === 'integrate').length, 2, 'no rerun of the integrate step');
+  // No notes: the stop still says why.
+  const bare = await run(m, {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: '', tests_failed: true, checks_unfinished: true },
+      ],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(bare.result.reason, 'integration checks did not finish: a check timed out or found the project busy');
+});
+
+test('autonomous integrate with checks_unfinished false heals as before', async () => {
+  const m = manifest({ hooks: { post_integrate: 'POST-INTEGRATE: check contracts' } });
+  const script = {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true, checks_unfinished: false },
+        { status: 'done', head: H('I3'), notes: 'tests pass now' },
+      ],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  };
+  const { result, calls } = await run(m, script);
+  assert.equal(result.status, 'complete');
+  const l = labels(calls).filter((x) => ['integrate', 'post-integrate fix', 'post-integrate re-review'].includes(x));
+  assert.deepEqual(l, ['integrate', 'integrate', 'post-integrate fix', 'post-integrate re-review', 'integrate']);
 });
 
 test('autonomous post_integrate hook failure: opus fix + re-review, then the hook reruns', async () => {

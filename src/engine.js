@@ -100,12 +100,14 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
   };
   // Why an implement or fix result did not move the branch past from, as
   // {kind: 'budget'|'blocked'|'question', reason}; null when it did. A budget
-  // refusal (the sentinel the run budget returns once the agent cap is hit)
-  // ends the task without adjudication: no agent can be spawned to settle it.
+  // refusal (the sentinel the run budget returns once the agent cap is hit,
+  // or once agents are unavailable) ends the task without adjudication: no
+  // agent can be spawned to settle it. Its reason (refusalText) names why.
   // In supervised mode a question is just a blocked result.
+  const refusedBy = (r, label) => ({ kind: 'budget', reason: refusalText({ unavailable: Boolean(r.__unavailable) }, label) });
   const failure = (r, label, from) => {
     const blockedBy = (reason) => ({ kind: 'blocked', reason });
-    if (r && r.__budget) return { kind: 'budget', reason: `${label} was not run` };
+    if (r && r.__budget) return refusedBy(r, label);
     if (r === null || r === undefined) return blockedBy(`no result from ${label}`);
     if (r.status === 'question') {
       const q = present(r.question) ? r.question : (present(r.notes) ? r.notes : '(no question text)');
@@ -232,13 +234,15 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
     }
     // A park or unblock the policy refuses never took effect, so it is listed
     // as refused, not as a ruling made on the user's behalf.
-    if (!out.unavailable && !out.invalid) {
+    // An adjudication the run refused (out.refused: the budget or agents
+    // unavailable) ran no adjudicator: no ruling, and its text is the stop.
+    if (!out.unavailable && !out.invalid && !out.refused) {
       rulings.push(refused === 'security' ? `refused (security-gated): ${out.text}`
         : refused !== null ? `refused (${refused}): ${out.text}` : out.text);
     }
     io.log(`${task.id}: adjudicated ${need.kind} -> ${out.outcome}`);
     if (out.outcome === 'stop') {
-      return result('blocked', out.unavailable ? out.text : `adjudicator_stop: ${out.stop_condition}`);
+      return result('blocked', out.unavailable || out.refused ? out.text : `adjudicator_stop: ${out.stop_condition}`);
     }
     if (refused !== null) {
       io.log(`${task.id}: ${out.outcome} refused (${refused})`);
@@ -289,7 +293,7 @@ async function runTask(m, task, where, base, io = { agent, log }, resume = null,
       verdict = await review();
     }
     if (verdict && verdict.__budget) {
-      need = { kind: 'budget', reason: `${task.id} ${reviewLabel} was not run` };
+      need = refusedBy(verdict, `${task.id} ${reviewLabel}`);
       continue;
     }
     if (!verdict || verdict.invalid) {

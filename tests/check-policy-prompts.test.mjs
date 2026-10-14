@@ -308,8 +308,9 @@ test('procedureLines names reserve, run_in_background, wait and its exit codes 4
   // A caller can say what a rerun that changed the checkout again returns.
   const changed = flat(procedureLines(m, { name: 'x', start, changed: 'return CHANGED-TEXT.' }).join('\n'));
   assert.ok(changed.includes('do not run the checks a third time; return CHANGED-TEXT.'), changed);
-  // No busy handling without --exact; with it, wait on the file reserve names.
-  assert.ok(!text.includes('busy'), text);
+  // No busy reserve handling without --exact; with it, wait on the file
+  // reserve names. (Exit 75, a busy project, is the exit-code rule's.)
+  assert.ok(!text.includes('status busy') && !text.includes('If reserve exits 4'), text);
   const exact = flat(procedureLines(m, { name: 'verify-x', exact: true, start }).join('\n'));
   assert.ok(exact.includes(`${RESERVE}'verify-x' --exact`), exact);
   assert.ok(exact.includes('If reserve exits 4 with status busy'), exact);
@@ -318,6 +319,96 @@ test('procedureLines names reserve, run_in_background, wait and its exit codes 4
   // A caller can say what a second stop returns.
   const own = flat(procedureLines(m, { name: 'x', start, stop: 'return STOP-TEXT.' }).join('\n'));
   assert.ok(own.includes('After a second stop, do not start it again: return STOP-TEXT.'), own);
+});
+
+// ---- 1.6.2: the exit-code contract, worded per caller (spec 4.3)
+
+const EXITS = ['exits 124 timed out', 'exits 75 found the project busy'];
+const CHANGE_NOTHING = 'do not change code, tests, timeouts or commands';
+
+test('procedureLines carries the exit-code rule: not a defect, change nothing, say so', () => {
+  const m = manifest();
+  const start = "cd '/work/repo' && 'python3' '/skills/parallel-lanes/scripts/run-checks' '/work/repo' --out '<P>'";
+  const text = flat(procedureLines(m, { name: 'x', start }).join('\n'));
+  for (const s of EXITS) assert.ok(text.includes(s), `${s}: ${text}`);
+  assert.ok(text.includes('128 or above'), text);
+  assert.ok(text.includes(CHANGE_NOTHING), text);
+  assert.ok(text.includes('say so in your notes'), text);
+  // The long-command rule and the fixers' every-check line carry the same rule.
+  const long = flat(longCheckRuleLines(m).join('\n'));
+  for (const s of [...EXITS, CHANGE_NOTHING, 'say so in your notes']) assert.ok(long.includes(s), `${s}: long`);
+  const finding = { id: 'F1', severity: 'important', file: 'src/T2.js', line: 1, issue: 'x', fix: 'y' };
+  for (const [name, p] of [['final fix', finalFixPrompt(m, [finding], H('tip'))],
+    ['post-integrate fix', postIntegrateFixPrompt(m, 'npm test failed', 'tests')]]) {
+    const rule = flat(p);
+    assert.ok(rule.includes(CHANGE_NOTHING) && rule.includes(EXITS[1]), name);
+  }
+  // A caller can word what it does with such a failure.
+  const own = flat(procedureLines(m, { name: 'x', start, exits: ['OWN-EXITS-TEXT.'] }).join('\n'));
+  for (const s of EXITS) assert.ok(own.includes(s), `${s}: ${own}`);
+  assert.ok(own.includes('OWN-EXITS-TEXT.') && !own.includes(CHANGE_NOTHING), own);
+});
+
+test('the implementer reports a task check that failed only with those exits blocked, changing nothing', () => {
+  const m = manifest();
+  const where = laneWhere(m, lane(m, 'alpha'));
+  const p = implementPrompt(m, t(m, 'T2'), where, H('base'));
+  const start = p.indexOf('Task checks. Before you commit');
+  const text = flat(p.slice(start, p.indexOf('It picks the targeted checks', start)));
+  for (const s of EXITS) assert.ok(text.includes(s), `${s}: ${text}`);
+  assert.ok(text.includes('failed only with such exits'), text);
+  assert.ok(text.includes(CHANGE_NOTHING), text);
+  assert.ok(text.includes('report blocked, naming the exits and the result file'), text);
+});
+
+test('the verify prompt reports the exits as printed and is never told to report blocked', () => {
+  const m = manifest();
+  for (const p of [verifyPrompt(m, H('d1')), verifyPrompt(m, H('d1'), H('d0'))]) {
+    const start = p.indexOf('3. Run the checks');
+    const text = flat(p.slice(start, p.indexOf(keepFilesMarker(p), start)));
+    for (const s of EXITS) assert.ok(text.includes(s), `${s}: ${text}`);
+    assert.ok(text.includes('report each exit as the wait printed it'), text);
+    assert.ok(!/blocked/i.test(text), text);
+    assert.ok(!/report(ed)? blocked/i.test(flat(p)), 'nothing in the verify prompt says report blocked');
+  }
+});
+// Where verify's step 3 ends: the first line after it that is not indented.
+function keepFilesMarker(p) {
+  const lines = p.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('3. Run the checks'));
+  return lines.slice(at + 1).find((l) => l !== '' && !l.startsWith(' '));
+}
+
+test('heal-mode integrate sets checks_unfinished when every failing command exited 75, 124, 128 or above', () => {
+  const m = manifest();
+  const heal = flat(integratePrompt(m, H('pre'), { testFailure: 'heal' }));
+  for (const s of EXITS) assert.ok(heal.includes(s), `${s}: ${heal}`);
+  assert.ok(heal.includes('When every failing command exited 75, 124, 128 or above (or a negative code)'), heal);
+  assert.ok(heal.includes('tests_failed true and checks_unfinished true'), heal);
+  assert.ok(heal.includes(CHANGE_NOTHING), heal);
+  assert.ok(heal.includes('A failing command with any other exit is a real failure: checks_unfinished false.'), heal);
+  assert.ok(heal.includes('and checks_unfinished (true when every failing command exited 75, 124, 128 or above'), heal);
+  // The plain and abort-mode prompts keep the general rule and never ask for it.
+  for (const p of [integratePrompt(m, H('pre')), integratePrompt(m, H('pre'), { conflictMode: 'abort' })]) {
+    const text = flat(p);
+    assert.ok(!text.includes('checks_unfinished'), text);
+    assert.ok(text.includes(CHANGE_NOTHING) && text.includes(EXITS[0]), text);
+  }
+});
+
+test('the repair prompt names 75 beside its timeout clause', () => {
+  const verify = { head: H('f1'), results: [{ group: 'test', command: 'npm test', exit: 1 }] };
+  const p = flat(verifyRepairPrompt(manifest(), verify, H('f1'), 1));
+  assert.ok(p.includes('flaky, timeout, crash or environment failure rather than a failing check (exit 124 is a '
+    + 'timeout, exit 75 a busy project)'), p);
+});
+
+test('the adjudicator is told such a failure is not a defect to fix', () => {
+  const m = manifest();
+  const where = laneWhere(m, lane(m, 'alpha'));
+  const p = flat(adjudicatorPrompt(m, { kind: 'blocked', task: t(m, 'T2'), where, details: 'x', findings: [] }));
+  assert.ok(p.includes('A check that failed only with exit 75 (the project was busy), 124 (it timed out), or 128 or '
+    + 'above (killed by a signal) is not a defect to fix'), p);
 });
 
 test('no prompt mentions Monitor, sleep or an output file', () => {

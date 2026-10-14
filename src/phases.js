@@ -109,7 +109,9 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
-  if (!fix || fix.__budget) return settle([], null, fix ? 'final fix not run: budget exhausted' : 'no result from final fix');
+  // A refused call says why (refusalCause: the budget, or agents unavailable).
+  const cause = (r) => refusalCause({ unavailable: Boolean(r.__unavailable) });
+  if (!fix || fix.__budget) return settle([], null, fix ? `final fix not run: ${cause(fix)}` : 'no result from final fix');
   if (fix.status !== 'done') return settle([], null, `final fix blocked: ${fix.notes}`);
   if (badHead(fix)) {
     const why = noHead(fix, 'the final fix');
@@ -136,7 +138,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
-    settle(dispositions, null, rr && rr.__budget ? 'final re-review not run: budget exhausted'
+    settle(dispositions, null, rr && rr.__budget ? `final re-review not run: ${cause(rr)}`
       : 'no result from final re-review');
   } else {
     settle(dispositions, rr, undefined, final.head);
@@ -152,11 +154,20 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   return final;
 }
 
+// The exit-code contract (1.6.2 spec 4.3): true when at least one command
+// failed and every failing exit marks no defect: 75 (the project was busy),
+// 124 (a timeout), 128 and above or negative (a signal), or not a number. A
+// busy machine, a hang or a kill is not an assertion an agent should fix.
+function nonDefectFailure(results) {
+  const failing = (Array.isArray(results) ? results : []).filter((r) => r && r.exit !== 0);
+  return failing.length > 0 && failing.every((r) => typeof r.exit !== 'number'
+    || r.exit === 75 || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+}
+
 // Whether a verify result calls for a repair (spec 4.5): results at sha, of
 // exactly the configured inventory, with no head_after, on a clean checkout,
-// with a failing exit and no failing exit that marks a timeout or a signal
-// (124, 128 and above, or negative): a hang or a kill is not an assertion a
-// repair agent should fix.
+// with a failing exit, and not a failure made only of exits that mark no
+// defect (nonDefectFailure). A real failure beside a timeout is still due.
 function repairDue(m, verify, sha) {
   if (!verify || typeof verify !== 'object' || verify.head !== sha || !Array.isArray(verify.results)) return false;
   const want = expectedChecks(m);
@@ -165,9 +176,8 @@ function repairDue(m, verify, sha) {
     || want.some((w, i) => !results[i] || results[i].group !== w.group || results[i].command !== w.command)) return false;
   if (present(verify.head_after)) return false;
   if (uncleanChecksDetail(verify, sha) !== null) return false;
-  const failing = results.filter((r) => r.exit !== 0);
-  if (failing.length === 0) return false;
-  return !failing.some((r) => typeof r.exit !== 'number' || r.exit === 124 || r.exit >= 128 || r.exit < 0);
+  if (!results.some((r) => r.exit !== 0)) return false;
+  return !nonDefectFailure(results);
 }
 
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
@@ -184,7 +194,8 @@ function repairHeadEligible(verify, sha, from) {
 // nothing to keep open, so this check is what closes the result.
 function validRepairReview(rr, delivered) {
   if (!rr || typeof rr !== 'object' || rr.__budget) {
-    return rr && rr.__budget ? 'the final re-review was not run: budget exhausted' : 'the final re-review returned no result';
+    return rr && rr.__budget ? `the final re-review was not run: ${refusalCause({ unavailable: Boolean(rr.__unavailable) })}`
+      : 'the final re-review returned no result';
   }
   if (rr.head !== delivered) {
     return present(rr.head) ? `the final re-review judged ${rr.head}, not the delivered ${delivered}`
@@ -211,9 +222,11 @@ async function runRepairs(m, io, ctx) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
     const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
       { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
+    // A refused repair's status says why: budget, or unavailable (spec 4.1).
+    const refusedAs = r && r.__budget ? (r.__unavailable ? 'unavailable' : 'budget') : null;
     const entry = {
       attempt: n, from: head, observed_head: r && !r.__budget && present(r.head) ? r.head : null, eligible: false,
-      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (r && r.__budget ? 'budget' : 'no result'),
+      head, failed, status: r && !r.__budget && present(r.status) ? r.status : (refusedAs || 'no result'),
       notes: r && !r.__budget && typeof r.notes === 'string' ? r.notes : '',
     };
     repairs.push(entry);
@@ -413,6 +426,8 @@ function scheduleFix(m, entry) {
 //  order: state.spawned, see makeIo), rulings_spent (adjudications that ran;
 //  a relaunch subtracts it from limits.max_rulings), reason (stopped runs only), errors (invalid only),
 //  budget:{agents, rulings, limits} (reason budget only),
+//  agents_unavailable:{trigger, probe, results_before} (reason
+//  agents_unavailable only: makeIo's latch, state.unavailableInfo),
 //  agent_type_fallback: true (only when a failing agent_type switched the
 //  rest of the run to the default agent type; see makeIo)}.
 // integrate.fix_review lists the findings of the post-integrate re-reviews
@@ -535,16 +550,22 @@ async function runAll(manifest, io) {
     ...(reason === 'budget'
       ? { budget: { agents: state.agents, rulings: state.rulings, limits: effectiveLimits(m) } }
       : {}),
+    ...(reason === 'agents_unavailable' && state.unavailableInfo
+      ? { agents_unavailable: { ...state.unavailableInfo } }
+      : {}),
     ...(state.untyped ? { agent_type_fallback: true } : {}),
   });
   // The run stops (resumable) once an agent was refused: runAll checks
   // state.refused after every phase step, ahead of any other stop reason.
-  // Each task whose agent was refused says so in its notes.
+  // Each task whose agent was refused says so in its notes. Under makeIo's
+  // agents-unavailable latch (spec 4.1) the reason is agents_unavailable,
+  // the report carries agents_unavailable {trigger, probe, results_before},
+  // and the notes say agents unavailable (refusalText).
   const budgetReport = () => {
     const notes = new Map();
     for (const label of state.refused) {
       for (const id of labelTasks(m, label)) {
-        notes.set(id, [...(notes.get(id) || []), `budget exhausted: ${label} was not run`]);
+        notes.set(id, [...(notes.get(id) || []), refusalText(state, label)]);
       }
     }
     for (const [id, lines] of notes) {
@@ -552,7 +573,7 @@ async function runAll(manifest, io) {
       const text = lines.join('\n');
       t.notes = t.status === 'done' && t.notes ? `${t.notes}\n${text}` : text;
     }
-    return report('stopped', 'budget');
+    return report('stopped', state.unavailable ? 'agents_unavailable' : 'budget');
   };
 
   const notices = launchNotices(m, planAgents(m));
@@ -745,6 +766,13 @@ async function runAll(manifest, io) {
     integrate = integrateReport(integ);
     if (integrate.status !== 'done') return report('stopped', `integration failed: ${integrate.notes}`);
     tip = integ.head;
+    // Checks that only timed out, found the project busy or were killed
+    // (1.6.2 spec 4.3) are no defect a fix agent can address, and a relaunch
+    // would hit the same: a real stop, not a transient one.
+    if (autonomous && integ.tests_failed === true && integ.checks_unfinished === true) {
+      return report('stopped', 'integration checks did not finish: '
+        + (integrate.notes || 'a check timed out or found the project busy'));
+    }
     // Post-integration test failures (autonomous, C2): fix + re-review, then
     // rerun the integrate step once; still failing stops the run.
     if (autonomous && integ.tests_failed === true) {
@@ -819,11 +847,14 @@ async function runAll(manifest, io) {
   // A result with stopped (the checks stopped twice without a result, spec
   // 4.1) is no result: the missing-verify path, never a repair, since no
   // command failed. verifyStopped keeps the last verify call's stop text
-  // for the report (null when it did not stop).
+  // for the report (null when it did not stop). A refused verify (the
+  // agents-unavailable latch refuses even this one) is no result either: the
+  // refusal sentinel never reaches verify or final.verify.
   const verifyAt = async (sha, from = null) => {
     const r = await callM('verify', 'Verify', verifyPrompt(m, sha, from), verifySchema(),
       { ...sonnetHigh, overBudget: true });
     verifyStopped = r && typeof r === 'object' && present(r.stopped) ? r.stopped : null;
+    if (r && r.__budget) return null;
     return verifyStopped === null ? r : null;
   };
   // Repairs after a failing verify (spec 4.5): autonomous only, at most
@@ -842,9 +873,10 @@ async function runAll(manifest, io) {
   };
   const repair = autonomous ? { admit, first: spent + 1 } : null;
   // A budget stop once every task is in: the checks still run at the
-  // feature head the run reached, and the stopped report carries them.
+  // feature head the run reached, and the stopped report carries them; not
+  // once agents are unavailable (the verify agent would be refused too).
   const budgetStopWithChecks = async (sha) => {
-    if (hasChecks && present(sha)) {
+    if (hasChecks && present(sha) && !state.unavailable) {
       io.phase('Verify');
       verify = await verifyAt(sha);
     }
@@ -897,6 +929,9 @@ async function runAll(manifest, io) {
   // post-integrate one check-only), told the project checks' result there.
   io.phase('Verify');
   if (hasChecks && !verifiedInReview) verify = await verifyAt(delivered);
+  // A verify refused under the agents-unavailable latch must not let the run
+  // report complete with its checks missing (spec 4.1).
+  if (state.refused.length > 0) return budgetReport();
   // No final findings and a failing verify (autonomous): the same bounded
   // repairs (spec 4.5). A repair that moved the head gets a final re-review
   // of its range with no findings under verification; anything but a valid
