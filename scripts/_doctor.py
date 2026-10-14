@@ -13,7 +13,9 @@ run_checks(manifest, probes) runs every check and returns
      "checks": [{"check", "outcome": "passed" | "warning" | "failed" | "skipped"}],
      "observed_at": "YYYY-MM-DDTHH:MM:SSZ",
      "doctor_version": "<the skill's VERSION>" | "unavailable",
-     "run_id": "<the manifest's run_id>" | null}
+     "run_id": "<the manifest's run_id>" | null,
+     "usage_limit_pause": {"pause": "yes" | "no" | "unknown", "reasons": [str],
+                           "version": "x.y.z" | null, "setting": true | false | null}}
 status is "blocked" when there is at least one failure. The manifest's repo
 paths are used as given (the doctor CLI puts them in the C:/... form first).
 
@@ -68,6 +70,14 @@ skipped as not_applicable.
   compared here and never printed or returned.
 - concurrency: CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS is unset, or lower
   than min(limits.max_parallel_lanes, lane count).
+- usage_limit_pause: Claude Code may not pause the run at the usage limit:
+  claude --version (on Windows also claude.exe and claude.cmd) is older than
+  2.1.271 or cannot be read, or autoContinueAtUsageLimit is false in the
+  managed or user settings (${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json).
+  A settings file that cannot be read counts as unset (on), with a reason. It
+  passes only when the pause is "yes" with no reason; the session type
+  (Remote Control, background, headless) is not seen by doctor, so the
+  session supplies it. Its finding is also the result's usage_limit_pause.
 """
 
 import base64
@@ -90,7 +100,7 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # Every check, in the order run_checks runs them.
 CHECKS = ("git_identity", "base_not_current", "python", "dirty_checkout", "shadow_repo",
           "memory", "disk", "python_alias", "heavy_processes", "active_runs", "defender",
-          "concurrency")
+          "concurrency", "usage_limit_pause")
 # A check recorded more than once keeps the outcome ranked highest.
 _OUTCOME_RANK = {"passed": 0, "skipped": 1, "warning": 2, "failed": 3}
 
@@ -118,6 +128,22 @@ POWERSHELL_TIMEOUT_S = 15
 READ_TIMEOUT_S = 15
 ACTIVE_RUN_TIMEOUT_S = 30
 CONCURRENCY_VARIABLE = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"
+# The Claude Code release that first pauses a workflow at the usage limit
+# (code.claude.com docs, "Dynamic workflows", "When a run hits your usage
+# limit", read 2026-10-13).
+PAUSE_MIN_VERSION = (2, 1, 271)
+PAUSE_SETTING = "autoContinueAtUsageLimit"
+_CLAUDE_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+# The managed-settings.json file per platform, as code.claude.com docs,
+# "Deploy managed settings", list them (read 2026-10-13). Claude Code does not
+# read the legacy Windows path C:\ProgramData\ClaudeCode. doctor reads only
+# this file: MDM profiles, the Windows registry, managed-settings.d drop-ins
+# and server-managed settings are not read.
+MANAGED_SETTINGS = {
+    "darwin": "/Library/Application Support/ClaudeCode/managed-settings.json",
+    "win32": "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+}
+MANAGED_SETTINGS_OTHER = "/etc/claude-code/managed-settings.json"
 _WINDOWS_APPS = re.compile(r"(^|[\\/])WindowsApps([\\/]|$)", re.IGNORECASE)
 
 # One PowerShell call reads both Windows values, each on its own so that one
@@ -166,6 +192,9 @@ class Probes:
         cannot be read. Windows only.
     active_runs() -> the entries active-run list prints, or None.
     which(name) -> the file name resolves to on env's PATH, or None.
+    read_json(path) -> the JSON object in the file at path, or None when
+        there is no such file; raises when the file cannot be read or does
+        not hold a JSON object.
     env: the environment the commands run in.
     platform: sys.platform's value for the machine checked.
     A probe may also raise; the check then treats the read as failed.
@@ -173,7 +202,7 @@ class Probes:
 
     def __init__(self, env=None, platform=None, git=None, ls_remote=None, run=None,
                  memory=None, disk_free=None, load_average=None, appx_working_set=None,
-                 defender_exclusions=None, active_runs=None, which=None):
+                 defender_exclusions=None, active_runs=None, which=None, read_json=None):
         self.env = dict(os.environ) if env is None else env
         self.platform = sys.platform if platform is None else platform
         self.git = git or self._git
@@ -186,6 +215,7 @@ class Probes:
         self.defender_exclusions = defender_exclusions or self._defender_exclusions
         self.active_runs = active_runs or self._active_runs
         self.which = which or self._which
+        self.read_json = read_json or self._read_json
         self._windows = None
 
     def _git_env(self):
@@ -310,6 +340,15 @@ class Probes:
 
     def _which(self, name):
         return shutil.which(name, path=_shell._getenv(self.env, "PATH"))
+
+    def _read_json(self, path):
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f)
+        if not isinstance(value, dict):
+            raise ValueError("not a JSON object: " + path)
+        return value
 
 
 def _windows_memory():
@@ -897,6 +936,109 @@ def check_concurrency(manifest, probes, report):
         report.passed(check)
 
 
+def _claude_version(probes, reasons):
+    """The x.y.z of claude --version, or None (with a reason) when unknown."""
+    names = ["claude"]
+    if probes.platform == "win32":
+        names += ["claude.exe", "claude.cmd"]
+    path = None
+    for name in names:
+        path = _read(probes.which, name)
+        if isinstance(path, str) and path:
+            break
+        path = None
+    if path is None:
+        reasons.append("no claude executable was found on PATH, so the Claude Code version "
+                       "is unknown")
+        return None
+    res = _read(probes.run, [path, "--version"], READ_TIMEOUT_S)
+    m = _CLAUDE_VERSION.match(res.out.strip()) if res is not None and res.code == 0 else None
+    if not m:
+        reasons.append("claude --version did not report a version, so the Claude Code "
+                       "version is unknown")
+        return None
+    return m.group(0)
+
+
+def _user_settings_path(probes):
+    """${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json in probes' environment."""
+    folder = _shell._getenv(probes.env, "CLAUDE_CONFIG_DIR")
+    if not folder:
+        home = None
+        if probes.platform == "win32":
+            home = _shell._getenv(probes.env, "USERPROFILE")
+        home = home or _shell._getenv(probes.env, "HOME") or os.path.expanduser("~")
+        folder = os.path.join(home, ".claude")
+    return os.path.join(folder, "settings.json")
+
+
+def _pause_setting(probes, reasons):
+    """(autoContinueAtUsageLimit as Claude Code applies it: True, False or
+    None when unset, the scope it came from or None). A managed value is
+    above the user's, as in Claude Code. An unreadable file counts as unset,
+    with a reason."""
+    found = {}
+    files = (("managed", MANAGED_SETTINGS.get(probes.platform, MANAGED_SETTINGS_OTHER)),
+             ("user", _user_settings_path(probes)))
+    for scope, path in files:
+        try:
+            data = probes.read_json(path)
+        except Exception:
+            reasons.append("the " + scope + " settings file " + path.replace("\\", "/")
+                           + " could not be read, so its " + PAUSE_SETTING
+                           + " is taken as unset")
+            continue
+        if not isinstance(data, dict) or PAUSE_SETTING not in data:
+            continue
+        value = data[PAUSE_SETTING]
+        if isinstance(value, bool):
+            found[scope] = value
+        else:
+            reasons.append(PAUSE_SETTING + " in the " + scope + " settings is not true or "
+                           "false, so it is taken as unset")
+    for scope, _path in files:
+        if scope in found:
+            return found[scope], scope
+    return None, None
+
+
+def check_usage_limit_pause(probes, report):
+    """Whether Claude Code will pause this run at the usage limit, as far as
+    doctor can tell; returns {"pause", "reasons", "version", "setting"}.
+
+    The pause needs Claude Code 2.1.271 or later and autoContinueAtUsageLimit
+    not false (unset is on). It also needs an interactive session that is not
+    Remote Control, background or headless: doctor runs as a plain script and
+    reads no marker for the session type (none was confirmed reliable), so the
+    session that launches the run supplies that part itself.
+    """
+    check = "usage_limit_pause"
+    reasons = []
+    no = False
+    version = _claude_version(probes, reasons)
+    if version is not None:
+        parts = tuple(int(n) for n in version.split("."))
+        if parts < PAUSE_MIN_VERSION:
+            no = True
+            reasons.append("Claude Code " + version + " is older than 2.1.271, the first "
+                           "release that pauses a run at the usage limit")
+    setting, scope = _pause_setting(probes, reasons)
+    if setting is False:
+        no = True
+        reasons.append(PAUSE_SETTING + " is false in the " + scope + " settings")
+    pause = "no" if no else ("unknown" if version is None else "yes")
+    if pause == "no":
+        report.warn(check, "the run will not pause at the usage limit: " + "; ".join(reasons))
+    elif pause == "unknown":
+        report.warn(check, "unknown whether the run pauses at the usage limit: "
+                    + "; ".join(reasons))
+    elif reasons:
+        report.warn(check, "the run pauses at the usage limit, but " + "; ".join(reasons))
+    else:
+        report.passed(check)
+    return {"pause": pause, "reasons": reasons, "version": version, "setting": setting}
+
+
 def run_checks(manifest, probes):
     """Every doctor check against manifest, through probes; see the module doc."""
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -916,7 +1058,9 @@ def run_checks(manifest, probes):
     check_active_runs(manifest, probes, report)
     check_defender(manifest, probes, report)
     check_concurrency(manifest, probes, report)
+    pause = check_usage_limit_pause(probes, report)
     result = report.result()
+    result["usage_limit_pause"] = pause
     result["observed_at"] = observed_at
     result["doctor_version"] = read_version(SKILL_DIR)
     run_id = manifest.get("run_id")
