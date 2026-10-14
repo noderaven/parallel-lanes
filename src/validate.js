@@ -588,7 +588,10 @@ function validateManifest(m) {
       if (!isTextList(r.discarded)) err('setup_result.discarded: must be a list of non-empty strings');
       if ('preserved' in r && !(Array.isArray(r.preserved) && r.preserved.every((p) => isObject(p)
         && isText(p.worktree) && isText(p.ref) && isText(p.commit)))) {
-        err('setup_result.preserved: must be a list of {worktree, ref, commit}');
+        // index_commit, index_saved and index_error (scripts/setup snapshot)
+        // are optional: setup before 1.6.2 did not write them.
+        err('setup_result.preserved: must be a list of {worktree, ref, commit} with optional '
+          + 'index_commit (the staged version, or null), index_saved and index_error');
       }
       // setup_skipped (spec 4.8): lanes whose setup commands setup skipped.
       // None may have pending work under the manifest's current done and
