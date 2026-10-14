@@ -1,0 +1,13 @@
+{
+  "runId": "wf_m1a",
+  "workflowName": "parallel-lanes",
+  "status": "completed",
+  "result": {
+    "status": "stopped",
+    "run_id": "m1a",
+    "version": "1.5.2"
+  },
+  "logs": [
+    "[I3 implement] failed: You've hit your session limit \u00b7 resets 5am (America/Los_Angeles)"
+  ]
+}
