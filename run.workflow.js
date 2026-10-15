@@ -1581,7 +1581,7 @@ function carryOverLines(m, task, where, by) {
     'An implementer may override only an implementer ruling of its own lane; to depart from any other, report status',
     'question naming its id.',
     'Before changing a file outside your Files list, run (a read-only command):',
-    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, '<path>')}`,
+    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, "'<path relative to the worktree>'")}`,
     'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
     'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
     'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
@@ -2285,7 +2285,10 @@ function verifySchema() {
 // bind it, and whether the plan or spec changed since the last launch
 // (inputs_changed, copied from ledger status). [] on a first launch.
 function relaunchPreflightLines(m) {
-  if (!Array.isArray(m.done) || m.done.length === 0) return [];
+  // A relaunch: tasks are done, or the session carried an earlier launch
+  // (carried_minors, set on every resume) even when none got done.
+  const done = Array.isArray(m.done) ? m.done : [];
+  if (done.length === 0 && !m.carried_minors) return [];
   const ic = m.inputs_changed;
   const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
   let changed = 'Whether the plan or the spec changed since the last launch is not known.';
@@ -2294,7 +2297,7 @@ function relaunchPreflightLines(m) {
   else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
   else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
   return [
-    `Built tasks (done in an earlier launch; never rule on their code): ${m.done.join(', ')}`,
+    `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
     'Check only the tasks still to run and their dependence on built work.',
@@ -5140,7 +5143,7 @@ async function runAll(manifest, io) {
     .filter((t) => taskState(m, t.id) === 'skip' && !covered.has(t.id)).map((t) => t.id);
   if (earlier.length > 0) {
     final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
-      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + ' did not reach the final lenses or task_minors_open: no carried snapshot covers them; read those'
       + " tasks' approved reviews in the earlier launch's report");
   }
   delivered = final.head;

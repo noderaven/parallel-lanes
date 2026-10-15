@@ -292,3 +292,105 @@ test('owners without an owner map exits 3', () => {
   const dir = freshDir();
   assert.equal(ledger('owners', dir, '--task', 'T2', 'a.txt').code, 3);
 });
+
+// ---- Review fixes ----
+
+test('an override takes effect only in views that show the overriding ruling, and only within the rules', () => {
+  const dir = freshDir();
+  appendOk(dir, 'beta', { task: 'T4', event: 'ruling', by: 'implementer', text: 'BETA-KEEPS' });
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'RUN-WIDE' });
+  appendOk(dir, 'alpha', { task: 'T2', event: 'ruling', by: 'implementer', text: 'MINE', overrides: ['beta-R1', '_run-R1'] });
+  // beta's view does not show alpha-R1: both targets stay in force there.
+  const beta = rulingsOut(dir, '--lane', 'beta');
+  assert.ok(beta.includes('beta-R1 [implementer, T4, lane] BETA-KEEPS') && beta.includes('] RUN-WIDE'), beta);
+  // Even where alpha-R1 shows, an implementer cannot override another lane's or an adjudicator's ruling.
+  const all = rulingsOut(dir);
+  assert.ok(all.includes('] RUN-WIDE') && all.includes('] BETA-KEEPS'), all);
+  assert.ok(all.includes('(overrides beta-R1 (against the rule), _run-R1 (against the rule))'), all);
+  // Within the rules it takes effect.
+  appendOk(dir, 'alpha', { task: 'T3', event: 'ruling', by: 'implementer', text: 'NEWER', overrides: ['alpha-R1'] });
+  assert.ok(rulingsOut(dir, '--lane', 'alpha').split('Overridden:')[1].includes('alpha-R1 by alpha-R2'));
+});
+
+test("a PF-n not yet bound is this launch's pre-flight ruling, not unknown", () => {
+  const dir = freshDir();
+  appendOk(dir, 'alpha', { task: 'T2', event: 'ruling', by: 'adjudicator', text: 'X', overrides: ['PF-2'] });
+  const out = rulingsOut(dir);
+  assert.ok(out.includes("(overrides PF-2 (this launch's pre-flight))"), out);
+  assert.deepEqual(statusOf(dir).overrides[0].unknown, []);
+});
+
+// A ledger with two launches: setup run_started events and doctor files that
+// name each launch's setup_event, as the session's ledger conditions writes.
+function twoLaunchLedger(dir) {
+  const started = (head) => ({ task: '_run', event: 'run_started', phase: 'setup', head, plan_sha256: null, spec_sha256: null });
+  appendOk(dir, '_run', started('h1'));
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'ADJ-ONE' });
+  appendOk(dir, '_run', started('h2'));
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'ADJ-TWO' });
+  writeFileSync(join(dir, 'doctor-wf_one111-001.json'), JSON.stringify({ launch: { wf: 'wf_one111-001', setup_event: 1 } }));
+  writeFileSync(join(dir, 'doctor-wf_two222-002.json'), JSON.stringify({ launch: { wf: 'wf_two222-002', setup_event: 2 } }));
+}
+
+test("carry-launch maps a launch's adjudication to the adjudicator ruling of that launch's window", () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  twoLaunchLedger(dir);
+  const conflicts = { rulings: ['P', 'ADJ'], adjudicated: 1 };
+  assert.equal(carry(dir, launchFile(config, 'wf_one111-001', conflicts)).code, 0);
+  assert.equal(carry(dir, launchFile(config, 'wf_two222-002', conflicts)).code, 0);
+  const carried = readFileSync(join(dir, '_run.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    .filter((e) => e.event === 'carried');
+  assert.deepEqual(carried.map((c) => c.pf['PF-2']), ['_run-R1', '_run-R2']);
+});
+
+test('carry-launch refuses a launch while an earlier launch is not carried', () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  twoLaunchLedger(dir);
+  launchFile(config, 'wf_one111-001');
+  const later = carry(dir, launchFile(config, 'wf_two222-002'));
+  assert.equal(later.code, 3, later.stdout);
+  assert.match(later.stderr, /wf_one111-001/);
+  assert.equal(carry(dir, 'wf_one111-001', { CLAUDE_CONFIG_DIR: config }).code, 0);
+  assert.equal(carry(dir, 'wf_two222-002', { CLAUDE_CONFIG_DIR: config }).code, 0);
+});
+
+test('status says the spec did not change when no launch recorded one and none is given', () => {
+  const dir = freshDir();
+  const plan = join(dir, '..', 'plan.md');
+  writeFileSync(plan, '# Plan\n');
+  appendOk(dir, '_run', { task: '_run', event: 'run_started', phase: 'setup', head: 'h1', plan_sha256: null, spec_sha256: null });
+  assert.equal(statusOf2(dir, '--plan', plan).inputs.spec_changed, false);
+});
+function statusOf2(dir, ...extra) {
+  const res = ledger('status', dir, ...extra);
+  assert.equal(res.code, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test('owners takes an absolute path inside the checkout as relative, refuses one outside, and checks task ids', () => {
+  const root = freshDir('proj');
+  const dir = join(root, 'ledger');
+  assert.equal(ledger('write-owners', dir, ownersManifest(root)).code, 0);
+  const inside = spawnSync('python3', [join(SCRIPTS, 'ledger'), 'owners', dir, '--task', 'T2', join(root, 'src', 'y.js')],
+    { encoding: 'utf8', cwd: root });
+  assert.equal(inside.status, 0, inside.stderr);
+  assert.ok(inside.stdout.includes('(owned by T4, another lane, running alongside)'), inside.stdout);
+  const outside = spawnSync('python3', [join(SCRIPTS, 'ledger'), 'owners', dir, '--task', 'T2', join(TMP, 'elsewhere.js')],
+    { encoding: 'utf8', cwd: root });
+  assert.equal(outside.status, 2, outside.stdout);
+  assert.equal(ledger('owners', dir, '--task', 'NOPE', 'a.txt').code, 2);
+  assert.equal(ledger('owners', dir, '--task', 'T2', '--task', 'bad/id', 'a.txt').code, 2);
+});
+
+test('a final review result without carried_minors_open raised none of the carried minors', () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  carry(dir, launchFile(config, 'wf_m1aaaa-001', { tasks: { T1: done([minor('T1-1', 'T1')]) } }));
+  carry(dir, launchFile(config, 'wf_m2aaaa-002', {
+    tasks: {}, final: { findings: [], task_minors_open: [] },
+    args: { carried_minors: { open: ['T1-1'], covered: ['T1'] } },
+  }));
+  assert.deepEqual(statusOf(dir).minors.open, ['T1-1']);
+});

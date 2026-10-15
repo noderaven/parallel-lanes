@@ -383,6 +383,26 @@ test('start-task --owners names the owner of each changed path, and shared decla
     + "shared.css (in your Files list; also in T5's Files)\n"), res.stdout);
 });
 
+test('start-task still starts without an owner map, or when the rulings print fails', () => {
+  const c = newCase();
+  const base = git(c.lane, 'rev-parse', 'HEAD');
+  write(join(c.lane, 'src', 'b.js'), 'b\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'work');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--scope', base, head, '--declared', 'src/a.js',
+    '--owners', join(c.root, 'no-such-owners.json'), '--brief', 'T1', out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\nsrc/b.js\n"), res.stdout);
+  // A torn ledger line makes ledger rulings fail: the agent still starts and sees why.
+  const ledgerDir = join(c.root, 'torn ledger');
+  write(join(ledgerDir, 'alpha.jsonl'), '{"task":\n');
+  const torn = startTask(c.lane, c.plan, '--rulings', ledgerDir, 'alpha', '--brief', 'T1', out);
+  assert.equal(torn.code, 0, torn.stderr);
+  assert.match(torn.stdout, /===== rulings in force =====\n\(could not read the rulings: [^\n]+\)\n/);
+});
+
 test('start-task --rulings prints the rulings in force for the lane', () => {
   const c = newCase();
   const ledgerDir = join(c.root, 'ledger');

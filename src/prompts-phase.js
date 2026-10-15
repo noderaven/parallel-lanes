@@ -231,7 +231,10 @@ function verifySchema() {
 // bind it, and whether the plan or spec changed since the last launch
 // (inputs_changed, copied from ledger status). [] on a first launch.
 function relaunchPreflightLines(m) {
-  if (!Array.isArray(m.done) || m.done.length === 0) return [];
+  // A relaunch: tasks are done, or the session carried an earlier launch
+  // (carried_minors, set on every resume) even when none got done.
+  const done = Array.isArray(m.done) ? m.done : [];
+  if (done.length === 0 && !m.carried_minors) return [];
   const ic = m.inputs_changed;
   const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
   let changed = 'Whether the plan or the spec changed since the last launch is not known.';
@@ -240,7 +243,7 @@ function relaunchPreflightLines(m) {
   else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
   else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
   return [
-    `Built tasks (done in an earlier launch; never rule on their code): ${m.done.join(', ')}`,
+    `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
     'Check only the tasks still to run and their dependence on built work.',

@@ -225,7 +225,8 @@ earlier snapshot belongs to the earlier launch.
 
 Relaunch once with the relaunch notice: carry budgets over (reference.md "Transient stops"). Set
 `repairs_spent` to the repairs in the stopped run's `final.repairs` plus the earlier value.
-First recompute `done`, `reviewed`, `deferred`, the `carry` notes and `backfill` as in Resume
+First recompute `done`, `reviewed`, `deferred`, the `carry` notes, `carried_minors`,
+`inputs_changed` and `backfill` as in Resume
 steps 2-3, then rerun `scripts/setup --owner <token>` and take `start_points`; if validation
 rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient
 stop is a real stop, unless it is a usage-limit stop (reference.md "Usage limit").
@@ -286,12 +287,13 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
 
 1. Invoked notice. Read the manifest (an `active-run list` marker names it); set `python` by
    Building step 0. No manifest (earlier work from a hand-run attempt): `<skill_dir>/adopt.md` first.
-2. `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
+2. First `<python> <skill_dir>/scripts/ledger carry-launch <ledger_dir> <wf id>` for each earlier
+   launch not yet carried, in launch order (`doctor-<wf>.json` gives its `setup_event`). Then
+   `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
    task up: reference.md "Backfill"), and `repairs_spent` from earlier reports' `final.repairs`;
-   put each `carry` entry into `notes`. First run `ledger carry-launch <ledger_dir> <wf id>` for
-   each earlier launch (`doctor-<wf>.json` in the ledger names them); then copy `minors` into
-   `carried_minors` and `inputs` into `inputs_changed` as printed (reference.md "Carry-over"). Tasks in `stale`
+   put each `carry` entry into `notes`; copy `minors` into `carried_minors`, and `inputs` into
+   `inputs_changed` as `{plan: plan_changed, spec: spec_changed}` (reference.md "Carry-over"). Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
    spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again

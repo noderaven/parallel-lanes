@@ -534,7 +534,7 @@ function carryOverLines(m, task, where, by) {
     'An implementer may override only an implementer ruling of its own lane; to depart from any other, report status',
     'question naming its id.',
     'Before changing a file outside your Files list, run (a read-only command):',
-    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, '<path>')}`,
+    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, "'<path relative to the worktree>'")}`,
     'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
     'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
     'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',

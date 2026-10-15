@@ -950,7 +950,7 @@ async function runAll(manifest, io) {
     .filter((t) => taskState(m, t.id) === 'skip' && !covered.has(t.id)).map((t) => t.id);
   if (earlier.length > 0) {
     final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
-      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + ' did not reach the final lenses or task_minors_open: no carried snapshot covers them; read those'
       + " tasks' approved reviews in the earlier launch's report");
   }
   delivered = final.head;

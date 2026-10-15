@@ -66,7 +66,7 @@ test('reviewers get the owner map with their scope list, and the four-way scope 
 
 test('implementers check owners before going outside their Files list, record observed failures, and override by id', () => {
   const p = implementPrompt(manifest(), task('T2'), ALPHA, H('b0'));
-  assert.ok(p.includes(`${LEDGER} owners '/work/ledger' --task 'T2' <path>`), p);
+  assert.ok(p.includes(`${LEDGER} owners '/work/ledger' --task 'T2' '<path relative to the worktree>'`), p);
   assert.ok(p.includes('Observed: <test or command> failed - <why outside this task> - <rerun result>'), p);
   assert.ok(p.includes('"scope": "run"'), p);
   assert.ok(p.includes('"overrides": ['), p);
@@ -109,4 +109,16 @@ test("a relaunch's pre-flight checks only the tasks still to run, bound by the e
   assert.ok(p.includes('The plan changed since the last launch; the spec did not.'), p);
   const unknown = preflightPrompt(manifest({ done: ['T1'], reviewed: ['T1'] }));
   assert.ok(unknown.includes('Whether the plan or the spec changed since the last launch is not known.'), unknown);
+});
+
+test("a relaunch with carried minors but no task done still gets the earlier rulings in pre-flight", () => {
+  const m = manifest({ carried_minors: { open: [], covered: [] } });
+  const p = preflightPrompt(m);
+  assert.ok(p.includes(RULINGS_CMD), p);
+  assert.ok(p.includes('Built tasks (done in an earlier launch; never rule on their code): (none)'), p);
+});
+
+test('the owners command in the implement prompt asks for a quoted path relative to the worktree', () => {
+  const p = implementPrompt(manifest(), task('T2'), ALPHA, H('b0'));
+  assert.ok(p.includes("--task 'T2' '<path relative to the worktree>'"), p);
 });

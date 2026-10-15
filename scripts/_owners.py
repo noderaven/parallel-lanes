@@ -1,8 +1,9 @@
 """The owner map: which tasks list each path in their Files list, and where
 each task runs (1.6.3).
 
-setup writes <ledger_dir>/owners.json through `ledger write-owners`; the
-ledger's owners and undeclared commands and start-task --owners read it.
+setup writes <ledger_dir>/owners.json (`ledger write-owners` writes the same
+file from a manifest); the ledger's owners and undeclared commands and
+start-task --owners read it.
 
   {"repo": {"mode", "root", "git_dir"},
    "tasks": {id: {"where": "prelude" | <lane id> | "join", "pos": n}},

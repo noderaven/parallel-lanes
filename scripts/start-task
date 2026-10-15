@@ -38,11 +38,12 @@ In order:
              X, earlier in the run)", "(owned by X, another lane, running
              alongside)", "(owned by X, later)" or "(no task owns it)"; a
              changed declared path that another task also lists follows as
-             "(in your Files list; also in X's Files)". An unreadable FILE
-             exits 3.
+             "(in your Files list; also in X's Files)". A missing FILE prints
+             the plain list; an unreadable one exits 3.
   --rulings  prints `ledger rulings LEDGER_DIR --lane LANE` (LANE "-": every
              ruling) under a "===== rulings in force =====" line, after the
-             briefs.
+             briefs; when that fails, one "(could not read the rulings: ...)"
+             line instead.
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
 On Windows every path argument may be given in any form (C:\\x, /c/x,
 /tmp/x) and is used in the C:/... form.
@@ -54,8 +55,8 @@ stdout, only on success:
   branch: <abbrev-ref of DIR>
   head: <full sha of DIR's HEAD after any sync>
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
-  ===== review package =====           then the script's stdout (--package)
   ===== rulings in force =====         then the rulings (--rulings)
+  ===== review package =====           then the script's stdout (--package)
   ===== files changed outside ... ===== then the paths (--scope)
 
 Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
@@ -228,10 +229,10 @@ def run(args):
         res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "rulings", ledger_dir,
                               *([] if lane == "-" else ["--lane", lane])],
                              env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if res.returncode != 0:
-            sys.stderr.write(res.stderr)
-            sys.exit(res.returncode)
-        out.append(f"===== rulings in force =====\n{res.stdout}")
+        # An unreadable ledger never keeps the agent from starting: it sees why.
+        text = res.stdout if res.returncode == 0 else \
+            f"(could not read the rulings: {(res.stderr.strip().splitlines() or ['ledger failed'])[-1]})\n"
+        out.append(f"===== rulings in force =====\n{text}")
 
     if args.package is not None:
         script, base, head_ref, package_out = args.package
@@ -260,7 +261,8 @@ def run(args):
         changed = [p for p in res.stdout.splitlines() if p]
         outside = sorted(p for p in changed if path_key(p) not in declared)
         lines = outside
-        if args.owners is not None:
+        if args.owners is not None and os.path.exists(args.owners):
+            # A ledger set up before 1.6.3 has no owner map: the plain list.
             try:
                 owners = _owners.load(args.owners)
             except (OSError, ValueError) as e:

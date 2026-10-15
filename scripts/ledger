@@ -66,7 +66,11 @@ ruling by preflight with scope run and pf PF-<n> (the adjudication at
 preflight.adjudicated is skipped: the adjudicator recorded it; a result
 without that field and with conflicts has it last); a minors event; and a
 carried event binding every ruling whose overrides name a PF-n no earlier
-carried event bound. The open minors: the previous snapshot's, less the
+carried event bound. Launches are carried in launch order: with the ledger's
+doctor-<wf>.json files (ledger conditions) naming each launch's setup event,
+carrying a launch while an earlier one is not carried exits 3 naming it, and
+the adjudication is looked for between the launch's setup run_started and the
+next one. The open minors: the previous snapshot's, less the
 entries of tasks done in this launch and the carried ids this launch's final
 review raised, plus each task done in this launch's minor_findings less the
 ids the final review raised (none without one). Prints {"carried", "rulings",
@@ -562,7 +566,9 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
     if setup_hashes is not None:
         if plan_sha is not None:
             inputs["plan_changed"] = setup_hashes[0] != plan_sha
-        if spec_sha is not None:
+        if spec_sha is not None or plan_given:
+            # Without --spec there is no spec now (as for stale reviews): a
+            # launch that recorded none did not change it.
             inputs["spec_changed"] = setup_hashes[1] != spec_sha
 
     stale, unbound = [], []
@@ -665,9 +671,10 @@ def carried_events(directory):
 
 
 def resolve_overrides(records, carried):
-    """{ruling id: [(target id, known)]}: a PF-<n> a ruling names resolves
-    through the carried event that bound that ruling (carry-launch); any
-    other id must be a ruling of this ledger."""
+    """{ruling id: [(target id, state)]}: state is known (a ruling of this
+    ledger), pending (a PF-<n> no carried event bound yet: this launch's
+    pre-flight ruling) or unknown. A PF-<n> resolves through the carried event
+    that bound the ruling naming it (carry-launch)."""
     ids = {r["id"] for r in records}
     bound = {}
     for c in carried:
@@ -679,19 +686,38 @@ def resolve_overrides(records, carried):
         targets = []
         for o in r["event"].get("overrides") or []:
             if PF_ID.fullmatch(o):
-                mapped = bound.get((r["file"], r["line"]), {}).get(o)
-                targets.append((mapped or o, mapped is not None and mapped in ids))
+                pf = bound.get((r["file"], r["line"]))
+                if pf is None:
+                    targets.append((o, "pending"))
+                else:
+                    mapped = pf.get(o)
+                    targets.append((mapped or o, "known" if mapped in ids else "unknown"))
             else:
-                targets.append((o, o in ids))
+                targets.append((o, "known" if o in ids else "unknown"))
         out[r["id"]] = targets
     return out
 
 
+def may_override(r, target):
+    """Whether ruling r may override target: an adjudicator any ruling; a task
+    agent only an implementer's or reviewer's ruling of its own lane file;
+    pre-flight none."""
+    if r["role"] == "adjudicator":
+        return True
+    if r["role"] in ("implementer", "reviewer"):
+        return target["role"] in ("implementer", "reviewer") and target["stem"] == r["stem"]
+    return False
+
+
+OVERRIDE_NOTES = {"unknown": " (unknown)", "pending": " (this launch's pre-flight)", "against": " (against the rule)"}
+
+
 def ruling_line(r, targets):
+    """targets: [(id, state)], state known, unknown, pending or against."""
     e = r["event"]
     line = f"{r['id']} [{r['role']}, {e['task']}, {r['scope']}] {e['text']}"
     if targets:
-        line += " (overrides " + ", ".join(t if known else f"{t} (unknown)" for t, known in targets) + ")"
+        line += " (overrides " + ", ".join(t + OVERRIDE_NOTES.get(state, "") for t, state in targets) + ")"
     if e.get("files"):
         line += " (files " + ", ".join(e["files"]) + ")"
     return line
@@ -701,17 +727,26 @@ def rulings(directory, lane=None):
     """Print the rulings in force, then the overridden ones. With lane: the
     rulings of _run, the prelude and that lane, and every run-scope one."""
     records = ruling_records(directory)
+    by_id = {r["id"]: r for r in records}
     overrides = resolve_overrides(records, carried_events(directory))
-    overridden_by = {}
-    for r in records:
-        for target, known in overrides[r["id"]]:
-            if known:
-                overridden_by.setdefault(target, r["id"])
 
     def shown(r):
         return lane is None or r["stem"] in ("_run", "prelude", lane) or r["scope"] == "run"
 
-    in_force = [ruling_line(r, overrides[r["id"]]) for r in records if shown(r) and r["id"] not in overridden_by]
+    # An override takes effect only within the rules, and in this view only
+    # when the ruling that makes it is shown here too.
+    marked = {}
+    overridden_by = {}
+    for r in records:
+        marked[r["id"]] = []
+        for target, state in overrides[r["id"]]:
+            if state == "known" and not may_override(r, by_id[target]):
+                state = "against"
+            marked[r["id"]].append((target, state))
+            if state == "known" and shown(r):
+                overridden_by.setdefault(target, r["id"])
+
+    in_force = [ruling_line(r, marked[r["id"]]) for r in records if shown(r) and r["id"] not in overridden_by]
     gone = [f"{r['id']} by {overridden_by[r['id']]}" for r in records if shown(r) and r["id"] in overridden_by]
     lines = in_force or ["(none)"]
     if gone:
@@ -799,7 +834,7 @@ def overrides_list(directory):
     resolved = resolve_overrides(records, carried_events(directory))
     return [{"id": r["id"], "by": r["role"], "task": r["event"]["task"],
              "overrides": [t for t, _ in resolved[r["id"]]],
-             "unknown": [t for t, known in resolved[r["id"]] if not known]}
+             "unknown": [t for t, state in resolved[r["id"]] if state == "unknown"]}
             for r in records if resolved[r["id"]]]
 
 
@@ -858,10 +893,26 @@ def write_owners(directory, manifest_path):
 
 
 def owners(directory, unit_ids, paths):
-    """Print what each path is, seen from the unit's tasks."""
+    """Print what each path is, seen from the unit's tasks. An absolute path
+    is taken relative to the current directory (the agent's checkout); one
+    outside it, or a task the map does not know, is a usage error."""
     data = load_owners(directory)
+    unknown = [t for t in unit_ids if t not in data["tasks"]]
+    if unknown:
+        fail(2, f"unknown task {unknown[0]!r}: not in the owner map")
+    here = os.path.abspath(os.getcwd())
     for p in paths:
-        print(f"{p} ({_owners.annotate(data, unit_ids, p)})")
+        rel = p
+        if os.path.isabs(p) or (len(p) > 1 and p[1] == ":"):
+            full = os.path.abspath(p)
+            try:
+                inside = os.path.commonpath([full, here]) == here
+            except ValueError:
+                inside = False
+            if not inside:
+                fail(2, f"give {p!r} relative to the checkout {here!r}")
+            rel = os.path.relpath(full, here).replace(os.sep, "/")
+        print(f"{p} ({_owners.annotate(data, unit_ids, rel)})")
 
 
 def undeclared(directory):
@@ -916,7 +967,11 @@ def open_minors(previous, result, args):
     final = result.get("final") if isinstance(result.get("final"), dict) else None
     done_here = [t for t, v in tasks.items() if isinstance(v, dict) and v.get("status") == "done"]
     carried_open = ((args or {}).get("carried_minors") or {}).get("open") or []
-    still_carried = set((final or {}).get("carried_minors_open") or []) if final is not None else set(carried_open)
+    # A final review that reports no carried_minors_open raised none of them.
+    if final is not None and isinstance(final.get("carried_minors_open"), list):
+        still_carried = set(final["carried_minors_open"])
+    else:
+        still_carried = set(carried_open)
     raised_carried = set(carried_open) - still_carried
     task_open = None if final is None else {m.get("id") for m in final.get("task_minors_open") or []
                                             if isinstance(m, dict)}
@@ -939,6 +994,39 @@ def open_minors(previous, result, args):
     return out, covered
 
 
+def launch_order(directory):
+    """{wf id: n}: the setup event each launch's doctor-<wf>.json names (the
+    nth setup run_started in _run.jsonl), from ledger conditions."""
+    order = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return order
+    for name in names:
+        if not (name.startswith("doctor-") and name.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as f:
+                launch = json.load(f).get("launch") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        if is_text(launch.get("wf")) and isinstance(launch.get("setup_event"), int):
+            order[launch["wf"]] = launch["setup_event"]
+    return order
+
+
+def setup_window(directory, n):
+    """(first line, end line) of launch n's events in _run.jsonl: after its
+    setup run_started, before the next one; None when n is unknown."""
+    if not isinstance(n, int):
+        return None
+    starts = [number for name, number, e in read_events_at(directory)
+              if name == "_run.jsonl" and e.get("event") == "run_started" and e.get("phase") == "setup"]
+    if n < 1 or n > len(starts):
+        return None
+    return starts[n - 1], (starts[n] if n < len(starts) else float("inf"))
+
+
 def carry_launch(directory, source):
     """Record what a launch knew that the ledger does not: pre-flight's own
     rulings (by preflight, PF-n), the open task minors, and which PF-n
@@ -959,9 +1047,18 @@ def carry_launch(directory, source):
     pre = result.get("preflight") if isinstance(result.get("preflight"), dict) else {}
     texts = [t for t in pre.get("rulings") or [] if isinstance(t, str)]
     adjudicated = pre.get("adjudicated")
+    order = launch_order(directory)
+    carried_wfs = {e.get("wf") for e in events if e.get("event") == "carried"}
+    if wf in order:
+        missing = [w for w, n in sorted(order.items(), key=lambda x: x[1])
+                   if n < order[wf] and w not in carried_wfs]
+        if missing:
+            fail(3, f"carry the earlier launch {missing[0]} first (launches are carried in launch order)")
     already_mapped = {v for c in carried_events(directory) for v in (c.get("pf") or {}).values()}
+    window = setup_window(directory, order.get(wf))
     adj_ids = [r["id"] for r in ruling_records(directory)
-               if r["stem"] == "_run" and r["role"] == "adjudicator" and r["id"] not in already_mapped]
+               if r["stem"] == "_run" and r["role"] == "adjudicator" and r["id"] not in already_mapped
+               and (window is None or window[0] < r["line"] < window[1])]
     if "adjudicated" not in pre and pre.get("conflicts") and texts and adj_ids:
         # A 1.6.2 result has no marker: its engine adjudicated pre-flight
         # conflicts only in autonomous runs and pushed the ruling last. With no
@@ -1232,10 +1329,12 @@ def main(argv):
         undeclared(argv[1])
     elif len(argv) >= 4 and argv[0] == "owners" and argv[1] and argv[2] == "--task":
         rest, unit = argv[2:], []
-        while len(rest) >= 2 and rest[0] == "--task" and LANE.fullmatch(rest[1]):
+        while len(rest) >= 2 and rest[0] == "--task":
+            if not LANE.fullmatch(rest[1]):
+                fail(2, f"unsafe task id {rest[1]!r}")
             unit.append(rest[1])
             rest = rest[2:]
-        if not unit or not rest:
+        if not unit or not rest or any(a == "--task" for a in rest):
             fail(2, "usage: ledger owners DIR --task ID [--task ID ...] PATH ...")
         owners(argv[1], unit, rest)
     elif len(argv) == 3 and argv[0] == "carry-launch" and argv[1] and argv[2]:
@@ -1246,7 +1345,10 @@ def main(argv):
                 " | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]"
                 " | ledger status DIR [--plan PLAN] [--spec SPEC] [--manifest MANIFEST] | ledger backfill DIR MANIFEST"
                 " | ledger accept DIR CHECKOUT HEAD TEXT | ledger ended DIR STATUS AGENTS RULINGS"
-                " | ledger conditions DIR WF_ID DOCTOR_FILE")
+                " | ledger conditions DIR WF_ID DOCTOR_FILE | ledger rulings DIR [--lane LANE]"
+                " | ledger carry-launch DIR TRANSCRIPT_DIR|WF_ID | ledger minors DIR"
+                " | ledger write-owners DIR MANIFEST | ledger owners DIR --task ID [--task ID ...] PATH ..."
+                " | ledger undeclared DIR")
 
 
 if __name__ == "__main__":

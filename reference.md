@@ -63,7 +63,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `profile` | `full` (default) or `lite` (see Profiles). |
 | `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved, setup_skipped}` (`setup_skipped`: the lanes whose setup commands were skipped because every task is done and reviewed; validation rejects a listed lane with pending work, and then setup reruns). Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
 | `carried_minors` | Optional (1.6.3), set on a resume: `{open, covered}` from `ledger status`'s `minors`, copied as printed: the ids of the task minors earlier launches left open, and the tasks the snapshot covers ("Carry-over"). |
-| `inputs_changed` | Optional (1.6.3), set on a resume: `{plan, spec}` from `ledger status --plan --spec`'s `inputs` (each `true`, `false` or `null`), read before setup, so a relaunch's pre-flight knows what changed since the last launch. |
+| `inputs_changed` | Optional (1.6.3), set on a resume: `{plan, spec}` from `ledger status --plan --spec`'s `inputs` (`plan` is `plan_changed`, `spec` is `spec_changed`; each `true`, `false` or `null`), read before setup, so a relaunch's pre-flight knows what changed since the last launch. |
 | `start_points` | The feature heads `ledger status` prints after setup, copied exactly as it prints them: `prelude` from setup, `join` only once a launch got past integration (a new run has no `join` key). |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status --plan`. Never by hand. |
@@ -337,7 +337,10 @@ carry-launch <ledger_dir> <transcript dir>` reads that launch's Workflow result 
 once per wf id: each pre-flight ruling (by `preflight`, scope `run`, its `PF-n`), skipping the
 pre-flight adjudication the adjudicator recorded itself (`preflight.adjudicated`); one `minors`
 snapshot, the task minors still open after that launch; and a `carried` event that binds any
-`PF-n` a ruling of that launch overrode. On a resume, `carry-launch <ledger_dir> <wf id>` finds a
+`PF-n` a ruling of that launch overrode. Launches are carried in launch order (each
+`doctor-<wf>.json` names its `setup_event`; carrying one while an earlier one is not carried
+exits 3 naming it). An override takes effect only within the rules and only in a view that
+shows the ruling that makes it; otherwise the print marks it `(against the rule)`. On a resume, `carry-launch <ledger_dir> <wf id>` finds a
 launch whose session died by its wf id under the Claude config dir's
 `projects/*/*/workflows/<wf>.json` (the ledger's `doctor-<wf>.json` files name the wf ids). Exit 3
 means that launch is not carried (no readable result); say so and go on. `ledger minors
