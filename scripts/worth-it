@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Say whether running a plan's lane layout in parallel saves enough to pay
+for a run's fixed phases.
+
+usage:
+  python3 worth-it PLAN --max-lanes N [--prelude IDS] --lane IDS [--lane IDS ...]
+                   [--join IDS] [--project DIR] [--history-dir DIR]
+
+IDS are comma-separated task ids; --lane repeats, one per lane, in lane order
+and task order; --prelude, --join and a --lane may be empty. N is the lane
+cap the Assessment computed (an integer, at least 1).
+
+The layout: N tasks, L non-empty lanes, A = min(L, --max-lanes) lanes at
+once (at least 1). Task-slots S = prelude tasks + the makespan of the lanes'
+task counts assigned in order, each to the worker free earliest, across A
+workers (the engine's runLanes) + join tasks. A direct build takes N
+task-times; the layout saves N - S. recommend is "direct" when the saving is
+THRESHOLD or less, else "parallel".
+
+The plan is read only to check the layout: every id must be a task heading
+of the plan (_plan.task_sections) and appear once.
+
+With --project, a scale line: the mean, lowest and highest task time of this
+project's complete archived runs (history index entries whose status is
+complete and whose project matches, as history --project matches), each
+run's task time from its autopsy.json and manifest (_history.run_figures).
+For scale only; it never changes the recommendation.
+
+Prints one JSON object:
+  {"status": "ok", "tasks": N, "lanes": L, "lanes_at_once": A, "slots": S,
+   "saved": N - S, "threshold": THRESHOLD, "recommend": "parallel"|"direct",
+   "scale": {"runs", "task_s_mean", "task_s_min", "task_s_max"} | null,
+   "notes": [str]}
+or {"status": "unavailable", "reason": str, "notes": [str]} when the plan
+cannot be read or the layout is not valid. Read-only.
+
+Exit 0, unavailable results included (the session's Offer goes on as
+before); 2 on a usage error (no PLAN, no --max-lanes, a --max-lanes that is
+not an integer of at least 1, an unknown option or a missing value).
+"""
+import glob
+import json
+import os
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _history  # noqa: E402
+import _plan  # noqa: E402
+import _shell  # noqa: E402
+
+USAGE = ("usage: worth-it PLAN --max-lanes N [--prelude IDS] --lane IDS [--lane IDS ...] [--join IDS] "
+         "[--project DIR] [--history-dir DIR]")
+
+# The back-test of 31 archived runs (2026-10-15, tools/worth-it-backtest.py;
+# the 1.6.4 design, section 4.3): the fixed phases a run adds beyond the
+# whole-branch review a direct build also ends with cost a median 1.23
+# task-times (quartiles 0.92 to 1.67). A layout saving 1 task-time or less
+# does not come out ahead: at 1 the rule agreed with each run's own
+# comparison on 28 of 31 runs, at 2 on 24.
+THRESHOLD = 1
+
+_SINGLE = ("--max-lanes", "--prelude", "--join", "--project", "--history-dir")
+_OPTIONS = _SINGLE + ("--lane",)
+
+
+class UsageError(Exception):
+    """Bad arguments; the message says why (exit 2)."""
+
+
+def parse_args(args):
+    """{plan, max_lanes, prelude, lanes, join, project, history_dir}."""
+    opts = {"plan": None, "--lane": []}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _OPTIONS:
+            if i + 1 >= len(args) or args[i + 1] in _OPTIONS:
+                raise UsageError(a + " needs a value")
+            if a == "--lane":
+                opts["--lane"].append(args[i + 1])
+            elif a in opts:
+                raise UsageError(a + " given twice")
+            else:
+                opts[a] = args[i + 1]
+            i += 2
+        elif a.startswith("--"):
+            raise UsageError("unknown option " + a)
+        elif opts["plan"] is None:
+            opts["plan"] = a
+            i += 1
+        else:
+            raise UsageError("one PLAN only, not also " + a)
+    if not opts["plan"]:
+        raise UsageError("PLAN is required")
+    if "--max-lanes" not in opts:
+        raise UsageError("--max-lanes is required")
+    try:
+        max_lanes = int(opts["--max-lanes"])
+    except ValueError:
+        max_lanes = 0
+    if max_lanes < 1:
+        raise UsageError("--max-lanes needs an integer of at least 1, not " + opts["--max-lanes"])
+    return {
+        "plan": opts["plan"],
+        "max_lanes": max_lanes,
+        "prelude": split_ids(opts.get("--prelude", "")),
+        "lanes": [split_ids(v) for v in opts["--lane"]],
+        "join": split_ids(opts.get("--join", "")),
+        "project": opts.get("--project") or None,
+        "history_dir": opts.get("--history-dir") or None,
+    }
+
+
+def split_ids(value):
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def slots(prelude, lanes, join, at_once):
+    """prelude + the makespan of the lane sizes assigned in order, each to
+    the worker free earliest, across at_once workers + join."""
+    workers = [0] * max(1, min(at_once, len(lanes)))
+    for size in lanes:
+        i = workers.index(min(workers))
+        workers[i] += size
+    return prelude + (max(workers) if lanes else 0) + join
+
+
+def decide(saved):
+    return "direct" if saved <= THRESHOLD else "parallel"
+
+
+def plan_ids(path):
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    return [s.id for s in _plan.task_sections(lines, _plan.unfenced_mask(lines))]
+
+
+def layout_error(layout, known):
+    """Why the layout is not valid, or None."""
+    if not layout:
+        return "the layout names no task"
+    seen = set()
+    for task in layout:
+        if task in seen:
+            return "task " + task + " appears twice in the layout"
+        seen.add(task)
+        if task not in known:
+            return "task " + task + " is not a task heading of the plan"
+    return None
+
+
+def _read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def scale(hdir, project, notes=None):
+    """{runs, task_s_mean, task_s_min, task_s_max} over this project's
+    complete archived runs, or None (with a note when notes is a list)."""
+    notes = [] if notes is None else notes
+    try:
+        index = _history.read_index(hdir)
+    except _history.HistoryError as e:
+        notes.append("scale: " + str(e))
+        return None
+    found, skipped = [], 0
+    for entry in index["runs"]:
+        if entry.get("status") != "complete" or not _history.matches_project(entry, project):
+            continue
+        folder = _history.run_folder(hdir, entry)
+        figures = None
+        try:
+            manifests = sorted(glob.glob(os.path.join(glob.escape(folder), "*.lanes.json"))) if folder else []
+            if manifests:
+                figures = _history.run_figures(_read_json(os.path.join(folder, "autopsy.json")),
+                                               _read_json(manifests[0]))
+        except (OSError, ValueError):
+            figures = None
+        if figures is None:
+            skipped += 1
+        else:
+            found.append((entry.get("run_id"), figures["task_s"]))
+    if not found:
+        notes.append("scale: no complete run of this project with readable figures"
+                     + (" (%d skipped)" % skipped if skipped else ""))
+        return None
+    if skipped:
+        notes.append("scale: %d run(s) of this project skipped (no readable autopsy or manifest)" % skipped)
+    times = [t for _, t in found]
+    return {"runs": [r for r, _ in found], "task_s_mean": round(sum(times) / len(times), 1),
+            "task_s_min": min(times), "task_s_max": max(times)}
+
+
+def assess(args):
+    notes = []
+    try:
+        known = set(plan_ids(_shell.native_path(args["plan"])))
+    except (OSError, UnicodeDecodeError, _shell.BashNotFound) as e:
+        return {"status": "unavailable", "reason": "cannot read the plan: " + str(e), "notes": notes}
+    lanes = [lane for lane in args["lanes"] if lane]
+    layout = args["prelude"] + [t for lane in lanes for t in lane] + args["join"]
+    error = layout_error(layout, known)
+    if error:
+        return {"status": "unavailable", "reason": error, "notes": notes}
+    at_once = max(1, min(len(lanes), args["max_lanes"]))
+    used = slots(len(args["prelude"]), [len(lane) for lane in lanes], len(args["join"]), at_once)
+    saved = len(layout) - used
+    found = None
+    if args["project"]:
+        try:
+            found = scale(_history.history_dir(args["history_dir"]), args["project"], notes)
+        except (OSError, _shell.BashNotFound) as e:
+            notes.append("scale: " + str(e))
+    return {"status": "ok", "tasks": len(layout), "lanes": len(lanes), "lanes_at_once": at_once, "slots": used,
+            "saved": saved, "threshold": THRESHOLD, "recommend": decide(saved), "scale": found, "notes": notes}
+
+
+def main(argv):
+    _shell.setup_io()
+    try:
+        args = parse_args(argv)
+    except UsageError as e:
+        print("worth-it: " + str(e), file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        result = assess(args)
+    except Exception as e:  # noqa: BLE001 - the Offer must never wait on this helper
+        result = {"status": "unavailable", "reason": "%s: %s" % (type(e).__name__, e), "notes": []}
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
