@@ -199,3 +199,188 @@ test('started refuses a unit_branch of another form', () => {
     assert.equal(ledger('append', dir, 'join', JSON.stringify(bad)).code, 2, JSON.stringify(bad));
   }
 });
+
+// ---- Task 3: reads ----
+
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.invalid',
+  GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.invalid',
+};
+function git(dir, ...args) {
+  const res = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: mergeEnv(process.env, GIT_ENV) });
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.replace(/\r\n/g, '\n').trim();
+}
+const jtask = (id) => ({ id, title: id, files: [], tier: 'standard', security: false });
+
+// A repo on branch feat (initial commit W), a ledger dir, and a manifest whose
+// join is ids with start point W.
+function joinCase(ids) {
+  counter += 1;
+  const root = join(TMP, `join ${counter}`);
+  const repo = join(root, 'repo');
+  mkdirSync(repo, { recursive: true });
+  git(repo, 'init', '-q', '-b', 'feat');
+  git(repo, 'commit', '-q', '--allow-empty', '-m', 'init');
+  const w = git(repo, 'rev-parse', 'HEAD');
+  const ledgerDir = join(root, 'ledger');
+  const manifest = join(root, 'manifest.json');
+  writeFileSync(manifest, JSON.stringify({
+    repo: { mode: 'git', root: repo, git_dir: null }, prelude: [], lanes: [], join: ids.map(jtask),
+    start_points: { join: w },
+  }));
+  return { root, repo, w, ledger: ledgerDir, manifest };
+}
+// Commit a file on branch (created from `from` when it does not exist) and
+// record the task's range from..HEAD with finish-task; returns the head.
+function unitCommit(c, branch, from, taskId, name) {
+  const exists = spawnSync('git', ['-C', c.repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
+    { env: mergeEnv(process.env, GIT_ENV) }).status === 0;
+  git(c.repo, 'checkout', '-q', ...(exists ? [branch] : ['-b', branch, from]));
+  writeFileSync(join(c.repo, name), `${name}\n`);
+  git(c.repo, 'add', name);
+  git(c.repo, 'commit', '-q', '-m', name);
+  const res = run('finish-task', [c.repo, branch, from, c.ledger, 'join', '--task', taskId]);
+  assert.equal(res.code, 0, res.stderr);
+  return git(c.repo, 'rev-parse', 'HEAD');
+}
+const backfillOf = (c) => {
+  const res = ledger('backfill', c.ledger, c.manifest);
+  return { code: res.code, ...JSON.parse(res.stdout) };
+};
+
+test('1.6.4 ledgers give join_started false', () => {
+  const dir = freshDir();
+  appendOk(dir, 'prelude', { task: 'T1', event: 'started', base: 'abc' });
+  appendOk(dir, 'join', { task: 'J1', event: 'committed', commits: ['abd'], base: 'abc', head: 'abd' });
+  const s = statusOf(dir);
+  assert.equal(s.join_started, false);
+  assert.deepEqual(s.unit_branches, {});
+  assert.deepEqual(s.wave_merges, []);
+});
+
+test('a started event in join.jsonl gives join_started', () => {
+  const dir = freshDir();
+  appendOk(dir, 'join', { task: 'J1', event: 'started', base: 'abc' });
+  assert.equal(statusOf(dir).join_started, true);
+});
+
+test('unit_branches lists the latest unit branch and dir', () => {
+  const dir = freshDir();
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'abc', dir: 'C:/wt/lane-a', unit_branch: 'pl-r-u-J2' });
+  appendOk(dir, 'join', { task: 'J3', event: 'started', base: 'abc', dir: 'C:/wt/lane-a', unit_branch: 'pl-r-u-J3' });
+  appendOk(dir, 'join', { task: 'J3', event: 'started', base: 'abc', dir: 'C:/wt/lane-b', unit_branch: 'pl-r-u-J3' });
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'abe', restart: true });
+  assert.deepEqual(statusOf(dir).unit_branches, { J3: { branch: 'pl-r-u-J3', dir: 'C:/wt/lane-b' } });
+});
+
+test('a restart resets a done-then-blocked task', () => {
+  const dir = freshDir();
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'w0', unit_branch: 'pl-r-u-J2', dir: 'C:/wt/a' });
+  appendOk(dir, 'join', { task: 'J2', event: 'committed', commits: ['h1'], base: 'w0', head: 'h1' });
+  appendOk(dir, 'join', { task: 'J2', event: 'blocked', reason: 'review_rounds' });
+  let s = statusOf(dir);
+  assert.ok(s.done.includes('J2') && s.blocked.includes('J2'));
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'tip', restart: true });
+  s = statusOf(dir);
+  assert.ok(!s.done.includes('J2'));
+  assert.ok(!s.blocked.includes('J2'));
+  assert.deepEqual(s.inconsistent, []);
+  assert.equal(s.ranges.J2, undefined);
+  appendOk(dir, 'join', { task: 'J2', event: 'committed', commits: ['h2'], base: 'tip', head: 'h2' });
+  s = statusOf(dir);
+  assert.deepEqual(s.ranges.J2, { base: 'tip', head: 'h2' });
+  assert.deepEqual(s.inconsistent, []);
+});
+
+test('a restart at a new base is not a start mismatch', () => {
+  const dir = freshDir();
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'w0' });
+  appendOk(dir, 'join', { task: 'J2', event: 'committed', commits: ['h1'], base: 'w0', head: 'h1' });
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'other', restart: true });
+  assert.deepEqual(statusOf(dir).inconsistent, []);
+  const plain = freshDir();
+  appendOk(plain, 'join', { task: 'J2', event: 'started', base: 'w0' });
+  appendOk(plain, 'join', { task: 'J2', event: 'committed', commits: ['h1'], base: 'w0', head: 'h1' });
+  appendOk(plain, 'join', { task: 'J2', event: 'started', base: 'other' });
+  assert.equal(statusOf(plain).inconsistent.length, 1, 'without restart it is still a mismatch');
+});
+
+test('wave_merges lists merge events in order', () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', wave: 2, units: ['J2', 'J3'], head: 'm2',
+    overlaps: [{ path: 'a', units: ['J2', 'J3'] }], conflict_files: [] });
+  appendOk(dir, '_run', { task: '_run', event: 'wave_checked', wave: 2, head: 'm2', ok: true });
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', recovery: true, units: ['J4'], head: 'm3' });
+  assert.deepEqual(statusOf(dir).wave_merges, [
+    { wave: 2, units: ['J2', 'J3'], head: 'm2', overlaps: [{ path: 'a', units: ['J2', 'J3'] }], conflict_files: [] },
+    { recovery: true, units: ['J4'], head: 'm3', overlaps: [], conflict_files: [] },
+  ]);
+});
+
+test('backfill continues past an unfinished wave unit', () => {
+  const c = joinCase(['A', 'B', 'C']);
+  for (const [id, branch] of [['A', 'pl-r-u-A'], ['B', 'pl-r-u-B'], ['C', 'pl-r-u-C']]) {
+    appendOk(c.ledger, 'join', { task: id, event: 'started', base: c.w, dir: 'C:/wt/x', unit_branch: branch });
+  }
+  const a = unitCommit(c, 'pl-r-u-A', c.w, 'A', 'a.txt');
+  const cc = unitCommit(c, 'pl-r-u-C', c.w, 'C', 'c.txt');
+  const out = backfillOf(c);
+  assert.equal(out.code, 0, JSON.stringify(out.errors));
+  assert.deepEqual(out.backfill, { A: { base: c.w, head: a }, C: { base: c.w, head: cc } });
+});
+
+test('backfill keeps chaining a serial join', () => {
+  const c = joinCase(['A', 'B', 'C']);
+  const a = unitCommit(c, 'feat', c.w, 'A', 'a.txt');
+  unitCommit(c, 'side', a, 'C', 'c.txt');
+  const out = backfillOf(c);
+  assert.equal(out.code, 0, JSON.stringify(out.errors));
+  assert.deepEqual(out.backfill, { A: { base: c.w, head: a } });
+  assert.equal(out.join_tip, a);
+});
+
+test('join_tip is the descendant of wave and serial heads', () => {
+  const c = joinCase(['A', 'B', 'D']);
+  for (const [id, branch] of [['A', 'pl-r-u-A'], ['B', 'pl-r-u-B']]) {
+    appendOk(c.ledger, 'join', { task: id, event: 'started', base: c.w, dir: 'C:/wt/x', unit_branch: branch });
+  }
+  const a = unitCommit(c, 'pl-r-u-A', c.w, 'A', 'a.txt');
+  const b = unitCommit(c, 'pl-r-u-B', c.w, 'B', 'b.txt');
+  git(c.repo, 'checkout', '-q', 'feat');
+  git(c.repo, 'merge', '-q', '--no-ff', '-m', 'join wave 1: merge A', a);
+  git(c.repo, 'merge', '-q', '--no-ff', '-m', 'join wave 1: merge B', b);
+  const m = git(c.repo, 'rev-parse', 'HEAD');
+  appendOk(c.ledger, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A', 'B'], head: m });
+  appendOk(c.ledger, 'join', { task: 'D', event: 'started', base: m });
+  const d = unitCommit(c, 'feat', m, 'D', 'd.txt');
+  const out = backfillOf(c);
+  assert.equal(out.code, 0, JSON.stringify(out.errors));
+  assert.equal(out.join_tip, d);
+  assert.deepEqual(out.backfill.D, { base: m, head: d });
+});
+
+test('join_tip refuses unordered heads', () => {
+  const c = joinCase(['A', 'D']);
+  appendOk(c.ledger, 'join', { task: 'A', event: 'started', base: c.w, dir: 'C:/wt/x', unit_branch: 'pl-r-u-A' });
+  const a = unitCommit(c, 'pl-r-u-A', c.w, 'A', 'a.txt');
+  git(c.repo, 'checkout', '-q', 'feat');
+  git(c.repo, 'merge', '-q', '--no-ff', '-m', 'join wave 1: merge A', a);
+  const m = git(c.repo, 'rev-parse', 'HEAD');
+  appendOk(c.ledger, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], head: m });
+  appendOk(c.ledger, 'join', { task: 'D', event: 'started', base: c.w });
+  unitCommit(c, 'other', c.w, 'D', 'd.txt');
+  const out = backfillOf(c);
+  assert.equal(out.code, 3);
+  assert.ok(out.errors.some((e) => /^join_tip: heads \S+ and \S+ do not descend from one another$/.test(e)),
+    JSON.stringify(out.errors));
+  assert.equal(out.join_tip, null);
+});
+
+test('no join work gives join_tip null', () => {
+  const c = joinCase(['A']);
+  const out = backfillOf(c);
+  assert.equal(out.code, 0);
+  assert.equal(out.join_tip, null);
+});

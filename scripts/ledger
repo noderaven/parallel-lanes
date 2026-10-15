@@ -115,7 +115,15 @@ status reads every DIR/*.jsonl and prints
    "start_points": {...}, "carry": {...}, "ranges": {...}, "legacy": [...],
    "inconsistent": [...], "stale": [...], "unbound": [...], "inputs": {...},
    "spent": {"agents", "rulings"}, "accepted": [{head, text}],
-   "undeclared": {...}}
+   "undeclared": {...}, "join_started": bool, "unit_branches": {...},
+   "wave_merges": [...]}
+join_started: join.jsonl holds a 'started' event (the join began in an
+earlier launch: it then runs serially, 1.6.5). unit_branches: {task: {branch,
+dir}} from each join task's latest 'started' event with a unit_branch, since
+its latest restart. wave_merges: the _run wave_merged events in order, each
+{wave or recovery, units, head, overlaps, conflict_files}. A 'started' event
+with restart true begins its task afresh: its earlier events (committed,
+reviewed, blocked, settled) no longer count.
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
 'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
 with a 'blocked' event and no 'committed' or 'settled' after it. deferred:
@@ -208,7 +216,14 @@ start_points.join), and head = the last commit of its last event; it is listed
 in derived. Every range is checked against git: base must be an ancestor of
 head, and a committed event's commits must be exactly git rev-list base..head
 of that event. Any failure is listed in errors and the exit is 3: a resume
-must not narrow or guess a review range.
+must not narrow or guess a review range. A list ends at its first task that
+is not done, except the join once it started (join_started): a join that ran
+in waves can have a later unit done beside an earlier one that stopped, so
+its unfinished tasks are skipped. It also prints "join_tip": among the heads
+of the wave_merged and wave_checked events and the backfill heads of join
+tasks that did not run on a unit branch, the one every other is an ancestor
+of (null when there is none); two heads neither of which descends from the
+other are an error.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 or task name, an unreadable ledger, plan or manifest, or a backfill error.
@@ -612,7 +627,14 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             if task not in history and want is not None and entry["base"] != want:
                 start_mismatch[task] = (f"its first recorded range starts at {entry['base']}, not at the base "
                                         f"{want} it started at")
-        if event == "started":
+        if event == "started" and entry.get("restart") is True:
+            # A join unit begun again from the feature tip (1.6.5): its
+            # earlier attempt on its unit branch no longer counts.
+            for state in (done, reviewed_by, blocked, deferred, unblocked, last_ruling, review_event,
+                          history, start_mismatch):
+                state.pop(task, None)
+            started[task] = entry["base"]
+        elif event == "started":
             evs = history.get(task)
             if evs and "base" in evs[0] and entry["base"] not in (evs[0]["base"], evs[-1].get("head")) \
                     and task not in start_mismatch:
@@ -764,6 +786,56 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         "accepted": accepted,
         "undeclared": undeclared,
     }, history
+
+
+def join_facts(events_at):
+    """What the ledger says about the join's waves (1.6.5), from (file name,
+    line, event) triples: join_started (a started event in join.jsonl),
+    unit_branches ({task: {branch, dir}} from each join task's latest
+    started event with a unit_branch since its latest restart), and
+    wave_merges (the wave_merged events of _run.jsonl in order, as {wave or
+    recovery, units, head, overlaps, conflict_files})."""
+    started, branches, merges = False, {}, []
+    for name, _, entry in events_at:
+        event = entry["event"]
+        if name == "join.jsonl" and event == "started":
+            started = True
+            if entry.get("restart") is True:
+                branches.pop(entry["task"], None)
+            if "unit_branch" in entry:
+                branches[entry["task"]] = {"branch": entry["unit_branch"], "dir": entry.get("dir")}
+        elif name == "_run.jsonl" and event == "wave_merged":
+            item = {"wave": entry["wave"]} if "wave" in entry else {"recovery": True}
+            item.update({"units": entry["units"], "head": entry["head"],
+                         "overlaps": entry.get("overlaps", []), "conflict_files": entry.get("conflict_files", [])})
+            merges.append(item)
+    return {"join_started": started, "unit_branches": branches, "wave_merges": merges}
+
+
+def join_tip(events, ranges, unit_branches, git):
+    """The join's tip: among the heads of wave_merged and wave_checked
+    events and the recorded heads of join tasks that did not run on a unit
+    branch, the one every other is an ancestor of. Returns (tip or None,
+    error or None)."""
+    heads = []
+    for entry in events:
+        if entry["task"] == "_run" and entry["event"] in ("wave_merged", "wave_checked"):
+            heads.append(entry["head"])
+    for task, rng in ranges.items():
+        if task not in unit_branches:
+            heads.append(rng["head"])
+    tip = None
+    for head in heads:
+        if tip is None:
+            tip = head
+            continue
+        if head == tip:
+            continue
+        if git("merge-base", "--is-ancestor", tip, head).returncode == 0:
+            tip = head
+        elif git("merge-base", "--is-ancestor", head, tip).returncode != 0:
+            return None, f"join_tip: heads {tip} and {head} do not descend from one another"
+    return tip, None
 
 
 def ruling_records(directory):
@@ -1107,10 +1179,12 @@ def undeclared(directory):
 def status(directory, plan=None, spec=None, manifest_path=None):
     plan_text = read_text(plan, "plan") if plan is not None else None
     manifest = load_manifest(manifest_path) if manifest_path is not None else None
-    events = read_events(directory)
+    events_at = read_events_at(directory)
+    events = [entry for _, _, entry in events_at]
     result, _ = summarize(events, plan_text, plan is not None,
                           file_sha256(spec) if spec is not None else None,
                           file_sha256(plan) if plan is not None else None, manifest)
+    result.update(join_facts(events_at))
     snap = latest_minors(events)
     result["minors"] = {"open": [m.get("id") for m in snap["open"]] if snap else [],
                         "covered": list(snap.get("covered") or []) if snap else []}
@@ -1310,7 +1384,10 @@ def backfill(directory, manifest_path):
     lists = task_lists(m)
     git = repo_git(m)
 
-    summary, history = summarize(read_events(directory))
+    events_at = read_events_at(directory)
+    events = [entry for _, _, entry in events_at]
+    summary, history = summarize(events)
+    facts = join_facts(events_at)
     done = set(summary["done"])
     starts = m.get("start_points") or summary["start_points"]
     out, derived, errors = {}, [], []
@@ -1330,6 +1407,10 @@ def backfill(directory, manifest_path):
         for t in tasks:
             tid = t["id"]
             if tid not in done:
+                # A join that ran in waves (1.6.5) can have a later unit done
+                # beside an earlier one that stopped: each has its own range.
+                if name == "join" and facts["join_started"]:
+                    continue
                 break
             evs = history.get(tid, [])
             if tid in summary["ranges"]:
@@ -1359,7 +1440,12 @@ def backfill(directory, manifest_path):
             prev = rng["head"]
         if name == "prelude":
             prelude_head = prev
-    print(json.dumps({"backfill": out, "derived": derived, "errors": errors}))
+    join_ids = {t["id"] for name, tasks in lists if name == "join" for t in tasks}
+    tip, tip_error = join_tip(events, {t: r for t, r in out.items() if t in join_ids},
+                              facts["unit_branches"], git)
+    if tip_error:
+        errors.append(tip_error)
+    print(json.dumps({"backfill": out, "derived": derived, "errors": errors, "join_tip": tip}))
     if errors:
         sys.exit(3)
 
