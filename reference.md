@@ -564,7 +564,8 @@ tool call never ends the agent's turn.
 Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
 changed path the Files list does not cover, nor an adjudicator ruling in force permits: one filed
 under the unit's task, or under `_run` for a path no task's Files list names (neither the path
-nor a folder above it), in the folder of a file the unit declares; a permit names files, and an
+nor a folder above it), in the folder of a file the unit declares or in a directory it declares
+(folders compared by case); a permit names files, and an
 entry naming a directory permits nothing; such a path is
 listed in `policy.permitted` with the ruling's id), `widen_path` (a changed path under
 `widen_paths`), `forced` (the agent's `--force-full '<why>'`, for a shared contract,

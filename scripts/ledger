@@ -762,9 +762,11 @@ def ruling_view(directory, lane=None):
 def adjudicator_permits(directory, task_ids, declared=()):
     """[(path, ruling id)]: the files the adjudicator rulings in force permit
     for a unit of task_ids that declares the files declared: a ruling filed
-    under one of task_ids, or under _run for a path no task's Files list names
-    in <directory>/owners.json (none of _run's without a readable owner map)
-    that sits in the same folder as a declared file. Implementer, reviewer
+    under one of task_ids, or under _run for a path that neither it nor a
+    folder above it is named by a task's Files list in <directory>/owners.json
+    (none of _run's without a readable owner map) and that sits in the folder
+    of a declared file, or in a declared directory itself (_folder; folders
+    compare by case). A permit names files only. Implementer, reviewer
     and pre-flight rulings permit nothing. task-checks counts these paths as
     declared."""
     shown, _marked, overridden_by = ruling_view(directory)
@@ -772,7 +774,7 @@ def adjudicator_permits(directory, task_ids, declared=()):
         owned = set(_owners.load(owners_path(directory))["files"])
     except (OSError, ValueError):
         owned = None
-    folders = {posixpath.dirname(k) for k in map(_owners.path_key, declared) if k is not None}
+    folders = {_folder(d) for d in declared if _owners.path_key(d) is not None}
     out = []
     for r in shown:
         e = r["event"]
@@ -785,9 +787,18 @@ def adjudicator_permits(directory, task_ids, declared=()):
                 continue
             if e.get("task") in task_ids or (e.get("task") == "_run" and owned is not None
                                              and not _owned_or_under(key, owned)
-                                             and posixpath.dirname(key) in folders):
+                                             and _folder(path, as_file=True) in folders):
                 out.append((path, r["id"]))
     return out
+
+
+def _folder(path, as_file=False):
+    """The folder a declared path names, compared by case: a directory
+    entry ('src/') is its own folder, a file's is its parent; '' is the
+    project root. With as_file, path is always read as a file."""
+    p = path.replace("\\", "/")
+    folder = posixpath.normpath(p) if p.endswith("/") and not as_file else posixpath.dirname(posixpath.normpath(p))
+    return "" if folder == "." else folder
 
 
 def _owned_or_under(key, owned):

@@ -242,6 +242,48 @@ test('a permit names files only: a directory, or an owned folder, never covers a
   widens('owned folder');
 });
 
+test('the permit folder guard: a declared directory is its own folder, and folders compare by case', () => {
+  // Deferred minors of the 1.6.4 final review, included in 1.6.4.
+  const r = repo({ 'src/a.js': '1\n', 'Src2/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'build.cfg'), 'new\n');
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  ledgerFile(r, '_run', [permit('_run', ['build.cfg'])]);
+  // A unit declaring only the directory src/ is not in build.cfg's (root) folder.
+  const dir = run(r, { args: ['--declared', 'src/'] });
+  assert.deepEqual(codes(dir.json), ['outside_files']);
+  assert.deepEqual(dir.json.policy.permitted, []);
+  // A declared root file is.
+  writeFileSync(join(r.dir, 'root.txt'), 'x\n');
+  rmSync(join(r.dir, 'src/a.js'));
+  git(r.dir, 'checkout', '--', 'src/a.js');
+  const root = run(r, { args: ['--declared', 'root.txt'] });
+  assert.deepEqual(root.json.policy.permitted, [{ path: 'build.cfg', ruling: '_run-R1' }]);
+  rmSync(join(r.dir, 'root.txt'));
+  rmSync(join(r.dir, 'build.cfg'));
+  // Src2/new.js is not in the folder of a declared src2/a.js on a case-sensitive comparison.
+  writeFileSync(join(r.dir, 'Src2/new.js'), 'x\n');
+  ledgerFile(r, '_run', [permit('_run', ['Src2/new.js'])]);
+  const cased = run(r, { args: ['--declared', 'src2/a.js'] });
+  assert.deepEqual(cased.json.policy.permitted, []);
+});
+
+test('a malformed owner map, and a backslash or mixed-case permit of an owned file, permit nothing', () => {
+  const r = repo({ 'src/a.js': '1\n', 'src/sub/owned.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/sub/owned.js'), '2\n');
+  ledgerFile(r, '_run', [permit('_run', ['src/sub/owned.js'])]);
+  writeFileSync(join(r.ledger, 'owners.json'), '{"tasks": [], "files": 3}');
+  assert.deepEqual(run(r, { args: ['--declared', 'src/sub/x.js', '--declared', 'src/a.js'] }).json.policy.permitted, []);
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub/owned.js': ['U9'] });
+  for (const path of ['src\\sub\\owned.js', 'SRC/Sub/owned.js']) {
+    ledgerFile(r, '_run', [permit('_run', [path])]);
+    const res = run(r, { args: ['--declared', 'src/sub/x.js', '--declared', 'src/a.js'] });
+    assert.deepEqual(res.json.policy.permitted, [], path);
+    assert.deepEqual(codes(res.json), ['outside_files'], path);
+  }
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');

@@ -42,8 +42,8 @@ Permitted paths: a changed path outside the Files list that an adjudicator
 ruling in force permits this unit (its 'files', file paths only: an entry
 naming a directory permits nothing; filed under one of the --task ids, or
 under _run for a path that neither it nor a folder above it is named by a
-task's Files list in LEDGER_DIR/owners.json, in the same folder as a
---declared file) counts as declared and is listed in policy.permitted as
+task's Files list in LEDGER_DIR/owners.json, in the folder of a --declared
+file or in a declared directory itself, folders compared by case) counts as declared and is listed in policy.permitted as
 {path, ruling}. Implementer, reviewer and pre-flight rulings permit nothing.
 The ledger script's adjudicator_permits finds them. When the ledger cannot
 be read none are permitted; when the owner map cannot be read, none of
