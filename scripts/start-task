@@ -5,10 +5,24 @@ usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
                   [--artifacts ROOT] [--record-start LEDGER_DIR LANE BASE]
                   [--scope BASE HEAD --declared PATH [--declared PATH ...] [--owners FILE]]
                   [--rulings LEDGER_DIR LANE]
+                  [--unit-branch NAME SHA --run-id RUN [--setup COMMAND ...]]
+                  [--restart]
                   --brief TASK_ID OUT [--brief TASK_ID OUT ...]
                   [--also TASK_ID PRODUCER_ID ...]
 
 In order:
+  --unit-branch  a join wave unit (1.6.5) runs on its own branch NAME
+             (pl-<run_id>-u-<unit id>) in a lane worktree DIR. When DIR is
+             already on NAME (a retry of the same unit) nothing changes
+             ("kept"). Otherwise DIR's uncommitted changes, if any, are
+             saved under refs/parallel-lanes/RUN/abandoned/ (the snapshot
+             setup makes of a reused worktree, _snapshot) and discarded,
+             and NAME is checked out ("switched"), or created at SHA when
+             it does not exist ("created"; a SHA that is not a commit exits
+             3 before anything changes). Then each --setup COMMAND runs
+             with bash -c in DIR, in order (the feature checkout's setup:
+             the worktree's environment predates the merged lanes); one
+             that fails exits 1. Needs --run-id; not with --sync.
   --sync     git -C DIR merge --ff-only BRANCH (a failure exits 3 and writes
              no brief).
   --brief    scripts/task-brief PLAN TASK_ID OUT for each pair, in the given
@@ -27,7 +41,11 @@ In order:
              "event": "started", "base": <full sha of BASE>} for every --brief
              TASK_ID to LEDGER_DIR/LANE.jsonl (scripts/ledger append): the
              task base, recorded before the implementer writes. BASE must be
-             a commit in DIR, else exit 3 before anything is written.
+             a commit in DIR, else exit 3 before anything is written. With
+             --unit-branch the event also has "dir" (DIR, in the C:/ form on
+             Windows) and "unit_branch"; with --restart (which needs
+             --record-start), "restart": true: a join unit begun again from
+             the feature tip, whose earlier attempt the ledger then drops.
   --scope    prints the paths git diff --name-only --no-renames BASE HEAD
              (in DIR) changes that are not a --declared PATH (normalized and
              case-insensitive; a rename changes both paths), one per line
@@ -54,6 +72,8 @@ package script, so DIR alone names the repository.
 stdout, only on success:
   branch: <abbrev-ref of DIR>
   head: <full sha of DIR's HEAD after any sync>
+  unit branch: NAME (created|switched|kept)  (--unit-branch)
+  saved: <ref> (<commit>)              per snapshot --unit-branch made
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
   ===== rulings in force =====         then the rulings (--rulings)
   ===== review package =====           then the script's stdout (--package)
@@ -71,6 +91,7 @@ import argparse
 import json
 import os
 import posixpath
+import re
 import subprocess
 import sys
 
@@ -80,10 +101,14 @@ sys.path.insert(0, HERE)
 import _brief  # noqa: E402
 import _owners  # noqa: E402
 import _shell  # noqa: E402
+import _snapshot  # noqa: E402
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+# The same forms as the ledger's UNIT_BRANCH and validate.js' runIdPattern.
+UNIT_BRANCH = re.compile(r"^pl-[a-z0-9-]+-u-[A-Za-z0-9_][A-Za-z0-9._-]*$")
+RUN_ID = re.compile(r"^[a-z0-9-]+$")
 
 
 def fail(code, message):
@@ -125,7 +150,22 @@ def parse(argv):
     parser.add_argument("--declared", action="append", default=[], metavar="PATH")
     parser.add_argument("--owners", metavar="FILE")
     parser.add_argument("--rulings", nargs=2, metavar=("LEDGER_DIR", "LANE"))
+    parser.add_argument("--unit-branch", nargs=2, metavar=("NAME", "SHA"))
+    parser.add_argument("--run-id", metavar="RUN")
+    parser.add_argument("--setup", action="append", default=[], metavar="COMMAND")
+    parser.add_argument("--restart", action="store_true")
     args = parser.parse_args(argv)
+    if args.unit_branch is not None:
+        if args.run_id is None or not RUN_ID.fullmatch(args.run_id):
+            parser.error("--unit-branch needs a --run-id of lowercase letters, digits and dashes")
+        if not UNIT_BRANCH.fullmatch(args.unit_branch[0]):
+            parser.error(f"--unit-branch {args.unit_branch[0]!r} is not of the form pl-<run_id>-u-<unit id>")
+        if args.sync is not None:
+            parser.error("--unit-branch and --sync do not go together")
+    elif args.setup:
+        parser.error("--setup needs --unit-branch")
+    if args.restart and args.record_start is None:
+        parser.error("--restart needs --record-start")
     if args.owners is not None and args.scope is None:
         parser.error("--owners needs --scope")
     if args.scope is not None and not args.declared:
@@ -171,6 +211,40 @@ def path_key(path):
     return posixpath.normpath(path).lower()
 
 
+def switch_unit_branch(directory, args):
+    """Put DIR on the unit branch (--unit-branch NAME SHA) and run the
+    --setup commands there. Returns (NAME, the output lines)."""
+    name, sha = args.unit_branch
+    current = rev_parse(3, directory, "--abbrev-ref", "HEAD")
+    lines, preserved = [], []
+    if current == name:
+        state = "kept"
+    else:
+        exists = git(directory, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0
+        start = None
+        if not exists:
+            res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^{{commit}}")
+            if res.returncode != 0 or not res.stdout.strip():
+                fail(3, f"--unit-branch start {sha!r} is not a commit in {directory!r}; nothing changed")
+            start = res.stdout.strip()
+        try:
+            _snapshot.discard_changes(directory, args.run_id, [], preserved, by="start-task")
+        except _snapshot.Failure as e:
+            fail(e.code, str(e))
+        res = git(directory, "checkout", "-q", name) if exists else \
+            git(directory, "checkout", "-q", "-b", name, start)
+        if res.returncode != 0:
+            fail(1, f"checking out {name!r} in {directory!r} failed: {res.stderr.strip()}")
+        state = "switched" if exists else "created"
+    lines.append(f"unit branch: {name} ({state})\n")
+    lines += [f"saved: {p['ref']} ({p['commit']})\n" for p in preserved]
+    for command in args.setup:
+        res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV)
+        if res.returncode != 0:
+            fail(1, f"setup command {command!r} exited {res.returncode} in {directory!r}")
+    return name, lines
+
+
 def main(argv):
     _shell.setup_io()
     try:
@@ -198,6 +272,10 @@ def run(args):
             fail(3, f"--record-start base {args.record_start[2]!r} is not a commit in {directory!r}; nothing written")
         start_base = res.stdout.strip()
 
+    unit_lines = []
+    if args.unit_branch is not None:
+        branch, unit_lines = switch_unit_branch(directory, args)
+
     if args.sync is not None:
         res = git(directory, "merge", "--ff-only", "--end-of-options", args.sync)
         if res.returncode != 0:
@@ -205,7 +283,7 @@ def run(args):
             fail(3, f"fast-forward of {directory!r} to {args.sync!r} failed: {detail}")
     head = rev_parse(1, directory, "HEAD")
 
-    out = [f"branch: {branch}\n", f"head: {head}\n"]
+    out = [f"branch: {branch}\n", f"head: {head}\n", *unit_lines]
     plan = _shell.native_path(os.path.abspath(args.plan))
     for task_id, path in args.brief:
         extra = [a for t, producer in args.also if t == task_id for a in ("--also", producer)]
@@ -277,7 +355,12 @@ def run(args):
     if start_base is not None:
         ledger_dir, lane, _ = args.record_start
         for task_id, _ in args.brief:
-            entry = json.dumps({"task": task_id, "event": "started", "base": start_base})
+            event = {"task": task_id, "event": "started", "base": start_base}
+            if args.unit_branch is not None:
+                event.update({"dir": directory, "unit_branch": args.unit_branch[0]})
+            if args.restart:
+                event["restart"] = True
+            entry = json.dumps(event)
             res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "append", ledger_dir, lane, entry],
                                  env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if res.returncode != 0:

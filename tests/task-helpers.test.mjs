@@ -595,3 +595,128 @@ test('finish-task ignores GIT_DIR and friends pointing at another repo', () => {
   });
   assert.deepEqual(done(c), ['T1']);
 });
+
+// ---- 1.6.5: start-task --unit-branch (a join wave unit in a lane worktree) ----
+
+const briefOut = (c, id = 'T1') => join(c.root, 'briefs', `${id}.md`);
+const abandoned = (c) => git(c.project, 'for-each-ref', '--format=%(refname)', 'refs/parallel-lanes/r1/abandoned')
+  .split('\n').filter(Boolean);
+const unitStart = (c, ...extra) => startTask(c.lane, c.plan, '--unit-branch', 'pl-r1-u-T1', c.initial,
+  '--run-id', 'r1', ...extra, '--brief', 'T1', briefOut(c));
+
+test('a new unit branch is created at SHA', () => {
+  const c = newCase();
+  commit(c.lane, 'lane.txt', 'lane work\n', 'lane work');
+  const res = unitStart(c);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(git(c.lane, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-u-T1');
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), c.initial);
+  assert.match(res.stdout, /^branch: pl-r1-u-T1\n/);
+  assert.match(res.stdout, /\nunit branch: pl-r1-u-T1 \(created\)\n/);
+  assert.equal(git(c.lane, 'rev-parse', 'lane-a') === c.initial, false, 'the lane branch keeps its commit');
+});
+
+test('switching saves uncommitted work under abandoned refs', () => {
+  const c = newCase();
+  write(join(c.lane, 'a.txt'), 'edited\n');
+  write(join(c.lane, 'new.txt'), 'untracked\n');
+  const res = unitStart(c);
+  assert.equal(res.code, 0, res.stderr);
+  const refs = abandoned(c);
+  assert.equal(refs.length, 1);
+  assert.equal(git(c.project, 'show', `${refs[0]}:new.txt`), 'untracked');
+  assert.equal(git(c.project, 'show', `${refs[0]}:a.txt`), 'edited');
+  assert.equal(git(c.lane, 'status', '--porcelain'), '');
+  assert.match(res.stdout, new RegExp(`\\nsaved: ${refs[0]} \\([0-9a-f]{40}\\)\\n`));
+  assert.match(res.stdout, /\nunit branch: pl-r1-u-T1 \(created\)\n/);
+});
+
+test('a retry on the same unit branch keeps uncommitted work', () => {
+  const c = newCase();
+  assert.equal(unitStart(c).code, 0);
+  const head = commit(c.lane, 'unit.txt', 'unit work\n', 'unit work');
+  write(join(c.lane, 'wip.txt'), 'in progress\n');
+  const res = unitStart(c);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /\nunit branch: pl-r1-u-T1 \(kept\)\n/);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), head);
+  assert.equal(readFileSync(join(c.lane, 'wip.txt'), 'utf8'), 'in progress\n');
+  assert.deepEqual(abandoned(c), []);
+});
+
+test('switching back to an existing unit branch keeps its commits', () => {
+  const c = newCase();
+  assert.equal(unitStart(c).code, 0);
+  const head = commit(c.lane, 'unit.txt', 'unit work\n', 'unit work');
+  git(c.lane, 'checkout', '-q', 'lane-a');
+  const res = unitStart(c);
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /\nunit branch: pl-r1-u-T1 \(switched\)\n/);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), head);
+});
+
+test('the setup commands run in the worktree after the checkout', () => {
+  const c = newCase();
+  const res = unitStart(c, '--setup', 'git rev-parse --abbrev-ref HEAD > setup.txt', '--setup', 'echo two >> setup.txt');
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(readFileSync(join(c.lane, 'setup.txt'), 'utf8').replace(/\r\n/g, '\n'), 'pl-r1-u-T1\ntwo\n');
+});
+
+test('a failing setup command exits 1', () => {
+  const c = newCase();
+  const res = unitStart(c, '--setup', 'exit 7', '--record-start', c.ledgerDir, 'join', c.initial);
+  assert.equal(res.code, 1);
+  assert.match(res.stderr, /setup command 'exit 7' exited 7/);
+  assert.ok(!existsSync(join(c.ledgerDir, 'join.jsonl')), 'no started event');
+});
+
+test('started records dir in forward-slash form and the unit branch', () => {
+  const c = newCase();
+  const res = unitStart(c, '--record-start', c.ledgerDir, 'join', c.initial);
+  assert.equal(res.code, 0, res.stderr);
+  const [ev] = readFileSync(join(c.ledgerDir, 'join.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(ev.unit_branch, 'pl-r1-u-T1');
+  assert.equal(ev.base, c.initial);
+  assert.ok(!ev.dir.includes('\\'), ev.dir);
+  assert.ok(samePath(ev.dir, c.lane), `${ev.dir} is not ${c.lane}`);
+  assert.equal('restart' in ev, false);
+});
+
+test('--restart adds restart to the started event', () => {
+  const c = newCase();
+  const res = unitStart(c, '--record-start', c.ledgerDir, 'join', c.initial, '--restart');
+  assert.equal(res.code, 0, res.stderr);
+  const [ev] = readFileSync(join(c.ledgerDir, 'join.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(ev.restart, true);
+});
+
+test('--restart without --unit-branch records a restart on the current branch', () => {
+  const c = newCase();
+  const res = startTask(c.lane, c.plan, '--record-start', c.ledgerDir, 'join', 'HEAD', '--restart',
+    '--brief', 'T1', briefOut(c));
+  assert.equal(res.code, 0, res.stderr);
+  const [ev] = readFileSync(join(c.ledgerDir, 'join.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(ev, { task: 'T1', event: 'started', base: c.initial, restart: true });
+});
+
+test('unit-branch usage errors', () => {
+  const c = newCase();
+  const usage = (...args) => startTask(c.lane, c.plan, ...args, '--brief', 'T1', briefOut(c)).code;
+  assert.equal(usage('--unit-branch', 'pl-r1-u-T1', c.initial), 2, 'no --run-id');
+  assert.equal(usage('--unit-branch', 'pl-r1-u-T1', c.initial, '--run-id', 'r1', '--sync', 'main'), 2);
+  assert.equal(usage('--setup', 'true'), 2, '--setup needs --unit-branch');
+  assert.equal(usage('--restart'), 2, '--restart needs --record-start');
+  assert.equal(usage('--unit-branch', 'lane-a', c.initial, '--run-id', 'r1'), 2, 'not a unit branch name');
+  assert.equal(usage('--unit-branch', 'pl-r1-u-T1', c.initial, '--run-id', 'R!'), 2, 'unsafe run id');
+});
+
+test('an unknown SHA for a new unit branch exits 3 and changes nothing', () => {
+  const c = newCase();
+  write(join(c.lane, 'a.txt'), 'edited\n');
+  const res = startTask(c.lane, c.plan, '--unit-branch', 'pl-r1-u-T1', '0'.repeat(40), '--run-id', 'r1',
+    '--brief', 'T1', briefOut(c));
+  assert.equal(res.code, 3);
+  assert.equal(git(c.lane, 'rev-parse', '--abbrev-ref', 'HEAD'), 'lane-a');
+  assert.equal(readFileSync(join(c.lane, 'a.txt'), 'utf8'), 'edited\n');
+  assert.deepEqual(abandoned(c), []);
+});
