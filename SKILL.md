@@ -174,10 +174,8 @@ this. Say the table is the one required check, show it, and wait.
    token (keep it for relaunches). Exit 4: another session holds the run; stop and ask, and use
    `--takeover` only when the user confirms that session ended. Then run
    `<python> <skill_dir>/scripts/setup <manifest file> --owner <token>`. Its exit 4 naming another
-   run (`the checkout ... is in use by run ...`) means that run holds the checkout: setup changed
-   nothing, so release this run's own launch lock first (`active-run release <run_id> setup_failed
-   --owner <token>`, or `active-run release <run_id> --remove --owner <token>` for a new run that never
-   started), then stop and report it. It creates the feature branch and
+   run (`the checkout ... is in use by run ...`): reference.md "Active-run markers and stops"; then stop
+   and report it. It creates the feature branch and
    worktrees and discards edits in run-owned worktrees, so never before the yes. On failure
    wait 10 seconds and retry once; then `active-run release <run_id> setup_failed --owner <token>`, report,
    and stop. Put its output in `setup_result`
@@ -195,12 +193,12 @@ this. Say the table is the one required check, show it, and wait.
    never stops the run; keep the latest launch's refusal code for `tool-outcomes`.
 5. Record each launch's spend (reference.md "Budgets"), a relaunch included, never a dry run:
    `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status> <agents_spawned>
-   <rulings_spent>` (`<status>`: reference.md "Budgets").
-   After a launch that a transient relaunch follows, record only the spend (keep the lock
-   through the relaunch). At the end, record the spend and release the lock in one command
-   line, so the spend is never forgotten once the lock goes, and a refused record (exit 2)
-   keeps the lock until it is fixed: `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status>
-   <agents_spawned> <rulings_spent> && bash <skill_dir>/scripts/active-run release <run_id>
+   <rulings_spent>` (`<status>`: reference.md "Budgets"), then `<python> <skill_dir>/scripts/ledger
+   carry-launch <ledger_dir> <transcript dir>` (reference.md "Carry-over"; exit 3: say that launch
+   is not carried). Before a transient relaunch, keep the lock. At the end, in one command line
+   (reference.md "Budgets"): `<python> <skill_dir>/scripts/ledger ended <ledger_dir> <status>
+   <agents_spawned> <rulings_spent> && { <python> <skill_dir>/scripts/ledger carry-launch <ledger_dir>
+   <transcript dir> || true; } && bash <skill_dir>/scripts/active-run release <run_id>
    <release> --owner <token>`, where `<release>` is `--remove` only for `complete` when the hand-back gate
    passes: `acceptance.status` `accepted`, and `<python> <skill_dir>/scripts/check-verify <transcript dir>
    <manifest file>` exits 0 printing status `match` or `not_required`; otherwise `<status>` (`unaccepted` for
@@ -291,7 +289,9 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
 2. `<python> <skill_dir>/scripts/ledger status <ledger_dir> --plan <plan> --manifest <manifest
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
    task up: reference.md "Backfill"), and `repairs_spent` from earlier reports' `final.repairs`;
-   put each `carry` entry into `notes`. Tasks in `stale`
+   put each `carry` entry into `notes`. First run `ledger carry-launch <ledger_dir> <wf id>` for
+   each earlier launch (`doctor-<wf>.json` in the ledger names them); then copy `minors` into
+   `carried_minors` and `inputs` into `inputs_changed` as printed (reference.md "Carry-over"). Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
    spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
