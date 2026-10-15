@@ -951,6 +951,14 @@ function featureWhere(m, ledgerLane) {
   return { dir: featureDir(m), branch: m.repo.branch, lane: ledgerLane };
 }
 
+// Where a unit of a multi-unit join wave runs (1.6.5): its own branch in the
+// lane worktree dir, created from the wave's base from; its ledger lane, its
+// checks and its phase stay the join's, and there is no lane sync.
+function unitWhere(m, unit, dir, from) {
+  const branch = unitBranch(m, unit);
+  return { dir, branch, lane: 'join', unit_branch: branch, from };
+}
+
 // Scratch files for a task, kept in the ledger dir (outside every repo).
 function taskFiles(m, task) {
   const dir = m.repo.ledger_dir;
@@ -1683,7 +1691,10 @@ function declaredFiles(task) {
 // superpowers present the review package for base..head. With opts.pkg and a
 // Files list it also lists the files base..head changes outside that list
 // (--scope); with opts.start (the task base, implement only) it records that
-// base in the ledger once the briefs are written (--record-start).
+// base in the ledger once the briefs are written (--record-start). For a
+// join wave unit (where.unit_branch, 1.6.5) the implement start (opts.start)
+// also puts the worktree on the unit's branch from where.from and runs the
+// feature checkout's setup there (--unit-branch, --setup).
 function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
@@ -1692,6 +1703,10 @@ function startCommand(m, task, where, opts = {}) {
     shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
+  if (present(where.unit_branch) && present(opts.start)) {
+    parts.push('--unit-branch', shellQuote(where.unit_branch), shellQuote(where.from), '--run-id', shellQuote(m.run_id),
+      ...finalSetup(m).flatMap((c) => ['--setup', shellQuote(c)]));
+  }
   if (pkg && m.sp_dir !== null) {
     const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
     const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
@@ -1724,6 +1739,9 @@ function startCommand(m, task, where, opts = {}) {
 function startBlock(m, task, where, opts, failure) {
   const what = [
     ...(present(opts.sync) ? ['fast-forwards this worktree to the feature branch (it holds the prelude commits)'] : []),
+    ...(present(where.unit_branch) && present(opts.start)
+      ? [`puts this worktree on the unit's own branch ${where.unit_branch} (saving any uncommitted changes it finds `
+        + 'under the run\'s abandoned refs) and runs the project\'s setup commands there'] : []),
     isBatch(task)
       ? 'regenerates every task brief from the current plan and prints it'
       : 'regenerates the task brief from the current plan and prints it',
@@ -4090,6 +4108,105 @@ async function runTaskList(m, tasks, where, base, io, name, baseIsPhaseTip = fal
     prevIsPhaseTip = false;
   }
   return { results, stopped: null, head: prev };
+}
+
+// Run the join in waves (1.6.5 design 4.2, 4.3) from base, the feature tip.
+// waves: [[unit id, ...], ...] from wavePlan. A single-unit wave runs its
+// unit on the feature checkout from the tip, as a serial join does, and its
+// head is the new tip. A multi-unit wave runs its units side by side, at
+// most min(waveWidth(m), laneDirs.length) at once, each in a free lane
+// worktree of laneDirs on its own branch from the tip (unitWhere); a dir is
+// free again once its unit finished. Once a unit of the wave is not done or
+// deferred, no further unit of it starts. Then merge(wave number,
+// [{unit, result}] of the units that ran, in plan order, tip) merges the
+// finished ones: {head} is the new tip, {stopped} ends the join there. A
+// wave with a stopped unit ends the join after its merge, as a serial list
+// stops at its first unfinished task. An unblocked unit's note goes to the
+// later units that depend on it, else to every unit of the next wave.
+// Returns {results (runTaskList's shape, plan order), stopped, head: the
+// tip, waves: [{wave, units, head, merge}]}.
+async function runJoinWaves(m, waves, base, laneDirs, io, merge) {
+  const units = new Map(joinUnits(m).map((u) => [u.id, u]));
+  const order = m.join.map((t) => t.id);
+  const results = [];
+  const waveLog = [];
+  const carried = new Map();
+  const finished = (r) => r.status === 'done' || r.status === 'deferred';
+  const noteOf = (unit) => unitTasks(unit).flatMap((t) => carried.get(t.id) || []).join('\n') || null;
+  const carry = (unit, w, text) => {
+    const ids = unitTasks(unit).map((t) => t.id);
+    const later = waves.slice(w + 1).flat().map((id) => units.get(id));
+    const dependents = later.filter((u) => (waveDeps(u) || []).some((d) => ids.includes(d)));
+    for (const u of dependents.length > 0 ? dependents : (waves[w + 1] || []).map((id) => units.get(id))) {
+      for (const t of unitTasks(u).slice(0, 1)) {
+        carried.set(t.id, [...(carried.get(t.id) || []), `from ${unit.id}, unblocked by the adjudicator: ${text}`]);
+      }
+    }
+  };
+  const record = (unit, r) => {
+    if (unitTasks(unit).length === 1) results.push(r);
+    else if (finished(r)) for (const t of unitTasks(unit)) results.push({ ...r, task: t.id, batch: unit.id });
+    else results.push({ ...r, task: unitTasks(unit)[0].id, batch: unit.id });
+  };
+  const sorted = () => results.slice().sort((a, b) => order.indexOf(a.task) - order.indexOf(b.task));
+  const run = async (unit, where, from) => {
+    try {
+      return await runTask(m, unit, where, from, io, null, noteOf(unit));
+    } catch (e) {
+      return { task: unit.id, status: 'blocked', base: from, head: null, rounds: 0, tier_used: unit.tier,
+        notes: `error: ${e && e.message}`, rulings: [] };
+    }
+  };
+  let tip = base;
+  for (let w = 0; w < waves.length; w += 1) {
+    const wave = waves[w].map((id) => units.get(id));
+    if (wave.length === 1) {
+      const r = await run(wave[0], featureWhere(m, 'join'), tip);
+      record(wave[0], r);
+      if (r.next_note) carry(wave[0], w, r.next_note);
+      if (!finished(r)) {
+        io.log(`Join: wave ${w + 1}: stopped at ${wave[0].id} (${r.notes})`);
+        return { results: sorted(), stopped: r.notes, head: tip, waves: waveLog };
+      }
+      tip = r.head;
+      waveLog.push({ wave: w + 1, units: waves[w], head: tip, merge: null });
+      continue;
+    }
+    const from = tip;
+    const ran = [];
+    let next = 0;
+    let stopped = null;
+    const worker = async (dir) => {
+      while (next < wave.length && stopped === null) {
+        const unit = wave[next];
+        next += 1;
+        const r = await run(unit, unitWhere(m, unit, dir, from), from);
+        ran.push({ unit, result: r });
+        if (!finished(r) && stopped === null) stopped = r.notes;
+      }
+    };
+    const width = Math.min(waveWidth(m), laneDirs.length, wave.length);
+    io.log(`Join: wave ${w + 1}: ${waves[w].join(', ')} side by side (${width} at once)`);
+    await Promise.all(laneDirs.slice(0, width).map(worker));
+    ran.sort((a, b) => wave.indexOf(a.unit) - wave.indexOf(b.unit));
+    for (const { unit, result } of ran) {
+      record(unit, result);
+      if (result.next_note) carry(unit, w, result.next_note);
+    }
+    let merged = { head: tip };
+    if (ran.some((x) => finished(x.result))) merged = await merge(w + 1, ran, from);
+    waveLog.push({ wave: w + 1, units: waves[w], head: merged.head || tip, merge: merged });
+    if (present(merged.stopped)) {
+      io.log(`Join: wave ${w + 1}: merge stopped (${merged.stopped})`);
+      return { results: sorted(), stopped: merged.stopped, head: tip, waves: waveLog };
+    }
+    tip = merged.head;
+    if (stopped !== null) {
+      io.log(`Join: wave ${w + 1}: stopped (${stopped})`);
+      return { results: sorted(), stopped, head: tip, waves: waveLog };
+    }
+  }
+  return { results: sorted(), stopped: null, head: tip, waves: waveLog };
 }
 
 // Run a lane's tasks in order in its worktree, the first from base (the

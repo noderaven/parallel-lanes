@@ -627,7 +627,10 @@ function declaredFiles(task) {
 // superpowers present the review package for base..head. With opts.pkg and a
 // Files list it also lists the files base..head changes outside that list
 // (--scope); with opts.start (the task base, implement only) it records that
-// base in the ledger once the briefs are written (--record-start).
+// base in the ledger once the briefs are written (--record-start). For a
+// join wave unit (where.unit_branch, 1.6.5) the implement start (opts.start)
+// also puts the worktree on the unit's branch from where.from and runs the
+// feature checkout's setup there (--unit-branch, --setup).
 function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
@@ -636,6 +639,10 @@ function startCommand(m, task, where, opts = {}) {
     shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
+  if (present(where.unit_branch) && present(opts.start)) {
+    parts.push('--unit-branch', shellQuote(where.unit_branch), shellQuote(where.from), '--run-id', shellQuote(m.run_id),
+      ...finalSetup(m).flatMap((c) => ['--setup', shellQuote(c)]));
+  }
   if (pkg && m.sp_dir !== null) {
     const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
     const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
@@ -668,6 +675,9 @@ function startCommand(m, task, where, opts = {}) {
 function startBlock(m, task, where, opts, failure) {
   const what = [
     ...(present(opts.sync) ? ['fast-forwards this worktree to the feature branch (it holds the prelude commits)'] : []),
+    ...(present(where.unit_branch) && present(opts.start)
+      ? [`puts this worktree on the unit's own branch ${where.unit_branch} (saving any uncommitted changes it finds `
+        + 'under the run\'s abandoned refs) and runs the project\'s setup commands there'] : []),
     isBatch(task)
       ? 'regenerates every task brief from the current plan and prints it'
       : 'regenerates the task brief from the current plan and prints it',

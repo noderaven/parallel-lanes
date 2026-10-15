@@ -177,6 +177,14 @@ function featureWhere(m, ledgerLane) {
   return { dir: featureDir(m), branch: m.repo.branch, lane: ledgerLane };
 }
 
+// Where a unit of a multi-unit join wave runs (1.6.5): its own branch in the
+// lane worktree dir, created from the wave's base from; its ledger lane, its
+// checks and its phase stay the join's, and there is no lane sync.
+function unitWhere(m, unit, dir, from) {
+  const branch = unitBranch(m, unit);
+  return { dir, branch, lane: 'join', unit_branch: branch, from };
+}
+
 // Scratch files for a task, kept in the ledger dir (outside every repo).
 function taskFiles(m, task) {
   const dir = m.repo.ledger_dir;
