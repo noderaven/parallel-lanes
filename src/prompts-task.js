@@ -449,13 +449,15 @@ function commitWithLine(message) {
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
 // amendments are adjudicator rulings that amend the task's brief for this run.
-function taskContext(m, task, where, guidance = null) {
+// by is the role a ruling the agent records carries: 'implementer' (implement
+// and fix) or 'reviewer' (review and re-review).
+function taskContext(m, task, where, guidance = null, by = 'implementer') {
   const files = taskFiles(m, task);
   const tasks = unitTasks(task);
   const userNote = (t) => m.notes && m.notes[t.id];
   // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
-    { task: tasks[0].id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+    { task: tasks[0].id, event: 'ruling', by, text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
@@ -832,7 +834,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     reviewResultText(m, task, where, rounds, head),
   ].join('\n');
@@ -906,7 +908,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
     reviewResultText(m, task, where, round, head),

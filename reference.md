@@ -274,8 +274,12 @@ run is still not accepted. A security-flagged task is never parked or unblocked,
 findings (`adjudicator_stop: security`), and `allow_deferral: false` refuses it for every task
 (`adjudicator_stop: deferral_not_allowed`). A task adjudicated twice and still blocked ends with
 `adjudication_cap`. Every ruling is a
-ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
-`preflight.rulings`.
+ledger `ruling` event `Ruling: decision - why - cost if wrong` whose `by` names its role:
+`adjudicator`, `implementer` (implement and fix agents) or `reviewer` (review and re-review
+agents); a ruling with no `by` comes from an implementer before 1.6.3. Pre-flight rulings are
+in `preflight.rulings`. A task's adjudicator rulings are also in the run result's
+`tasks.<id>.rulings`, and its approving review's minor findings in `tasks.<id>.minor_findings`
+(`[]` unless the task was done in that launch), so a later launch can read both.
 
 Pre-flight also returns `code_deps` (`[{task, producer, what}]`, required, may be empty): code a
 task needs from another task's work. An entry the run order already meets (the placement rule
@@ -286,11 +290,14 @@ with `preflight_conflicts` in both modes (the adjudicator is not called), and
 `preflight.schedule` lists each as `{task, producer, what, fix}`, `fix` being the move that meets
 it (`move T to join after P`, `move T after P in the prelude`, or `move T to join, or into P's
 lane after it`). `preflight.schedule` is always present on a full-profile run (`[]` when there
-is none) and is `[]` under lite, which has no pre-flight agent.
+is none) and is `[]` under lite, which has no pre-flight agent. A relaunch with every task done
+and reviewed has none either: there is no task left to check, and a pre-flight there could only
+re-rule work already built. Its `preflight` is empty with `skipped: "no task left to run"`, and
+the dry run plans no pre-flight agent.
 
 Run rulings: pre-flight's own rulings, then the adjudicator's ruling on pre-flight conflicts,
-reach every task not yet done and every final reviewer as "Rulings already made for this run
-(binding)", in that order, each quoted as written, so no agent decides a settled point again.
+reach every task not yet done, every adjudicator and every final reviewer as "Rulings already
+made for this run (binding)", in that order, each quoted as written, so no agent decides a settled point again.
 The workflow builds that list (`run_rulings`) itself during the run and never reads it from
 the manifest file. The user's answers (`notes`) keep their own label, and an adjudicator's
 `answer` or `clarify_plan` for one task reaches only that task. Both appear in the hand-back under "Rulings made on your behalf". Under
@@ -484,6 +491,11 @@ to run longer than 9 minutes) goes through one procedure built on
 5. After a stop (exit 5), reserve and start once more; after a second stop do not start it
    again and report the checks as failed, never as passed, with both outcomes the wait
    printed.
+
+Quitting Claude Code while a check runs stops it: from Claude Code 2.1.300, exit force-kills a
+background command still running 1.5 seconds after being asked to stop. The wait then reports
+`stopped` with reason `died` (exit 5), and anything the killed check left in the checkout shows
+as `checks_unclean`.
 
 A report with `tree_changed` true (below) means the checkout changed while the checks ran: run
 them once more, with a new reserve. Rerun only once; if the checkout changed again, keep that

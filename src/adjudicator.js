@@ -76,6 +76,9 @@ function adjudicatorPrompt(m, ctx) {
       `  ${brief}`,
     );
   }
+  // The run's rulings bind the adjudicator too (pre-flight's, and its own
+  // pre-flight ruling once made): runRulingsLines, [] when there are none.
+  parts.push(...runRulingsLines(m));
   parts.push(
     '',
     'Details (the diff range, the implementer report file, and the blocked reason or question, or the',

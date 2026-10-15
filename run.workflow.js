@@ -852,7 +852,7 @@ function planAgents(m) {
     }
   };
 
-  if (!lite) add('Pre-flight', null, null, 'preflight', standard);
+  if (!lite && preflightNeeded(m)) add('Pre-flight', null, null, 'preflight', standard);
   addTasks('Prelude', null, m.prelude);
   for (const lane of m.lanes) addTasks(lane.name, lane.id, lane.tasks);
   if (!lite) {
@@ -944,6 +944,14 @@ function taskState(m, id) {
 // Tasks of a group (prelude, a lane, join) that still need an agent.
 function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
+}
+
+// Pre-flight checks the plan for the tasks still to run. On a relaunch where
+// every task is done and reviewed there is none, and a pre-flight there could
+// only re-rule work already built (f1a's resume: a new ruling changed built
+// code through the final review), so neither the run nor the plan has one.
+function preflightNeeded(m) {
+  return hasWork(m, [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]);
 }
 
 // The task_checks entry a unit uses (spec 4.1): its task's, or for a batch
@@ -1470,13 +1478,15 @@ function commitWithLine(message) {
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
 // amendments are adjudicator rulings that amend the task's brief for this run.
-function taskContext(m, task, where, guidance = null) {
+// by is the role a ruling the agent records carries: 'implementer' (implement
+// and fix) or 'reviewer' (review and re-review).
+function taskContext(m, task, where, guidance = null, by = 'implementer') {
   const files = taskFiles(m, task);
   const tasks = unitTasks(task);
   const userNote = (t) => m.notes && m.notes[t.id];
   // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
-    { task: tasks[0].id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+    { task: tasks[0].id, event: 'ruling', by, text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
@@ -1853,7 +1863,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     reviewResultText(m, task, where, rounds, head),
   ].join('\n');
@@ -1927,7 +1937,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
     reviewResultText(m, task, where, round, head),
@@ -3059,6 +3069,9 @@ function adjudicatorPrompt(m, ctx) {
       `  ${brief}`,
     );
   }
+  // The run's rulings bind the adjudicator too (pre-flight's, and its own
+  // pre-flight ruling once made): runRulingsLines, [] when there are none.
+  parts.push(...runRulingsLines(m));
   parts.push(
     '',
     'Details (the diff range, the implementer report file, and the blocked reason or question, or the',
@@ -4463,7 +4476,9 @@ function scheduleFix(m, entry) {
 
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
-//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
+//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes,
+//    minor_findings (the approving review's, taskMinorFindings; [] unless done
+//    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
@@ -4489,7 +4504,9 @@ function scheduleFix(m, entry) {
 // (done and reviewed earlier), or not_run. Under profile lite no
 // pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
-// post_integrate hook, so no configured hook is skipped).
+// post_integrate hook, so no configured hook is skipped). Nor does one on a
+// relaunch with every task done and reviewed (preflightNeeded): preflight is
+// then empty with skipped 'no task left to run'.
 async function runAll(manifest, io) {
   // Windows paths in forward-slash form, and hooks {} when absent, before
   // anything reads them.
@@ -4532,6 +4549,8 @@ async function runAll(manifest, io) {
       tier_used: null,
       commits: range ? [range.base, range.head] : null,
       notes: '',
+      minor_findings: [],
+      rulings: [],
     };
   }
   // The minor findings of approved task reviews, for the final lenses (a
@@ -4549,6 +4568,10 @@ async function runAll(manifest, io) {
         tier_used: r.tier_used,
         commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
+        // Kept as data for a later launch (1.6.3): the approving review's
+        // minor findings (done tasks only) and the adjudicator's rulings.
+        minor_findings: r.status === 'done' && Array.isArray(r.minor_findings) ? r.minor_findings : [],
+        rulings: Array.isArray(r.rulings) ? r.rulings : [],
       };
     }
   };
@@ -4655,6 +4678,11 @@ async function runAll(manifest, io) {
   const lite = m.profile === 'lite';
   if (lite) {
     preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
+  } else if (!preflightNeeded(m)) {
+    // A relaunch with every task done and reviewed: no pre-flight agent, so no
+    // rulings (preflightNeeded says why).
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run' };
+    io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());

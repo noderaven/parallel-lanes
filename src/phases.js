@@ -410,7 +410,9 @@ function scheduleFix(m, entry) {
 
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
-//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
+//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes,
+//    minor_findings (the approving review's, taskMinorFindings; [] unless done
+//    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
@@ -436,7 +438,9 @@ function scheduleFix(m, entry) {
 // (done and reviewed earlier), or not_run. Under profile lite no
 // pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
-// post_integrate hook, so no configured hook is skipped).
+// post_integrate hook, so no configured hook is skipped). Nor does one on a
+// relaunch with every task done and reviewed (preflightNeeded): preflight is
+// then empty with skipped 'no task left to run'.
 async function runAll(manifest, io) {
   // Windows paths in forward-slash form, and hooks {} when absent, before
   // anything reads them.
@@ -479,6 +483,8 @@ async function runAll(manifest, io) {
       tier_used: null,
       commits: range ? [range.base, range.head] : null,
       notes: '',
+      minor_findings: [],
+      rulings: [],
     };
   }
   // The minor findings of approved task reviews, for the final lenses (a
@@ -496,6 +502,10 @@ async function runAll(manifest, io) {
         tier_used: r.tier_used,
         commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
+        // Kept as data for a later launch (1.6.3): the approving review's
+        // minor findings (done tasks only) and the adjudicator's rulings.
+        minor_findings: r.status === 'done' && Array.isArray(r.minor_findings) ? r.minor_findings : [],
+        rulings: Array.isArray(r.rulings) ? r.rulings : [],
       };
     }
   };
@@ -602,6 +612,11 @@ async function runAll(manifest, io) {
   const lite = m.profile === 'lite';
   if (lite) {
     preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
+  } else if (!preflightNeeded(m)) {
+    // A relaunch with every task done and reviewed: no pre-flight agent, so no
+    // rulings (preflightNeeded says why).
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run' };
+    io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());

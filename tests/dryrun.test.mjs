@@ -135,6 +135,16 @@ test('tasks in done and reviewed produce no agents', () => {
   assert.deepEqual(roles(forTask(agents, 'T3')), ['implement', 'review']);
 });
 
+test('a relaunch with every task done and reviewed plans no pre-flight agent', () => {
+  const all = ['T1', 'T2', 'T3', 'T4', 'T5'];
+  const agents = planAgents(manifest({ done: all, reviewed: all }));
+  assert.ok(!roles(agents).includes('preflight'), JSON.stringify(roles(agents)));
+  assert.ok(roles(agents).includes('integrate'));
+  // One task still to review keeps the pre-flight agent.
+  const one = planAgents(manifest({ done: all, reviewed: ['T1', 'T2', 'T3', 'T4'] }));
+  assert.ok(roles(one).includes('preflight'));
+});
+
 test('a task in done but not reviewed produces a review agent only', () => {
   const agents = planAgents(manifest({ done: ['T2'], reviewed: [] }));
   assert.deepEqual(roles(forTask(agents, 'T2')), ['review']);
