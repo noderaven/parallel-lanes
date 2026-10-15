@@ -6,10 +6,12 @@ usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE
                    [--project-test CMD ...]
                    [--entry TASK_ID --targeted GROUP CMD [--targeted GROUP CMD ...]]
                    --lane-cmd GROUP CMD [...] --wide-cmd GROUP CMD [...]
-                   [--force-full REASON] [--evidence PATH]
+                   [--force-full REASON] [--evidence PATH] [--phase NAME]
 
 Options come in any order. The workflow builds the call (spec 4.2 of the
 1.6.0 check policy); the task's implementer runs it once before committing.
+--phase NAME goes to run-checks, which sets PL_PHASE=NAME for the checks
+(without it PL_PHASE is removed); NAME is one of run-checks' phases.
 
 Selection (policy.selected):
   lane      no --entry: the unit has no task_checks entry, so the --lane-cmd
@@ -133,9 +135,11 @@ PRINT_DETAIL = 2000
 USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
          "--task ID [...] [--declared PATH ...] [--widen PATH ...] [--project-test CMD ...] "
          "[--entry TASK_ID --targeted GROUP CMD ...] --lane-cmd GROUP CMD [...] "
-         "--wide-cmd GROUP CMD [...] [--force-full REASON] [--evidence PATH]")
+         "--wide-cmd GROUP CMD [...] [--force-full REASON] [--evidence PATH] [--phase NAME]")
+# run-checks' phases (--phase sets PL_PHASE for the checks).
+PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify")
 SINGLE = {"--base": "base", "--ledger": "ledger", "--unit": "unit", "--lane": "lane",
-          "--entry": "entry", "--force-full": "forced", "--evidence": "evidence"}
+          "--entry": "entry", "--force-full": "forced", "--evidence": "evidence", "--phase": "phase"}
 REPEATED = {"--task": "tasks", "--declared": "declared", "--widen": "widen",
             "--project-test": "project_tests"}
 PAIRS = {"--targeted": "targeted", "--lane-cmd": "lane_cmds", "--wide-cmd": "wide_cmds"}
@@ -181,7 +185,7 @@ def parse(argv):
     first usage error the reading met (checked by validate), or None. A token
     that is not an option is skipped."""
     args = {"dir": None, "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
-            "forced": None, "evidence": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
+            "forced": None, "evidence": None, "phase": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
             "targeted": [], "lane_cmds": [], "wide_cmds": []}
     errors = []
     rest = argv
@@ -244,6 +248,8 @@ def validate(args):
             fail(2, f"--{key} is required")
     if not args["tasks"]:
         fail(2, "at least one --task is required")
+    if args["phase"] is not None and args["phase"] not in PHASES:
+        fail(2, f"--phase {args['phase']!r} is not one of {', '.join(PHASES)}")
     if not args["lane_cmds"] or not args["wide_cmds"]:
         fail(2, "--lane-cmd and --wide-cmd are required")
     if (args["entry"] is None) != (not args["targeted"]):
@@ -470,6 +476,8 @@ def run_checks(args, chosen, policy, out):
     process holds), add policy, save, print, and exit."""
     cmd = [sys.executable, os.path.join(HERE, "run-checks"), args["dir"], "--out", out, "--root", args["ledger"],
            "--lock-held"]
+    if args["phase"] is not None:
+        cmd += ["--phase", args["phase"]]
     for group, command in chosen:
         cmd += ["--cmd", group, command]
     res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)

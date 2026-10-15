@@ -336,7 +336,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -530,7 +530,7 @@ function postIntegrateFixPrompt(m, failure, path = 'hook') {
       'command.',
     ] : [
       'Rerun every project command afterwards and confirm they pass:',
-      commandsText(m, null, featureDir(m), 'post-integrate-fix'),
+      commandsText(m, null, featureDir(m), 'post-integrate-fix', 'post-integrate'),
     ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
@@ -579,7 +579,7 @@ function postIntegratePrompt(m, checkOnly = false, checks = null) {
   ] : [
     'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
     'the project commands afterwards:',
-    commandsText(m, null, featureDir(m), 'post-integrate'),
+    commandsText(m, null, featureDir(m), 'post-integrate', 'post-integrate'),
   ];
   return [
     `You are the post-integration agent for parallel-lanes run ${m.run_id}.`,
@@ -768,7 +768,7 @@ function finalFixPrompt(m, findings, base) {
       'check at the delivered revision right after you, and a failure there goes to a repair agent.',
     ] : [
       'decline. Rerun every project command afterwards:',
-      commandsText(m, null, featureDir(m), 'final-fix'),
+      commandsText(m, null, featureDir(m), 'final-fix', 'final-fix'),
     ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
@@ -865,7 +865,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
 function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
   const q = shellQuote;
-  const base = runChecksCommand(m, dir, finalChecks(m), resultPath());
+  const base = runChecksCommand(m, dir, finalChecks(m), resultPath(), 'verify');
   const cmd = from === null ? base : `${base} --descends-from ${q(from)}`;
   const setup = finalSetup(m);
   const stop = [

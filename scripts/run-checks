@@ -2,7 +2,13 @@
 """Run a checkout's project commands one by one and keep every exit status.
 
 usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA]
-                  [--lock-held] --cmd GROUP COMMAND [--cmd ...]
+                  [--lock-held] [--phase NAME] --cmd GROUP COMMAND [--cmd ...]
+
+--phase NAME (prelude, lane, join, integrate, post-integrate, final-fix or
+verify, else a usage error) sets PL_PHASE=NAME for every command, the busy
+retry included, so a project's check script can tell the run's phases apart
+(a join unit runs in a lane worktree from 1.6.5); without --phase an inherited
+PL_PHASE is removed. The JSON gains "phase": NAME, or null without it.
 
 Each COMMAND runs with bash -c in DIR (the bash _shell.find_bash resolves:
 Git Bash on Windows, never the WSL launcher), in the given order, and every
@@ -145,7 +151,9 @@ BUSY_EXIT = 75  # sysexits EX_TEMPFAIL: busy or temporary, retried once
 BUSY_WAIT_S = 60
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] [--lock-held] "
-         "--cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+         "[--phase NAME] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+# The run phases a check can belong to (--phase, PL_PHASE).
+PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify")
 
 # Where fail writes its error record: FILE once it is validated, unless
 # --lock-held says the caller writes FILE's records; None before that.
@@ -177,7 +185,7 @@ def parse(argv):
     if not argv or not argv[0] or argv[0].startswith("-"):
         fail(2, USAGE)
     directory, rest = _shell.native_path(argv[0]), argv[1:]
-    out = root = descends = None
+    out = root = descends = phase = None
     lock_held = False
     cmds = []
     while rest:
@@ -187,6 +195,9 @@ def parse(argv):
         elif rest[0] == "--lock-held":
             lock_held = True
             rest = rest[1:]
+        elif rest[0] == "--phase" and len(rest) >= 2 and rest[1] in PHASES:
+            phase = rest[1]
+            rest = rest[2:]
         elif rest[0] in ("--out", "--root") and len(rest) >= 2 and rest[1]:
             if rest[0] == "--out":
                 out = _shell.native_path(rest[1])
@@ -198,7 +209,7 @@ def parse(argv):
             rest = rest[2:]
         else:
             fail(2, USAGE)
-    return directory, out, root, cmds, descends, lock_held
+    return directory, out, root, cmds, descends, lock_held, phase
 
 
 def head_of(directory):
@@ -376,10 +387,19 @@ def busy_wait_s():
     return int(value) if value.isascii() and value.isdigit() else BUSY_WAIT_S
 
 
-def run_command(command, directory, f):
+def command_env(phase):
+    """The commands' environment: ENV with PL_PHASE=phase, or without
+    PL_PHASE when phase is None."""
+    env = {k: v for k, v in ENV.items() if k != "PL_PHASE"}
+    if phase is not None:
+        env["PL_PHASE"] = phase
+    return env
+
+
+def run_command(command, directory, f, env=None):
     """Run command with bash -c in directory, its stdout and stderr to the
     open log f; return its exit code."""
-    res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV,
+    res = subprocess.run(_shell.bash_argv("-c", command), cwd=directory, env=ENV if env is None else env,
                          stdout=f, stderr=subprocess.STDOUT)
     return res.returncode
 
@@ -387,7 +407,7 @@ def run_command(command, directory, f):
 def main(argv):
     global _record
     _shell.setup_io()
-    directory, out, root, cmds, descends, lock_held = parse(argv)
+    directory, out, root, cmds, descends, lock_held, phase = parse(argv)
     if out is not None and root is not None and (os.path.islink(out) or not _shell.contained(out, root)):
         fail(3, f"output path {out!r} is outside {root!r}")
     with contextlib.ExitStack() as stack:
@@ -406,7 +426,7 @@ def main(argv):
             except OSError as e:
                 fail(3, f"cannot lock {out!r}: {e}")
         try:
-            run(directory, out, root, cmds, descends)
+            run(directory, out, root, cmds, descends, phase)
         except _shell.BashNotFound as e:
             fail(3, str(e))
         except Exception as e:
@@ -414,8 +434,9 @@ def main(argv):
             raise
 
 
-def run(directory, out, root, cmds, descends=None):
+def run(directory, out, root, cmds, descends=None, phase=None):
     """The checks themselves; main has validated out against root."""
+    env = command_env(phase)
     if cmds:
         # Found before anything runs: a missing bash fails no check halfway.
         _shell.find_bash()
@@ -438,7 +459,7 @@ def run(directory, out, root, cmds, descends=None):
                       "clean": not before,
                       "tracked_before": tracked_before, "tracked_after": tracked_before,
                       "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(before),
-                      "tree_changed": False, "descends_from": lineage}
+                      "tree_changed": False, "descends_from": lineage, "phase": phase}
             emit(report, out)
     fingerprint_before = fingerprint(directory)
     results = []
@@ -446,7 +467,7 @@ def run(directory, out, root, cmds, descends=None):
         retry = None
         with open(log, "wb") as f:
             started, t0 = utc_stamp(), time.monotonic()
-            code = run_command(command, directory, f)
+            code = run_command(command, directory, f, env)
             if code == BUSY_EXIT:
                 # Busy or temporary: wait, then run it once more into the same
                 # log; the second exit is the result.
@@ -457,7 +478,7 @@ def run(directory, out, root, cmds, descends=None):
                 f.flush()
                 time.sleep(waited)
                 retry = {"first_exit": code, "waited_s": waited}
-                code = run_command(command, directory, f)
+                code = run_command(command, directory, f, env)
             duration, ended = time.monotonic() - t0, utc_stamp()
         result = {"group": group, "command": command, "exit": code,
                   "started": started, "ended": ended, "duration_s": round(duration, 3),
@@ -473,7 +494,7 @@ def run(directory, out, root, cmds, descends=None):
               "ok": all(r["exit"] == 0 for r in results) and after == head, "clean": not finish,
               "tracked_before": tracked_before, "tracked_after": tracked_after,
               "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(finish),
-              "tree_changed": tree_changed(fingerprint_before, fingerprint_after)}
+              "tree_changed": tree_changed(fingerprint_before, fingerprint_after), "phase": phase}
     if after != head:
         report["head_after"] = after
     if lineage is not None:
