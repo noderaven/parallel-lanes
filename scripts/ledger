@@ -169,7 +169,14 @@ REQUIRED = {
     "started": "base",
     "run_ended": "status",
     "accepted": "text",
+    "minors": "open",
+    "carried": "wf",
 }
+RULING_ROLES = ("implementer", "reviewer", "adjudicator", "preflight")
+RULING_SCOPES = ("lane", "run")
+PF_ID = re.compile(r"^PF-[1-9][0-9]*$")
+# Events only the _run file holds: one per launch, written by carry-launch.
+RUN_ONLY = ("minors", "carried")
 SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -247,8 +254,54 @@ def entry_error(entry):
     elif event == "accepted":
         if not is_text(value) or not is_text(entry.get("head")):
             return "'text' and 'head' must be non-empty strings"
+    elif event == "ruling":
+        if not isinstance(value, str):
+            return "'text' must be a string"
+        return ruling_fields_error(entry)
+    elif event in RUN_ONLY:
+        return run_only_error(entry)
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
+    return None
+
+
+def is_text_list(v):
+    return isinstance(v, list) and all(is_text(x) for x in v)
+
+
+def ruling_fields_error(entry):
+    """Why a ruling's optional 1.6.3 fields are malformed, or None. The values
+    are checked; whether an agent told the truth about its role is not."""
+    if "by" in entry and entry["by"] not in RULING_ROLES:
+        return f"'by' must be one of {', '.join(RULING_ROLES)}"
+    if "scope" in entry and entry["scope"] not in RULING_SCOPES:
+        return f"'scope' must be one of {', '.join(RULING_SCOPES)}"
+    for field in ("overrides", "files"):
+        if field in entry and not is_text_list(entry[field]):
+            return f"'{field}' must be a list of non-empty strings"
+    if "pf" in entry and not (isinstance(entry["pf"], str) and PF_ID.fullmatch(entry["pf"])):
+        return "'pf' must look like PF-1"
+    if "wf" in entry and not is_text(entry["wf"]):
+        return "'wf' must be a non-empty string"
+    return None
+
+
+def run_only_error(entry):
+    """Why a minors or carried event is malformed, or None."""
+    if entry["task"] != "_run":
+        return f"a {entry['event']} event belongs to task _run"
+    if not is_text(entry.get("wf")):
+        return "'wf' must be a non-empty string"
+    if entry["event"] == "minors":
+        if not isinstance(entry.get("open"), list) or not all(isinstance(m, dict) for m in entry["open"]):
+            return "'open' must be a list of objects"
+        if not is_text_list(entry.get("covered", [])):
+            return "'covered' must be a list of task ids"
+    else:
+        if not isinstance(entry.get("pf", {}), dict):
+            return "'pf' must be an object"
+        if not isinstance(entry.get("bound", []), list):
+            return "'bound' must be a list"
     return None
 
 
@@ -334,6 +387,11 @@ def reviewed(directory, lane, task, rounds, plan, checkout, head, blocking, spec
 
 def read_events(directory):
     """Every valid event in ledger order (files by name, then lines)."""
+    return [entry for _, _, entry in read_events_at(directory)]
+
+
+def read_events_at(directory):
+    """Every valid event as (file name, line number, event), in ledger order."""
     events = []
     if not os.path.isdir(directory):
         return events
@@ -355,7 +413,7 @@ def read_events(directory):
             error = "invalid JSON" if entry is None else entry_error(entry)
             if error:
                 fail(3, f"{path}:{number}: {error}")
-            events.append(entry)
+            events.append((name, number, entry))
     return events
 
 
@@ -528,6 +586,84 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         "accepted": accepted,
         "undeclared": undeclared,
     }, history
+
+
+def ruling_records(directory):
+    """Every ruling as a dict: id (<file stem>-R<n>, n counting that file's
+    rulings in append order), stem, file, line, role, scope and the event.
+    A ruling with no by was written by a task agent before 1.6.3 and counts
+    as an implementer's."""
+    out = []
+    counts = {}
+    for name, number, e in read_events_at(directory):
+        if e.get("event") != "ruling":
+            continue
+        stem = name[:-len(".jsonl")]
+        counts[stem] = counts.get(stem, 0) + 1
+        scope = e.get("scope") or ("run" if stem == "_run" else "lane")
+        out.append({"id": f"{stem}-R{counts[stem]}", "stem": stem, "file": name, "line": number,
+                    "role": e.get("by") or "implementer", "scope": scope, "event": e})
+    return out
+
+
+def carried_events(directory):
+    return [e for e in read_events(directory) if e.get("event") == "carried"]
+
+
+def resolve_overrides(records, carried):
+    """{ruling id: [(target id, known)]}: a PF-<n> a ruling names resolves
+    through the carried event that bound that ruling (carry-launch); any
+    other id must be a ruling of this ledger."""
+    ids = {r["id"] for r in records}
+    bound = {}
+    for c in carried:
+        for b in c.get("bound") or []:
+            if isinstance(b, dict):
+                bound[(b.get("file"), b.get("line"))] = c.get("pf") or {}
+    out = {}
+    for r in records:
+        targets = []
+        for o in r["event"].get("overrides") or []:
+            if PF_ID.fullmatch(o):
+                mapped = bound.get((r["file"], r["line"]), {}).get(o)
+                targets.append((mapped or o, mapped is not None and mapped in ids))
+            else:
+                targets.append((o, o in ids))
+        out[r["id"]] = targets
+    return out
+
+
+def ruling_line(r, targets):
+    e = r["event"]
+    line = f"{r['id']} [{r['role']}, {e['task']}, {r['scope']}] {e['text']}"
+    if targets:
+        line += " (overrides " + ", ".join(t if known else f"{t} (unknown)" for t, known in targets) + ")"
+    if e.get("files"):
+        line += " (files " + ", ".join(e["files"]) + ")"
+    return line
+
+
+def rulings(directory, lane=None):
+    """Print the rulings in force, then the overridden ones. With lane: the
+    rulings of _run, the prelude and that lane, and every run-scope one."""
+    records = ruling_records(directory)
+    overrides = resolve_overrides(records, carried_events(directory))
+    overridden_by = {}
+    for r in records:
+        for target, known in overrides[r["id"]]:
+            if known:
+                overridden_by.setdefault(target, r["id"])
+
+    def shown(r):
+        return lane is None or r["stem"] in ("_run", "prelude", lane) or r["scope"] == "run"
+
+    in_force = [ruling_line(r, overrides[r["id"]]) for r in records if shown(r) and r["id"] not in overridden_by]
+    gone = [f"{r['id']} by {overridden_by[r['id']]}" for r in records if shown(r) and r["id"] in overridden_by]
+    lines = in_force or ["(none)"]
+    if gone:
+        lines += ["Overridden:"] + gone
+    for line in lines:
+        print(line)
 
 
 def load_manifest(manifest_path):
@@ -779,7 +915,7 @@ def conditions(directory, wf_id, doctor_file):
 
 
 PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6, 9), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
-             "ended": (1,), "conditions": (1, 3)}
+             "ended": (1,), "conditions": (1, 3), "rulings": (1,)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
 
@@ -823,6 +959,8 @@ def main(argv):
         ended(*argv[1:])
     elif len(argv) == 4 and argv[0] == "conditions" and argv[1] and argv[3]:
         conditions(*argv[1:])
+    elif argv[:1] == ["rulings"] and len(argv) in (2, 4) and argv[1] and (len(argv) == 2 or argv[2] == "--lane"):
+        rulings(argv[1], argv[3] if len(argv) == 4 and argv[3] != "-" else None)
     else:
         fail(2, "usage: ledger append DIR LANE JSON"
                 " | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]"
