@@ -30,7 +30,9 @@ ignored), NUL-delimited, unique and sorted. Changes to ignored files are not
 seen: widening for them is the agent's --force-full.
 
 Coverage: '\\' becomes '/'; an entry ending in '/' is a directory and covers
-every path under it; any other entry covers the equal path. Paths are
+every path under it; any other entry covers the equal path, except a --widen
+entry that names an existing directory in DIR, which covers it as if it ended
+in '/' (widening is the safe side; --declared keeps the strict rule). Paths are
 normalized (posixpath.normpath) and compared case-sensitively, so on a
 case-insensitive filesystem a case mismatch only widens. A --declared or
 --widen value that is absolute or leaves the project after normalizing is a
@@ -242,6 +244,9 @@ def validate(args):
         args[key] = keys
     args["dir"] = _shell.native_path(args["dir"])
     args["ledger"] = _shell.native_path(args["ledger"])
+    # A --widen entry naming an existing directory covers it without the '/':
+    # widening is the safe side. --declared keeps the strict rule.
+    args["widen"] = [(e, d or os.path.isdir(os.path.join(args["dir"], e))) for e, d in args["widen"]]
 
 
 def git_paths(directory, *git_args):

@@ -122,6 +122,22 @@ test('a widen path widens even inside the Files list', () => {
   assert.deepEqual(codes(json), ['widen_path']);
 });
 
+test('a widen entry naming an existing directory without a trailing / covers files under it', () => {
+  // 1.6.0 deferred minor: 'test/helpers' (no '/') matched only the equal
+  // path, so a change under the directory never widened.
+  const r = repo({ 'test/helpers/h.js': '1\n', 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'test/helpers/h.js'), '2\n');
+  const { json } = run(r, { args: ['--declared', 'test/helpers/h.js', '--widen', 'test/helpers'] });
+  assert.equal(json.policy.selected, 'widened');
+  assert.deepEqual(codes(json), ['widen_path']);
+  // A --declared entry keeps the strict rule: without '/' it covers the equal path only.
+  const declared = run(r, { args: ['--declared', 'test/helpers'] });
+  assert.deepEqual(codes(declared.json), ['outside_files']);
+  // A widen entry that is a file, or names nothing, still covers the equal path only.
+  const file = run(r, { args: ['--declared', 'test/helpers/h.js', '--widen', 'src/a.js', '--widen', 'gone'] });
+  assert.equal(file.json.policy.selected, 'targeted');
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');
