@@ -410,3 +410,42 @@ test('the audit allowance uses join_tip', () => {
   assert.ok(p.includes("'join wave <n>: merge <unit>'") && p.includes("'join recovery: merge <unit>'"), p);
   assert.ok(p.includes('fix: make the wave checks pass'), p);
 });
+
+// ---- Task 11: pre-flight sees the waves ----
+
+test('pre-flight is shown the waves', async () => {
+  const { calls } = await run(manifest(), script(H('J3')));
+  const p = callOf(calls, 'pre-flight').prompt;
+  assert.ok(p.includes('wave 1: J1, J2') && p.includes('wave 2: J3'), p);
+  assert.ok(p.includes('the run moves the task to a later wave'), p);
+});
+
+test('an earlier-producer finding moves the unit to a later wave and is reported', async () => {
+  const m = manifest({ join: [task('J1', []), task('J2', []), task('J3', [])] });
+  const { result, calls } = await run(m, script(H('J3'), {
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [{ task: 'J3', producer: 'J2', what: 'a test helper' }],
+      code_deps: [] }],
+    'J3 implement': [done(H('M1'), H('J3'))],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.deepEqual(result.preflight.wave_moves, [{ unit: 'J3', from: 1, to: 2, producer: 'J2' }]);
+  assert.ok(callOf(calls, 'wave 1 merge').prompt.includes("--unit 'J2'") && !callOf(calls, 'wave 1 merge').prompt.includes("--unit 'J3'"));
+  assert.ok(at(calls, 'wave 1 merge') < at(calls, 'J3 implement'));
+  assert.ok(callOf(calls, 'J3 implement').prompt.includes("cd '/work/repo'"), 'J3 runs alone, on the feature checkout');
+});
+
+test('a later-producer code dependency is still a schedule conflict', async () => {
+  const { result } = await run(manifest(), script(H('J3'), {
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [{ task: 'J1', producer: 'J2', what: 'calls it' }] }],
+  }));
+  assert.equal(result.status, 'preflight_conflicts');
+  assert.match(result.preflight.schedule[0].fix, /move J1 to join after J2/);
+});
+
+test('a serial join\'s pre-flight prompt is unchanged', async () => {
+  const m = manifest({ join: [task('J1'), task('J2')] });
+  const { calls } = await run(m, script(H('J2'), {
+    'J2 implement': [done(H('J1'), H('J2'))], 'wave 1 merge': [], 'J3 implement': [], 'J3 review': [],
+  }));
+  assert.ok(!callOf(calls, 'pre-flight').prompt.includes('Join waves'));
+});

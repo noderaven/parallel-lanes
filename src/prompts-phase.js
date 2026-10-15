@@ -253,7 +253,10 @@ function relaunchPreflightLines(m) {
   ];
 }
 
-function preflightPrompt(m) {
+// waves (1.6.5): the join's waves ([[unit id, ...], ...]) when the join runs in
+// waves; pre-flight then also looks for a unit needing another unit of its own
+// wave (design 4.7).
+function preflightPrompt(m, waves = null) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
     'file, branch, or worktree.',
@@ -275,6 +278,14 @@ function preflightPrompt(m) {
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
+    ...(waves === null ? [] : [
+      '5. Join waves: the join runs in these waves. The units of a wave run side by side, each from the feature',
+      '   tip after the previous wave, without the work of the other units of their own wave:',
+      ...waves.map((w, i) => `   wave ${i + 1}: ${w.join(', ')}`),
+      '   For every task that needs work of another unit in its own wave (code, a contract, a test helper, a',
+      '   generated file), report it in code_deps (code) or undeclared (anything else) as {task, producer,',
+      '   what}: the run moves the task to a later wave.',
+    ]),
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',

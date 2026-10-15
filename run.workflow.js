@@ -2401,7 +2401,10 @@ function relaunchPreflightLines(m) {
   ];
 }
 
-function preflightPrompt(m) {
+// waves (1.6.5): the join's waves ([[unit id, ...], ...]) when the join runs in
+// waves; pre-flight then also looks for a unit needing another unit of its own
+// wave (design 4.7).
+function preflightPrompt(m, waves = null) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
     'file, branch, or worktree.',
@@ -2423,6 +2426,14 @@ function preflightPrompt(m) {
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
+    ...(waves === null ? [] : [
+      '5. Join waves: the join runs in these waves. The units of a wave run side by side, each from the feature',
+      '   tip after the previous wave, without the work of the other units of their own wave:',
+      ...waves.map((w, i) => `   wave ${i + 1}: ${w.join(', ')}`),
+      '   For every task that needs work of another unit in its own wave (code, a contract, a test helper, a',
+      '   generated file), report it in code_deps (code) or undeclared (anything else) as {task, producer,',
+      '   what}: the run moves the task to a later wave.',
+    ]),
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
@@ -5371,6 +5382,8 @@ async function runAll(manifest, io) {
     stoppedLanes.push({ lane, task: last && last.status !== 'done' ? last.task : null, reason: list.stopped });
   };
   let preflight = null;
+  // Pre-flight's findings between join units, as wave edges (design 4.7).
+  const waveEdges = [];
   let integrate = null;
   let e2e = null;
   let final = null;
@@ -5484,7 +5497,9 @@ async function runAll(manifest, io) {
     io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
-    const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
+    const shown = wavePlan(m);
+    const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m, shown.mode === 'waves' ? shown.waves : null),
+      preflightSchema());
     if (state.refused.length > 0) return budgetReport();
     if (!pre) return report('stopped', 'no result from pre-flight');
     // Undeclared dependencies only add context: they reach the briefs of
@@ -5510,6 +5525,27 @@ async function runAll(manifest, io) {
     // carry-launch skips it (1.6.3); null when there is none.
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule, adjudicated: null };
     if (schedule.length > 0) return report('preflight_conflicts');
+    // Findings between join units whose producer is earlier move the task's
+    // unit to a later wave (design 4.7); preflight.wave_moves reports them.
+    if (shown.mode === 'waves') {
+      const units = joinUnits(m);
+      const unitOf = (id) => units.find((u) => unitTasks(u).some((t) => t.id === id));
+      for (const e of kept) {
+        const u = unitOf(e.task);
+        const p = unitOf(e.producer);
+        if (u && p && u !== p && units.indexOf(p) < units.indexOf(u)) waveEdges.push({ unit: u.id, producer: p.id });
+      }
+      const waveOf = (waves, id) => waves.findIndex((w) => w.includes(id)) + 1;
+      const after = wavePlan(m, waveEdges).waves;
+      preflight.wave_moves = units.filter((u) => waveOf(shown.waves, u.id) !== waveOf(after, u.id)).map((u) => {
+        const edge = waveEdges.find((e) => e.unit === u.id);
+        return { unit: u.id, from: waveOf(shown.waves, u.id), to: waveOf(after, u.id), producer: edge ? edge.producer : null };
+      });
+      for (const mv of preflight.wave_moves) {
+        io.log(`parallel-lanes: pre-flight: ${mv.unit} moves from join wave ${mv.from} to ${mv.to}`
+          + `${mv.producer ? ` (it needs ${mv.producer})` : ''}`);
+      }
+    }
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings).
@@ -5534,8 +5570,8 @@ async function runAll(manifest, io) {
     }
   }
 
-  // How the join runs (design 4.1): waves only in the launch that starts it.
-  const waveEdges = [];
+  // How the join runs (design 4.1): waves only in the launch that starts it,
+  // with pre-flight's findings as edges (design 4.7).
   const joinPlan = wavePlan(m, waveEdges);
   const wavesOn = joinPlan.mode === 'waves';
 
