@@ -5,7 +5,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { mergeEnv, tempDir } from './platform.mjs';
@@ -187,6 +187,23 @@ test('scale line skips unreadable or incomplete autopsies', () => {
   const ok = history([{ id: 'k1', project: '/x/proj', a1: 60, b1: 60 }, { id: 'g2', project: '/x/proj', autopsy: 'garbage' }]);
   const s = run([plan(3), '--max-lanes', '2', '--lane', 'T1', '--lane', 'T2,T3', '--project', '/x/proj', '--history-dir', ok]);
   assert.deepEqual(s.json.scale.runs, ['k1']);
+});
+
+test('a malformed archived run never changes the recommendation', () => {
+  // Final review (1.6.4): an agent whose launch is a list, or a manifest whose lanes is a
+  // number, raised TypeError through the scale line and made the whole result unavailable.
+  const h = history([{ id: 'ok1', project: '/x/proj', a1: 60, b1: 60 },
+    { id: 'bad1', project: '/x/proj', a1: 60, b1: 60 }, { id: 'bad2', project: '/x/proj', a1: 60, b1: 60 }]);
+  const auto = join(h, 'bad1', 'autopsy.json');
+  const a = JSON.parse(readFileSync(auto, 'utf8'));
+  a.time.agents[0].launch = ['wf_1'];
+  writeFileSync(auto, JSON.stringify(a));
+  writeFileSync(join(h, 'bad2', 'p.lanes.json'), JSON.stringify({ prelude: [], join: [], lanes: 5 }));
+  const r = run([plan(4), '--max-lanes', '2', '--lane', 'T1,T2', '--lane', 'T3,T4', '--project', '/x/proj', '--history-dir', h]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([r.json.status, r.json.saved, r.json.recommend], ['ok', 2, 'parallel']);
+  assert.ok(r.json.scale.runs.includes('ok1'), JSON.stringify(r.json));
+  assert.ok(!r.json.scale.runs.includes('bad2'), JSON.stringify(r.json));
 });
 
 test('no history dir is fine', () => {

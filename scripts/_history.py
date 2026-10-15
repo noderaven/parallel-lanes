@@ -231,7 +231,8 @@ def _union(spans):
 def _task_ids(manifest):
     ids = set()
     groups = [manifest.get("prelude"), manifest.get("join")]
-    groups += [lane.get("tasks") for lane in manifest.get("lanes") or [] if isinstance(lane, dict)]
+    lanes = manifest.get("lanes")
+    groups += [lane.get("tasks") for lane in lanes if isinstance(lane, dict)] if isinstance(lanes, list) else []
     for group in groups:
         for task in group if isinstance(group, list) else []:
             if isinstance(task, dict) and isinstance(task.get("id"), str):
@@ -251,6 +252,8 @@ def latest_task_launch(analysis, manifest):
     launches = {}
     for a in agents:
         if not isinstance(a, dict) or a.get("task") not in ids:
+            continue
+        if not (a.get("launch") is None or isinstance(a.get("launch"), str)):
             continue
         start, end = _ts(a.get("start")), _ts(a.get("end"))
         if start is None or end is None or end < start:

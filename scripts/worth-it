@@ -175,7 +175,7 @@ def scale(hdir, project, notes=None):
             if manifests:
                 figures = _history.run_figures(_read_json(os.path.join(folder, "autopsy.json")),
                                                _read_json(manifests[0]))
-        except (OSError, ValueError):
+        except Exception:  # noqa: BLE001 - one damaged run must never reach the rule
             figures = None
         if figures is None:
             skipped += 1
@@ -210,8 +210,8 @@ def assess(args):
     if args["project"]:
         try:
             found = scale(_history.history_dir(args["history_dir"]), args["project"], notes)
-        except (OSError, _shell.BashNotFound) as e:
-            notes.append("scale: " + str(e))
+        except Exception as e:  # noqa: BLE001 - the scale line never changes the rule
+            notes.append("scale: %s: %s" % (type(e).__name__, e))
     return {"status": "ok", "tasks": len(layout), "lanes": len(lanes), "lanes_at_once": at_once, "slots": used,
             "saved": saved, "threshold": THRESHOLD, "recommend": decide(saved), "scale": found, "notes": notes}
 
