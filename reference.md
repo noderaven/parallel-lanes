@@ -1639,7 +1639,8 @@ above the CPU count), `active_runs` (another run holds a launch lock on this mac
 `defender` (Windows), `concurrency`
 (`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once),
 `host_budget` (the lanes at once, lowered to that variable when it is smaller, exceed the
-logical CPU count: "4 lanes at once, 2 CPUs"; a project whose checks run several workers should
+logical CPU count: "4 lanes at once, 2 CPUs"; expected at the lane cap on a machine with 4 or
+fewer CPUs, since the cap is min(5, CPUs + 2); a project whose checks run several workers should
 keep lanes x workers within the CPUs) and
 `usage_limit_pause` (Claude Code may not pause the run at the usage limit; below). A read that
 fails is a warning with detail `unknown`.

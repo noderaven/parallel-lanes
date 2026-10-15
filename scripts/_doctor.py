@@ -73,8 +73,10 @@ skipped as not_applicable.
 - host_budget: the lanes at once (as concurrency counts them, lowered to
   CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS when that is a smaller integer)
   exceed the logical CPU count (detail "<n> lanes at once, <c> CPUs"); a
-  count that cannot be read is "unknown". A project whose checks run
-  several workers should keep lanes x workers within the CPUs.
+  count that cannot be read is "unknown". Expected at the skill's lane cap
+  on a machine with 4 or fewer CPUs (the cap is min(5, CPUs + 2)). A project
+  whose checks run several workers should keep lanes x workers within the
+  CPUs.
 - usage_limit_pause: Claude Code may not pause the run at the usage limit:
   claude --version (on Windows also claude.exe and claude.cmd) is older than
   2.1.271 or cannot be read, or autoContinueAtUsageLimit is false in the
@@ -919,13 +921,19 @@ def check_defender(manifest, probes, report):
         report.passed(check)
 
 
-def check_concurrency(manifest, probes, report):
-    check = "concurrency"
+def _lanes_at_once(manifest):
+    """min(limits.max_parallel_lanes, lane count), the lane count when the
+    cap is not an integer."""
     lanes = manifest.get("lanes")
     count = len(lanes) if isinstance(lanes, list) else 0
     limits = manifest.get("limits") if isinstance(manifest.get("limits"), dict) else {}
     cap = limits.get("max_parallel_lanes")
-    at_once = min(cap, count) if isinstance(cap, int) and not isinstance(cap, bool) else count
+    return min(cap, count) if isinstance(cap, int) and not isinstance(cap, bool) else count
+
+
+def check_concurrency(manifest, probes, report):
+    check = "concurrency"
+    at_once = _lanes_at_once(manifest)
     value = _shell._getenv(probes.env, CONCURRENCY_VARIABLE)
     if value is None or not value.strip():
         report.warn(check, CONCURRENCY_VARIABLE + " is unset, so the Workflow tool's own cap "
@@ -948,11 +956,7 @@ def check_host_budget(manifest, probes, report):
     to the concurrency variable when it is a smaller integer) against the
     logical CPU count."""
     check = "host_budget"
-    lanes = manifest.get("lanes")
-    count = len(lanes) if isinstance(lanes, list) else 0
-    limits = manifest.get("limits") if isinstance(manifest.get("limits"), dict) else {}
-    cap = limits.get("max_parallel_lanes")
-    at_once = min(cap, count) if isinstance(cap, int) and not isinstance(cap, bool) else count
+    at_once = _lanes_at_once(manifest)
     value = _shell._getenv(probes.env, CONCURRENCY_VARIABLE)
     try:
         at_once = min(at_once, int(value.strip())) if value and value.strip() else at_once

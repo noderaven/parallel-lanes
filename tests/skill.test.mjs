@@ -770,6 +770,8 @@ test('reference.md documents the 1.6.2 report fields, doctor check and repair re
   }
   const doctor = section(ref, 'Doctor');
   assert.ok(doctor.includes('`usage_limit_pause`') && doctor.includes('fourteen checks'), doctor);
+  // host_budget is expected at the skill's own lane cap on a small machine (1.6.4).
+  assert.ok(doctor.replace(/\s+/g, ' ').includes('expected at the lane cap'), 'host_budget at the cap');
   assert.ok(section(ref, 'Launch conditions').includes('usage_limit_pause'), 'Launch conditions lacks usage_limit_pause');
   assert.ok(section(ref, 'Budgets').includes('(7, plus 4 with an e2e hook'), 'Budgets reserve');
   assert.ok(section(ref, 'Check ownership').includes('The reserve is 7'), 'Check ownership reserve');
