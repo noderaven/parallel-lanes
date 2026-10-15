@@ -13,6 +13,7 @@ attempt, with a worked example, is in adopt.md. `<config dir>` below is
 - Manifest fields: every manifest field, what it holds and its limits
 - Flow details: notices, git identity, the confirmation header, transient stops
 - Building lanes: turning derive-lanes facts into prelude, lanes and join
+- Worth it: whether a layout saves enough to pay for a run's fixed phases
 - Profiles: full and lite
 - Tiers: standard, sonnet and light tasks, and escalation
 - Batching: light tasks run as one unit
@@ -126,8 +127,9 @@ Details SKILL.md points to.
 
 `<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
 executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
-`<K>` = length of `done`. The dry run returns the launch and resume lines filled in
-(`notices`); the script logs the same line; you still print it.
+`<K>` = length of `done`. `<saved>` = the worth-it result's `saved` (see "Worth it"), and in
+that notice `<method>` is the direct method recommended. The dry run returns the launch and
+resume lines filled in (`notices`); the script logs the same line; you still print it.
 
 ### Git identity
 
@@ -246,6 +248,44 @@ Otherwise:
    goes in `excluded` with the reason `done by hooks.e2e`.
 8. Every plan task the run does not run goes in `excluded` with its reason; `scripts/coverage
    <plan> <manifest>` must exit 0 (no plan task missing, no unknown or repeated id).
+
+## Worth it
+
+`<python> <skill_dir>/scripts/worth-it <plan> --max-lanes <cap> [--prelude <ids>] --lane <ids>
+[--lane <ids> ...] [--join <ids>] [--project <dir>] [--history-dir <dir>]` runs at the
+Assessment, after the layout and only when the Offer will be shown. It reads the plan only to
+check the layout: every id must be a task heading of the plan and appear once.
+
+**The rule.** N tasks; A lanes at once = min(lanes, `--max-lanes`). The task-slots S are the prelude
+tasks + the lanes' task counts queued whole, in lane order, each to the worker free earliest,
+across A workers (as the engine's `runLanes` runs them) + the join tasks. A direct build takes N
+task-times, so the layout saves N - S. `recommend` is `direct` when that is at most `THRESHOLD`
+(1), else `parallel`. A single-lane layout saves 0.
+
+**Why 1.** A back-test of 31 archived runs (2026-10-15; `tools/worth-it-backtest.py`, the 1.6.4
+design section 4.3): the fixed phases a run adds beyond the whole-branch review a direct build
+also ends with (pre-flight, integrate, E2E, verify) cost a median 1.23 task-times (quartiles 0.92
+to 1.67). With 1 the rule agreed with each run's own comparison on 28 of 31 runs; with 2 on 24.
+Minutes were tried and dropped: estimated from a project's earlier runs they were off by -74% to
++1788%, since task time depends on the plan.
+
+**Biases.** The comparison leans towards a run: no direct build is archived, so "direct" is
+modelled; a run's task time includes a per-task review (Native has none) and the contention of
+parallel lanes; the run side leaves out the session's own steps (dry run, setup, confirmation,
+hand-back). A `direct` recommendation is the safer of the two to trust. The rule assumes the
+full profile; a `lite` run's fixed phases are smaller.
+
+**The scale line.** With `--project`, `scale` holds the mean, lowest and highest task time of
+this project's complete archived runs (`--project` matched as `history --project` matches), each
+run's from its autopsy.json and manifest (the latest launch that ran task agents; a task's time
+is the summed wall time of its agents). Minutes for scale only; it never changes `recommend`.
+Runs whose autopsy or manifest cannot be read are skipped, with a note.
+
+**Output.** One JSON line: `{"status": "ok", "tasks", "lanes", "lanes_at_once", "slots",
+"saved", "threshold", "recommend", "scale": {"runs", "task_s_mean", "task_s_min",
+"task_s_max"} or null, "notes"}`, or `{"status": "unavailable", "reason", "notes"}` for an
+unreadable plan or a layout that names a task twice, names a task the plan lacks, or names none.
+Exit 0 in both cases (the Offer goes on as before); 2 on a usage error. Read-only.
 
 ## Profiles
 
@@ -1311,6 +1351,13 @@ copies a run that ended after a launch into the run history (never a dry run). R
   folders already there (imported runs, hand-archived runs). Every folder holding a
   `*.lanes.json` is one run; the report is the first of `*.report.json`, `*.run-report.json`
   and `report.json`. Folders keep their names; it prints `{"runs": N, "skipped": [...]}`.
+- **Comparing two runs:** `history --runs A,B [--json]` (two run ids or folder names) prints,
+  for each run, its plan's sha256, task ids, lanes, a hash of its `commands`, versions, launches,
+  status, acceptance, wall time, fixed phases, task time, full-suite time and tokens, and whether
+  the pair is comparable: only when the archived plans hash the same, the task ids, lanes and
+  commands match, both autopsies are current and neither has partial tokens. Otherwise
+  `not comparable` with every reason. It writes nothing, never reruns autopsy and never prints a
+  percentage. An id the index holds twice, or the same run twice, exits 2.
 - **Imported folders are read-only:** do not run their manifests. `--reindex`, `autopsy` and
   `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,
   `history.md`) and never change or remove an imported file.
@@ -1339,7 +1386,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 6, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 7, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1369,6 +1416,18 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     whose last wait said still running (exit 4), each `{agent, file}`: an agent that ended without
     its check's result. Claude Code 2.1.300 discourages waiting on background commands, so a
     run on it is worth checking here.
+  - `commands` (1.6.4, `checks.commands`): check time per configured command, from every file in the ledger's
+    `checks/` with a results list (task checks, integrate, verify, final fix, accept): one entry
+    `{check, group, runs, total_s, median_s, project_suite}` per configured command that ran, in
+    check id order; `project_suite` is true for a `commands.<group>` entry (no lane or task
+    prefix). `commands_unconfigured` (`runs`, `total_s`) counts results whose command the
+    manifest does not name (a focused rerun), without their text; `commands_skipped` counts
+    error records, unreadable files and results without a duration. These come from the
+    ledger, so they are reported for a run without tool events too.
+  - `widened` (1.6.4): `{targeted_median_s, calls: [{unit, codes, s}]}`: each task-checks
+    evidence selected `widened` with its reason codes and duration, and the median duration of
+    the targeted ones. `autopsy.md` shows them as the "Widened task checks" table, each against
+    the run's median targeted call (measured, not a cost claim).
   - `repairs` (`attempts`, `eligible`, `by_status`, from `final.repairs`) and `setup`
     (`skipped`, `no_setup_commands`, from `setup_result.setup_skipped`) are `unavailable` for
     runs before 1.6.0.
@@ -1573,7 +1632,10 @@ Warnings: `memory` (under 4 GB available, or the commit charge near its limit), 
 WindowsApps alias), `heavy_processes` (Windows: AppXSvc over 1500 MB; elsewhere a load average
 above the CPU count), `active_runs` (another run holds a launch lock on this machine),
 `defender` (Windows), `concurrency`
-(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once) and
+(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once),
+`host_budget` (the lanes at once, lowered to that variable when it is smaller, exceed the
+logical CPU count: "4 lanes at once, 2 CPUs"; a project whose checks run several workers should
+keep lanes x workers within the CPUs) and
 `usage_limit_pause` (Claude Code may not pause the run at the usage limit; below). A read that
 fails is a warning with detail `unknown`.
 
@@ -1604,7 +1666,7 @@ Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: doctor itsel
 `--json` prints `{"status": "ok" | "blocked", "failures": [...],
 "warnings": [...], "skipped": [...], "checks": [...], "observed_at": ..., "doctor_version": ...,
 "run_id": ..., "usage_limit_pause": {...}}`.
-- **`checks`:** one entry `{"check", "outcome"}` for each of the thirteen checks, in run order,
+- **`checks`:** one entry `{"check", "outcome"}` for each of the fourteen checks, in run order,
   with outcome `passed`, `warning`, `failed` or `skipped`. A check that recorded nothing
   is `skipped` and also appears in `skipped` with reason `not_recorded`; a check recorded more
   than once keeps its worst outcome (failed, warning, skipped, passed).

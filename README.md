@@ -269,7 +269,9 @@ session lists it, and you can resume with one word. Finished tasks are skipped.
 1. **Assess.** `scripts/derive-lanes` groups the tasks into lanes (at most
    `min(5, CPU cores + 2)`), a *prelude* (shared groundwork that runs first), and a *join*
    (tasks that need the merged result). Plans with only 1-2 tasks are handed back to
-   Superpowers.
+   Superpowers. `scripts/worth-it` then counts how many task-times running the lanes in
+   parallel saves; when that is 1 or less (always for a single lane), a direct build is
+   recommended first, and you can still pick parallel lanes.
 2. **Manifest.** Claude writes a JSON manifest covering lanes, model tier per task
    (`standard`, `sonnet`, or `light`; security-sensitive tasks are always `standard`),
    project commands, commit rules taken from your CLAUDE.md, and budgets.
@@ -365,7 +367,7 @@ Other things to know:
 | `reference.md` | Manifest fields, lane building, tiers, budgets, recovery details |
 | `adopt.md` | Adopting earlier work from a hand-run attempt, with a worked example |
 | `run.workflow.js` | The orchestrator, built from `src/` by `scripts/build` |
-| `scripts/` | derive-lanes, setup, ledger, shadow, run-report, active-run, task-checks, run-checks, await-checks, audit, tool-outcomes, stop-cause, and other helpers |
+| `scripts/` | derive-lanes, worth-it, setup, ledger, shadow, run-report, active-run, task-checks, run-checks, await-checks, audit, tool-outcomes, stop-cause, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `agents/` | The `parallel-lanes-worker` agent definition |
 | `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, four files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |
