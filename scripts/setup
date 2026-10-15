@@ -7,6 +7,9 @@ usage:
 MANIFEST is the run manifest (JSON). setup does what the Setup agent of
 run.workflow.js does, without an agent:
 
+A SHA-256 repository (git rev-parse --show-object-format) is refused: exit 3,
+nothing changed; the run names commits by 40-hex SHA-1 ids.
+
 git mode (the main checkout repo.root is the feature checkout):
   refuses a main checkout with uncommitted changes (exit 3, nothing created;
   its changes are never discarded), creates repo.branch from repo.base_ref
@@ -452,6 +455,13 @@ def setup(m, owner=None):
     feature = feature_dir(m)
 
     # Every refusal comes before the first change.
+    # The run names commits by 40-hex SHA-1 ids (isSha): a SHA-256 repository
+    # would fail partway through. Only an explicit sha256 answer refuses, so
+    # an old git that does not know the option is not refused by mistake.
+    object_format = repo.git("rev-parse", "--show-object-format", check=False).stdout.strip()
+    if object_format == "sha256":
+        raise Failure(3, "the repository uses SHA-256 object names; parallel-lanes supports only SHA-1 "
+                         "repositories (nothing was changed)")
     if repo_cfg["mode"] == "git":
         dirty = run_git(["-C", feature, "status", "--porcelain"]).stdout
         if dirty:

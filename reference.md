@@ -107,6 +107,10 @@ one (`git config --global user.name` and `user.email`) or to name one that `comm
 passes with `-c` (`git -c user.name=... -c user.email=... commit`). `scripts/setup` does not
 check this, since a `-c` identity is legitimate.
 
+A repository with SHA-256 object names (`git rev-parse --show-object-format` prints `sha256`) is
+not supported: the run names commits by 40-hex SHA-1 ids. `scripts/setup` refuses it (exit 3,
+nothing changed); tell the user.
+
 ### Confirmation header
 
 The header shown with the dry-run table lists: mode, base and feature branch, worktree_root,

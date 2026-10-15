@@ -250,6 +250,21 @@ test('setup: a dirty main checkout exits 3 and creates nothing', () => {
   assert.equal(readFileSync(join(c.project, 'README.md'), 'utf8'), 'uncommitted\n');
 });
 
+test('setup: a SHA-256 repository exits 3 with a clear message and creates nothing', () => {
+  const c = newCase();
+  rmSync(join(c.project, '.git'), { recursive: true, force: true });
+  git(c.project, 'init', '-q', '-b', 'main', '--object-format=sha256');
+  git(c.project, 'add', '-A');
+  git(c.project, 'commit', '-q', '-m', 'init');
+  const res = setup(c, manifest(c));
+  assert.equal(res.code, 3, res.stderr);
+  assert.equal(res.stdout, '');
+  assert.match(res.stderr, /SHA-256/);
+  assert.equal(sh('git', ['-C', c.project, 'show-ref', '--verify', '--quiet', 'refs/heads/feature/x']).code, 1);
+  assert.equal(existsSync(c.worktreeRoot), false);
+  assert.equal(existsSync(c.ledgerDir), false);
+});
+
 test('setup: ignored files in the main checkout survive', () => {
   const c = newCase();
   write(c.project, 'scratch/notes.txt', 'mine\n');
