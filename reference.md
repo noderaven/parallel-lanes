@@ -318,7 +318,8 @@ From 1.6.3 what earlier agents decided or found reaches the agents after them, o
 
 **The ledger holds every ruling.** A `ruling` event may carry `by` (`implementer`, `reviewer`,
 `adjudicator`, `preflight`), `scope` (`lane` or `run`), `overrides` (the ids it departs from),
-`files` (paths an adjudicator ruling permits outside a task's Files list), `pf` and `wf`. The
+`files` (paths an adjudicator ruling permits outside a task's Files list; an implementer lists
+the files its ruling explains, which permits nothing), `pf` and `wf`. The
 ledger checks the values, not whether an agent told the truth. A ruling's id is `<file
 stem>-R<n>`, n counting that ledger file's rulings in append order (`rig-R4`, `_run-R2`); this
 launch's pre-flight rulings are numbered `PF-1`... in the prompts until `carry-launch` records

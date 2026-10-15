@@ -71,6 +71,11 @@ test('implementers check owners before going outside their Files list, record ob
   assert.ok(p.includes('"scope": "run"'), p);
   assert.ok(p.includes('"overrides": ['), p);
   assert.ok(p.includes('may override only an implementer ruling of its own lane'), p);
+  // P7 (d1a): DJ4's rulings explained its edits to earlier lanes' files in text only; with
+  // "files" the ruling names them. It permits nothing (task-checks counts an adjudicator's only).
+  const flat = p.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('When you change a file outside your Files list, record a ruling saying why with "files": ['), p);
+  assert.ok(flat.includes('it permits nothing'), p);
 });
 
 test('the adjudicator reads every ruling and may scope, override and permit files', () => {
