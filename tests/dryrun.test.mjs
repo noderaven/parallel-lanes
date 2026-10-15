@@ -445,6 +445,8 @@ test('repair_limit is 0 for a supervised manifest and 2 for an autonomous one', 
   assert.equal(repairLimit(manifest({ autonomy: 'supervised' })), 0);
   assert.equal(repairReserve(manifest()), 7);
   assert.equal(repairReserve(manifest({ hooks: { e2e: 'x', post_integrate: 'y' } })), 13);
+  // The post-integrate 2 apply in the full profile only (reference.md says so since 1.6.4).
+  assert.equal(repairReserve(manifest({ profile: 'lite', hooks: { post_integrate: 'y' } })), 7);
   assert.equal(repairFixMessage(), 'fix: make the delivery checks pass');
   const { result } = await dryRun(policyManifest({ autonomy: 'supervised', repairs_spent: 1 }));
   assert.equal(result.checks.repair_limit, 0);

@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 6);
+  assert.equal(A.autopsy_version, 7);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -1092,6 +1092,10 @@ test('checks without tool events are unavailable, not zero', () => {
     full_suite_runs: { total: 'unavailable', inferred: 'unavailable', by_role: 'unavailable' },
     task_check_calls: 'unavailable', project_test_runs: 'unavailable', repairs: 'unavailable', setup: 'unavailable',
     waits: 'unavailable',
+    // 1.6.4: check time per command comes from the ledger's evidence files, not
+    // the transcripts, so it is reported without tool events (run3 has none).
+    commands: [], commands_unconfigured: { runs: 0, total_s: 0 }, commands_skipped: 0,
+    widened: { targeted_median_s: 'unavailable', calls: [] },
   });
 });
 

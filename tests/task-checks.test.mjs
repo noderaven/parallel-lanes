@@ -122,12 +122,195 @@ test('a widen path widens even inside the Files list', () => {
   assert.deepEqual(codes(json), ['widen_path']);
 });
 
+test('a widen entry naming an existing directory without a trailing / covers files under it', () => {
+  // 1.6.0 deferred minor: 'test/helpers' (no '/') matched only the equal
+  // path, so a change under the directory never widened.
+  const r = repo({ 'test/helpers/h.js': '1\n', 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'test/helpers/h.js'), '2\n');
+  const { json } = run(r, { args: ['--declared', 'test/helpers/h.js', '--widen', 'test/helpers'] });
+  assert.equal(json.policy.selected, 'widened');
+  assert.deepEqual(codes(json), ['widen_path']);
+  // A --declared entry keeps the strict rule: without '/' it covers the equal path only.
+  const declared = run(r, { args: ['--declared', 'test/helpers'] });
+  assert.deepEqual(codes(declared.json), ['outside_files']);
+  // A widen entry that is a file, or names nothing, still covers the equal path only.
+  const file = run(r, { args: ['--declared', 'test/helpers/h.js', '--widen', 'src/a.js', '--widen', 'gone'] });
+  assert.equal(file.json.policy.selected, 'targeted');
+});
+
+// The ledger's ruling events and owner map, as the run writes them.
+function ledgerFile(r, stem, events) {
+  writeFileSync(join(r.ledger, `${stem}.jsonl`), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}
+function ownerMap(r, files) {
+  writeFileSync(join(r.ledger, 'owners.json'), JSON.stringify({
+    tasks: { U1: { where: 'alpha', pos: 0 }, U2: { where: 'alpha', pos: 1 }, U9: { where: 'beta', pos: 0 } }, files }));
+}
+const permit = (task, files, extra = {}) => ({ event: 'ruling', task, by: 'adjudicator', text: 'Ruling: x - y - z', files, ...extra });
+
+test('a file an adjudicator ruling in force permits counts as declared, and the policy names the ruling', () => {
+  // d1a DI3: the pre-flight adjudicator permitted ToolRackSlot.cs (no task listed it), filed under _run;
+  // task-checks widened anyway (outside_files), 1089 s instead of about 600 s.
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js'])]);
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+  assert.equal(status, 0);
+  assert.equal(json.policy.selected, 'targeted');
+  assert.deepEqual(json.policy.permitted, [{ path: 'src/slot.js', ruling: '_run-R1' }]);
+  // Filed under the unit's own task (in its lane file), the files count whatever the owner map says.
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/slot.js': ['U9'] });
+  rmSync(join(r.ledger, '_run.jsonl'));
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'])]);
+  assert.deepEqual(run(r, { args: ['--declared', 'src/a.js'] }).json.policy.permitted,
+    [{ path: 'src/slot.js', ruling: 'alpha-R1' }]);
+});
+
+test('only an adjudicator ruling in force, for this unit or an unowned path, permits a file', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  const widens = (why) => {
+    const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+    assert.equal(status, 0, why);
+    assert.deepEqual(codes(json), ['outside_files'], why);
+    assert.deepEqual(json.policy.permitted, [], why);
+  };
+  const reset = () => { for (const n of readdirSync(r.ledger)) if (n.endsWith('.jsonl') || n === 'owners.json') rmSync(join(r.ledger, n)); };
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  // An implementer's own ruling never permits (it could switch off its own widening).
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'], { by: 'implementer' })]);
+  widens('implementer ruling');
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'], { by: 'reviewer' })]);
+  widens('reviewer ruling');
+  // Another task's ruling.
+  ledgerFile(r, 'alpha', [permit('U2', ['src/slot.js'])]);
+  widens('another task');
+  reset();
+  // A _run ruling for a path another task owns, or with no owner map to tell.
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js'])]);
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/slot.js': ['U9'] });
+  widens('owned elsewhere');
+  rmSync(join(r.ledger, 'owners.json'));
+  widens('no owner map');
+  // A _run ruling's unowned path counts only for a unit declaring a file in the same folder
+  // (d1a: ToolRackSlot.cs beside DI3's ToolRack.cs), so it does not exempt every other task.
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  mkdirSync(join(r.dir, 'other'));
+  writeFileSync(join(r.dir, 'other/far.js'), 'new\n');
+  rmSync(join(r.dir, 'src/slot.js'));
+  ledgerFile(r, '_run', [permit('_run', ['other/far.js'])]);
+  widens('another folder');
+  rmSync(join(r.dir, 'other'), { recursive: true });
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  // An overridden ruling is no longer in force.
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js']), permit('_run', [], { overrides: ['_run-R1'] })]);
+  widens('overridden');
+  // An unreadable ledger keeps the strict rule.
+  writeFileSync(join(r.ledger, '_run.jsonl'), '{not json\n');
+  widens('unreadable ledger');
+});
+
+test('a permit names files only: a directory, or an owned folder, never covers another lane\'s file', () => {
+  // Final review (1.6.4): a _run adjudicator ruling naming "src/sub/" was not in the owner map
+  // (it lists files) and became a directory entry covering U9's src/sub/owned.js.
+  const r = repo({ 'src/a.js': '1\n', 'src/sub/owned.js': '1\n', 'b.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/sub/owned.js'), '2\n');
+  const widens = (why, declared = 'src/a.js') => {
+    const { status, json } = run(r, { args: ['--declared', declared] });
+    assert.equal(status, 0, why);
+    assert.deepEqual(codes(json), ['outside_files'], why);
+    assert.deepEqual(json.policy.permitted, [], why);
+  };
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub/owned.js': ['U9'] });
+  for (const dir of ['src/sub/', 'src/sub\\', 'src', './', '.']) {
+    ledgerFile(r, '_run', [permit('_run', [dir])]);
+    widens(`_run permit ${dir}`);
+    // A ruling filed under the unit's own task names files only, too.
+    rmSync(join(r.ledger, '_run.jsonl'));
+    ledgerFile(r, 'alpha', [permit('U1', [dir])]);
+    widens(`task permit ${dir}`);
+    rmSync(join(r.ledger, 'alpha.jsonl'));
+  }
+  // A folder another task's Files list names owns every path under it.
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub': ['U9'] });
+  ledgerFile(r, '_run', [permit('_run', ['src/sub/owned.js'])]);
+  widens('owned folder');
+});
+
+test('the permit folder guard: a declared directory is its own folder, and folders compare by case', () => {
+  // Deferred minors of the 1.6.4 final review, included in 1.6.4.
+  const r = repo({ 'src/a.js': '1\n', 'Src2/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'build.cfg'), 'new\n');
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  ledgerFile(r, '_run', [permit('_run', ['build.cfg'])]);
+  // A unit declaring only the directory src/ is not in build.cfg's (root) folder.
+  const dir = run(r, { args: ['--declared', 'src/'] });
+  assert.deepEqual(codes(dir.json), ['outside_files']);
+  assert.deepEqual(dir.json.policy.permitted, []);
+  // A declared root file is.
+  writeFileSync(join(r.dir, 'root.txt'), 'x\n');
+  rmSync(join(r.dir, 'src/a.js'));
+  git(r.dir, 'checkout', '--', 'src/a.js');
+  const root = run(r, { args: ['--declared', 'root.txt'] });
+  assert.deepEqual(root.json.policy.permitted, [{ path: 'build.cfg', ruling: '_run-R1' }]);
+  rmSync(join(r.dir, 'root.txt'));
+  rmSync(join(r.dir, 'build.cfg'));
+  // Src2/new.js is not in the folder of a declared src2/a.js on a case-sensitive comparison.
+  writeFileSync(join(r.dir, 'Src2/new.js'), 'x\n');
+  ledgerFile(r, '_run', [permit('_run', ['Src2/new.js'])]);
+  const cased = run(r, { args: ['--declared', 'src2/a.js'] });
+  assert.deepEqual(cased.json.policy.permitted, []);
+});
+
+test('a malformed owner map, and a backslash or mixed-case permit of an owned file, permit nothing', () => {
+  const r = repo({ 'src/a.js': '1\n', 'src/sub/owned.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/sub/owned.js'), '2\n');
+  ledgerFile(r, '_run', [permit('_run', ['src/sub/owned.js'])]);
+  writeFileSync(join(r.ledger, 'owners.json'), '{"tasks": [], "files": 3}');
+  assert.deepEqual(run(r, { args: ['--declared', 'src/sub/x.js', '--declared', 'src/a.js'] }).json.policy.permitted, []);
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub/owned.js': ['U9'] });
+  for (const path of ['src\\sub\\owned.js', 'SRC/Sub/owned.js']) {
+    ledgerFile(r, '_run', [permit('_run', [path])]);
+    const res = run(r, { args: ['--declared', 'src/sub/x.js', '--declared', 'src/a.js'] });
+    assert.deepEqual(res.json.policy.permitted, [], path);
+    assert.deepEqual(codes(res.json), ['outside_files'], path);
+  }
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');
   const { json } = run(r, { args: ['--declared', 'src/a.js'] });
   assert.deepEqual(codes(json), ['outside_files']);
   assert.deepEqual(json.policy.changed, ['new.js']);
+});
+
+test('the printed report caps long path lists; the evidence file keeps them whole', () => {
+  // 1.6.0 deferred minor: the printed line carried every changed and outside path.
+  const r = repo({ 'src/a.js': '1\n' });
+  const names = Array.from({ length: 60 }, (_, i) => `gen/${'x'.repeat(40)}${String(i).padStart(2, '0')}.js`);
+  mkdirSync(join(r.dir, 'gen'));
+  for (const n of names) writeFileSync(join(r.dir, n), 'x\n');
+  const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+  assert.equal(status, 0);
+  const saved = JSON.parse(readFileSync(join(r.ledger, 'checks', 'task-U1.1.json'), 'utf8'));
+  assert.deepEqual(saved.policy.changed, names);
+  assert.ok(saved.policy.reasons[0].detail.includes(names[59]));
+  assert.equal(saved.printed_cut, undefined);
+  assert.deepEqual(json.policy.changed, names.slice(0, 50));
+  assert.ok(json.policy.reasons[0].detail.length <= 2100);
+  assert.ok(!json.policy.reasons[0].detail.includes(names[59]));
+  assert.match(json.printed_cut, /50 of 60 changed paths/);
+  assert.ok(json.printed_cut.includes('task-U1.1.json'));
+  // Everything else is the file's report.
+  assert.deepEqual({ ...json, policy: null, printed_cut: undefined }, { ...saved, policy: null, printed_cut: undefined });
 });
 
 test('a rename counts both paths', () => {

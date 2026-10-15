@@ -1300,6 +1300,8 @@ test('every agent gets the file-editing rule', () => {
     'Change file contents with your file-editing tools (Edit, Write).',
     'can be corrupted by shell quoting',
     'generators (for example scripts/build), formatters, codemods',
+    // f1a 17, hx1 10, d1a 12 edit_retry slowdowns: an Edit or Write on a file not read first fails.
+    'Read a file right before you edit or overwrite it',
   ]) {
     assert.ok(r.includes(phrase), phrase);
   }

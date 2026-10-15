@@ -14,7 +14,7 @@ the skipped checks. With --json it prints run_checks' result:
    "run_id": "<the manifest's run_id>"|null,
    "usage_limit_pause": {"pause": "yes"|"no"|"unknown", "reasons": [...],
                          "version": "x.y.z"|null, "setting": true|false|null}}
-checks lists all thirteen checks in the order they run, each with the outcome
+checks lists all fourteen checks in the order they run, each with the outcome
 it recorded (see _doctor.py). usage_limit_pause says whether Claude Code will
 pause the run at the usage limit, as far as doctor can see; it only warns.
 

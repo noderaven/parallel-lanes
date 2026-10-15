@@ -179,6 +179,8 @@ test('review prompts name the unit\'s evidence files and invite a finding on a w
   assert.ok(reviewPrompt(m, t(m, 'T2'), where, H('a'), H('b')).includes(line));
   assert.ok(reReviewPrompt(m, t(m, 'T2'), where, H('b'), H('c'), []).includes(line));
   assert.ok(taskEvidenceLine(m, batchUnit([t(m, 'T2'), t(m, 'T3')])).includes('task-T2-T3.<n>.json'));
+  // 1.6.0 deferred minor: task-1.<n>.json also matches unit 1.2's task-1.2.<n>.json files.
+  assert.ok(flat(line).includes('read only the files whose policy.unit is T2'), line);
 });
 
 test('the fix fallback is not the implement fallback', () => {

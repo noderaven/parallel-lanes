@@ -7,6 +7,37 @@ attempt, with a worked example, is in adopt.md. `<config dir>` below is
 `${CLAUDE_CONFIG_DIR:-~/.claude}`; every helper uses the same one.
 `<python>` below is the manifest's `python` (see Paths and Python).
 
+## Contents
+
+- Paths and Python: finding Python, how every helper command starts, path forms
+- Manifest fields: every manifest field, what it holds and its limits
+- Flow details: notices, git identity, the confirmation header, transient stops
+- Building lanes: turning derive-lanes facts into prelude, lanes and join
+- Worth it: whether a layout saves enough to pay for a run's fixed phases
+- Profiles: full and lite
+- Tiers: standard, sonnet and light tasks, and escalation
+- Batching: light tasks run as one unit
+- Adjudicator: blocked tasks, rulings and their limits
+- Carry-over: rulings, task minors and owners passed between agents
+- Fix commits: the message of every commit after a task's first
+- Budgets: agent and ruling limits, the repair reserve
+- Check ownership: which agent runs which checks, task-checks selection
+- Long checks: reserving, starting and waiting on a check
+- Exit codes: the busy, timeout and signal codes a check may return
+- Active-run markers and stops: launch locks, setup exit 4, stopping a run
+- Usage limit: the platform pause and the agents_unavailable stop
+- Report: run-report output, the report contents, the run tools line
+- Verify evidence: check-verify and the acceptance gates
+- Backfill: rebuilding commit ranges in an older ledger
+- Shadow repos: runs on a folder that is not a git repo
+- Run history: archive-run, the history folder and its index
+- Autopsy: where a run's time went, slowdowns and suggestions
+- Audit: what the archive proves about each task
+- Doctor: the machine checks before a dry run
+- Launch conditions: doctor's result bound to each launch
+- Cleanup: removing a finished run's branches and worktrees
+- Uninstall: removing the skill
+
 ## Paths and Python
 
 `python` is the output of `bash <skill_dir>/scripts/find-python`: the absolute path of the
@@ -47,7 +78,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `commands` | `setup`, `test`, `lint`, `build`: lists of shell commands run from a checkout. Take them from the plan's conventions, then the project (package.json scripts, pyproject, Makefile). Use `[]` for a group the project lacks. |
 | `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). They are the lane's own checks: integration and verify run every distinct one, so a narrower run of a project check belongs in `task_checks`, not here. |
 | `task_checks` | Optional `{<task id>: {test, lint?, build?}}`: the targeted checks a task runs once before committing (see Check ownership). `test` is required and names at least one command; an absent `lint` or `build` inherits the lane's. A batch uses its last task's entry. Every command must be a narrower run of a check the delivery inventory already runs, in the same checkout and environment; must run correctly at the task that uses it (list the lane's test files created or changed by that task and the lane's earlier tasks, cumulatively, so no entry names a file a later task creates); must fail when it selects no tests (name existing test files; a filter that passes on zero matches needs a wrapper that fails); and keeps an explicit worker limit like the project's test command (for example `node --test --test-concurrency=4 ...`). Derive the entries from the briefs' test files and commands; a task you cannot map gets no entry and runs its lane's checks. Never part of the delivery inventory. |
-| `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Take them from the plan's shared files; no absolute path or `..`. |
+| `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory; an existing directory named without it counts as one too) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Take them from the plan's shared files; no absolute path or `..`. |
 | `repairs_spent` | Optional integer, default 0: repairs after a failing verify that earlier launches of this run made (the sum of `final.repairs` lengths in their reports; a report without `final` made none). Set it on a transient relaunch or a resume, like the budget carry-over; a run allows 2 in all (see Check ownership). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
@@ -96,8 +127,9 @@ Details SKILL.md points to.
 
 `<plan>` = absolute plan path. `<method>` = `Subagent-driven` or `Native` (superpowers
 executing-plans). `<N>` = distinct lanes in the dry-run `agents` list, `<M>` = its length,
-`<K>` = length of `done`. The dry run returns the launch and resume lines filled in
-(`notices`); the script logs the same line; you still print it.
+`<K>` = length of `done`. `<saved>` = the worth-it result's `saved` (see "Worth it"), and in
+that notice `<method>` is the direct method recommended. The dry run returns the launch and
+resume lines filled in (`notices`); the script logs the same line; you still print it.
 
 ### Git identity
 
@@ -106,6 +138,10 @@ a commit without an identity fails partway through the run. If it fails, ask the
 one (`git config --global user.name` and `user.email`) or to name one that `commit_rules`
 passes with `-c` (`git -c user.name=... -c user.email=... commit`). `scripts/setup` does not
 check this, since a `-c` identity is legitimate.
+
+A repository with SHA-256 object names (`git rev-parse --show-object-format` prints `sha256`) is
+not supported: the run names commits by 40-hex SHA-1 ids. `scripts/setup` refuses it (exit 3,
+nothing changed); tell the user.
 
 ### Confirmation header
 
@@ -213,6 +249,44 @@ Otherwise:
 8. Every plan task the run does not run goes in `excluded` with its reason; `scripts/coverage
    <plan> <manifest>` must exit 0 (no plan task missing, no unknown or repeated id).
 
+## Worth it
+
+`<python> <skill_dir>/scripts/worth-it <plan> --max-lanes <cap> [--prelude <ids>] --lane <ids>
+[--lane <ids> ...] [--join <ids>] [--project <dir>] [--history-dir <dir>]` runs at the
+Assessment, after the layout and only when the Offer will be shown. It reads the plan only to
+check the layout: every id must be a task heading of the plan and appear once.
+
+**The rule.** N tasks; A lanes at once = min(lanes, `--max-lanes`). The task-slots S are the prelude
+tasks + the lanes' task counts queued whole, in lane order, each to the worker free earliest,
+across A workers (as the engine's `runLanes` runs them) + the join tasks. A direct build takes N
+task-times, so the layout saves N - S. `recommend` is `direct` when that is at most `THRESHOLD`
+(1), else `parallel`. A single-lane layout saves 0.
+
+**Why 1.** A back-test of 31 archived runs (2026-10-15; `tools/worth-it-backtest.py`, the 1.6.4
+design section 4.3): the fixed phases a run adds beyond the whole-branch review a direct build
+also ends with (pre-flight, integrate, E2E, verify) cost a median 1.23 task-times (quartiles 0.92
+to 1.67). With 1 the rule agreed with each run's own comparison on 28 of 31 runs; with 2 on 24.
+Minutes were tried and dropped: estimated from a project's earlier runs they were off by -74% to
++1788%, since task time depends on the plan.
+
+**Biases.** The comparison leans towards a run: no direct build is archived, so "direct" is
+modelled; a run's task time includes a per-task review (Native has none) and the contention of
+parallel lanes; the run side leaves out the session's own steps (dry run, setup, confirmation,
+hand-back). A `direct` recommendation is the safer of the two to trust. The rule assumes the
+full profile; a `lite` run's fixed phases are smaller.
+
+**The scale line.** With `--project`, `scale` holds the mean, lowest and highest task time of
+this project's complete archived runs (`--project` matched as `history --project` matches), each
+run's from its autopsy.json and manifest (the latest launch that ran task agents; a task's time
+is the summed wall time of its agents). Minutes for scale only; it never changes `recommend`.
+Runs whose autopsy or manifest cannot be read are skipped, with a note.
+
+**Output.** One JSON line: `{"status": "ok", "tasks", "lanes", "lanes_at_once", "slots",
+"saved", "threshold", "recommend", "scale": {"runs", "task_s_mean", "task_s_min",
+"task_s_max"} or null, "notes"}`, or `{"status": "unavailable", "reason", "notes"}` for an
+unreadable plan or a layout that names a task twice, names a task the plan lacks, or names none.
+Exit 0 in both cases (the Offer goes on as before); 2 on a usage error. Read-only.
+
 ## Profiles
 
 - `full` (default): prelude, lane worktrees, an integrate agent, a pre-flight agent, and three
@@ -314,7 +388,8 @@ From 1.6.3 what earlier agents decided or found reaches the agents after them, o
 
 **The ledger holds every ruling.** A `ruling` event may carry `by` (`implementer`, `reviewer`,
 `adjudicator`, `preflight`), `scope` (`lane` or `run`), `overrides` (the ids it departs from),
-`files` (paths an adjudicator ruling permits outside a task's Files list), `pf` and `wf`. The
+`files` (paths an adjudicator ruling permits outside a task's Files list; an implementer lists
+the files its ruling explains, which permits nothing), `pf` and `wf`. The
 ledger checks the values, not whether an agent told the truth. A ruling's id is `<file
 stem>-R<n>`, n counting that ledger file's rulings in append order (`rig-R4`, `_run-R2`); this
 launch's pre-flight rulings are numbered `PF-1`... in the prompts until `carry-launch` records
@@ -408,7 +483,7 @@ raised it).
   need no second table are `setup_result`, `start_points`, and the relaunch carry-over (budgets
   and `repairs_spent`).
 - Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while
-  `repairReserve` agents are free (7, plus 4 with an e2e hook and 2 with a post-integrate hook;
+  `repairReserve` agents are free (7, plus 4 with an e2e hook and 2 with a post-integrate hook in the full profile;
   the 7 include one availability probe, see "Usage limit"),
   so neither the repair nor the checks it makes necessary are ever refused: with less room
   there is no repair, and the run ends as it would without one.
@@ -487,7 +562,12 @@ tool call never ends the agent's turn.
   worktree never ran the project's setup, and integration still runs every check.
 
 Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
-changed path the Files list does not cover), `widen_path` (a changed path under
+changed path the Files list does not cover, nor an adjudicator ruling in force permits: one filed
+under the unit's task, or under `_run` for a path no task's Files list names (neither the path
+nor a folder above it), in the folder of a file the unit declares or in a directory it declares
+(folders compared by case); a permit names files, and an
+entry naming a directory permits nothing; such a path is
+listed in `policy.permitted` with the ruling's id), `widen_path` (a changed path under
 `widen_paths`), `forced` (the agent's `--force-full '<why>'`, for a shared contract,
 configuration, generated or ignored inputs, a dependency that is not a direct import, or a
 targeted list that turned out invalid), `git_failed`. Changed paths are the working tree
@@ -497,7 +577,8 @@ agent's `--force-full`. Matching is case-sensitive; a `\` in a changed path is n
 Safety: ids must be safe file names and the base a sha (else exit 2, nothing written); the
 evidence file `<ledger>/checks/task-<unit>.<n>.json` is created exclusively inside the ledger
 (else exit 3); exit 1 always means a check failed, and any other failure exits 3 with an
-error record. The evidence is a record and a count: nothing reads it to accept, skip or reuse
+error record. The printed line lists at most 50 changed paths and cuts long reasons, with a `printed_cut`
+note; the evidence file keeps everything. The evidence is a record and a count: nothing reads it to accept, skip or reuse
 checks.
 
 **Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
@@ -509,7 +590,7 @@ checks.
   run (`repairs_spent` carries earlier launches'). The reserve is 7 (the repair, its verify and
   the re-review that must follow, each with one retry, and the availability probe a dead pair
   among them may start; see "Usage limit"), plus 4 with an e2e hook and 2 with a
-  post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
+  post-integrate hook in the full profile (the rechecks a moved head needs), so nothing the repair makes necessary
   is ever refused.
 - One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
   correct fix, focused checks only, `fix: make the delivery checks pass`. It never weakens,
@@ -799,7 +880,9 @@ its first log line, `parallel-lanes v<version> loaded`), `agents` (per agent: la
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
-that cannot be read is the string `unavailable`, never a guess. Effort comes from the
+that cannot be read is the string `unavailable`, never a guess. With `--out` the full report
+goes to FILE and the script prints a summary for the hand-back: the same object without
+`agents`, plus `report` (FILE) and `agent_count`. Effort comes from the
 workflow result file, which the Workflow tool writes to `<session>/workflows/wf_<id>.json` for
 a transcript directory `<session>/subagents/workflows/wf_<id>/` (`<transcript_dir>.json`
 beside the directory is the fallback): its `agent_settings`
@@ -1270,6 +1353,15 @@ copies a run that ended after a launch into the run history (never a dry run). R
   folders already there (imported runs, hand-archived runs). Every folder holding a
   `*.lanes.json` is one run; the report is the first of `*.report.json`, `*.run-report.json`
   and `report.json`. Folders keep their names; it prints `{"runs": N, "skipped": [...]}`.
+- **Comparing two runs:** `history --runs A,B [--json]` (two run ids or folder names) prints,
+  for each run, its plan's sha256, task ids, lanes, a hash of its `commands`, versions, launches,
+  status, acceptance, wall time, fixed phases, task time, full-suite time and tokens, and whether
+  the pair is comparable: only when the archived plans hash the same, the task ids, lanes and
+  commands match and both autopsies are current. Otherwise `not comparable` with every reason.
+  Partial token counts (the usual case: transcripts keep mid-stream output counts) are a note,
+  not a reason. An out-of-date or missing autopsy (every archived run after an `AUTOPSY_VERSION`
+  bump) gives a reason ending "(run history first)": a plain `history` run refreshes them. It writes nothing, never reruns autopsy and never prints a
+  percentage. An id the index holds twice, or the same run twice, exits 2.
 - **Imported folders are read-only:** do not run their manifests. `--reindex`, `autopsy` and
   `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,
   `history.md`) and never change or remove an imported file.
@@ -1298,7 +1390,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 6, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 7, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1323,7 +1415,24 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`) counts the long-check
     procedure ("Long checks"): executions that reserved, started and waited, the `await-checks wait`
     calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
-    `harness_output_reads`); `unavailable` for a run without tool events.
+    `harness_output_reads`); `unavailable` for a run without tool events. `unwaited` lists the
+    background check starts no `await-checks wait` on their file followed, and `left_running` those
+    whose last wait said still running (exit 4), each `{agent, file}`: no await-checks wait on its
+    file followed to the end (the agent may still have read the result another way, after a
+    completion notice). Claude Code 2.1.300 discourages waiting on background commands, so a
+    run on it is worth checking here.
+  - `commands` (1.6.4, `checks.commands`): check time per configured command, from every file in the ledger's
+    `checks/` with a results list (task checks, integrate, verify, final fix, accept): one entry
+    `{check, group, runs, total_s, median_s, project_suite}` per configured command that ran, in
+    check id order; `project_suite` is true for a `commands.<group>` entry (no lane or task
+    prefix). `commands_unconfigured` (`runs`, `total_s`) counts results whose command the
+    manifest does not name (a focused rerun), without their text; `commands_skipped` counts
+    error records, unreadable files and results without a duration. These come from the
+    ledger, so they are reported for a run without tool events too.
+  - `widened` (1.6.4): `{targeted_median_s, calls: [{unit, codes, s}]}`: each task-checks
+    evidence selected `widened` with its reason codes and duration, and the median duration of
+    the targeted ones. `autopsy.md` shows them as the "Widened task checks" table, each against
+    the run's median targeted call (measured, not a cost claim).
   - `repairs` (`attempts`, `eligible`, `by_status`, from `final.repairs`) and `setup`
     (`skipped`, `no_setup_commands`, from `setup_result.setup_skipped`) are `unavailable` for
     runs before 1.6.0.
@@ -1528,7 +1637,11 @@ Warnings: `memory` (under 4 GB available, or the commit charge near its limit), 
 WindowsApps alias), `heavy_processes` (Windows: AppXSvc over 1500 MB; elsewhere a load average
 above the CPU count), `active_runs` (another run holds a launch lock on this machine),
 `defender` (Windows), `concurrency`
-(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once) and
+(`CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS` unset or lower than the lanes at once),
+`host_budget` (the lanes at once, lowered to that variable when it is smaller, exceed the
+logical CPU count: "4 lanes at once, 2 CPUs"; expected at the lane cap on a machine with 4 or
+fewer CPUs, since the cap is min(5, CPUs + 2); a project whose checks run several workers should
+keep lanes x workers within the CPUs) and
 `usage_limit_pause` (Claude Code may not pause the run at the usage limit; below). A read that
 fails is a warning with detail `unknown`.
 
@@ -1559,7 +1672,7 @@ Exit 0: no hard failure. Exit 3: at least one hard failure. Exit 2: doctor itsel
 `--json` prints `{"status": "ok" | "blocked", "failures": [...],
 "warnings": [...], "skipped": [...], "checks": [...], "observed_at": ..., "doctor_version": ...,
 "run_id": ..., "usage_limit_pause": {...}}`.
-- **`checks`:** one entry `{"check", "outcome"}` for each of the thirteen checks, in run order,
+- **`checks`:** one entry `{"check", "outcome"}` for each of the fourteen checks, in run order,
   with outcome `passed`, `warning`, `failed` or `skipped`. A check that recorded nothing
   is `skipped` and also appears in `skipped` with reason `not_recorded`; a check recorded more
   than once keeps its worst outcome (failed, warning, skipped, passed).

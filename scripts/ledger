@@ -75,7 +75,8 @@ entries of tasks done in this launch and the carried ids this launch's final
 review raised, plus each task done in this launch's minor_findings less the
 ids the final review raised (none without one). Prints {"carried", "rulings",
 "open_minors"}, or {"carried", "already": true}; exit 3 and nothing written
-when no readable result is found.
+when no readable result is found or DIR does not exist. Its events go to
+_run.jsonl in one write.
 
 minors prints the latest snapshot: '[<id>] <task> <file>:<line> - <issue>
 (fix: <fix>)' per minor, or '(none)'. write-owners writes DIR/owners.json
@@ -146,9 +147,10 @@ head) that is not in its files, nor in the files of a task with the same range
 unquoted. owner is the first other task whose files list the path (null when
 none does) and relation when that task runs: earlier, alongside or later.
 minors: {"open": [ids], "covered": [task ids]} from the latest minors event
-(empty lists without one). overrides: [{id, by, task, overrides, unknown}] for
-each ruling that names others it departs from (resolved; unknown lists the
-ones that name no ruling).
+(empty lists without one). overrides: [{id, by, task, overrides, unknown,
+targets}] for each ruling that names others it departs from (resolved; unknown
+lists the ones that name no ruling; targets gives each known one's id, role
+and lane, the ledger file it is in).
 A missing DIR has empty lists, no start points, and no carry.
 
 accept appends {"task": "_run", "event": "accepted", "head": <full sha>,
@@ -364,11 +366,19 @@ def run_only_error(entry):
 
 
 def write_entry(directory, lane, entry):
+    append_entries(directory, lane, [entry])
+
+
+def append_entries(directory, lane, entries):
+    """Append entries to DIR/<lane>.jsonl in one write: every entry is
+    validated first, so an invalid one writes none, and a reader never sees
+    half of them (carry-launch's rulings, snapshot and marker)."""
     if not LANE.fullmatch(lane):
         fail(3, f"unsafe lane name {lane!r}")
-    error = entry_error(entry)
-    if error:
-        fail(2, error)
+    for entry in entries:
+        error = entry_error(entry)
+        if error:
+            fail(2, error)
     # Parallel lanes may make their first append at the same moment, so the
     # directory may appear between any check and create. Only the process that
     # creates it sets the mode (makedirs honors umask); the rest just append.
@@ -379,7 +389,7 @@ def write_entry(directory, lane, entry):
             fail(3, f"ledger path {directory!r} exists and is not a directory")
     else:
         os.chmod(directory, 0o700)
-    line = json.dumps(entry, ensure_ascii=True, separators=(",", ":")) + "\n"
+    line = "".join(json.dumps(e, ensure_ascii=True, separators=(",", ":")) + "\n" for e in entries)
     path = os.path.join(directory, f"{lane}.jsonl")
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
@@ -723,9 +733,12 @@ def ruling_line(r, targets):
     return line
 
 
-def rulings(directory, lane=None):
-    """Print the rulings in force, then the overridden ones. With lane: the
-    rulings of _run, the prelude and that lane, and every run-scope one."""
+def ruling_view(directory, lane=None):
+    """(shown records, {id: [(target, state)]}, {overridden id: by id}): the
+    rulings shown (with lane: those of _run, the prelude and that lane, and
+    every run-scope one), each one's override targets, and the overrides that
+    take effect: within the rules, and only when the ruling that makes it is
+    shown too."""
     records = ruling_records(directory)
     by_id = {r["id"]: r for r in records}
     overrides = resolve_overrides(records, carried_events(directory))
@@ -733,8 +746,6 @@ def rulings(directory, lane=None):
     def shown(r):
         return lane is None or r["stem"] in ("_run", "prelude", lane) or r["scope"] == "run"
 
-    # An override takes effect only within the rules, and in this view only
-    # when the ruling that makes it is shown here too.
     marked = {}
     overridden_by = {}
     for r in records:
@@ -745,9 +756,66 @@ def rulings(directory, lane=None):
             marked[r["id"]].append((target, state))
             if state == "known" and shown(r):
                 overridden_by.setdefault(target, r["id"])
+    return [r for r in records if shown(r)], marked, overridden_by
 
-    in_force = [ruling_line(r, marked[r["id"]]) for r in records if shown(r) and r["id"] not in overridden_by]
-    gone = [f"{r['id']} by {overridden_by[r['id']]}" for r in records if shown(r) and r["id"] in overridden_by]
+
+def adjudicator_permits(directory, task_ids, declared=()):
+    """[(path, ruling id)]: the files the adjudicator rulings in force permit
+    for a unit of task_ids that declares the files declared: a ruling filed
+    under one of task_ids, or under _run for a path that neither it nor a
+    folder above it is named by a task's Files list in <directory>/owners.json
+    (none of _run's without a readable owner map) and that sits in the folder
+    of a declared file, or in a declared directory itself (_folder; folders
+    compare by case). A permit names files only. Implementer, reviewer
+    and pre-flight rulings permit nothing. task-checks counts these paths as
+    declared."""
+    shown, _marked, overridden_by = ruling_view(directory)
+    try:
+        owned = set(_owners.load(owners_path(directory))["files"])
+    except (OSError, ValueError):
+        owned = None
+    folders = {_folder(d) for d in declared if _owners.path_key(d) is not None}
+    out = []
+    for r in shown:
+        e = r["event"]
+        if r["role"] != "adjudicator" or r["id"] in overridden_by:
+            continue
+        for path in e.get("files") or []:
+            key = _owners.path_key(path)
+            # A permit names files: a directory ("src/", "./") would cover every path under it.
+            if not isinstance(path, str) or key in (None, ".") or path.endswith(("/", "\\")):
+                continue
+            if e.get("task") in task_ids or (e.get("task") == "_run" and owned is not None
+                                             and not _owned_or_under(key, owned)
+                                             and _folder(path, as_file=True) in folders):
+                out.append((path, r["id"]))
+    return out
+
+
+def _folder(path, as_file=False):
+    """The folder a declared path names, compared by case: a directory
+    entry ('src/') is its own folder, a file's is its parent; '' is the
+    project root. With as_file, path is always read as a file."""
+    p = path.replace("\\", "/")
+    folder = posixpath.normpath(p) if p.endswith("/") and not as_file else posixpath.dirname(posixpath.normpath(p))
+    return "" if folder == "." else folder
+
+
+def _owned_or_under(key, owned):
+    """Whether the path key, or a folder above it, is in a Files list."""
+    while key:
+        if key in owned:
+            return True
+        key = posixpath.dirname(key)
+    return False
+
+
+def rulings(directory, lane=None):
+    """Print the rulings in force, then the overridden ones. With lane: the
+    rulings of _run, the prelude and that lane, and every run-scope one."""
+    records, marked, overridden_by = ruling_view(directory, lane)
+    in_force = [ruling_line(r, marked[r["id"]]) for r in records if r["id"] not in overridden_by]
+    gone = [f"{r['id']} by {overridden_by[r['id']]}" for r in records if r["id"] in overridden_by]
     lines = in_force or ["(none)"]
     if gone:
         lines += ["Overridden:"] + gone
@@ -831,10 +899,13 @@ def overrides_list(directory):
     overrides, unknown}], overrides resolved (PF-n through carry-launch),
     unknown the ids that resolve to no ruling."""
     records = ruling_records(directory)
+    by_id = {r["id"]: r for r in records}
     resolved = resolve_overrides(records, carried_events(directory))
     return [{"id": r["id"], "by": r["role"], "task": r["event"]["task"],
              "overrides": [t for t, _ in resolved[r["id"]]],
-             "unknown": [t for t, state in resolved[r["id"]] if state == "unknown"]}
+             "unknown": [t for t, state in resolved[r["id"]] if state == "unknown"],
+             "targets": [{"id": t, "role": by_id[t]["role"], "lane": by_id[t]["stem"]}
+                         for t, state in resolved[r["id"]] if state == "known"]}
             for r in records if resolved[r["id"]]]
 
 
@@ -889,7 +960,7 @@ def write_owners(directory, manifest_path):
         os.replace(tmp, owners_path(directory))
     except OSError as e:
         fail(3, f"cannot write {owners_path(directory)!r}: {e}")
-    print(json.dumps({"owners": owners_path(directory), "files": len(data["files"])}))
+    print(json.dumps({"owners": owners_path(directory).replace("\\", "/"), "files": len(data["files"])}))
 
 
 def owners(directory, unit_ids, paths):
@@ -1033,6 +1104,8 @@ def carry_launch(directory, source):
     """Record what a launch knew that the ledger does not: pre-flight's own
     rulings (by preflight, PF-n), the open task minors, and which PF-n
     overrides recorded during the launch name. Once per wf id."""
+    if not os.path.isdir(directory):
+        fail(3, f"no ledger dir {directory!r}")
     path = find_launch_file(source)
     try:
         data = json.loads(read_text(path, "launch result")) if path else None
@@ -1067,26 +1140,27 @@ def carry_launch(directory, source):
         # adjudicator ruling in _run (a supervised stop) there was none.
         adjudicated = len(texts) - 1
     pf = {}
-    written = 0
+    entries = []
+    run_rulings = len([r for r in ruling_records(directory) if r["stem"] == "_run"])
     for i, text in enumerate(texts):
         key = f"PF-{i + 1}"
         if isinstance(adjudicated, int) and not isinstance(adjudicated, bool) and i == adjudicated:
             if adj_ids:
                 pf[key] = adj_ids[-1]
             continue
-        write_entry(directory, "_run", {"task": "_run", "event": "ruling", "text": text, "by": "preflight",
-                                        "scope": "run", "pf": key, "wf": wf})
-        written += 1
-        pf[key] = [r["id"] for r in ruling_records(directory) if r["stem"] == "_run"][-1]
+        entries.append({"task": "_run", "event": "ruling", "text": text, "by": "preflight",
+                        "scope": "run", "pf": key, "wf": wf})
+        pf[key] = f"_run-R{run_rulings + len(entries)}"
+    written = len(entries)
     bound_before = {(b.get("file"), b.get("line")) for c in carried_events(directory)
                     for b in c.get("bound") or [] if isinstance(b, dict)}
     bound = [{"file": r["file"], "line": r["line"]} for r in ruling_records(directory)
              if any(PF_ID.fullmatch(o) for o in r["event"].get("overrides") or [])
              and (r["file"], r["line"]) not in bound_before]
     open_now, covered = open_minors(latest_minors(events), result, data.get("args"))
-    write_entry(directory, "_run", {"task": "_run", "event": "minors", "wf": wf, "open": open_now,
-                                    "covered": covered})
-    write_entry(directory, "_run", {"task": "_run", "event": "carried", "wf": wf, "pf": pf, "bound": bound})
+    entries.append({"task": "_run", "event": "minors", "wf": wf, "open": open_now, "covered": covered})
+    entries.append({"task": "_run", "event": "carried", "wf": wf, "pf": pf, "bound": bound})
+    append_entries(directory, "_run", entries)
     print(json.dumps({"carried": wf, "rulings": written, "open_minors": len(open_now)}))
 
 

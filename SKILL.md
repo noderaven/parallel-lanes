@@ -1,6 +1,6 @@
 ---
 name: parallel-lanes
-description: Use when an approved implementation plan is about to be executed (at the execution-method handoff), or when resuming a stopped parallel-lanes run.
+description: Runs an approved implementation plan as parallel lanes of tasks in separate git worktrees, each task implemented and reviewed by its own agents, then integrated, checked and reviewed as a whole. Use when an approved implementation plan is about to be executed (at the execution-method handoff), or when resuming a stopped parallel-lanes run.
 ---
 
 # Parallel lanes
@@ -36,6 +36,7 @@ after the marker is fixed).
 |---|---|
 | The skill fires (first output) | `parallel-lanes invoked: evaluating <plan> for parallel execution` |
 | Stepping aside | `parallel-lanes: not a fit (<reason>); recommending <method>` |
+| The worth-it check favours a direct build | `parallel-lanes: running in parallel saves about <saved> task-times, less than a run's fixed phases; recommending <method>` |
 | Launching a new run | `parallel-lanes: launching run <run_id>: <N> lanes, <M> agents` |
 | Launching with tasks already done | `parallel-lanes: resuming run <run_id>: <K> tasks already committed` |
 | Relaunch after a transient stop | `parallel-lanes: relaunching run <run_id> after a transient stop` |
@@ -67,17 +68,26 @@ lanes, prelude, and join per reference.md "Building lanes" (exit 3: no parseable
 headings; step aside). Runnable tasks exclude ones the plan marks after-merge, operator, or
 manual.
 
-- Parallel lanes is the default executor: run as Parallel for any approved plan of 3+
-  runnable tasks, a single lane included.
+- Parallel lanes is the default executor for any approved plan of 3+ runnable tasks, unless
+  the worth-it check below recommends a direct build.
 - Step aside only for a 1-2 task plan or an explicit request for Subagent-driven or Native:
   print `not a fit (<reason>)` (e.g. `2 tasks`), recommending Native when the tasks edit the
   same files in sequence, else Subagent-driven. Then present the plan's normal execution
   choices with that recommendation and stop. Run nothing.
+- Worth-it check, only when the Offer will be shown (not when the user already chose Parallel
+  lanes by name, never on Resume): with the layout just built, run
+  `<python> <skill_dir>/scripts/worth-it <plan> --max-lanes <cap> --prelude <ids> --lane <ids>
+  [--lane <ids> ...] --join <ids> --project <project folder>` (comma-separated task ids, one
+  `--lane` per lane in lane order; an empty prelude or join is `''`). It prints JSON:
+  `recommend` is `direct` when running in parallel saves 1 task-time or less (always for a
+  single-lane plan), else `parallel`; a non-zero exit or any `status` other than `ok` leaves the Offer as it was.
+  The rule, its evidence and the output: reference.md "Worth it".
 
 ## Offer
 
 Skip this only if the user already chose parallel lanes by name. Otherwise present these
-choices in order, recommend the first, and wait for the pick:
+choices, recommend one, and wait for the pick. With `recommend: parallel`, or the worth-it
+check unavailable, keep this order and recommend the first:
 
 1. Parallel lanes (recommended) - <N> lanes in separate worktrees, superpowers implementer +
    reviewer per task, then integration, project checks, and final reviews. ~<X> agents.
@@ -86,6 +96,21 @@ choices in order, recommend the first, and wait for the pick:
 
 X is about 2 x runnable tasks + 10; the table gives the exact number. "Go ahead" or
 "execute the plan" is not a choice of option 1; ask.
+
+Under the choices print `Worth it: these lanes run <N> tasks in about <S> task-slots, saving
+about <saved> task-times; a run's fixed phases cost about 1-2.` and, when the result has a
+`scale`, `For scale: this project's past runs took about <T> min per task (<min>-<max>).`
+(minutes, rounded). When the check is unavailable print `Worth it: unavailable (<reason>).`
+instead.
+
+With `recommend: direct`: print the worth-it notice first, then put the direct method first and
+recommend it (Native when the tasks edit the same files in sequence, else Subagent-driven, as
+for a step-aside), Parallel lanes second and the other method third. Under them print the
+Worth it line, the scale line if any, and `A direct build still ends with a whole-branch
+review; it gives up the run's worktree isolation, integration and delivery checks, E2E and the
+multi-lens final review with its verify gate.` This is not a step-aside: if the user picks
+Parallel lanes, continue as usual; if they pick the direct method, stop and leave the plan to
+that method, as after a step-aside.
 
 ## Building the manifest
 

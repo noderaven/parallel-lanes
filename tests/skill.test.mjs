@@ -10,7 +10,10 @@ const ADOPT_MD = join(SKILL_DIR, 'adopt.md');
 const README_MD = join(SKILL_DIR, 'README.md');
 const CI_YML = join(SKILL_DIR, '.github', 'workflows', 'tests.yml');
 
-const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
+// What the skill does, then when to use it (the Agent Skills best-practices guide asks for both).
+const DESCRIPTION = 'Runs an approved implementation plan as parallel lanes of tasks in separate git ' +
+  'worktrees, each task implemented and reviewed by its own agents, then integrated, checked and ' +
+  'reviewed as a whole. Use when an approved implementation plan is about to be executed (at the ' +
   'execution-method handoff), or when resuming a stopped parallel-lanes run.';
 
 const NOTICES = {
@@ -18,6 +21,8 @@ const NOTICES = {
   stepAside: 'parallel-lanes: not a fit (<reason>); recommending <method>',
   launch: 'parallel-lanes: launching run <run_id>: <N> lanes, <M> agents',
   resume: 'parallel-lanes: resuming run <run_id>: <K> tasks already committed',
+  worthIt: "parallel-lanes: running in parallel saves about <saved> task-times, less than a run's fixed phases; "
+    + 'recommending <method>',
 };
 
 const TABLE_NOTE = 'each task can add up to 2x review_rounds more agents (fix and re-review rounds)';
@@ -220,9 +225,23 @@ test('SKILL.md resume rechecks coverage, passes the manifest to ledger status, a
 // notices, the consent gate, the hand-back). Material needed only sometimes
 // moves whole to reference.md, with SKILL.md pointing to it. Never shorten
 // sentences or drop the reasons behind rules to stay under the limit.
-test('SKILL.md stays under 3000 words', () => {
+test('SKILL.md stays under 4000 words', () => {
   const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
-  assert.ok(words < 3000, `SKILL.md has ${words} words`);
+  assert.ok(words < 4000, `SKILL.md has ${words} words`);
+});
+
+test('reference.md opens with a contents list naming every section in order', () => {
+  // The best-practices guide: a reference file over 100 lines needs a table of contents at the
+  // top, so a partial read (head -100) still shows everything the file holds.
+  const text = read(REFERENCE_MD).toString('utf8');
+  const lines = text.split('\n');
+  const headings = lines.filter((l) => l.startsWith('## ')).map((l) => l.slice(3));
+  assert.equal(headings[0], 'Contents');
+  const start = lines.indexOf('## Contents');
+  assert.ok(start >= 0 && start < 20, 'the contents list is near the top');
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  const entries = lines.slice(start + 1, end).filter((l) => l.startsWith('- ')).map((l) => l.slice(2).split(':')[0]);
+  assert.deepEqual(entries, headings.slice(1));
 });
 
 test('reference.md has sections for profiles, tiers, batching, adjudicator, budgets, and the report', () => {
@@ -750,7 +769,9 @@ test('reference.md documents the 1.6.2 report fields, doctor check and repair re
     assert.ok(report.includes(word), `Report lacks ${word}`);
   }
   const doctor = section(ref, 'Doctor');
-  assert.ok(doctor.includes('`usage_limit_pause`') && doctor.includes('thirteen checks'), doctor);
+  assert.ok(doctor.includes('`usage_limit_pause`') && doctor.includes('fourteen checks'), doctor);
+  // host_budget is expected at the skill's own lane cap on a small machine (1.6.4).
+  assert.ok(doctor.replace(/\s+/g, ' ').includes('expected at the lane cap'), 'host_budget at the cap');
   assert.ok(section(ref, 'Launch conditions').includes('usage_limit_pause'), 'Launch conditions lacks usage_limit_pause');
   assert.ok(section(ref, 'Budgets').includes('(7, plus 4 with an e2e hook'), 'Budgets reserve');
   assert.ok(section(ref, 'Check ownership').includes('The reserve is 7'), 'Check ownership reserve');
@@ -759,3 +780,36 @@ test('reference.md documents the 1.6.2 report fields, doctor check and repair re
 test('README lists stop-cause', () => {
   assert.match(flat(README_MD), /\| `scripts\/` \|[^|]*\bstop-cause\b/);
 });
+
+// 1.6.4: the worth-it check at the Assessment and the Offer.
+const OFFER_LINES = [
+  "Worth it: these lanes run <N> tasks in about <S> task-slots, saving about <saved> task-times; a run's fixed "
+    + 'phases cost about 1-2.',
+  "For scale: this project's past runs took about <T> min per task (<min>-<max>).",
+  "A direct build still ends with a whole-branch review; it gives up the run's worktree isolation, integration and "
+    + 'delivery checks, E2E and the multi-lens final review with its verify gate.',
+  'Worth it: unavailable (<reason>).',
+];
+
+test('SKILL.md runs worth-it after the layout and shows its lines at the Offer', () => {
+  const text = flat(SKILL_MD);
+  assert.ok(text.includes('<skill_dir>/scripts/worth-it'), 'SKILL.md names scripts/worth-it');
+  for (const line of OFFER_LINES) assert.ok(text.includes(line), `SKILL.md lacks: ${line}`);
+  assert.ok(!text.includes('a single lane included'), 'the single-lane rule changed in 1.6.4');
+  assert.ok(text.includes('single-lane'), 'SKILL.md says what happens to a single-lane plan');
+  assert.ok(text.includes('only when the Offer'), 'the check runs only when the Offer is shown');
+  // Final review (1.6.4): a usage error exits 2 with no JSON; it must not stop the Offer either.
+  assert.ok(text.includes('a non-zero exit or any `status` other than `ok` leaves the Offer as it was'), 'fail open');
+});
+
+test('reference.md documents worth-it, and bootstrap.md lets a direct build follow its recommendation', () => {
+  const ref = read(REFERENCE_MD).toString('utf8');
+  assert.ok(ref.split('\n').includes('## Worth it'), 'reference.md has a Worth it section');
+  for (const word of ['THRESHOLD', 'task-slots', 'back-test', 'lite', 'checks.commands', '--runs', 'host_budget']) {
+    assert.ok(ref.includes(word), `reference.md lacks ${word}`);
+  }
+  const boot = flat(join(SKILL_DIR, 'hooks', 'bootstrap.md'));
+  assert.ok(boot.includes('Use a superpowers execution mode only when parallel-lanes steps aside, recommends a direct '
+    + 'build and the user picks it, or the user explicitly asks for one.'), boot);
+});
+

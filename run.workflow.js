@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.3: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.4: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -63,6 +63,8 @@ function agentRules() {
       'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
       'formatters, codemods, and other maintenance commands.',
+    'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
+      'an Edit or Write on a file not read first, or changed since, fails and costs a retry.',
   ].join('\n');
 }
 
@@ -1391,10 +1393,13 @@ function taskChecksLines(m, task, where, base) {
 
 // The line that points a reviewer at the unit's task-check evidence (spec
 // 4.3). Files are task-<unit id>.<n>.json: the '.' after the id keeps a
-// batch id (T2-T3) apart from its first task's (T2).
+// batch id (T2-T3) apart from its first task's (T2). A dotted id still
+// collides (unit 1's pattern matches unit 1.2's files), so the line names
+// policy.unit as the filter.
 function taskEvidenceLine(m, task) {
   return [
     `Task-check evidence for this unit: ${m.repo.ledger_dir}/checks/task-${task.id}.<n>.json (n = 1, 2, ...);`,
+    `another unit's files can match that pattern, so read only the files whose policy.unit is ${task.id};`,
     'each records its selection (policy.selected) and reasons. Do not rerun the checks. Report a wrong selection',
     'as a finding (for example targeted checks on a change that clearly reaches another lane).',
   ].join('\n');
@@ -1585,6 +1590,8 @@ function carryOverLines(m, task, where, by) {
     'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
     'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
     'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
+    'When you change a file outside your Files list, record a ruling saying why with "files": ["<path>"] added to its',
+    'JSON, listing those files: it permits nothing, it shows reviewers and later tasks what changed outside the list.',
     'A check failure you judge outside your task (it passed on a rerun, or the failing test covers code your task did',
     'not touch): record it as a ruling whose JSON adds "scope": "run", with the text',
     'Observed: <test or command> failed - <why outside this task> - <rerun result>.',
@@ -2765,7 +2772,9 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
     'Files each task changed outside its Files list, with their owners (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
-    "Check each change was needed and, where it is another lane's or a later task's file, covered by a ruling.",
+    'Check each change was needed. A file of a task earlier in the run needs no ruling. A file owned by a task in',
+    'another lane running alongside, or a later task, needs a pre-flight or adjudicator ruling in force that covers it',
+    "(cite its id); an implementer's own ruling never does.",
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
@@ -5226,7 +5235,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.3';
+const VERSION = '1.6.4';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

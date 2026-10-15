@@ -221,7 +221,8 @@ test("a ruling that overrides a launch's PF-n resolves to that launch's carried 
   assert.ok(out.includes('alpha-R1 [adjudicator, T2, lane] NEW (overrides _run-R2)'), out);
   assert.ok(out.split('Overridden:')[1].includes('_run-R2 by alpha-R1'), out);
   assert.deepEqual(statusOf(dir).overrides,
-    [{ id: 'alpha-R1', by: 'adjudicator', task: 'T2', overrides: ['_run-R2'], unknown: [] }]);
+    [{ id: 'alpha-R1', by: 'adjudicator', task: 'T2', overrides: ['_run-R2'], unknown: [],
+      targets: [{ id: '_run-R2', role: 'preflight', lane: '_run' }] }]);
 });
 
 test('a 1.6.2 result with pre-flight conflicts: the last pre-flight ruling is the adjudication, carried once', () => {
@@ -393,4 +394,69 @@ test('a final review result without carried_minors_open raised none of the carri
     args: { carried_minors: { open: ['T1-1'], covered: ['T1'] } },
   }));
   assert.deepEqual(statusOf(dir).minors.open, ['T1-1']);
+});
+
+// ---- 1.6.4: the 1.6.3 deferred minors ----
+
+// Loads scripts/ledger as a module in a python3 subprocess and runs code with
+// it as L; returns the process result.
+function withLedgerModule(code, args = []) {
+  // spec_from_loader and exec_module, as task-checks loads ledger (load_module is deprecated).
+  const loader = 'import importlib.machinery, importlib.util, sys\n'
+    + "ldr = importlib.machinery.SourceFileLoader('ledger', sys.argv[1])\n"
+    + "L = importlib.util.module_from_spec(importlib.util.spec_from_loader('ledger', ldr))\n"
+    + `ldr.exec_module(L)\n${code}`;
+  // -B: no __pycache__ beside the scripts (the suite leaves the checkout unchanged).
+  return spawnSync('python3', ['-B', '-c', loader, join(SCRIPTS, 'ledger'), ...args], { encoding: 'utf8' });
+}
+
+test('append_entries writes every entry or none: an invalid one stops all of them', () => {
+  const dir = freshDir();
+  const good = { task: '_run', event: 'ruling', by: 'preflight', text: 'R' };
+  const bad = { task: '_run', event: 'minors', wf: 'wf_x', open: 'not a list' };
+  const res = withLedgerModule(
+    'import json\ntry:\n    L.append_entries(sys.argv[2], "_run", json.loads(sys.argv[3]))\nexcept SystemExit as e:\n    print("exit", e.code)\n',
+    [dir, JSON.stringify([good, bad])]);
+  assert.match(res.stdout, /exit 2/, res.stderr);
+  assert.equal(rulingsOut(dir).trim(), '(none)');
+  const ok = withLedgerModule('import json\nL.append_entries(sys.argv[2], "_run", json.loads(sys.argv[3]))\n',
+    [dir, JSON.stringify([good, { ...good, text: 'S' }])]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual(readFileSync(join(dir, '_run.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l).text), ['R', 'S']);
+});
+
+test('carry-launch refuses a ledger dir that does not exist and creates nothing', () => {
+  const missing = join(freshDir(), 'no such ledger');
+  const config = freshDir('config');
+  const res = carry(missing, launchFile(config, 'wf_nodira-001', { rulings: ['R'] }));
+  assert.equal(res.code, 3, res.stdout);
+  assert.equal(spawnSync('python3', ['-c', 'import os,sys; print(os.path.exists(sys.argv[1]))', missing],
+    { encoding: 'utf8' }).stdout.trim(), 'False');
+});
+
+test("status overrides names each overridden ruling's role and lane", () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'RUN' });
+  appendOk(dir, 'alpha', { task: 'T2', event: 'ruling', by: 'implementer', text: 'X', overrides: ['_run-R1', 'zeta-R9'] });
+  assert.deepEqual(statusOf(dir).overrides, [{
+    id: 'alpha-R1', by: 'implementer', task: 'T2', overrides: ['_run-R1', 'zeta-R9'], unknown: ['zeta-R9'],
+    targets: [{ id: '_run-R1', role: 'adjudicator', lane: '_run' }],
+  }]);
+});
+
+test('write-owners prints the owner map path with forward slashes', () => {
+  const root = freshDir('proj');
+  const res = ledger('write-owners', join(root, 'ledger'), ownersManifest(root));
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(!JSON.parse(res.stdout).owners.includes('\\'), res.stdout);
+});
+
+test("a batch's minors are carried once, under the batch's first task", () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  // A batch result repeats the unit's minors for each of its tasks.
+  const unit = [minor('T2-T3-1', 'T2'), minor('T2-T3-2', 'T2')];
+  carry(dir, launchFile(config, 'wf_batch1-001', { tasks: { T2: { ...done(unit), batch: 'T2-T3' }, T3: { ...done(unit), batch: 'T2-T3' } } }));
+  assert.deepEqual(statusOf(dir).minors, { open: ['T2-T3-1', 'T2-T3-2'], covered: ['T2', 'T3'] });
+  assert.ok(ledger('minors', dir).stdout.includes('[T2-T3-1] T2 '), 'listed under the first task');
 });

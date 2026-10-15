@@ -344,10 +344,13 @@ function taskChecksLines(m, task, where, base) {
 
 // The line that points a reviewer at the unit's task-check evidence (spec
 // 4.3). Files are task-<unit id>.<n>.json: the '.' after the id keeps a
-// batch id (T2-T3) apart from its first task's (T2).
+// batch id (T2-T3) apart from its first task's (T2). A dotted id still
+// collides (unit 1's pattern matches unit 1.2's files), so the line names
+// policy.unit as the filter.
 function taskEvidenceLine(m, task) {
   return [
     `Task-check evidence for this unit: ${m.repo.ledger_dir}/checks/task-${task.id}.<n>.json (n = 1, 2, ...);`,
+    `another unit's files can match that pattern, so read only the files whose policy.unit is ${task.id};`,
     'each records its selection (policy.selected) and reasons. Do not rerun the checks. Report a wrong selection',
     'as a finding (for example targeted checks on a change that clearly reaches another lane).',
   ].join('\n');
@@ -538,6 +541,8 @@ function carryOverLines(m, task, where, by) {
     'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
     'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
     'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
+    'When you change a file outside your Files list, record a ruling saying why with "files": ["<path>"] added to its',
+    'JSON, listing those files: it permits nothing, it shows reviewers and later tasks what changed outside the list.',
     'A check failure you judge outside your task (it passed on a rerun, or the failing test covers code your task did',
     'not touch): record it as a ruling whose JSON adds "scope": "run", with the text',
     'Observed: <test or command> failed - <why outside this task> - <rerun result>.',

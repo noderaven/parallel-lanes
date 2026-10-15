@@ -6,8 +6,9 @@ usage:
 
 TRANSCRIPT_DIR holds agent-*.meta.json (description, workflowPhase, optional
 model) and agent-*.jsonl (resolved message.model and usage per line).
-MANIFEST is the run manifest, used to recognise task ids. Prints JSON (or
-writes it to FILE):
+MANIFEST is the run manifest, used to recognise task ids. Prints JSON, or
+with --out writes it to FILE and prints a summary for the hand-back: the
+same object without agents, as {report: FILE as given, agent_count: N, ...}:
 
   {engine_version: "x.y.z", agents: [...], tiers: {<tier>: {...}},
    totals: {...}, models: {...}, unavailable: N, output_incomplete: N,
@@ -77,7 +78,7 @@ def main(argv):
         if i + 1 >= len(args):
             print("run-report: --out needs a file", file=sys.stderr)
             return 2
-        out = args[i + 1]
+        out = out_given = args[i + 1]
         del args[i:i + 2]
     if len(args) != 2:
         print("usage: run-report TRANSCRIPT_DIR MANIFEST [--out FILE]", file=sys.stderr)
@@ -98,9 +99,13 @@ def main(argv):
     except (OSError, ValueError) as e:
         print(f"run-report: cannot read manifest: {e}", file=sys.stderr)
         return 2
-    text = json.dumps(_transcripts.build_report(transcript_dir, manifest if isinstance(manifest, dict) else {}), indent=2) + "\n"
+    report = _transcripts.build_report(transcript_dir, manifest if isinstance(manifest, dict) else {})
+    text = json.dumps(report, indent=2) + "\n"
     if out:
         _shell.write_text(out, text)
+        rest = {k: v for k, v in report.items() if k != "agents"}
+        summary = {"report": out_given, "agent_count": len(report["agents"]), **rest}
+        sys.stdout.write(json.dumps(summary, indent=2) + "\n")
     else:
         sys.stdout.write(text)
     return 0
