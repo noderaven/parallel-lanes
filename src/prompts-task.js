@@ -666,6 +666,9 @@ function startCommand(m, task, where, opts = {}) {
   parts.push('--rulings', shellQuote(m.repo.ledger_dir), shellQuote(where.lane === 'join' ? '-' : where.lane));
   if (present(opts.start)) {
     parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
+    // A join unit begun again from the tip (1.6.5): the ledger drops its
+    // earlier attempt.
+    if (where.restart) parts.push('--restart');
   }
   return parts.join(' ');
 }
@@ -683,7 +686,8 @@ function startBlock(m, task, where, opts, failure) {
       : 'regenerates the task brief from the current plan and prints it',
     ...(opts.pkg && m.sp_dir !== null ? ['builds the review package'] : []),
     ...(opts.pkg && declaredFiles(task).length > 0 ? ["lists the files the range changes outside the Files list"] : []),
-    ...(present(opts.start) ? ['records the task base in the ledger'] : []),
+    ...(present(opts.start) ? [where.restart ? 'records the task base in the ledger as a restart'
+      : 'records the task base in the ledger'] : []),
   ];
   const files = isBatch(task) ? 'brief files' : 'brief file';
   return [
@@ -805,6 +809,26 @@ function reopenLines(m, task, where, reopen) {
   ];
 }
 
+// What a join unit begun again on the feature checkout is told (1.6.5 design
+// 4.5): restart = {branch, dir, complete}, where its earlier attempt ran in a
+// join wave of an earlier launch. That work never reached the feature branch.
+function restartLines(m, task, restart, base) {
+  const q = shellQuote;
+  const dir = q(featureDir(m));
+  const noun = unitNoun(task);
+  const folder = String(restart.dir).replace(/[\\/]+$/, '').split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]/g, '-');
+  return [
+    `This ${noun} ran before, in a join wave of an earlier launch, on its own branch ${restart.branch} in`,
+    `${restart.dir}, and that work never reached the feature branch. It was ${restart.complete
+      ? 'complete: committed, but its review did not finish' : 'partial: it stopped before it was done'}.`,
+    `Start again from the task base ${base} on the feature branch, and reuse what is right of the earlier work:`,
+    `  its commits: git -C ${dir} log HEAD..${q(restart.branch)} (and git -C ${dir} diff HEAD...${q(restart.branch)})`,
+    `  uncommitted changes saved from that worktree: git -C ${dir} for-each-ref ${q(`refs/parallel-lanes/${m.run_id}/abandoned/${folder}-`)}`,
+    '  (each such ref is a commit; read it with git show).',
+    'Never merge, rebase or reset onto that branch as it is: bring over what is right as your own commits here.',
+  ];
+}
+
 // Prompt for an implementer. base is the task base the script owns (the
 // previous task's head, or the feature tip); retry (optional) is {reason,
 // findings} when a previous attempt in this run blocked or failed review;
@@ -853,6 +877,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
         ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
+  if (where.restart) parts.push('', restartLines(m, task, where.restart, base).join('\n'));
   const checks = taskChecksLines(m, task, where, base);
   if (checks.length > 0) parts.push('', checks.join('\n'));
   parts.push('', [

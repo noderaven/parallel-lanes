@@ -1421,7 +1421,7 @@ test('setup_result under profile lite maps the lane to the feature checkout', as
 });
 
 test('start_points: the saved prelude and join heads are the bases of the first tasks', async () => {
-  const m = manifest({ start_points: { prelude: H('SP0'), join: H('SJ0') } });
+  const m = manifest({ start_points: { prelude: H('SP0'), join: H('SJ0') }, join_started: false });
   const { result, calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(result.status, 'complete');
   assert.deepEqual(result.tasks.T1.commits, [H('SP0'), H('T1-h')]);

@@ -269,3 +269,144 @@ test('waveChecksFixPrompt uses the fix message', () => {
   assert.ok(c.includes("--phase 'join' --cmd 'test' 'npm test -- j1'"), c);
   assert.ok(c.includes('"wave":2'), c);
 });
+
+// ---- Task 10: a relaunch after waves ran: recovery merge, restarts, serial from the tip ----
+
+const { integratePrompt, recoveryUnits } = await loadHelpers(['integratePrompt', 'recoveryUnits']);
+
+// A relaunch of manifest(): the lanes and J1 (wave 1, on the feature checkout)
+// done and reviewed; wave 2's J2 and J3 ran on unit branches; join_started.
+// over: the manifest fields to change (done, reviewed, backfill, ...).
+function relaunch(over = {}) {
+  const base = manifest();
+  const range = (id, b) => ({ base: b, head: H(id) });
+  return {
+    ...base,
+    done: ['A1', 'B1', 'J1', 'J2'],
+    reviewed: ['A1', 'B1', 'J1', 'J2'],
+    backfill: { A1: range('A1', 'a'), B1: range('B1', 'b'), J1: range('J1', H('I1')), J2: range('J2', H('J1')) },
+    start_points: { prelude: H('F0'), join: H('I1') },
+    join_started: true,
+    unit_branches: {
+      J2: { branch: 'pl-run-1-u-J2', dir: '/work/wt/lane-alpha' },
+      J3: { branch: 'pl-run-1-u-J3', dir: '/work/wt/lane-beta' },
+    },
+    ...over,
+  };
+}
+function relaunchScript(tip, extra = {}) {
+  return {
+    'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }],
+    integrate: [{ status: 'done', head: H('I1'), notes: 'already merged' }],
+    'recovery merge': [{ status: 'done', head: H('R1'), merged: ['J2'], conflict_unit: '', conflict_files: [],
+      overlaps: [], notes: '' }],
+    'J3 implement': [done(H('R1'), H('J3'))], 'J3 review': [approve()],
+    'final review sp': [lens(tip)], 'final review security': [lens(tip)], 'final review correctness': [lens(tip)],
+    verify: [verified(tip)],
+    ...extra,
+  };
+}
+
+test('relaunch merges reviewed wave units then continues from the tip', async () => {
+  const { result, calls } = await run(relaunch(), relaunchScript(H('J3')));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  const rec = callOf(calls, 'recovery merge');
+  assert.ok(rec.prompt.includes("--recovery --unit 'J2'"), rec.prompt);
+  assert.ok(rec.prompt.includes(`--unit 'J2' '${H('J1')}' '${H('J2')}'`), 'by recorded range');
+  assert.ok(!rec.prompt.includes("--unit 'J3'"));
+  assert.ok(at(calls, 'integrate') < at(calls, 'recovery merge') && at(calls, 'recovery merge') < at(calls, 'J3 implement'));
+  const j3 = callOf(calls, 'J3 implement').prompt;
+  assert.ok(j3.includes(`Task base: ${H('R1')}`), 'the restart starts at the recovery head');
+  assert.ok(j3.includes("cd '/work/repo'"), 'on the feature checkout');
+  assert.ok(j3.includes('--restart'), 'its started event is a restart');
+  assert.ok(!j3.includes('--unit-branch'), 'no unit branch on the continuation');
+  assert.ok(j3.includes('pl-run-1-u-J3') && j3.includes('/work/wt/lane-beta'), 'it is told where its earlier work is');
+  assert.ok(j3.includes('refs/parallel-lanes/run-1/abandoned/lane-beta-'), 'and the abandoned refs');
+  assert.match(j3, /partial/);
+  const review = callOf(calls, 'J3 review').prompt;
+  assert.ok(review.includes(`${H('R1')}..${H('J3')}`), 'its review covers only its own range');
+  assert.equal(result.tasks.J3.status, 'done');
+  assert.equal(result.final.head, H('J3'));
+  assert.ok(!labels(calls).some((l) => /^J[12] /.test(l)), 'merged and reviewed units are not run again');
+});
+
+test('a done but unreviewed wave unit restarts and is not recovered', async () => {
+  const m = relaunch({ done: ['A1', 'B1', 'J1', 'J2', 'J3'], reviewed: ['A1', 'B1', 'J1', 'J2'],
+    backfill: { ...relaunch().backfill, J3: { base: H('J1'), head: H('J3old') } } });
+  const { result, calls } = await run(m, relaunchScript(H('J3')));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.ok(!callOf(calls, 'recovery merge').prompt.includes("--unit 'J3'"));
+  const j3 = callOf(calls, 'J3 implement').prompt;
+  assert.ok(j3.includes('--restart'));
+  assert.match(j3, /complete/);
+  assert.ok(!labels(calls).includes('J3 review') || at(calls, 'J3 implement') < at(calls, 'J3 review'),
+    'implemented again, not only reviewed');
+});
+
+test('the recovery merge runs with nothing to merge', async () => {
+  const m = relaunch({ done: ['A1', 'B1', 'J1'], reviewed: ['A1', 'B1', 'J1'],
+    backfill: { A1: relaunch().backfill.A1, B1: relaunch().backfill.B1, J1: relaunch().backfill.J1 } });
+  const { result, calls } = await run(m, relaunchScript(H('J3'), {
+    'recovery merge': [{ status: 'done', head: H('J1'), merged: [], conflict_unit: '', conflict_files: [], overlaps: [], notes: '' }],
+    'J2 implement': [done(H('J1'), H('J2'))], 'J2 review': [approve()],
+    'J3 implement': [done(H('J2'), H('J3'))],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.ok(callOf(calls, 'recovery merge').prompt.includes("--recovery"));
+  assert.ok(callOf(calls, 'J2 implement').prompt.includes(`Task base: ${H('J1')}`));
+  assert.ok(callOf(calls, 'J3 implement').prompt.includes(`Task base: ${H('J2')}`), 'serial from the tip');
+});
+
+test('a supervised recovery conflict stops', async () => {
+  const { result, calls } = await run(relaunch({ autonomy: 'supervised' }), relaunchScript(H('J3'), {
+    'recovery merge': [{ status: 'conflict', head: H('I1'), merged: [], conflict_unit: 'J2', conflict_files: ['src/x.js'],
+      overlaps: [], notes: '' }],
+  }));
+  assert.equal(result.status, 'stopped');
+  assert.ok(!labels(calls).includes('J3 implement'));
+  const why = result.stopped_lanes.find((s) => s.lane === 'join').reason;
+  assert.ok(why.includes(H('J2')) && /by hand/.test(why), why);
+});
+
+test('an autonomous recovery conflict goes to a resolver', async () => {
+  const { result, calls } = await run(relaunch(), relaunchScript(H('J3'), {
+    'recovery merge': [
+      { status: 'conflict', head: H('I1'), merged: [], conflict_unit: 'J2', conflict_files: ['src/x.js'], overlaps: [], notes: '' },
+      { status: 'done', head: H('R1'), merged: [], conflict_unit: '', conflict_files: [], overlaps: [], notes: '' },
+    ],
+    'recovery resolve J2': [{ status: 'done', head: H('R1'), notes: 'kept both' }],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(callOf(calls, 'recovery resolve J2').prompt.includes("'join recovery: merge J2'"));
+});
+
+test('a relaunch of a serial join keeps the serial path', async () => {
+  const m = relaunch({ unit_branches: {}, done: ['A1', 'B1', 'J1'], reviewed: ['A1', 'B1', 'J1'],
+    backfill: { A1: relaunch().backfill.A1, B1: relaunch().backfill.B1, J1: relaunch().backfill.J1 } });
+  const { result, calls } = await run(m, relaunchScript(H('J3'), {
+    'J2 implement': [done(H('J1'), H('J2'))], 'J2 review': [approve()],
+    'J3 implement': [done(H('J2'), H('J3'))],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.ok(!labels(calls).includes('recovery merge'));
+  assert.ok(!callOf(calls, 'J2 implement').prompt.includes('--restart'));
+});
+
+test('recoveryUnits takes reviewed or deferred units with a unit branch', () => {
+  const m = relaunch({ done: ['A1', 'B1', 'J1', 'J2', 'J3'], reviewed: ['A1', 'B1', 'J1', 'J2'], deferred: ['J3'],
+    backfill: { ...relaunch().backfill, J3: { base: H('J1'), head: H('J3') } } });
+  assert.deepEqual(recoveryUnits(m), [
+    { id: 'J2', base: H('J1'), head: H('J2') },
+    { id: 'J3', base: H('J1'), head: H('J3') },
+  ]);
+  assert.deepEqual(recoveryUnits(relaunch({ unit_branches: {} })), []);
+});
+
+test('the audit allowance uses join_tip', () => {
+  const m = relaunch({ done: ['A1', 'B1', 'J1', 'J2', 'J3'], reviewed: ['A1', 'B1', 'J1', 'J2', 'J3'],
+    backfill: { ...relaunch().backfill, J3: { base: H('R1'), head: H('J3') } }, join_tip: H('W9') });
+  const p = integratePrompt(m, H('pre'), {});
+  assert.ok(p.includes(`may follow the last join commit ${H('W9')}`), p);
+  assert.ok(p.includes("'join wave <n>: merge <unit>'") && p.includes("'join recovery: merge <unit>'"), p);
+  assert.ok(p.includes('fix: make the wave checks pass'), p);
+});

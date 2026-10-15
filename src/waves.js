@@ -120,6 +120,25 @@ function waveChecksOf(m, units) {
   return out;
 }
 
+// The units a relaunch's recovery merge brings in (design 4.5): join units
+// in plan order that ran on a unit branch (m.unit_branches) and whose every
+// task is done and reviewed or deferred, as [{id, base, head}] from their
+// backfill range; merge-wave skips one already in the feature history.
+function recoveryUnits(m) {
+  const branches = m.unit_branches || {};
+  const done = new Set(m.done || []);
+  const settled = new Set([...(m.reviewed || []), ...(m.deferred || [])]);
+  const out = [];
+  for (const unit of joinUnits(m)) {
+    const tasks = unitTasks(unit);
+    if (!tasks.some((t) => Object.prototype.hasOwnProperty.call(branches, t.id))) continue;
+    if (!tasks.every((t) => done.has(t.id) && settled.has(t.id))) continue;
+    const range = (m.backfill || {})[tasks[tasks.length - 1].id];
+    if (range) out.push({ id: unit.id, base: range.base, head: range.head });
+  }
+  return out;
+}
+
 // The join started in an earlier launch: the ledger's join_started (copied
 // into the manifest), or any join task done or deferred (fail-safe).
 function joinStarted(m) {

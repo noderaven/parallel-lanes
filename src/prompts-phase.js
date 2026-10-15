@@ -365,10 +365,13 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // Every join task committed in an earlier attempt: a final fix of that
   // attempt may have committed after the last join commit.
   const lastJoin = m.join.length > 0 ? (m.backfill || {})[m.join[m.join.length - 1].id] : null;
-  const joinDone = Boolean(lastJoin) && m.join.every((t) => m.done.includes(t.id));
+  // With join waves (1.6.5) the join's last commit is the tip ledger
+  // backfill reports (join_tip), not the last plan-order task's head.
+  const joinTip = present(m.join_tip) ? m.join_tip : (lastJoin ? lastJoin.head : null);
+  const joinDone = present(joinTip) && m.join.every((t) => m.done.includes(t.id));
   const finalFixes = joinDone ? [
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
-    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it. That includes`,
+    `   this run may follow the last join commit ${joinTip}: allow any commits after it. That includes`,
     `   repair commits after a failing verify (\`${repairFixMessage()}\`).`,
   ] : [];
   const tipLines = m.lanes.map((lane) => {
@@ -436,6 +439,9 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
     '   commits (yours, or from an earlier attempt in this run), and commits an earlier attempt at a join task',
     `   made (join tasks: ${joinIds}; their recorded commits are in ${m.repo.ledger_dir}/join.jsonl).`,
+    "   A join that ran in waves also merged its units' heads ('join wave <n>: merge <unit>' and",
+    "   'join recovery: merge <unit>', a resolver's included) and may have a wave checks fix",
+    '   (`fix: make the wave checks pass`).',
     ...finalFixes,
     "   Any other commit landed on the feature branch outside the run's steps: fail listing it (do not",
     '   rewrite history).',
@@ -507,19 +513,25 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
 // units (units: [{id, base, head}], plan order) in the feature checkout;
 // with checks (the last multi-unit wave's, waveChecksOf) and every unit
 // merged, it runs them on the merged tip and records wave_checked.
+// wave null: a relaunch's recovery merge (design 4.5), merge-wave --recovery.
 function waveMergePrompt(m, wave, units, checks = []) {
   const q = shellQuote;
   const dir = featureDir(m);
+  const recovery = wave === null;
   const merge = [`cd ${q(dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/merge-wave`)} ${q(dir)}`,
-    q(m.repo.ledger_dir), '--wave', q(String(wave)),
+    q(m.repo.ledger_dir), ...(recovery ? ['--recovery'] : ['--wave', q(String(wave))]),
     ...units.flatMap((u) => ['--unit', q(u.id), q(u.base), q(u.head)])].join(' ');
   const run = checks.length > 0 ? runChecksCommand(m, dir, checks, resultPath(), 'join') : null;
   const record = (extra) => ledgerCommand(m, '_run',
     { task: '_run', event: 'wave_checked', wave, head: '<head>', ...extra }, dir);
   return [
-    `You are the wave merge agent for parallel-lanes run ${m.run_id}, join wave ${wave}.`,
+    recovery ? `You are the recovery merge agent for parallel-lanes run ${m.run_id}.`
+      : `You are the wave merge agent for parallel-lanes run ${m.run_id}, join wave ${wave}.`,
     `Work in ${dir} on the feature branch ${m.repo.branch}; do not switch branches.`,
-    `The units of wave ${wave} ran side by side, each on its own branch; merge their recorded heads.`,
+    recovery ? (units.length > 0
+      ? 'An earlier launch ran join units in waves; these finished and were reviewed but not merged. Merge their recorded heads.'
+      : 'An earlier launch ran join units in waves; none is left to merge. The command below only reports the head.')
+      : `The units of wave ${wave} ran side by side, each on its own branch; merge their recorded heads.`,
     '',
     '1. Run, as one call:',
     `   ${merge}`,
@@ -583,18 +595,20 @@ function waveMergeSchema() {
 // The wave resolver (Opus, autonomous): merges one unit's head that
 // conflicted, keeping both sides' intent, and commits; on any failure it
 // aborts the merge so the checkout is clean for a relaunch.
+// wave null: a conflict of the recovery merge.
 function waveResolvePrompt(m, wave, unit, conflictFiles) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
+  const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
   return [
-    `You are the wave resolver for parallel-lanes run ${m.run_id}, join wave ${wave}.`,
+    `You are the wave resolver for parallel-lanes run ${m.run_id}, ${wave === null ? 'the recovery merge' : `join wave ${wave}`}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
     `Merging unit ${unit.id} (its recorded head ${unit.head}) conflicted in: ${files}.`,
     '',
     `1. git -C ${dir} status --porcelain --untracked-files=all must print nothing; otherwise return status`,
     '   failed (never make it so by deleting, cleaning, or stashing files).',
-    `2. git -C ${dir} merge --no-ff -m ${q(`join wave ${wave}: merge ${unit.id}`)} ${q(unit.head)}`,
+    `2. git -C ${dir} merge --no-ff -m ${q(message)} ${q(unit.head)}`,
     "   Resolve each conflict keeping the intent of both sides: read the plan tasks of the units that touched the",
     '   file and keep what each meant to do, then commit the merge. Resolve the conflicts only; make no other',
     '   change, run no project command, rewrite no history, and remove no worktree or branch.',

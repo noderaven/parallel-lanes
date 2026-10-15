@@ -566,6 +566,73 @@ async function runJoinWaves(m, waves, base, laneDirs, io, merge) {
   return { results: sorted(), stopped: null, head: tip, waves: waveLog };
 }
 
+// Finish a join that ran in waves in an earlier launch (design 4.5), serially
+// on the feature checkout from tip (the recovery merge's head), instead of
+// runTaskList's plan-order chain: a task done and reviewed is skipped and
+// does not move the tip; a task that ran on a unit branch (m.unit_branches)
+// and is not done and reviewed starts again from the tip as a restart (its
+// prompt names its earlier work); a task done but not reviewed that ran on
+// the feature checkout is reviewed over its backfill range; any other task
+// runs from the tip. Returns runTaskList's {results, stopped, head}, head
+// the tip.
+async function runJoinContinuation(m, tasks, where, tip, io, name) {
+  const results = [];
+  const branches = m.unit_branches || {};
+  const own = (id) => Object.prototype.hasOwnProperty.call(branches, id);
+  const carried = new Map();
+  const carry = (unit, i, text) => {
+    const ids = unitTasks(unit).map((t) => t.id);
+    const later = tasks.slice(i);
+    const dependents = later.filter((t) => (t.depends_on || []).some((d) => ids.includes(d.id)));
+    for (const t of dependents.length > 0 ? dependents : later.slice(0, 1)) {
+      carried.set(t.id, [...(carried.get(t.id) || []), `from ${unit.id}, unblocked by the adjudicator: ${text}`]);
+    }
+  };
+  for (let i = 0; i < tasks.length;) {
+    const group = batchGroup(m, tasks, i);
+    i += group.length;
+    const task = group[0];
+    const state = taskState(m, task.id);
+    const range = (m.backfill || {})[task.id];
+    if (state === 'skip') {
+      results.push({
+        task: task.id, status: 'skipped', base: range ? range.base : null, head: range ? range.head : null,
+        rounds: null, tier_used: null, notes: '', rulings: [],
+      });
+      continue;
+    }
+    const unit = group.length > 1 ? batchUnit(group) : task;
+    const note = unitTasks(unit).flatMap((t) => carried.get(t.id) || []).join('\n') || null;
+    const ranOn = group.find((t) => own(t.id));
+    let r;
+    if (ranOn) {
+      const b = branches[ranOn.id];
+      r = await runTask(m, unit, { ...where, restart: { branch: b.branch, dir: b.dir, complete: state === 'review' } },
+        tip, io, null, note);
+    } else if (state === 'review') {
+      r = range ? await runTask(m, unit, where, range.base, io, range, note) : {
+        task: task.id, status: 'blocked', base: tip, head: null, rounds: 0, tier_used: task.tier,
+        notes: 'done but not reviewed, and no backfill commits', rulings: [],
+      };
+    } else {
+      r = await runTask(m, unit, where, tip, io, null, note);
+    }
+    if (r.next_note) carry(unit, i, r.next_note);
+    const finished = r.status === 'done' || r.status === 'deferred';
+    if (unit === task) results.push(r);
+    else if (finished) for (const t of group) results.push({ ...r, task: t.id, batch: unit.id });
+    else results.push({ ...r, task: task.id, batch: unit.id });
+    if (!finished) {
+      io.log(`${name}: stopped at ${task.id} (${r.notes})`);
+      return { results, stopped: r.notes, head: tip };
+    }
+    // A task reviewed on its range ran at the tip: a wave after an unreviewed
+    // single-unit wave never started, so its head is the tip.
+    tip = r.head;
+  }
+  return { results, stopped: null, head: tip };
+}
+
 // Run a lane's tasks in order in its worktree, the first from base (the
 // feature tip the lane fast-forwards to); stop at the first task that is not
 // done. Returns {lane, results, stopped:reason|null, head}.
