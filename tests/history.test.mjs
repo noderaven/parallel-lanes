@@ -377,9 +377,28 @@ test('--runs lists every reason two runs are not comparable', () => {
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.json.comparable, false);
   assert.deepEqual(r.json.reasons, ['plan differs', 'tasks differ', 'lanes differ', 'commands differ',
-    'autopsy missing for fa', 'tokens partial for fb']);
+    'autopsy missing for fa']);
   const text = runsOf(hist);
   assert.equal(text.stdout.split('\n')[0], `not comparable: ${r.json.reasons.join('; ')}`);
+});
+
+test('--runs notes partial tokens without calling the pair not comparable', () => {
+  // Final review (1.6.4): every real archived run has partial token counts (transcripts keep
+  // mid-stream output counts), so "tokens partial" as a reason made no real pair comparable.
+  const { hist, b } = comparablePair();
+  editLines(join(b, 'wf_1', 'agent-a2.jsonl'), (lines) => {
+    lines[2] = lines[2].slice(0, 60);
+    return lines;
+  });
+  historyOk(hist);
+  const r = runsOf(hist, '--json');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json.comparable, true, JSON.stringify(r.json.reasons));
+  assert.equal(r.json.runs[1].tokens_partial, true);
+  assert.deepEqual(r.json.notes, ['tokens partial for fb: its token totals are lower bounds']);
+  const text = runsOf(hist).stdout.split('\n');
+  assert.equal(text[0], 'comparable');
+  assert.equal(text[1], 'note: tokens partial for fb: its token totals are lower bounds');
 });
 
 test('--runs marks a stale autopsy and a missing plan', () => {

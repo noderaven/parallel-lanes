@@ -1356,8 +1356,9 @@ copies a run that ended after a launch into the run history (never a dry run). R
   for each run, its plan's sha256, task ids, lanes, a hash of its `commands`, versions, launches,
   status, acceptance, wall time, fixed phases, task time, full-suite time and tokens, and whether
   the pair is comparable: only when the archived plans hash the same, the task ids, lanes and
-  commands match, both autopsies are current and neither has partial tokens. Otherwise
-  `not comparable` with every reason. It writes nothing, never reruns autopsy and never prints a
+  commands match and both autopsies are current. Otherwise `not comparable` with every reason.
+  Partial token counts (the usual case: transcripts keep mid-stream output counts) are a note,
+  not a reason. It writes nothing, never reruns autopsy and never prints a
   percentage. An id the index holds twice, or the same run twice, exits 2.
 - **Imported folders are read-only:** do not run their manifests. `--reindex`, `autopsy` and
   `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,

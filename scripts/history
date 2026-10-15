@@ -79,7 +79,7 @@ history --runs A,B compares two runs (each a run id or a folder name) and
 writes nothing: it never runs autopsy, so a run whose autopsy is missing or
 not current (as above) is reported as such. It prints text, or with --json:
 
-  {"runs": [<run>, <run>], "comparable": bool, "reasons": [str]}
+  {"runs": [<run>, <run>], "comparable": bool, "reasons": [str], "notes": [str]}
 
 where each run has run_id, folder, plan, plan_sha256 (of the archived plan:
 the file in the run folder named as the index entry's plan; unavailable when
@@ -92,9 +92,11 @@ checks.commands), tokens_total, tokens_partial and autopsy (current, stale
 or missing); a figure that cannot be read is "unavailable". The pair is
 comparable only when none of these reasons holds, listed in this order:
 "plan unavailable for <id>", "plan differs", "tasks differ", "lanes differ",
-"commands differ", "autopsy <stale|missing> for <id>", "tokens partial for
-<id>". The text starts with "comparable" or "not comparable: <reasons>",
-then the values of each run side by side; never a percentage. --runs with
+"commands differ", "autopsy <stale|missing> for <id>". Partial token counts
+are no reason: notes ("tokens partial for <id>: its token totals are lower
+bounds") say so. The text starts with "comparable" or "not comparable: <reasons>",
+then a "note: " line per note and the values of each run side by side;
+never a percentage. --runs with
 --since or --project, the same run twice, an id the index does not hold or
 holds more than once (all its folders are named) exit 2.
 
@@ -682,13 +684,17 @@ def compare_runs(cards):
         if a[key] == UNAVAILABLE or a[key] != b[key]:
             reasons.append(reason)
     reasons += ["autopsy %s for %s" % (c["autopsy"], c["run_id"]) for c in cards if c["autopsy"] != "current"]
-    reasons += ["tokens partial for " + c["run_id"] for c in cards if c["tokens_partial"] is True]
-    return {"runs": cards, "comparable": not reasons, "reasons": reasons}
+    # Partial token counts are the norm (transcripts keep mid-stream output counts): a note,
+    # never a reason, or no real pair would be comparable.
+    notes = ["tokens partial for %s: its token totals are lower bounds" % c["run_id"]
+             for c in cards if c["tokens_partial"] is True]
+    return {"runs": cards, "comparable": not reasons, "reasons": reasons, "notes": notes}
 
 
 def render_runs(result):
     """The text form: the verdict, then each value of both runs."""
     lines = ["comparable" if result["comparable"] else "not comparable: " + "; ".join(result["reasons"])]
+    lines += ["note: " + n for n in result.get("notes", [])]
     a, b = result["runs"]
     for key in a:
         show = lambda v: ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)  # noqa: E731
