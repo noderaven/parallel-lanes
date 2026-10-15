@@ -402,7 +402,8 @@ test('a final review result without carried_minors_open raised none of the carri
 // it as L; returns the process result.
 function withLedgerModule(code, args = []) {
   const loader = `import importlib.machinery, sys; L = importlib.machinery.SourceFileLoader('ledger', sys.argv[1]).load_module()\n${code}`;
-  return spawnSync('python3', ['-c', loader, join(SCRIPTS, 'ledger'), ...args], { encoding: 'utf8' });
+  // -B: no __pycache__ beside the scripts (the suite leaves the checkout unchanged).
+  return spawnSync('python3', ['-B', '-c', loader, join(SCRIPTS, 'ledger'), ...args], { encoding: 'utf8' });
 }
 
 test('append_entries writes every entry or none: an invalid one stops all of them', () => {
