@@ -143,6 +143,7 @@ or task name, an unreadable ledger, plan or manifest, or a backfill error.
 """
 
 import hashlib
+import glob
 import json
 import os
 import posixpath
@@ -731,13 +732,152 @@ def undeclared_files(m, ranges):
     return out
 
 
+def latest_minors(events):
+    """The latest open-minors snapshot (carry-launch), or None."""
+    snaps = [e for e in events if e.get("event") == "minors"]
+    return snaps[-1] if snaps else None
+
+
+def overrides_list(directory):
+    """Every ruling that names others it departs from: [{id, by, task,
+    overrides, unknown}], overrides resolved (PF-n through carry-launch),
+    unknown the ids that resolve to no ruling."""
+    records = ruling_records(directory)
+    resolved = resolve_overrides(records, carried_events(directory))
+    return [{"id": r["id"], "by": r["role"], "task": r["event"]["task"],
+             "overrides": [t for t, _ in resolved[r["id"]]],
+             "unknown": [t for t, known in resolved[r["id"]] if not known]}
+            for r in records if resolved[r["id"]]]
+
+
 def status(directory, plan=None, spec=None, manifest_path=None):
     plan_text = read_text(plan, "plan") if plan is not None else None
     manifest = load_manifest(manifest_path) if manifest_path is not None else None
-    result, _ = summarize(read_events(directory), plan_text, plan is not None,
+    events = read_events(directory)
+    result, _ = summarize(events, plan_text, plan is not None,
                           file_sha256(spec) if spec is not None else None,
                           file_sha256(plan) if plan is not None else None, manifest)
+    snap = latest_minors(events)
+    result["minors"] = {"open": [m.get("id") for m in snap["open"]] if snap else [],
+                        "covered": list(snap.get("covered") or []) if snap else []}
+    result["overrides"] = overrides_list(directory)
     print(json.dumps(result))
+
+
+WF_ID = re.compile(r"^wf_[a-z0-9-]{6,64}$")
+
+
+def find_launch_file(source):
+    """The Workflow result file of a launch: source is its transcript dir, or
+    its wf id (a launch whose session died), looked up under the Claude config
+    dir as projects/*/*/workflows/<wf>.json. None when there is none."""
+    if WF_ID.fullmatch(source) and not os.path.isdir(source):
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+        found = sorted(glob.glob(os.path.join(glob.escape(config), "projects", "*", "*", "workflows", source + ".json")))
+        return found[0] if found else None
+    for path in _shell.result_paths(source):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def open_minors(previous, result, args):
+    """The task minors still open after a launch, and the tasks covered.
+
+    previous is the last snapshot event (or None). A task done in this launch
+    replaces its entries with its approving review's minors less those this
+    launch's final review raised (none raised without a final review). A
+    carried minor this launch's final raised drops out."""
+    prev_open = list((previous or {}).get("open") or [])
+    covered = list((previous or {}).get("covered") or [])
+    tasks = result.get("tasks") if isinstance(result.get("tasks"), dict) else {}
+    final = result.get("final") if isinstance(result.get("final"), dict) else None
+    done_here = [t for t, v in tasks.items() if isinstance(v, dict) and v.get("status") == "done"]
+    carried_open = ((args or {}).get("carried_minors") or {}).get("open") or []
+    still_carried = set((final or {}).get("carried_minors_open") or []) if final is not None else set(carried_open)
+    raised_carried = set(carried_open) - still_carried
+    task_open = None if final is None else {m.get("id") for m in final.get("task_minors_open") or []
+                                            if isinstance(m, dict)}
+    out = [m for m in prev_open if m.get("task") not in done_here and m.get("id") not in raised_carried]
+    seen = {m.get("id") for m in out}
+    for t in done_here:
+        minors = tasks[t].get("minor_findings")
+        if not isinstance(minors, list):
+            continue
+        if t not in covered:
+            covered.append(t)
+        for m in minors:
+            if not isinstance(m, dict) or m.get("id") in seen:
+                continue
+            if task_open is not None and m.get("id") not in task_open:
+                continue
+            seen.add(m.get("id"))
+            out.append({"id": m.get("id"), "task": t, "file": m.get("file"), "line": m.get("line"),
+                        "issue": m.get("issue"), "fix": m.get("fix")})
+    return out, covered
+
+
+def carry_launch(directory, source):
+    """Record what a launch knew that the ledger does not: pre-flight's own
+    rulings (by preflight, PF-n), the open task minors, and which PF-n
+    overrides recorded during the launch name. Once per wf id."""
+    path = find_launch_file(source)
+    try:
+        data = json.loads(read_text(path, "launch result")) if path else None
+    except ValueError:
+        data = None
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, dict):
+        fail(3, f"no readable workflow result for {source!r}")
+    wf = data.get("runId") if is_text(data.get("runId")) else os.path.basename(source.rstrip("/\\"))
+    events = read_events(directory)
+    if any(e.get("event") == "carried" and e.get("wf") == wf for e in events):
+        print(json.dumps({"carried": wf, "already": True}))
+        return
+    pre = result.get("preflight") if isinstance(result.get("preflight"), dict) else {}
+    texts = [t for t in pre.get("rulings") or [] if isinstance(t, str)]
+    adjudicated = pre.get("adjudicated")
+    already_mapped = {v for c in carried_events(directory) for v in (c.get("pf") or {}).values()}
+    adj_ids = [r["id"] for r in ruling_records(directory)
+               if r["stem"] == "_run" and r["role"] == "adjudicator" and r["id"] not in already_mapped]
+    if "adjudicated" not in pre and pre.get("conflicts") and texts and adj_ids:
+        # A 1.6.2 result has no marker: its engine adjudicated pre-flight
+        # conflicts only in autonomous runs and pushed the ruling last. With no
+        # adjudicator ruling in _run (a supervised stop) there was none.
+        adjudicated = len(texts) - 1
+    pf = {}
+    written = 0
+    for i, text in enumerate(texts):
+        key = f"PF-{i + 1}"
+        if isinstance(adjudicated, int) and not isinstance(adjudicated, bool) and i == adjudicated:
+            if adj_ids:
+                pf[key] = adj_ids[-1]
+            continue
+        write_entry(directory, "_run", {"task": "_run", "event": "ruling", "text": text, "by": "preflight",
+                                        "scope": "run", "pf": key, "wf": wf})
+        written += 1
+        pf[key] = [r["id"] for r in ruling_records(directory) if r["stem"] == "_run"][-1]
+    bound_before = {(b.get("file"), b.get("line")) for c in carried_events(directory)
+                    for b in c.get("bound") or [] if isinstance(b, dict)}
+    bound = [{"file": r["file"], "line": r["line"]} for r in ruling_records(directory)
+             if any(PF_ID.fullmatch(o) for o in r["event"].get("overrides") or [])
+             and (r["file"], r["line"]) not in bound_before]
+    open_now, covered = open_minors(latest_minors(events), result, data.get("args"))
+    write_entry(directory, "_run", {"task": "_run", "event": "minors", "wf": wf, "open": open_now,
+                                    "covered": covered})
+    write_entry(directory, "_run", {"task": "_run", "event": "carried", "wf": wf, "pf": pf, "bound": bound})
+    print(json.dumps({"carried": wf, "rulings": written, "open_minors": len(open_now)}))
+
+
+def minors(directory):
+    """Print the task minors still open (the latest snapshot)."""
+    snap = latest_minors(read_events(directory))
+    entries = (snap or {}).get("open") or []
+    if not entries:
+        print("(none)")
+    for m in entries:
+        print(f"[{m.get('id')}] {m.get('task')} {m.get('file')}:{m.get('line')} - {m.get('issue')} "
+              f"(fix: {m.get('fix')})")
 
 
 def accept(directory, checkout, head, text):
@@ -915,7 +1055,7 @@ def conditions(directory, wf_id, doctor_file):
 
 
 PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6, 9), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
-             "ended": (1,), "conditions": (1, 3), "rulings": (1,)}
+             "ended": (1,), "conditions": (1, 3), "rulings": (1,), "minors": (1,), "carry-launch": (1,)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
 
@@ -961,6 +1101,11 @@ def main(argv):
         conditions(*argv[1:])
     elif argv[:1] == ["rulings"] and len(argv) in (2, 4) and argv[1] and (len(argv) == 2 or argv[2] == "--lane"):
         rulings(argv[1], argv[3] if len(argv) == 4 and argv[3] != "-" else None)
+    elif len(argv) == 2 and argv[0] == "minors" and argv[1]:
+        minors(argv[1])
+    elif len(argv) == 3 and argv[0] == "carry-launch" and argv[1] and argv[2]:
+        source = argv[2] if WF_ID.fullmatch(argv[2]) else _shell.native_path(argv[2])
+        carry_launch(argv[1], source)
     else:
         fail(2, "usage: ledger append DIR LANE JSON"
                 " | ledger reviewed DIR LANE TASK ROUNDS PLAN CHECKOUT HEAD BLOCKING [SPEC]"
