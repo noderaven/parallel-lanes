@@ -1472,6 +1472,8 @@ def _task_checks_args(words):
 
 # await-checks wait's exit code for a check that stopped without a result.
 STOPPED_EXIT = 5
+# await-checks wait's exit code while the check is still running.
+STILL_RUNNING_EXIT = 4
 # A harness output file an agent may poll: tasks/<id>.output, either slash.
 _HARNESS_OUTPUT = re.compile(r"(?<![A-Za-z0-9_.-])tasks[/\\]+[A-Za-z0-9_-]+\.output(?![A-Za-z0-9_-])")
 # What Claude Code may put before a tool error's own text.
@@ -1680,15 +1682,32 @@ def waits_section(run):
     in two): monitor_errors, results that start 'No such tool available:
     Monitor'; sleep_blocked, results that start 'Blocked: sleep'; and
     harness_output_reads, Bash or Read calls whose input names a harness
-    tasks/<id>.output file, with either slash, blocked calls included."""
+    tasks/<id>.output file, with either slash, blocked calls included.
+
+    unwaited lists the background check starts (procedure_file) no
+    'await-checks wait' on their file followed, and left_running those whose
+    last wait said the check was still running (exit 4): the agent stopped
+    waiting before the check ended (1.6.4: Claude Code 2.1.300 discourages
+    waiting on background commands). Each is {agent, file}."""
     if not _has_tool_events(run):
         return UNAVAILABLE
     via = waits = stopped = 0
     seen = False
     improvised = {"monitor_errors": 0, "sleep_blocked": 0, "harness_output_reads": 0}
+    unwaited, left_running = [], []
     for a in _all_agents(run):
         calls = _calls(a)
         procedures = _procedures(calls)
+        label = a["entry"]["label"]
+        for i, c in enumerate(calls):
+            path = procedure_file(c)
+            if path is None:
+                continue
+            after = _wait_indexes(calls, i, _basename(path))
+            if not after:
+                unwaited.append({"agent": label, "file": path})
+            elif calls[after[-1]]["end"] is not None and exit_code(calls[after[-1]]["text"]) == STILL_RUNNING_EXIT:
+                left_running.append({"agent": label, "file": path})
         reserved = False
         for i, c in enumerate(calls):
             found = _await_call(c)
@@ -1709,7 +1728,8 @@ def waits_section(run):
                 improvised["harness_output_reads"] += 1
     if not seen and not _at_least(_engine_version(run), PROCEDURE_VERSION):
         via = UNAVAILABLE
-    return {"checks_via_procedure": via, "wait_calls": waits, "stopped": stopped, "improvised": improvised}
+    return {"checks_via_procedure": via, "wait_calls": waits, "stopped": stopped, "improvised": improvised,
+            "unwaited": unwaited, "left_running": left_running}
 
 
 # A backslash before a path character (a Windows path separator); shlex
@@ -2918,6 +2938,15 @@ def _md_waits(waits):
                  "await-checks wait; the wait calls, and those that said stopped (exit 5). Unavailable for an "
                  "engine before 1.6.1 that made no await-checks call.")
     lines.append("")
+    if isinstance(waits, dict):
+        for key, title in (("unwaited", "Background checks never waited on"),
+                           ("left_running", "Checks left running when the waits stopped")):
+            items = waits.get(key) or []
+            agents = sorted({i["agent"] for i in items if i.get("agent")})
+            lines.append("%s: %d%s" % (title, len(items), " (%s)" % ", ".join(agents) if agents else ""))
+        lines.append("  Checks started in the background that no await-checks wait followed, and those whose last "
+                     "wait said still running (exit 4): the agent ended without the check's result.")
+        lines.append("")
     improvised = waits.get("improvised") if isinstance(waits, dict) else None
     if isinstance(improvised, dict):
         lines.append("Improvised waits: Monitor errors %d, blocked sleeps %d, harness output reads %d" % (

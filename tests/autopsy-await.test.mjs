@@ -190,7 +190,8 @@ test('a procedure check is one measured execution timed from its report', () => 
   // timeout, no long call (the first wait blocked for 540 s), and the waits
   // that exit 4 are no repeated failure.
   assert.deepEqual(kinds(json), []);
-  assert.deepEqual(json.checks.waits, { checks_via_procedure: 1, wait_calls: 3, stopped: 0, improvised: NOTHING });
+  assert.deepEqual(json.checks.waits, { checks_via_procedure: 1, wait_calls: 3, stopped: 0, improvised: NOTHING,
+    unwaited: [], left_running: [] });
   // The same calls without a wait are the 1.6.0 background run.
   const bare = buildRun({
     agents: [{ label: 'integrate', phase: 'Integrate', start: '10:00:00', end: '10:13:00', calls: [
@@ -295,7 +296,8 @@ test('waits counts procedure checks, wait calls and stops', () => {
     },
   });
   const { json, md } = autopsy(dir);
-  assert.deepEqual(json.checks.waits, { checks_via_procedure: 2, wait_calls: 4, stopped: 1, improvised: NOTHING });
+  assert.deepEqual(json.checks.waits, { checks_via_procedure: 2, wait_calls: 4, stopped: 1, improvised: NOTHING,
+    unwaited: [{ agent: 'final fix', file: lone }], left_running: [] });
   assert.deepEqual(json.checks.executions.map((x) => [x.agent, x.timing, x.s]), [
     // --exact reuses its path: the stopped start has no report of its own.
     ['verify', 'unavailable', 'unavailable'],
@@ -371,7 +373,7 @@ test('an older run says checks_via_procedure unavailable', () => {
   for (const version of ['1.6.0', '1.5.1', 'unavailable']) {
     const { json, md } = autopsy(buildRun({ agents, files, version }));
     assert.deepEqual(json.checks.waits, { checks_via_procedure: 'unavailable', wait_calls: 0, stopped: 0,
-      improvised: { ...NOTHING, monitor_errors: 1 } }, version);
+      improvised: { ...NOTHING, monitor_errors: 1 }, unwaited: [], left_running: [] }, version);
     assert.match(md, /^Checks via the procedure: unavailable; 0 wait calls; 0 stopped$/m);
   }
   // From 1.6.1 on, no procedure call is a count of 0.
@@ -397,4 +399,27 @@ test('the version is 6', () => {
   assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 6);
   const dir = buildRun({ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] });
   assert.equal(autopsy(dir).json.autopsy_version, 6);
+});
+
+test('checks.waits lists background checks never waited on, and checks left running when the waits stopped', () => {
+  const out = checksFile('integrate.1.json');
+  const late = checksFile('task-A1.1.json');
+  const dir = buildRun({
+    agents: [
+      { label: 'integrate', phase: 'Integrate', start: '10:00:00', end: '10:13:00', calls: [
+        bash(reserve('integrate'), '10:00:05', '10:00:06', { text: out }),
+        bash(runChecks(out), '10:00:10', '10:00:11', { background: true, text: started('bx1') }),
+      ] },
+      { label: 'A1 implement', start: '10:00:00', end: '10:20:00', calls: [
+        bash(reserve('task-A1'), '10:00:05', '10:00:06', { text: late }),
+        bash(taskChecks('A1', late), '10:00:10', '10:00:11', { background: true, text: started('bx2') }),
+        bash(wait(late), '10:00:12', '10:09:12', { exit: 4, text: RUNNING(late) }),
+      ] },
+    ],
+  });
+  const { json, md } = autopsy(dir);
+  assert.deepEqual(json.checks.waits.unwaited, [{ agent: 'integrate', file: out }]);
+  assert.deepEqual(json.checks.waits.left_running, [{ agent: 'A1 implement', file: late }]);
+  assert.ok(md.includes('Background checks never waited on: 1 (integrate)'), md);
+  assert.ok(md.includes('Checks left running when the waits stopped: 1 (A1 implement)'), md);
 });

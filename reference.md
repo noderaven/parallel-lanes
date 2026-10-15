@@ -1327,7 +1327,11 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`) counts the long-check
     procedure ("Long checks"): executions that reserved, started and waited, the `await-checks wait`
     calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
-    `harness_output_reads`); `unavailable` for a run without tool events.
+    `harness_output_reads`); `unavailable` for a run without tool events. `unwaited` lists the
+    background check starts no `await-checks wait` on their file followed, and `left_running` those
+    whose last wait said still running (exit 4), each `{agent, file}`: an agent that ended without
+    its check's result. Claude Code 2.1.300 discourages waiting on background commands, so a
+    run on it is worth checking here.
   - `repairs` (`attempts`, `eligible`, `by_status`, from `final.repairs`) and `setup`
     (`skipped`, `no_setup_commands`, from `setup_result.setup_skipped`) are `unavailable` for
     runs before 1.6.0.
