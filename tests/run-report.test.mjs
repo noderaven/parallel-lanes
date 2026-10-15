@@ -100,12 +100,15 @@ test('effort is unavailable for every agent without the workflow result, never d
   for (const a of report.agents) assert.equal(a.effort, 'unavailable', a.label);
 });
 
-test('--out writes the report to a file', () => {
+test('--out writes the report to a file and prints its summary', () => {
+  // SKILL.md's Report step passes --out and appends the output: it used to be empty (m1a review).
   const out = join(TMP, 'report.json');
   const r = run([FIX, MANIFEST, '--out', out]);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(r.stdout, '');
   assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), report);
+  const summary = JSON.parse(r.stdout);
+  const { agents, ...rest } = report;
+  assert.deepEqual(summary, { report: out, agent_count: agents.length, ...rest });
 });
 
 test('bad usage exits 2', () => {

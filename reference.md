@@ -804,7 +804,9 @@ its first log line, `parallel-lanes v<version> loaded`), `agents` (per agent: la
 `resolved_models` with message counts, effort, input, output, cache read, and cache creation
 tokens), `tiers` (totals per tier), `totals`, `models` (agents per resolved model), and
 `unavailable`, `output_incomplete`, `escalations`, `fix_rounds`, `retries` counts. A field
-that cannot be read is the string `unavailable`, never a guess. Effort comes from the
+that cannot be read is the string `unavailable`, never a guess. With `--out` the full report
+goes to FILE and the script prints a summary for the hand-back: the same object without
+`agents`, plus `report` (FILE) and `agent_count`. Effort comes from the
 workflow result file, which the Workflow tool writes to `<session>/workflows/wf_<id>.json` for
 a transcript directory `<session>/subagents/workflows/wf_<id>/` (`<transcript_dir>.json`
 beside the directory is the fallback): its `agent_settings`
