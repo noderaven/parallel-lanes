@@ -412,7 +412,7 @@ raised it).
   need no second table are `setup_result`, `start_points`, and the relaunch carry-over (budgets
   and `repairs_spent`).
 - Repairs (see Check ownership) count toward `max_agents`. Each is admitted only while
-  `repairReserve` agents are free (7, plus 4 with an e2e hook and 2 with a post-integrate hook;
+  `repairReserve` agents are free (7, plus 4 with an e2e hook and 2 with a post-integrate hook in the full profile;
   the 7 include one availability probe, see "Usage limit"),
   so neither the repair nor the checks it makes necessary are ever refused: with less room
   there is no repair, and the run ends as it would without one.
@@ -514,7 +514,7 @@ checks.
   run (`repairs_spent` carries earlier launches'). The reserve is 7 (the repair, its verify and
   the re-review that must follow, each with one retry, and the availability probe a dead pair
   among them may start; see "Usage limit"), plus 4 with an e2e hook and 2 with a
-  post-integrate hook (the rechecks a moved head needs), so nothing the repair makes necessary
+  post-integrate hook in the full profile (the rechecks a moved head needs), so nothing the repair makes necessary
   is ever refused.
 - One Opus agent, `verify repair <n>`: the failing commands with log and tail, the smallest
   correct fix, focused checks only, `fix: make the delivery checks pass`. It never weakens,
