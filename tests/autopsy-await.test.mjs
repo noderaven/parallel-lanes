@@ -425,4 +425,8 @@ test('checks.waits lists background checks never waited on, and checks left runn
   assert.deepEqual(json.checks.waits.left_running, [{ agent: 'A1 implement', file: late }]);
   assert.ok(md.includes('Background checks never waited on: 1 (integrate)'), md);
   assert.ok(md.includes('Checks left running when the waits stopped: 1 (A1 implement)'), md);
+  // The evidence shows no await-checks wait followed, not that the agent never got the result
+  // (a completion notice and a Read of the file would also deliver it).
+  assert.ok(!md.includes('ended without the check'), md);
+  assert.ok(md.replace(/\s+/g, ' ').includes('no await-checks wait on its file followed'), md);
 });

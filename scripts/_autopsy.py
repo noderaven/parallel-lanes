@@ -3038,8 +3038,9 @@ def _md_waits(waits):
             items = waits.get(key) or []
             agents = sorted({i["agent"] for i in items if i.get("agent")})
             lines.append("%s: %d%s" % (title, len(items), " (%s)" % ", ".join(agents) if agents else ""))
-        lines.append("  Checks started in the background that no await-checks wait followed, and those whose last "
-                     "wait said still running (exit 4): the agent ended without the check's result.")
+        lines.append("  Checks started in the background where no await-checks wait on its file followed, and those "
+                     "whose last wait said still running (exit 4): the agent did not wait for the result the "
+                     "procedure way (it may still have read it another way).")
         lines.append("")
     improvised = waits.get("improvised") if isinstance(waits, dict) else None
     if isinstance(improvised, dict):

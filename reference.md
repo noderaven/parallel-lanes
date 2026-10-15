@@ -1417,8 +1417,9 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
     `harness_output_reads`); `unavailable` for a run without tool events. `unwaited` lists the
     background check starts no `await-checks wait` on their file followed, and `left_running` those
-    whose last wait said still running (exit 4), each `{agent, file}`: an agent that ended without
-    its check's result. Claude Code 2.1.300 discourages waiting on background commands, so a
+    whose last wait said still running (exit 4), each `{agent, file}`: no await-checks wait on its
+    file followed to the end (the agent may still have read the result another way, after a
+    completion notice). Claude Code 2.1.300 discourages waiting on background commands, so a
     run on it is worth checking here.
   - `commands` (1.6.4, `checks.commands`): check time per configured command, from every file in the ledger's
     `checks/` with a results list (task checks, integrate, verify, final fix, accept): one entry
