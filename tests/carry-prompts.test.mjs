@@ -95,6 +95,12 @@ test('final reviewers, the final fix, the re-review and the verify repair read e
     assert.ok(p.includes('A finding that a ruling in force settles is not raised unless it is critical or important;'
       + ' then raise it and cite the ruling\'s id.'), p);
     assert.ok(p.includes(`${LEDGER} undeclared '/work/ledger'`), p);
+    // d1a F22: "another lane's file" made a lens demand a ruling for an earlier lane's file,
+    // which the task rules allow; the lens rule must match them.
+    const flat = p.replace(/\s+/g, ' ');
+    assert.ok(flat.includes('A file of a task earlier in the run needs no ruling'), p);
+    assert.ok(flat.includes('a task in another lane running alongside, or a later task'), p);
+    assert.ok(!flat.includes("another lane's or a later task's file"), p);
   }
 });
 
