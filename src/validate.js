@@ -307,6 +307,13 @@ function validateManifest(m) {
         else if (!new RegExp(laneIdPattern()).test(lane.id)) {
           err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
         } else if (['prelude', 'join'].includes(lane.id.toLowerCase())) err(`lane ${lane.id}: id is reserved`);
+        else if (lane.id.toLowerCase().startsWith('u-')) {
+          // A lane's branch pl-<run_id>-<id> would then have a join unit
+          // branch's name, pl-<run_id>-u-<unit> (1.6.5; refs are
+          // case-insensitive on Windows).
+          err(`${where}.id: lane id ${JSON.stringify(lane.id)} must not start with u- `
+            + '(join unit branches use pl-<run_id>-u-<unit>)');
+        }
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
         else {
           laneIds.add(lane.id);

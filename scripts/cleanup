@@ -482,9 +482,17 @@ def make_plan(repo, m, run_folder):
     if repo.mode == "shadow":
         owned.append((repo.worktree_root + "/feature", repo_cfg["branch"]))
 
+    # A lane worktree a join wave left on one of the run's unit branches
+    # (pl-<run_id>-u-<unit>, 1.6.5) is the run's own too.
+    unit_prefix = "pl-" + run_id + "-u-"
     worktrees, owned_paths = [], []
     for path, branch in owned:
         entry = owned_worktree(repo, listing, path, branch)
+        if entry is None and path.startswith(repo.worktree_root + "/lane-"):
+            here = next((e for e in listing if same_place(e["path"], path)), None)
+            if here is not None and (here["branch"] or "").startswith(unit_prefix):
+                branch = here["branch"]
+                entry = owned_worktree(repo, listing, path, branch)
         if entry is not None:
             worktrees.append(worktree_item(repo, entry, slash(path), branch))
             owned_paths.append(path)
@@ -507,6 +515,12 @@ def make_plan(repo, m, run_folder):
         branch = "pl-" + run_id + "-" + lane["id"]
         sha = repo.sha("refs/heads/" + branch)
         if sha is not None:
+            branches.append(lane_branch_item(repo, branch, sha, kept_at, head))
+    # Join unit branches: removed like a lane branch, only once merged.
+    units = repo.out("for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/" + unit_prefix + "*")
+    for line in units.splitlines():
+        branch, _, sha = line.partition(" ")
+        if branch.startswith(unit_prefix):
             branches.append(lane_branch_item(repo, branch, sha, kept_at, head))
     feature_steps = []
     sha = repo.sha("refs/heads/" + repo_cfg["branch"])

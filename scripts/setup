@@ -289,8 +289,10 @@ class Repo:
                 self.git("worktree", "remove", norm)
 
 
-def worktree_state(repo, path, branch):
-    """'missing' (absent or empty dir) or 'reuse'; raises on anything else.
+def worktree_state(repo, path, branch, unit_prefix=None):
+    """'missing' (absent or empty dir), 'reuse', or 'unit' (a lane worktree
+    left on one of the run's join unit branches, whose name starts with
+    unit_prefix, 1.6.5); raises on anything else.
 
     A symlink is always refused, even one to an empty directory: git would
     create the worktree at the link's target, outside worktree_root.
@@ -312,6 +314,8 @@ def worktree_state(repo, path, branch):
             or os.path.realpath(common) != repo.common_dir):
         raise refuse
     head = run_git(["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
+    if head.returncode == 0 and unit_prefix is not None and head.stdout.strip().startswith(unit_prefix):
+        return "unit"
     if head.returncode != 0 or head.stdout.strip() != branch:
         raise refuse
     return "reuse"
@@ -408,7 +412,10 @@ def setup(m, owner=None):
     feature_state = (worktree_state(repo, feature, branch)
                      if repo_cfg["mode"] == "shadow" else None)
     lanes = [] if lite else [(lane, lane_dir(m, lane), lane_branch(m, lane)) for lane in m["lanes"]]
-    lane_states = [worktree_state(repo, path, lb) for _, path, lb in lanes]
+    # A lane worktree a join wave left on a unit branch (1.6.5) goes back to
+    # its lane branch below; a lane with new work then runs as usual.
+    unit_prefix = "pl-" + m["run_id"] + "-u-"
+    lane_states = [worktree_state(repo, path, lb, unit_prefix) for _, path, lb in lanes]
     if any(setup_commands(m, lane_id) for lane_id in [None] + [lane["id"] for lane in m["lanes"]]):
         _shell.find_bash()
 
@@ -416,6 +423,7 @@ def setup(m, owner=None):
 
     discarded = []
     preserved = []
+    returned = []
     # Drops only the records of the run's own worktrees whose directory is gone.
     repo.prune_run_worktrees(repo_cfg["worktree_root"])
     if not repo.has_branch(branch):
@@ -426,7 +434,13 @@ def setup(m, owner=None):
         ensure_worktree(repo, feature, branch, base, feature_state, m["run_id"], discarded, preserved)
     check_branch(feature, branch)
     for (_, path, lb), state in zip(lanes, lane_states):
-        ensure_worktree(repo, path, lb, branch, state, m["run_id"], discarded, preserved)
+        if state == "unit":
+            unit = run_git(["-C", path, "symbolic-ref", "--short", "HEAD"]).stdout.strip()
+            discard_changes(path, m["run_id"], discarded, preserved)
+            run_git(["-C", path, "checkout", "-q", lb])
+            returned.append({"worktree": path, "from": unit})
+        else:
+            ensure_worktree(repo, path, lb, branch, state, m["run_id"], discarded, preserved)
         check_branch(path, lb)
 
     feature_cmds = setup_commands(m, None)
@@ -465,7 +479,7 @@ def setup(m, owner=None):
         raise Failure(1, f"cannot write the owner map {owners_file!r}: {e}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
     return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved,
-            "setup_skipped": skipped}
+            "setup_skipped": skipped, "returned": returned}
 
 
 def main(argv):

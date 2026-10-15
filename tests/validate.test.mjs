@@ -770,3 +770,16 @@ test('inputs_changed says whether the plan and spec changed since the last launc
       'inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
   }
 });
+
+test('lane ids may not start with u-, in any letter case (join unit branches use pl-<run_id>-u-<unit>)', () => {
+  for (const id of ['u-x', 'U-x', 'u-']) {
+    const m = validManifest();
+    renameLane(m, 0, id);
+    assertError(validateManifest(m), `lane id ${JSON.stringify(id)}`, 'must not start with u-');
+  }
+  for (const id of ['u', 'ux', 'au-x', 'u_x']) {
+    const m = validManifest();
+    renameLane(m, 0, id);
+    assert.deepEqual(validateManifest(m), [], id);
+  }
+});
