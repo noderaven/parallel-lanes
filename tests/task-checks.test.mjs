@@ -214,6 +214,34 @@ test('only an adjudicator ruling in force, for this unit or an unowned path, per
   widens('unreadable ledger');
 });
 
+test('a permit names files only: a directory, or an owned folder, never covers another lane\'s file', () => {
+  // Final review (1.6.4): a _run adjudicator ruling naming "src/sub/" was not in the owner map
+  // (it lists files) and became a directory entry covering U9's src/sub/owned.js.
+  const r = repo({ 'src/a.js': '1\n', 'src/sub/owned.js': '1\n', 'b.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/sub/owned.js'), '2\n');
+  const widens = (why, declared = 'src/a.js') => {
+    const { status, json } = run(r, { args: ['--declared', declared] });
+    assert.equal(status, 0, why);
+    assert.deepEqual(codes(json), ['outside_files'], why);
+    assert.deepEqual(json.policy.permitted, [], why);
+  };
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub/owned.js': ['U9'] });
+  for (const dir of ['src/sub/', 'src/sub\\', 'src', './', '.']) {
+    ledgerFile(r, '_run', [permit('_run', [dir])]);
+    widens(`_run permit ${dir}`);
+    // A ruling filed under the unit's own task names files only, too.
+    rmSync(join(r.ledger, '_run.jsonl'));
+    ledgerFile(r, 'alpha', [permit('U1', [dir])]);
+    widens(`task permit ${dir}`);
+    rmSync(join(r.ledger, 'alpha.jsonl'));
+  }
+  // A folder another task's Files list names owns every path under it.
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/sub': ['U9'] });
+  ledgerFile(r, '_run', [permit('_run', ['src/sub/owned.js'])]);
+  widens('owned folder');
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');

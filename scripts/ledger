@@ -780,10 +780,23 @@ def adjudicator_permits(directory, task_ids, declared=()):
             continue
         for path in e.get("files") or []:
             key = _owners.path_key(path)
-            if e.get("task") in task_ids or (e.get("task") == "_run" and owned is not None and key is not None
-                                             and key not in owned and posixpath.dirname(key) in folders):
+            # A permit names files: a directory ("src/", "./") would cover every path under it.
+            if not isinstance(path, str) or key in (None, ".") or path.endswith(("/", "\\")):
+                continue
+            if e.get("task") in task_ids or (e.get("task") == "_run" and owned is not None
+                                             and not _owned_or_under(key, owned)
+                                             and posixpath.dirname(key) in folders):
                 out.append((path, r["id"]))
     return out
+
+
+def _owned_or_under(key, owned):
+    """Whether the path key, or a folder above it, is in a Files list."""
+    while key:
+        if key in owned:
+            return True
+        key = posixpath.dirname(key)
+    return False
 
 
 def rulings(directory, lane=None):
