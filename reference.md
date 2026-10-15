@@ -7,6 +7,36 @@ attempt, with a worked example, is in adopt.md. `<config dir>` below is
 `${CLAUDE_CONFIG_DIR:-~/.claude}`; every helper uses the same one.
 `<python>` below is the manifest's `python` (see Paths and Python).
 
+## Contents
+
+- Paths and Python: finding Python, how every helper command starts, path forms
+- Manifest fields: every manifest field, what it holds and its limits
+- Flow details: notices, git identity, the confirmation header, transient stops
+- Building lanes: turning derive-lanes facts into prelude, lanes and join
+- Profiles: full and lite
+- Tiers: standard, sonnet and light tasks, and escalation
+- Batching: light tasks run as one unit
+- Adjudicator: blocked tasks, rulings and their limits
+- Carry-over: rulings, task minors and owners passed between agents
+- Fix commits: the message of every commit after a task's first
+- Budgets: agent and ruling limits, the repair reserve
+- Check ownership: which agent runs which checks, task-checks selection
+- Long checks: reserving, starting and waiting on a check
+- Exit codes: the busy, timeout and signal codes a check may return
+- Active-run markers and stops: launch locks, setup exit 4, stopping a run
+- Usage limit: the platform pause and the agents_unavailable stop
+- Report: run-report output, the report contents, the run tools line
+- Verify evidence: check-verify and the acceptance gates
+- Backfill: rebuilding commit ranges in an older ledger
+- Shadow repos: runs on a folder that is not a git repo
+- Run history: archive-run, the history folder and its index
+- Autopsy: where a run's time went, slowdowns and suggestions
+- Audit: what the archive proves about each task
+- Doctor: the machine checks before a dry run
+- Launch conditions: doctor's result bound to each launch
+- Cleanup: removing a finished run's branches and worktrees
+- Uninstall: removing the skill
+
 ## Paths and Python
 
 `python` is the output of `bash <skill_dir>/scripts/find-python`: the absolute path of the

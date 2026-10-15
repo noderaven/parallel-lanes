@@ -10,7 +10,10 @@ const ADOPT_MD = join(SKILL_DIR, 'adopt.md');
 const README_MD = join(SKILL_DIR, 'README.md');
 const CI_YML = join(SKILL_DIR, '.github', 'workflows', 'tests.yml');
 
-const DESCRIPTION = 'Use when an approved implementation plan is about to be executed (at the ' +
+// What the skill does, then when to use it (the Agent Skills best-practices guide asks for both).
+const DESCRIPTION = 'Runs an approved implementation plan as parallel lanes of tasks in separate git ' +
+  'worktrees, each task implemented and reviewed by its own agents, then integrated, checked and ' +
+  'reviewed as a whole. Use when an approved implementation plan is about to be executed (at the ' +
   'execution-method handoff), or when resuming a stopped parallel-lanes run.';
 
 const NOTICES = {
@@ -223,6 +226,20 @@ test('SKILL.md resume rechecks coverage, passes the manifest to ledger status, a
 test('SKILL.md stays under 4000 words', () => {
   const words = read(SKILL_MD).toString('utf8').split(/\s+/).filter(Boolean).length;
   assert.ok(words < 4000, `SKILL.md has ${words} words`);
+});
+
+test('reference.md opens with a contents list naming every section in order', () => {
+  // The best-practices guide: a reference file over 100 lines needs a table of contents at the
+  // top, so a partial read (head -100) still shows everything the file holds.
+  const text = read(REFERENCE_MD).toString('utf8');
+  const lines = text.split('\n');
+  const headings = lines.filter((l) => l.startsWith('## ')).map((l) => l.slice(3));
+  assert.equal(headings[0], 'Contents');
+  const start = lines.indexOf('## Contents');
+  assert.ok(start >= 0 && start < 20, 'the contents list is near the top');
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  const entries = lines.slice(start + 1, end).filter((l) => l.startsWith('- ')).map((l) => l.slice(2).split(':')[0]);
+  assert.deepEqual(entries, headings.slice(1));
 });
 
 test('reference.md has sections for profiles, tiers, batching, adjudicator, budgets, and the report', () => {

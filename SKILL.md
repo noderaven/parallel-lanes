@@ -1,6 +1,6 @@
 ---
 name: parallel-lanes
-description: Use when an approved implementation plan is about to be executed (at the execution-method handoff), or when resuming a stopped parallel-lanes run.
+description: Runs an approved implementation plan as parallel lanes of tasks in separate git worktrees, each task implemented and reviewed by its own agents, then integrated, checked and reviewed as a whole. Use when an approved implementation plan is about to be executed (at the execution-method handoff), or when resuming a stopped parallel-lanes run.
 ---
 
 # Parallel lanes
