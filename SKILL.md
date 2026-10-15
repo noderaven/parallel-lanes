@@ -80,7 +80,7 @@ manual.
   [--lane <ids> ...] --join <ids> --project <project folder>` (comma-separated task ids, one
   `--lane` per lane in lane order; an empty prelude or join is `''`). It prints JSON:
   `recommend` is `direct` when running in parallel saves 1 task-time or less (always for a
-  single-lane plan), else `parallel`; any `status` other than `ok` leaves the Offer as it was.
+  single-lane plan), else `parallel`; a non-zero exit or any `status` other than `ok` leaves the Offer as it was.
   The rule, its evidence and the output: reference.md "Worth it".
 
 ## Offer

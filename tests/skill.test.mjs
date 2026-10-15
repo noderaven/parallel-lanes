@@ -796,6 +796,8 @@ test('SKILL.md runs worth-it after the layout and shows its lines at the Offer',
   assert.ok(!text.includes('a single lane included'), 'the single-lane rule changed in 1.6.4');
   assert.ok(text.includes('single-lane'), 'SKILL.md says what happens to a single-lane plan');
   assert.ok(text.includes('only when the Offer'), 'the check runs only when the Offer is shown');
+  // Final review (1.6.4): a usage error exits 2 with no JSON; it must not stop the Offer either.
+  assert.ok(text.includes('a non-zero exit or any `status` other than `ok` leaves the Offer as it was'), 'fail open');
 });
 
 test('reference.md documents worth-it, and bootstrap.md lets a direct build follow its recommendation', () => {
