@@ -239,19 +239,13 @@ def _task_ids(manifest):
     return ids
 
 
-def run_figures(analysis, manifest):
-    """One run's figures from its autopsy analysis, for the latest launch (by
-    its earliest task-agent start) whose agents include agents of a manifest
-    task: {launch, tasks, task_s, fixed_s, final_review_s, wall_s}. task_s is
-    the mean over that launch's tasks of each task's summed agent wall time
-    (every agent with that task: implement, review, fix, re-review,
-    adjudicate); fixed_s the union of its FIXED_PHASES, final_review_s of its
-    FINAL_PHASE, wall_s the span of its phases. None when no launch ran task
-    agents or the data is missing."""
+def latest_task_launch(analysis, manifest):
+    """(launch, {task id: summed agent wall seconds}) for the latest launch
+    (by its earliest task-agent start) whose agents include agents of a
+    manifest task; None when there is none or the data is missing."""
     time_ = analysis.get("time") if isinstance(analysis, dict) else None
     agents = time_.get("agents") if isinstance(time_, dict) else None
-    phases = time_.get("phases") if isinstance(time_, dict) else None
-    if not isinstance(agents, list) or not isinstance(phases, list) or not isinstance(manifest, dict):
+    if not isinstance(agents, list) or not isinstance(manifest, dict):
         return None
     ids = _task_ids(manifest)
     launches = {}
@@ -268,6 +262,24 @@ def run_figures(analysis, manifest):
     per_task = {}
     for task, start, end in launches[launch]:
         per_task[task] = per_task.get(task, 0.0) + (end - start)
+    return launch, per_task
+
+
+def run_figures(analysis, manifest):
+    """One run's figures from its autopsy analysis, for the latest launch (by
+    its earliest task-agent start) whose agents include agents of a manifest
+    task: {launch, tasks, task_s, fixed_s, final_review_s, wall_s}. task_s is
+    the mean over that launch's tasks of each task's summed agent wall time
+    (every agent with that task: implement, review, fix, re-review,
+    adjudicate); fixed_s the union of its FIXED_PHASES, final_review_s of its
+    FINAL_PHASE, wall_s the span of its phases. None when no launch ran task
+    agents or the data is missing."""
+    time_ = analysis.get("time") if isinstance(analysis, dict) else None
+    phases = time_.get("phases") if isinstance(time_, dict) else None
+    found = latest_task_launch(analysis, manifest)
+    if found is None or not isinstance(phases, list):
+        return None
+    launch, per_task = found
     spans = []
     for p in phases:
         if isinstance(p, dict) and p.get("launch") == launch:
