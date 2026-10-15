@@ -900,11 +900,13 @@ def owners(directory, unit_ids, paths):
     unknown = [t for t in unit_ids if t not in data["tasks"]]
     if unknown:
         fail(2, f"unknown task {unknown[0]!r}: not in the owner map")
-    here = os.path.abspath(os.getcwd())
+    # Resolved on both sides: a symlinked temp or home dir (macOS /var is
+    # /private/var) must not put a path inside the checkout outside it.
+    here = os.path.realpath(os.getcwd())
     for p in paths:
         rel = p
         if os.path.isabs(p) or (len(p) > 1 and p[1] == ":"):
-            full = os.path.abspath(p)
+            full = os.path.realpath(p)
             try:
                 inside = os.path.commonpath([full, here]) == here
             except ValueError:
