@@ -92,7 +92,8 @@ checks.commands), tokens_total, tokens_partial and autopsy (current, stale
 or missing); a figure that cannot be read is "unavailable". The pair is
 comparable only when none of these reasons holds, listed in this order:
 "plan unavailable for <id>", "plan differs", "tasks differ", "lanes differ",
-"commands differ", "autopsy <stale|missing> for <id>". Partial token counts
+"commands differ", "autopsy <stale|missing> for <id> (run history first)":
+a plain history run brings every autopsy up to date. Partial token counts
 are no reason: notes ("tokens partial for <id>: its token totals are lower
 bounds") say so. The text starts with "comparable" or "not comparable: <reasons>",
 then a "note: " line per note and the values of each run side by side;
@@ -137,8 +138,10 @@ class UsageError(Exception):
 
 
 def parse_args(args):
-    """{option: value} for --history-dir, --since and --project (None when
-    absent). --since must be a real calendar day."""
+    """{option: value} for --history-dir, --since, --project and --runs (None
+    when absent; --runs becomes its two ids) and --json (True when given).
+    --since must be a real calendar day; --runs takes no --since or
+    --project and two different ids; --json goes with --runs."""
     opts = dict.fromkeys(_OPTIONS + _FLAGS)
     i = 0
     while i < len(args):
@@ -595,6 +598,7 @@ def render_summary(history, hdir, redone, md_path, opts):
 def resolve_run(index, token):
     """The one index entry whose run_id or folder is token; UsageError when
     there is none or more than one (naming their folders)."""
+    token = token.rstrip("/\\")
     hits = [e for e in index["runs"]
             if e.get("run_id") == token or (isinstance(e.get("folder"), str) and e["folder"].rstrip("/\\") == token)]
     if not hits:
@@ -683,7 +687,8 @@ def compare_runs(cards):
     for key, reason in (("task_ids", "tasks differ"), ("lanes", "lanes differ"), ("commands_sha256", "commands differ")):
         if a[key] == UNAVAILABLE or a[key] != b[key]:
             reasons.append(reason)
-    reasons += ["autopsy %s for %s" % (c["autopsy"], c["run_id"]) for c in cards if c["autopsy"] != "current"]
+    reasons += ["autopsy %s for %s (run history first)" % (c["autopsy"], c["run_id"])
+                for c in cards if c["autopsy"] != "current"]
     # Partial token counts are the norm (transcripts keep mid-stream output counts): a note,
     # never a reason, or no real pair would be comparable.
     notes = ["tokens partial for %s: its token totals are lower bounds" % c["run_id"]

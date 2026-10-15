@@ -377,7 +377,7 @@ test('--runs lists every reason two runs are not comparable', () => {
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.json.comparable, false);
   assert.deepEqual(r.json.reasons, ['plan differs', 'tasks differ', 'lanes differ', 'commands differ',
-    'autopsy missing for fa']);
+    'autopsy missing for fa (run history first)']);
   const text = runsOf(hist);
   assert.equal(text.stdout.split('\n')[0], `not comparable: ${r.json.reasons.join('; ')}`);
 });
@@ -407,7 +407,7 @@ test('--runs marks a stale autopsy and a missing plan', () => {
   rmSync(join(b, 'p.md'));
   const r = runsOf(hist, '--json');
   assert.deepEqual([r.json.runs[0].autopsy, r.json.runs[1].plan_sha256], ['stale', 'unavailable']);
-  assert.deepEqual(r.json.reasons, ['plan unavailable for fb', 'autopsy stale for fa']);
+  assert.deepEqual(r.json.reasons, ['plan unavailable for fb', 'autopsy stale for fa (run history first)']);
 });
 
 test('--runs prints no percentage and writes nothing', () => {
@@ -448,4 +448,12 @@ test('--runs with --since or --project is a usage error', () => {
     assert.equal(r.status, 2, JSON.stringify(args));
     assert.match(r.stderr, /usage/);
   }
+});
+
+test('--runs takes a folder name with a trailing slash', () => {
+  const { hist } = comparablePair();
+  const r = spawnSync('python3', [HISTORY, '--history-dir', hist, '--runs', '2026-10-10-fa/,fb', '--json'],
+    { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).runs[0].run_id, 'fa');
 });

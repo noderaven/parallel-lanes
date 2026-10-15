@@ -1359,7 +1359,8 @@ copies a run that ended after a launch into the run history (never a dry run). R
   the pair is comparable: only when the archived plans hash the same, the task ids, lanes and
   commands match and both autopsies are current. Otherwise `not comparable` with every reason.
   Partial token counts (the usual case: transcripts keep mid-stream output counts) are a note,
-  not a reason. It writes nothing, never reruns autopsy and never prints a
+  not a reason. A stale or missing autopsy (every archived run after an `AUTOPSY_VERSION` bump)
+  reads "autopsy stale for <id> (run history first)": a plain `history` run refreshes them. It writes nothing, never reruns autopsy and never prints a
   percentage. An id the index holds twice, or the same run twice, exits 2.
 - **Imported folders are read-only:** do not run their manifests. `--reindex`, `autopsy` and
   `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,
