@@ -70,6 +70,11 @@ skipped as not_applicable.
   compared here and never printed or returned.
 - concurrency: CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS is unset, or lower
   than min(limits.max_parallel_lanes, lane count).
+- host_budget: the lanes at once (as concurrency counts them, lowered to
+  CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS when that is a smaller integer)
+  exceed the logical CPU count (detail "<n> lanes at once, <c> CPUs"); a
+  count that cannot be read is "unknown". A project whose checks run
+  several workers should keep lanes x workers within the CPUs.
 - usage_limit_pause: Claude Code may not pause the run at the usage limit:
   claude --version (on Windows also claude.exe and claude.cmd) is older than
   2.1.271 or cannot be read, or autoContinueAtUsageLimit is false in the
@@ -100,7 +105,7 @@ SKILL_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 # Every check, in the order run_checks runs them.
 CHECKS = ("git_identity", "base_not_current", "python", "dirty_checkout", "shadow_repo",
           "memory", "disk", "python_alias", "heavy_processes", "active_runs", "defender",
-          "concurrency", "usage_limit_pause")
+          "concurrency", "host_budget", "usage_limit_pause")
 # A check recorded more than once keeps the outcome ranked highest.
 _OUTCOME_RANK = {"passed": 0, "skipped": 1, "warning": 2, "failed": 3}
 
@@ -186,6 +191,7 @@ class Probes:
         Windows "commit_limit" and "commit_available" in bytes}, or None.
     disk_free(path) -> the free bytes on path's drive, or None.
     load_average() -> (1-minute load average, CPU count), or None.
+    cpu_count() -> the logical CPU count, or None.
     appx_working_set() -> AppXSvc's working set in bytes (0 when it has no
         process), or None. Windows only.
     defender_exclusions() -> Defender's exclusion paths, or None when they
@@ -202,7 +208,7 @@ class Probes:
 
     def __init__(self, env=None, platform=None, git=None, ls_remote=None, run=None,
                  memory=None, disk_free=None, load_average=None, appx_working_set=None,
-                 defender_exclusions=None, active_runs=None, which=None, read_json=None):
+                 defender_exclusions=None, active_runs=None, which=None, read_json=None, cpu_count=None):
         self.env = dict(os.environ) if env is None else env
         self.platform = sys.platform if platform is None else platform
         self.git = git or self._git
@@ -211,6 +217,7 @@ class Probes:
         self.memory = memory or self._memory
         self.disk_free = disk_free or self._disk_free
         self.load_average = load_average or self._load_average
+        self.cpu_count = cpu_count or os.cpu_count
         self.appx_working_set = appx_working_set or self._appx_working_set
         self.defender_exclusions = defender_exclusions or self._defender_exclusions
         self.active_runs = active_runs or self._active_runs
@@ -936,6 +943,30 @@ def check_concurrency(manifest, probes, report):
         report.passed(check)
 
 
+def check_host_budget(manifest, probes, report):
+    """The lanes running at once (as check_concurrency counts them, lowered
+    to the concurrency variable when it is a smaller integer) against the
+    logical CPU count."""
+    check = "host_budget"
+    lanes = manifest.get("lanes")
+    count = len(lanes) if isinstance(lanes, list) else 0
+    limits = manifest.get("limits") if isinstance(manifest.get("limits"), dict) else {}
+    cap = limits.get("max_parallel_lanes")
+    at_once = min(cap, count) if isinstance(cap, int) and not isinstance(cap, bool) else count
+    value = _shell._getenv(probes.env, CONCURRENCY_VARIABLE)
+    try:
+        at_once = min(at_once, int(value.strip())) if value and value.strip() else at_once
+    except ValueError:
+        pass
+    cpus = _amount(_read(probes.cpu_count))
+    if not cpus:
+        report.warn(check, "unknown")
+    elif at_once > cpus:
+        report.warn(check, "%d lanes at once, %d CPUs" % (at_once, cpus))
+    else:
+        report.passed(check)
+
+
 def _claude_version(probes, reasons):
     """The x.y.z of claude --version, or None (with a reason) when unknown."""
     names = ["claude"]
@@ -1058,6 +1089,7 @@ def run_checks(manifest, probes):
     check_active_runs(manifest, probes, report)
     check_defender(manifest, probes, report)
     check_concurrency(manifest, probes, report)
+    check_host_budget(manifest, probes, report)
     pause = check_usage_limit_pause(probes, report)
     result = report.result()
     result["usage_limit_pause"] = pause

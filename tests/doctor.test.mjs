@@ -103,7 +103,7 @@ function fixture() {
 const CHECK_NAMES = [
   'git_identity', 'base_not_current', 'python', 'dirty_checkout', 'shadow_repo', 'memory',
   'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
-  'usage_limit_pause',
+  'host_budget', 'usage_limit_pause',
 ];
 
 // No scenario may leave a check unrecorded: every result the helpers return
@@ -441,13 +441,15 @@ test('doctor changes nothing', () => {
 // that calls run_checks. The hard checks still run, against the fixture repo.
 
 const GB = 1024 ** 3;
-const WARNING_CHECKS = ['memory', 'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency'];
+const WARNING_CHECKS = ['memory', 'disk', 'python_alias', 'heavy_processes', 'active_runs', 'defender', 'concurrency',
+  'host_budget'];
 // A fake that raises stands for a read that fails.
 const RAISE = 'raise';
 const QUIET = {
   memory: { available: 16 * GB },
   disk_free: 100 * GB,
   load_average: [0.5, 8],
+  cpu_count: 8,
   appx_working_set: 0,
   defender_exclusions: [],
   active_runs: [],
@@ -537,7 +539,7 @@ function snippet(lines, ...args) {
 test('every check records exactly one outcome', () => {
   const f = fixture();
   const r = fakeDoctor(f.manifest());
-  assert.equal(r.checks.length, 13, JSON.stringify(r.checks));
+  assert.equal(r.checks.length, 14, JSON.stringify(r.checks));
   assert.deepEqual(r.checks.map((c) => c.check), CHECK_NAMES);
   const expected = {};
   for (const x of r.failures) expected[x.check] = 'failed';
@@ -621,7 +623,7 @@ test('an unrecorded check is never passed', () => {
       assert.deepEqual(r.skipped.filter((s) => s.check === check), [{ check, reason: 'not_recorded' }]);
     }
   }
-  assert.equal(r.skipped.length, 12);
+  assert.equal(r.skipped.length, 13);
   assert.equal(r.status, 'ok');
 });
 
@@ -739,6 +741,29 @@ test('the concurrency cap warns when below lanes at once', () => {
   // max_parallel_lanes caps the lanes at once.
   const capped = fakeDoctor(f.manifest({}, { lanes, limits: { max_parallel_lanes: 2 } }), { env: { [VAR]: '2' } });
   assert.equal(named(capped.warnings, 'concurrency'), undefined, JSON.stringify(capped));
+});
+
+test('host_budget warns when lanes at once exceed the CPUs', () => {
+  const f = fixture();
+  const lanes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const four = f.manifest({}, { lanes, limits: { max_parallel_lanes: 5 } });
+  const r = fakeDoctor(four, { fakes: { cpu_count: 2 } });
+  assert.equal(named(r.warnings, 'host_budget').detail, '4 lanes at once, 2 CPUs');
+  assert.equal(r.status, 'ok', JSON.stringify(r));
+  // At the boundary it passes.
+  const two = fakeDoctor(f.manifest({}, { lanes: lanes.slice(0, 2), limits: { max_parallel_lanes: 5 } }),
+    { fakes: { cpu_count: 2 } });
+  assert.equal(outcome(two, 'host_budget'), 'passed');
+  // max_parallel_lanes and a lower concurrency variable cap the lanes at once.
+  const capped = fakeDoctor(f.manifest({}, { lanes, limits: { max_parallel_lanes: 2 } }), { fakes: { cpu_count: 2 } });
+  assert.equal(outcome(capped, 'host_budget'), 'passed');
+  const variable = fakeDoctor(four, { fakes: { cpu_count: 2 }, env: { CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS: '2' } });
+  assert.equal(outcome(variable, 'host_budget'), 'passed');
+  // A CPU count that cannot be read is a warning saying unknown, as for the other reads.
+  for (const value of [null, RAISE, 0]) {
+    const unknown = fakeDoctor(four, { fakes: { cpu_count: value } });
+    assert.equal(named(unknown.warnings, 'host_budget').detail, 'unknown', String(value));
+  }
 });
 
 test('real probes run on this platform without error', () => {
@@ -941,5 +966,5 @@ test('usage_limit_pause with a real claude on PATH and malformed settings never 
   assert.match(r.out.usage_limit_pause.reasons.join(' '), /user settings file .* could not be read/);
   assert.equal(outcome(r.out, 'usage_limit_pause'), 'warning');
   assert.equal(named(r.out.failures, 'usage_limit_pause'), undefined);
-  assert.equal(r.out.checks.length, 13);
+  assert.equal(r.out.checks.length, 14);
 });
