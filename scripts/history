@@ -149,21 +149,7 @@ def run_date(entry):
     return UNAVAILABLE
 
 
-def _windows_form(p):
-    return p[1:3] == ":/" or p.startswith("//")
-
-
-def matches_project(entry, name):
-    """Whether the entry's project path is name, or ends in the component
-    name."""
-    project = entry.get("project")
-    if not isinstance(project, str) or not project or project == UNAVAILABLE:
-        return False
-    key = _history._key_form(project)
-    if key == _history._key_form(name):
-        return True
-    last = key.rstrip("/").rsplit("/", 1)[-1]
-    return last == (name.lower() if _windows_form(key) else name)
+matches_project = _history.matches_project
 
 
 def select(entries, since, project):
@@ -179,16 +165,7 @@ def select(entries, since, project):
     return out
 
 
-def run_folder(hdir, entry):
-    """The entry's folder as an absolute path inside hdir; None when it has
-    no usable folder name or the name leads outside hdir."""
-    folder = entry.get("folder")
-    if not isinstance(folder, str) or not folder or os.path.isabs(folder) or _shell._drive_form(folder):
-        return None
-    path = os.path.normpath(os.path.join(hdir, folder))
-    if os.path.normcase(path) == os.path.normcase(os.path.normpath(hdir)) or not _history.inside(path, hdir):
-        return None
-    return path
+run_folder = _history.run_folder
 
 
 # ---- autopsies ----

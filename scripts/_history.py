@@ -41,6 +41,7 @@ protocols is unsupported, and there is no guard against it.
 """
 
 import contextlib
+import datetime
 import json
 import os
 import socket
@@ -161,6 +162,128 @@ def inside(path, folder):
     if p == f:
         return True
     return p.startswith(f.rstrip(os.sep) + os.sep)
+
+
+# ---- selecting runs (shared by scripts/history and scripts/worth-it) ----
+
+UNAVAILABLE = "unavailable"
+
+
+def _windows_form(p):
+    return p[1:3] == ":/" or p.startswith("//")
+
+
+def matches_project(entry, name):
+    """Whether the entry's project path is name, or ends in the component
+    name."""
+    project = entry.get("project")
+    if not isinstance(project, str) or not project or project == UNAVAILABLE:
+        return False
+    key = _key_form(project)
+    if key == _key_form(name):
+        return True
+    last = key.rstrip("/").rsplit("/", 1)[-1]
+    return last == (name.lower() if _windows_form(key) else name)
+
+
+def run_folder(hdir, entry):
+    """The entry's folder as an absolute path inside hdir; None when it has
+    no usable folder name or the name leads outside hdir."""
+    folder = entry.get("folder")
+    if not isinstance(folder, str) or not folder or os.path.isabs(folder) or _shell._drive_form(folder):
+        return None
+    path = os.path.normpath(os.path.join(hdir, folder))
+    if os.path.normcase(path) == os.path.normcase(os.path.normpath(hdir)) or not inside(path, hdir):
+        return None
+    return path
+
+
+# ---- one run's figures (1.6.4) ----
+
+# The engine's phase labels, matched exactly: a lane may be named "Lane verify".
+FIXED_PHASES = ("Pre-flight", "Integrate", "E2E", "Final review", "Verify")
+FINAL_PHASE = "Final review"
+
+
+def _ts(value):
+    """Epoch seconds of an ISO 8601 UTC stamp ('...Z'), or None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _union(spans):
+    total, start, end = 0.0, None, None
+    for s, e in sorted(spans):
+        if start is None:
+            start, end = s, e
+        elif s > end:
+            total += end - start
+            start, end = s, e
+        else:
+            end = max(end, e)
+    return total + (end - start if start is not None else 0.0)
+
+
+def _task_ids(manifest):
+    ids = set()
+    groups = [manifest.get("prelude"), manifest.get("join")]
+    groups += [lane.get("tasks") for lane in manifest.get("lanes") or [] if isinstance(lane, dict)]
+    for group in groups:
+        for task in group if isinstance(group, list) else []:
+            if isinstance(task, dict) and isinstance(task.get("id"), str):
+                ids.add(task["id"])
+    return ids
+
+
+def run_figures(analysis, manifest):
+    """One run's figures from its autopsy analysis, for the latest launch (by
+    its earliest task-agent start) whose agents include agents of a manifest
+    task: {launch, tasks, task_s, fixed_s, final_review_s, wall_s}. task_s is
+    the mean over that launch's tasks of each task's summed agent wall time
+    (every agent with that task: implement, review, fix, re-review,
+    adjudicate); fixed_s the union of its FIXED_PHASES, final_review_s of its
+    FINAL_PHASE, wall_s the span of its phases. None when no launch ran task
+    agents or the data is missing."""
+    time_ = analysis.get("time") if isinstance(analysis, dict) else None
+    agents = time_.get("agents") if isinstance(time_, dict) else None
+    phases = time_.get("phases") if isinstance(time_, dict) else None
+    if not isinstance(agents, list) or not isinstance(phases, list) or not isinstance(manifest, dict):
+        return None
+    ids = _task_ids(manifest)
+    launches = {}
+    for a in agents:
+        if not isinstance(a, dict) or a.get("task") not in ids:
+            continue
+        start, end = _ts(a.get("start")), _ts(a.get("end"))
+        if start is None or end is None or end < start:
+            continue
+        launches.setdefault(a.get("launch"), []).append((a["task"], start, end))
+    if not launches:
+        return None
+    launch = max(launches, key=lambda wf: min(s for _, s, _ in launches[wf]))
+    per_task = {}
+    for task, start, end in launches[launch]:
+        per_task[task] = per_task.get(task, 0.0) + (end - start)
+    spans = []
+    for p in phases:
+        if isinstance(p, dict) and p.get("launch") == launch:
+            start, end = _ts(p.get("start")), _ts(p.get("end"))
+            if start is not None and end is not None and end >= start:
+                spans.append((p.get("phase"), start, end))
+    if not spans:
+        return None
+    return {
+        "launch": launch,
+        "tasks": len(per_task),
+        "task_s": round(sum(per_task.values()) / len(per_task), 1),
+        "fixed_s": round(_union([(s, e) for name, s, e in spans if name in FIXED_PHASES]), 1),
+        "final_review_s": round(_union([(s, e) for name, s, e in spans if name == FINAL_PHASE]), 1),
+        "wall_s": round(max(e for _, _, e in spans) - min(s for _, s, _ in spans), 1),
+    }
 
 
 def _empty():
