@@ -98,6 +98,28 @@ function waveWidth(m) {
   return Math.min(m.limits.max_parallel_lanes, usable);
 }
 
+// The lane worktrees a wave unit can run in: those of the lanes waveWidth
+// counts as usable, in lane order.
+function waveLaneDirs(m) {
+  const own = m.lane_commands || {};
+  return m.lanes.filter((l) => !(Object.prototype.hasOwnProperty.call(own, l.id)
+    && own[l.id] && Object.prototype.hasOwnProperty.call(own[l.id], 'setup'))).map((l) => laneWhere(m, l).dir);
+}
+
+// The checks after the last multi-unit wave (design 4.4): the union of its
+// units' targeted checks (their task_checks entries; a unit without one adds
+// nothing), as [{group, command}] without repeats.
+function waveChecksOf(m, units) {
+  const out = [];
+  for (const unit of units) {
+    const entry = taskChecksEntry(m, unit, 'join');
+    for (const c of entry === null ? [] : entry.checks) {
+      if (!out.some((o) => o.group === c.group && o.command === c.command)) out.push(c);
+    }
+  }
+  return out;
+}
+
 // The join started in an earlier launch: the ledger's join_started (copied
 // into the manifest), or any join task done or deferred (fail-safe).
 function joinStarted(m) {
