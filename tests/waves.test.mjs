@@ -150,3 +150,57 @@ test('_waves.task_waves and join_units', () => {
   const waves = python(['tasks = json.load(sys.stdin)', 'print(json.dumps(_waves.task_waves(tasks)))'], batch);
   assert.deepEqual(waves, { J1: 1, J2: 2, J3: 2, J4: 3 });
 });
+
+// ---- owners.json: join waves and alongside (design 4.8) ----
+
+function owners(lines, input) {
+  return python(['import _owners', ...lines], input);
+}
+const ownerManifest = (extra = {}) => ({
+  repo: { mode: 'git', root: '/r', git_dir: null },
+  prelude: [{ id: 'P1', files: ['p.cs'] }],
+  lanes: [{ id: 'a', tasks: [{ id: 'A1', files: ['a.cs'] }] }, { id: 'b', tasks: [{ id: 'B1', files: ['b.cs'] }] }],
+  join: [{ id: 'J1', files: ['j1.cs'], depends_on: [] }, { id: 'J2', files: ['j2.cs'], depends_on: [] },
+    { id: 'J3', files: ['j3.cs'], depends_on: [{ id: 'J1' }] }],
+  ...extra,
+});
+const relations = (m) => owners([
+  'm = json.load(sys.stdin)',
+  'o = _owners.build(m)',
+  'print(json.dumps({"waves": {t: v.get("wave") for t, v in o["tasks"].items() if v["where"] == "join"},',
+  '  "J1-J2": _owners.relation(o, ["J1"], "J2"), "J2-J1": _owners.relation(o, ["J2"], "J1"),',
+  '  "J3-J2": _owners.relation(o, ["J3"], "J2"), "J1-J3": _owners.relation(o, ["J1"], "J3"),',
+  '  "J1-A1": _owners.relation(o, ["J1"], "A1")}))',
+], m);
+
+test('join tasks in one wave are alongside', () => {
+  const r = relations(ownerManifest());
+  assert.deepEqual(r.waves, { J1: 1, J2: 1, J3: 2 });
+  assert.equal(r['J1-J2'], 'alongside');
+  assert.equal(r['J2-J1'], 'alongside');
+  assert.equal(r['J1-A1'], 'earlier', 'a lane is still earlier than the join');
+});
+
+test('join tasks in different waves are earlier and later', () => {
+  const r = relations(ownerManifest());
+  assert.equal(r['J3-J2'], 'earlier');
+  assert.equal(r['J1-J3'], 'later');
+});
+
+test('owners.json without wave keeps the old relation', () => {
+  const r = owners([
+    'm = json.load(sys.stdin)',
+    'o = _owners.build(m)',
+    'for t in o["tasks"].values(): t.pop("wave", None)',
+    'print(json.dumps([_owners.relation(o, ["J1"], "J2"), _owners.relation(o, ["J2"], "J1")]))',
+  ], ownerManifest());
+  assert.deepEqual(r, ['later', 'earlier']);
+});
+
+test('a join that cannot run in waves gets no wave in owners.json', () => {
+  for (const extra of [{ profile: 'lite' }, { lanes: [{ id: 'a', tasks: [{ id: 'A1', files: ['a.cs'] }] }] }]) {
+    const r = relations(ownerManifest(extra));
+    assert.deepEqual(r.waves, { J1: null, J2: null, J3: null });
+    assert.equal(r['J1-J2'], 'later');
+  }
+});
