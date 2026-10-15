@@ -63,6 +63,8 @@ function agentRules() {
       'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
       'formatters, codemods, and other maintenance commands.',
+    'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
+      'an Edit or Write on a file not read first, or changed since, fails and costs a retry.',
   ].join('\n');
 }
 
