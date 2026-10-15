@@ -2333,15 +2333,28 @@ def _uncovered(start, end, covers):
     return pieces
 
 
+def _procedure_spans(agent):
+    """[(start, end)] of the agent's procedure start and wait calls that
+    returned."""
+    calls = _calls(agent)
+    indexes = set()
+    for start, waits in _procedures(calls).items():
+        indexes.add(start)
+        indexes.update(waits)
+    return [(calls[i]["start"], calls[i]["end"]) for i in sorted(indexes) if calls[i]["end"] is not None]
+
+
 def unexplained_section(run, slowdowns):
     """The largest TOP_UNEXPLAINED spans over IDLE_GAP_S that no slowdown
     covers. Each agent's time is cut at its events (a model turn, a tool
     call); a slowdown covers its own agent's time, and one without an agent
-    (relaunch, idle gap) covers any agent's."""
+    (relaunch, idle gap) covers any agent's. A procedure execution's start
+    and wait calls (_procedures) cover their own time: it is check time,
+    counted in the checks section."""
     found = []
     for a in _timed(_all_agents(run)):
         covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
-                         if owner is None or owner is a])
+                         if owner is None or owner is a] + _procedure_spans(a))
         times = sorted(set([a["start"]] + [e["ts"] for e in a["events"]]))
         for start, end in zip(times, times[1:]):
             for s, e in _uncovered(start, end, covers):

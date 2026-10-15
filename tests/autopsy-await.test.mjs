@@ -192,6 +192,9 @@ test('a procedure check is one measured execution timed from its report', () => 
   assert.deepEqual(kinds(json), []);
   assert.deepEqual(json.checks.waits, { checks_via_procedure: 1, wait_calls: 3, stopped: 0, improvised: NOTHING,
     unwaited: [], left_running: [] });
+  // The waits are the check execution's time (checks section), not open
+  // questions: d1a listed five 541.6 s waits as unexplained.
+  assert.deepEqual(json.unexplained, []);
   // The same calls without a wait are the 1.6.0 background run.
   const bare = buildRun({
     agents: [{ label: 'integrate', phase: 'Integrate', start: '10:00:00', end: '10:13:00', calls: [
