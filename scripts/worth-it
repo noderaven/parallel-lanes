@@ -186,7 +186,8 @@ def scale(hdir, project, notes=None):
                      + (" (%d skipped)" % skipped if skipped else ""))
         return None
     if skipped:
-        notes.append("scale: %d run(s) of this project skipped (no readable autopsy or manifest)" % skipped)
+        notes.append("scale: %d run(s) of this project skipped (no readable autopsy or manifest, or no task agents)"
+                     % skipped)
     times = [t for _, t in found]
     return {"runs": [r for r, _ in found], "task_s_mean": round(sum(times) / len(times), 1),
             "task_s_min": min(times), "task_s_max": max(times)}

@@ -166,7 +166,10 @@ test('scale line from fixture history', () => {
 
 test('scale line matches the project in any path form', () => {
   const h = history([{ id: 'w1', project: 'C:/Studio/Proj', a1: 100, b1: 100 }]);
-  for (const name of ['C:/Studio/Proj', 'c:\\studio\\proj', 'C:/Studio/Proj/', 'Proj']) {
+  // The Git Bash form /c/x is a drive path only on Windows.
+  const forms = ['C:/Studio/Proj', 'c:\\studio\\proj', 'C:/Studio/Proj/', 'Proj']
+    .concat(process.platform === 'win32' ? ['/c/Studio/Proj', '/c/studio/proj/'] : []);
+  for (const name of forms) {
     const r = run([plan(3), '--max-lanes', '2', '--lane', 'T1', '--lane', 'T2,T3', '--project', name, '--history-dir', h]);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(r.json.scale && r.json.scale.runs, ['w1'], name);
@@ -187,6 +190,8 @@ test('scale line skips unreadable or incomplete autopsies', () => {
   const ok = history([{ id: 'k1', project: '/x/proj', a1: 60, b1: 60 }, { id: 'g2', project: '/x/proj', autopsy: 'garbage' }]);
   const s = run([plan(3), '--max-lanes', '2', '--lane', 'T1', '--lane', 'T2,T3', '--project', '/x/proj', '--history-dir', ok]);
   assert.deepEqual(s.json.scale.runs, ['k1']);
+  // The note names every cause a run is skipped for, a run with no task agents included.
+  assert.ok(s.json.notes.some((n) => n.includes('or no task agents')), JSON.stringify(s.json.notes));
 });
 
 test('a malformed archived run never changes the recommendation', () => {
