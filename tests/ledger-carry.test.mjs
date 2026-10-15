@@ -401,7 +401,11 @@ test('a final review result without carried_minors_open raised none of the carri
 // Loads scripts/ledger as a module in a python3 subprocess and runs code with
 // it as L; returns the process result.
 function withLedgerModule(code, args = []) {
-  const loader = `import importlib.machinery, sys; L = importlib.machinery.SourceFileLoader('ledger', sys.argv[1]).load_module()\n${code}`;
+  // spec_from_loader and exec_module, as task-checks loads ledger (load_module is deprecated).
+  const loader = 'import importlib.machinery, importlib.util, sys\n'
+    + "ldr = importlib.machinery.SourceFileLoader('ledger', sys.argv[1])\n"
+    + "L = importlib.util.module_from_spec(importlib.util.spec_from_loader('ledger', ldr))\n"
+    + `ldr.exec_module(L)\n${code}`;
   // -B: no __pycache__ beside the scripts (the suite leaves the checkout unchanged).
   return spawnSync('python3', ['-B', '-c', loader, join(SCRIPTS, 'ledger'), ...args], { encoding: 'utf8' });
 }
