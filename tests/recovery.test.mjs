@@ -287,7 +287,7 @@ test('ledger status --manifest lists the files a task changed outside its Files 
   const status = ok(py('ledger', 'status', c.ledger, '--manifest', c.manifest));
   // T1 declared a.txt (case and ./ do not matter); T2 declared nothing, so
   // there is nothing to compare against.
-  assert.deepEqual(status.undeclared, { T1: ['b.txt'] });
+  assert.deepEqual(status.undeclared, { T1: [{ path: 'b.txt', owner: null, relation: null }] });
 });
 
 test('run_ended events add up to the budget spent across launches', () => {

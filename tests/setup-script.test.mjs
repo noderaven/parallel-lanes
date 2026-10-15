@@ -283,6 +283,18 @@ test('setup: lite runs an identical lane setup only once', () => {
   assertSamePaths(logLines(c), [c.project]);
 });
 
+test('setup writes the owner map from the manifest', () => {
+  const c = newCase();
+  const m = manifest(c, { lanes: [
+    { id: 'a', name: 'Lane A', tasks: [{ id: 'a1', files: ['src/a.js', 'shared.css'] }] },
+    { id: 'b', name: 'Lane B', tasks: [{ id: 'b1', files: ['shared.css'] }] },
+  ] });
+  setupOk(c, m);
+  const owners = JSON.parse(readFileSync(join(c.ledgerDir, 'owners.json'), 'utf8'));
+  assert.deepEqual(owners.files, { 'src/a.js': ['a1'], 'shared.css': ['a1', 'b1'] });
+  assert.deepEqual(owners.tasks, { a1: { where: 'a', pos: 0 }, b1: { where: 'b', pos: 0 } });
+});
+
 test('setup: ledger records run_started and status reports the earliest start point', () => {
   const c = newCase();
   const m = manifest(c);

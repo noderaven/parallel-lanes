@@ -120,6 +120,7 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _locks  # noqa: E402
+import _owners  # noqa: E402
 import _shell  # noqa: E402
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -506,6 +507,14 @@ def setup(m, owner=None):
                          capture_output=True, text=True, encoding="utf-8", errors="replace", env=ENV)
     if res.returncode != 0:
         raise Failure(1, f"ledger append failed: {res.stderr.strip()}")
+    # The owner map start-task --owners and ledger owners read (1.6.3): which
+    # tasks list each path, and where each task runs.
+    owners_file = os.path.join(repo_cfg["ledger_dir"], "owners.json")
+    try:
+        _shell.write_text(owners_file + ".tmp", json.dumps(_owners.build(m), indent=2) + "\n")
+        os.replace(owners_file + ".tmp", owners_file)
+    except OSError as e:
+        raise Failure(1, f"cannot write the owner map {owners_file!r}: {e}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
     return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved,
             "setup_skipped": skipped}

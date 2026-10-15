@@ -238,3 +238,57 @@ test('a 1.6.2 result with pre-flight conflicts: the last pre-flight ruling is th
   assert.deepEqual(out.json, { carried: 'wf_old162-adj', rulings: 1, open_minors: 0 }, out.stderr);
   assert.ok(!rulingsOut(dir).includes('Change to FP3'));
 });
+
+// ---- Task 3: the owner map ----
+
+const otask = (id, files) => ({ id, title: id, files, tier: 'standard', security: false });
+function ownersManifest(dir) {
+  const m = {
+    version: 1, run_id: 'run-1',
+    repo: { mode: 'git', root: dir, git_dir: null, ledger_dir: join(dir, 'ledger') },
+    prelude: [otask('P1', ['a.txt'])],
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [otask('T2', ['src/x.js', 'shared.css']), otask('T3', ['.\\SRC\\x2.js'])] },
+      { id: 'beta', name: 'Lane beta', tasks: [otask('T4', ['src/y.js', 'shared.css'])] },
+    ],
+    join: [otask('J1', ['src/z.js'])],
+  };
+  const path = join(dir, 'm.lanes.json');
+  writeFileSync(path, JSON.stringify(m));
+  return path;
+}
+function ownersOf(dir, ...args) {
+  const res = ledger('owners', dir, ...args);
+  assert.equal(res.code, 0, res.stderr);
+  return res.stdout;
+}
+
+test('write-owners maps every path to the tasks that list it, and owners annotates by run order', () => {
+  const root = freshDir('proj');
+  const dir = join(root, 'ledger');
+  const res = ledger('write-owners', dir, ownersManifest(root));
+  assert.equal(res.code, 0, res.stderr);
+  const map = JSON.parse(readFileSync(join(dir, 'owners.json'), 'utf8'));
+  assert.deepEqual(map.files['shared.css'], ['T2', 'T4']);
+  assert.deepEqual(map.tasks.T3, { where: 'alpha', pos: 1 });
+  const out = ownersOf(dir, '--task', 'T2', 'src/y.js', 'a.txt', 'src/z.js', 'shared.css', 'new.js', 'src/x2.js', 'SRC/X.js');
+  assert.ok(out.includes('src/y.js (owned by T4, another lane, running alongside)'), out);
+  assert.ok(out.includes('a.txt (owned by P1, earlier in the run)'), out);
+  assert.ok(out.includes('src/z.js (owned by J1, later)'), out);
+  assert.ok(out.includes('shared.css (in your Files list; also in T4\'s Files)'), out);
+  assert.ok(out.includes('new.js (no task owns it)'), out);
+  assert.ok(out.includes('src/x2.js (owned by T3, later)'), out);
+  assert.ok(out.includes('SRC/X.js (in your Files list)'), out);
+  // Files entries match normalized: a Windows-form .\SRC\x2.js is src/x2.js.
+  assert.deepEqual(map.files['src/x2.js'], ['T3']);
+  assert.ok(ownersOf(dir, '--task', 'J1', 'src/x.js').includes('owned by T2, earlier in the run'));
+  assert.ok(ownersOf(dir, '--task', 'P1', 'src/x.js').includes('owned by T2, later'));
+  assert.ok(ownersOf(dir, '--task', 'T3', 'src/x.js').includes('owned by T2, earlier in the run'));
+  // A batch unit names all its tasks.
+  assert.ok(ownersOf(dir, '--task', 'T2', '--task', 'T3', 'src/x2.js').includes('(in your Files list)'));
+});
+
+test('owners without an owner map exits 3', () => {
+  const dir = freshDir();
+  assert.equal(ledger('owners', dir, '--task', 'T2', 'a.txt').code, 3);
+});

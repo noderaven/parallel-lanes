@@ -3,7 +3,8 @@
 
 usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
                   [--artifacts ROOT] [--record-start LEDGER_DIR LANE BASE]
-                  [--scope BASE HEAD --declared PATH [--declared PATH ...]]
+                  [--scope BASE HEAD --declared PATH [--declared PATH ...] [--owners FILE]]
+                  [--rulings LEDGER_DIR LANE]
                   --brief TASK_ID OUT [--brief TASK_ID OUT ...]
                   [--also TASK_ID PRODUCER_ID ...]
 
@@ -31,7 +32,17 @@ In order:
              (in DIR) changes that are not a --declared PATH (normalized and
              case-insensitive; a rename changes both paths), one per line
              after a "===== files changed outside the task's Files list ====="
-             line, or "(none)". --scope without --declared exits 2.
+             line, or "(none)". --scope without --declared exits 2. With
+             --owners FILE (the ledger's owners.json, written by setup) each
+             path carries what it is, seen from the --brief tasks: "(owned by
+             X, earlier in the run)", "(owned by X, another lane, running
+             alongside)", "(owned by X, later)" or "(no task owns it)"; a
+             changed declared path that another task also lists follows as
+             "(in your Files list; also in X's Files)". An unreadable FILE
+             exits 3.
+  --rulings  prints `ledger rulings LEDGER_DIR --lane LANE` (LANE "-": every
+             ruling) under a "===== rulings in force =====" line, after the
+             briefs.
 Relative SCRIPT, PLAN and OUT paths resolve against the caller's directory.
 On Windows every path argument may be given in any form (C:\\x, /c/x,
 /tmp/x) and is used in the C:/... form.
@@ -44,6 +55,7 @@ stdout, only on success:
   head: <full sha of DIR's HEAD after any sync>
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
   ===== review package =====           then the script's stdout (--package)
+  ===== rulings in force =====         then the rulings (--rulings)
   ===== files changed outside ... ===== then the paths (--scope)
 
 Exit 0 on success; 1 if git rev-parse HEAD fails after the sync, a written
@@ -65,6 +77,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.dont_write_bytecode = True
 sys.path.insert(0, HERE)
 import _brief  # noqa: E402
+import _owners  # noqa: E402
 import _shell  # noqa: E402
 # Variables that would point git at another repo than the one named.
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -109,7 +122,11 @@ def parse(argv):
     parser.add_argument("--record-start", nargs=3, metavar=("LEDGER_DIR", "LANE", "BASE"))
     parser.add_argument("--scope", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--declared", action="append", default=[], metavar="PATH")
+    parser.add_argument("--owners", metavar="FILE")
+    parser.add_argument("--rulings", nargs=2, metavar=("LEDGER_DIR", "LANE"))
     args = parser.parse_args(argv)
+    if args.owners is not None and args.scope is None:
+        parser.error("--owners needs --scope")
     if args.scope is not None and not args.declared:
         parser.error("--scope needs at least one --declared PATH")
     for task_id, _ in args.brief:
@@ -125,6 +142,10 @@ def parse(argv):
         args.artifacts = native(args.artifacts)
     if args.record_start is not None:
         args.record_start = [native(args.record_start[0]), args.record_start[1], args.record_start[2]]
+    if args.owners is not None:
+        args.owners = native(args.owners)
+    if args.rulings is not None:
+        args.rulings = [native(args.rulings[0]), args.rulings[1]]
     briefed = {task_id for task_id, _ in args.brief}
     for task_id, _ in args.also:
         if task_id not in briefed:
@@ -202,6 +223,16 @@ def run(args):
             fail(1, f"cannot read brief {path!r}: {e}")
         out.append(f"===== brief {task_id}: {path} =====\n{text}")
 
+    if args.rulings is not None:
+        ledger_dir, lane = args.rulings
+        res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "rulings", ledger_dir,
+                              *([] if lane == "-" else ["--lane", lane])],
+                             env=ENV, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if res.returncode != 0:
+            sys.stderr.write(res.stderr)
+            sys.exit(res.returncode)
+        out.append(f"===== rulings in force =====\n{res.stdout}")
+
     if args.package is not None:
         script, base, head_ref, package_out = args.package
         script = _shell.native_path(os.path.abspath(script))
@@ -226,9 +257,20 @@ def run(args):
         if res.returncode != 0:
             fail(1, f"git diff {' '.join(args.scope)} failed in {directory!r}: {res.stderr.strip()}")
         declared = {path_key(p) for p in args.declared}
-        outside = sorted(p for p in res.stdout.splitlines() if p and path_key(p) not in declared)
+        changed = [p for p in res.stdout.splitlines() if p]
+        outside = sorted(p for p in changed if path_key(p) not in declared)
+        lines = outside
+        if args.owners is not None:
+            try:
+                owners = _owners.load(args.owners)
+            except (OSError, ValueError) as e:
+                fail(3, f"cannot read the owner map {args.owners!r}: {e}")
+            unit = [task_id for task_id, _ in args.brief]
+            shared = sorted(p for p in changed if path_key(p) in declared
+                            and any(t not in unit for t in owners["files"].get(_owners.path_key(p), [])))
+            lines = [f"{p} ({_owners.annotate(owners, unit, p)})" for p in outside + shared]
         out.append("===== files changed outside the task's Files list =====\n"
-                   + ("\n".join(outside) if outside else "(none)") + "\n")
+                   + ("\n".join(lines) if lines else "(none)") + "\n")
 
     if start_base is not None:
         ledger_dir, lane, _ = args.record_start

@@ -9,6 +9,12 @@ usage:
   ledger accept DIR CHECKOUT HEAD TEXT
   ledger ended DIR STATUS AGENTS RULINGS
   ledger conditions DIR WF_ID DOCTOR_FILE
+  ledger rulings DIR [--lane LANE]
+  ledger carry-launch DIR TRANSCRIPT_DIR|WF_ID
+  ledger minors DIR
+  ledger write-owners DIR MANIFEST
+  ledger owners DIR --task ID [--task ID ...] PATH ...
+  ledger undeclared DIR
 
 append writes JSON as one line to DIR/<LANE>.jsonl, creating DIR with mode
 0700. JSON must be an object with a safe non-empty string 'task' (or "_run")
@@ -33,6 +39,46 @@ and an 'event' of:
   accepted     with 'text': non-empty string and 'head': non-empty string (the
                user explicitly accepted that revision despite named reasons or
                warnings; 'ledger accept' writes it)
+  minors       task _run only, with 'wf' and 'open': a list of objects (the
+               task minors still open after that launch: id, task, file, line,
+               issue, fix) and 'covered': task ids; carry-launch writes it
+  carried      task _run only, with 'wf', 'pf' ({"PF-n": ruling id}) and
+               'bound' ([{file, line}]); carry-launch writes it last, once per
+               launch
+A ruling may carry 'by' (implementer, reviewer, adjudicator, preflight; none:
+a task agent before 1.6.3, read as an implementer), 'scope' (lane, run),
+'overrides' and 'files' (lists of strings), 'pf' (PF-n) and 'wf'. The values
+are checked, not whether an agent told the truth.
+
+rulings prints the rulings in force, one per line: '<id> [<role>, <task>,
+<scope>] <text>', then ' (overrides <ids>)' (an id that resolves to no ruling
+marked '(unknown)') and ' (files <paths>)'; then 'Overridden:' and '<id> by
+<id>' for each ruling another overrides; '(none)' when there is none. A
+ruling's id is '<file stem>-R<n>', n counting that file's rulings in append
+order. A PF-n in 'overrides' resolves through the carried event that bound
+the ruling. With --lane LANE: the rulings of _run, prelude and LANE, and every
+one whose scope is run (a ruling's scope defaults to run in _run, else lane).
+
+carry-launch reads a launch's Workflow result file (from its transcript dir,
+or for a wf id from <CLAUDE_CONFIG_DIR or ~/.claude>/projects/*/*/workflows/
+<wf>.json) and appends, once per wf: each of result.preflight.rulings as a
+ruling by preflight with scope run and pf PF-<n> (the adjudication at
+preflight.adjudicated is skipped: the adjudicator recorded it; a result
+without that field and with conflicts has it last); a minors event; and a
+carried event binding every ruling whose overrides name a PF-n no earlier
+carried event bound. The open minors: the previous snapshot's, less the
+entries of tasks done in this launch and the carried ids this launch's final
+review raised, plus each task done in this launch's minor_findings less the
+ids the final review raised (none without one). Prints {"carried", "rulings",
+"open_minors"}, or {"carried", "already": true}; exit 3 and nothing written
+when no readable result is found.
+
+minors prints the latest snapshot: '[<id>] <task> <file>:<line> - <issue>
+(fix: <fix>)' per minor, or '(none)'. write-owners writes DIR/owners.json
+from MANIFEST (setup writes the same file itself); owners prints, for each
+PATH, what it is seen from the given tasks (see start-task --owners);
+undeclared prints status --manifest's undeclared from owners.json instead of
+a manifest. Both exit 3 without a readable owners.json.
 
 reviewed appends a reviewed event for TASK with ROUNDS, the sha256 of TASK's
 own section in PLAN (what the review approved against; _brief.section_sha256)
@@ -89,10 +135,16 @@ setup run_started events without a run_ended (their agents are not counted). acc
 With --manifest MANIFEST (and --plan), a reviewed task whose depends_on names a
 stale task is stale too ("it depends on <id>, whose approval is stale"),
 transitively, in run order. undeclared (with --manifest; else {}): {task:
-[paths]} for each task with a recorded range and a non-empty files list whose
-range changes a path (git diff --name-only --no-renames base head) that is not
-in its files, nor in the files of a task with the same range (a batch);
-paths compare normalized and case-insensitively, non-ASCII ones unquoted.
+[{path, owner, relation}]} for each task with a recorded range and a non-empty
+files list whose range changes a path (git diff --name-only --no-renames base
+head) that is not in its files, nor in the files of a task with the same range
+(a batch); paths compare normalized and case-insensitively, non-ASCII ones
+unquoted. owner is the first other task whose files list the path (null when
+none does) and relation when that task runs: earlier, alongside or later.
+minors: {"open": [ids], "covered": [task ids]} from the latest minors event
+(empty lists without one). overrides: [{id, by, task, overrides, unknown}] for
+each ruling that names others it departs from (resolved; unknown lists the
+ones that name no ruling).
 A missing DIR has empty lists, no start points, and no carry.
 
 accept appends {"task": "_run", "event": "accepted", "head": <full sha>,
@@ -155,6 +207,7 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _brief  # noqa: E402
+import _owners  # noqa: E402
 import _shell  # noqa: E402
 
 LANE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
@@ -568,7 +621,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
 
     undeclared = {}
     if manifest is not None:
-        undeclared = undeclared_files(manifest, ranges)
+        undeclared = annotated_undeclared(manifest, ranges)
 
     return {
         "done": list(done),
@@ -748,6 +801,75 @@ def overrides_list(directory):
              "overrides": [t for t, _ in resolved[r["id"]]],
              "unknown": [t for t, known in resolved[r["id"]] if not known]}
             for r in records if resolved[r["id"]]]
+
+
+def annotated_undeclared(manifest, ranges, owners=None):
+    """undeclared_files with each path's owner: {task: [{path, owner,
+    relation}]}, owner the first other task listing the path (None when no
+    task does) and relation earlier, alongside or later (None likewise)."""
+    owners = owners or _owners.build(manifest)
+    out = {}
+    for tid, paths in undeclared_files(manifest, ranges).items():
+        rows = []
+        for p in paths:
+            owner, rel = _owners.first_owner(owners, [tid], p)
+            rows.append({"path": p, "owner": owner, "relation": rel})
+        out[tid] = rows
+    return out
+
+
+def manifest_from_owners(owners):
+    """The parts of a manifest undeclared_files reads, rebuilt from an owner
+    map: the repo, and each task with its Files in its list."""
+    files_of = {}
+    for key, ids in owners["files"].items():
+        for tid in ids:
+            files_of.setdefault(tid, []).append(key)
+    lists = {}
+    for tid, where in owners["tasks"].items():
+        lists.setdefault(where["where"], []).append((where["pos"], {"id": tid, "files": files_of.get(tid, [])}))
+    ordered = {w: [t for _, t in sorted(items, key=lambda x: x[0])] for w, items in lists.items()}
+    return {"repo": owners.get("repo") or {}, "prelude": ordered.pop("prelude", []),
+            "join": ordered.pop("join", []), "lanes": [{"id": w, "tasks": ts} for w, ts in ordered.items()]}
+
+
+def owners_path(directory):
+    return os.path.join(directory, "owners.json")
+
+
+def load_owners(directory):
+    try:
+        return _owners.load(owners_path(directory))
+    except (OSError, ValueError) as e:
+        fail(3, f"cannot read the owner map {owners_path(directory)!r}: {e}")
+
+
+def write_owners(directory, manifest_path):
+    """Write <directory>/owners.json from the manifest (setup runs this)."""
+    data = _owners.build(load_manifest(manifest_path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = owners_path(directory) + ".tmp"
+    try:
+        _shell.write_text(tmp, json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, owners_path(directory))
+    except OSError as e:
+        fail(3, f"cannot write {owners_path(directory)!r}: {e}")
+    print(json.dumps({"owners": owners_path(directory), "files": len(data["files"])}))
+
+
+def owners(directory, unit_ids, paths):
+    """Print what each path is, seen from the unit's tasks."""
+    data = load_owners(directory)
+    for p in paths:
+        print(f"{p} ({_owners.annotate(data, unit_ids, p)})")
+
+
+def undeclared(directory):
+    """Print the owner-annotated files each task changed outside its Files
+    list, from the owner map and the ledger's ranges."""
+    data = load_owners(directory)
+    result, _ = summarize(read_events(directory))
+    print(json.dumps(annotated_undeclared(manifest_from_owners(data), result["ranges"], data)))
 
 
 def status(directory, plan=None, spec=None, manifest_path=None):
@@ -1055,7 +1177,8 @@ def conditions(directory, wf_id, doctor_file):
 
 
 PATH_ARGS = {"append": (1,), "reviewed": (1, 5, 6, 9), "status": (1,), "backfill": (1, 2), "accept": (1, 2),
-             "ended": (1,), "conditions": (1, 3), "rulings": (1,), "minors": (1,), "carry-launch": (1,)}
+             "ended": (1,), "conditions": (1, 3), "rulings": (1,), "minors": (1,), "carry-launch": (1,), "write-owners": (1, 2), "owners": (1,),
+             "undeclared": (1,)}
 PATH_OPTIONS = ("--plan", "--spec", "--manifest")
 
 
@@ -1103,6 +1226,18 @@ def main(argv):
         rulings(argv[1], argv[3] if len(argv) == 4 and argv[3] != "-" else None)
     elif len(argv) == 2 and argv[0] == "minors" and argv[1]:
         minors(argv[1])
+    elif len(argv) == 3 and argv[0] == "write-owners" and argv[1] and argv[2]:
+        write_owners(argv[1], argv[2])
+    elif len(argv) == 2 and argv[0] == "undeclared" and argv[1]:
+        undeclared(argv[1])
+    elif len(argv) >= 4 and argv[0] == "owners" and argv[1] and argv[2] == "--task":
+        rest, unit = argv[2:], []
+        while len(rest) >= 2 and rest[0] == "--task" and LANE.fullmatch(rest[1]):
+            unit.append(rest[1])
+            rest = rest[2:]
+        if not unit or not rest:
+            fail(2, "usage: ledger owners DIR --task ID [--task ID ...] PATH ...")
+        owners(argv[1], unit, rest)
     elif len(argv) == 3 and argv[0] == "carry-launch" and argv[1] and argv[2]:
         source = argv[2] if WF_ID.fullmatch(argv[2]) else _shell.native_path(argv[2])
         carry_launch(argv[1], source)
