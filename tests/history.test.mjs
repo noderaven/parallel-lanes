@@ -316,3 +316,117 @@ test('--since and --project filter runs', () => {
   assert.equal(res.code, 2);
   assert.match(res.stderr, /index\.json/);
 });
+
+// ---- history --runs A,B (1.6.4) ----
+
+// A history of fa and fb with the same archived plan and current autopsies
+// (made by a plain history run first).
+function comparablePair() {
+  const h = makeHistory();
+  for (const dir of [h.a, h.b]) writeFileSync(join(dir, 'p.md'), '# Plan\n\n### Task A1: x\n');
+  historyOk(h.hist);
+  return h;
+}
+function runsOf(hist, ...extra) {
+  const r = spawnSync('python3', [HISTORY, '--history-dir', hist, '--runs', 'fa,fb', ...extra],
+    { encoding: 'utf8', env: cleanEnv() });
+  let json = null;
+  try { json = JSON.parse(r.stdout); } catch { /* text output */ }
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, json };
+}
+
+test('--runs compares two runs of the same plan as comparable', () => {
+  const { hist } = comparablePair();
+  const r = runsOf(hist, '--json');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json.comparable, true, JSON.stringify(r.json.reasons));
+  assert.deepEqual(r.json.reasons, []);
+  const [fa, fb] = r.json.runs;
+  assert.deepEqual([fa.run_id, fb.run_id], ['fa', 'fb']);
+  assert.equal(fa.plan_sha256, fb.plan_sha256);
+  assert.match(fa.plan_sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(fa.lanes, ['a', 'b']);
+  assert.deepEqual(fa.task_ids, fb.task_ids);
+  assert.equal(fa.commands_sha256, fb.commands_sha256);
+  assert.deepEqual([fa.autopsy, fb.autopsy], ['current', 'current']);
+  for (const key of ['wall_s', 'fixed_s', 'task_s', 'full_suite_s', 'tokens_total', 'tokens_partial', 'engine_version',
+    'claude_code_version', 'launches', 'status', 'acceptance', 'folder', 'plan']) {
+    assert.ok(key in fa, key);
+  }
+  const text = runsOf(hist);
+  assert.equal(text.code, 0, text.stderr);
+  assert.equal(text.stdout.split('\n')[0], 'comparable');
+});
+
+test('--runs lists every reason two runs are not comparable', () => {
+  const { hist, a, b } = comparablePair();
+  writeFileSync(join(b, 'p.md'), '# Plan\n\n### Task A1: changed\n');
+  editJson(join(b, 'p.lanes.json'), (m) => {
+    m.lanes[1].id = 'c';
+    m.lanes[1].tasks.push({ id: 'Z9', title: 'Z9', tier: 'standard' });
+    m.commands.test = ['npm test'];
+  });
+  rmSync(join(a, 'autopsy.json'));
+  editLines(join(b, 'wf_1', 'agent-a2.jsonl'), (lines) => {
+    lines[2] = lines[2].slice(0, 60);
+    return lines;
+  });
+  historyOk(hist);
+  rmSync(join(a, 'autopsy.json'));
+  const r = runsOf(hist, '--json');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.json.comparable, false);
+  assert.deepEqual(r.json.reasons, ['plan differs', 'tasks differ', 'lanes differ', 'commands differ',
+    'autopsy missing for fa', 'tokens partial for fb']);
+  const text = runsOf(hist);
+  assert.equal(text.stdout.split('\n')[0], `not comparable: ${r.json.reasons.join('; ')}`);
+});
+
+test('--runs marks a stale autopsy and a missing plan', () => {
+  const { hist, a, b } = comparablePair();
+  editJson(join(a, 'autopsy.json'), (x) => { x.autopsy_version = 1; });
+  rmSync(join(b, 'p.md'));
+  const r = runsOf(hist, '--json');
+  assert.deepEqual([r.json.runs[0].autopsy, r.json.runs[1].plan_sha256], ['stale', 'unavailable']);
+  assert.deepEqual(r.json.reasons, ['plan unavailable for fb', 'autopsy stale for fa']);
+});
+
+test('--runs prints no percentage and writes nothing', () => {
+  const { hist, a } = comparablePair();
+  const before = ['history.json', 'history.md'].map((n) => readFileSync(join(hist, n), 'utf8'));
+  const autopsyBefore = readFileSync(join(a, 'autopsy.json'), 'utf8');
+  rmSync(join(a, 'autopsy.md'));
+  const r = runsOf(hist);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(!r.stdout.includes('%'), r.stdout);
+  assert.deepEqual(['history.json', 'history.md'].map((n) => readFileSync(join(hist, n), 'utf8')), before);
+  // It never reruns autopsy: the stale run stays as it was.
+  assert.equal(readFileSync(join(a, 'autopsy.json'), 'utf8'), autopsyBefore);
+  assert.ok(!existsSync(join(a, 'autopsy.md')));
+});
+
+test('--runs refuses ambiguous ids', () => {
+  const { hist } = comparablePair();
+  const same = spawnSync('python3', [HISTORY, '--history-dir', hist, '--runs', 'fa,fa'], { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(same.status, 2);
+  assert.match(same.stderr, /twice|same run/);
+  // An id the index holds twice: both folders are named.
+  editJson(join(hist, 'index.json'), (idx) => { idx.runs.push({ ...idx.runs[0], folder: '2026-10-11-fa' }); });
+  const dup = spawnSync('python3', [HISTORY, '--history-dir', hist, '--runs', 'fa,fb'], { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(dup.status, 2);
+  assert.match(dup.stderr, /2026-10-10-fa/);
+  assert.match(dup.stderr, /2026-10-11-fa/);
+  const missing = spawnSync('python3', [HISTORY, '--history-dir', hist, '--runs', 'fb,nope'], { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /nope/);
+});
+
+test('--runs with --since or --project is a usage error', () => {
+  const { hist } = comparablePair();
+  for (const extra of [['--since', '2026-10-01'], ['--project', 'proj'], []]) {
+    const args = extra.length ? ['--runs', 'fa,fb', ...extra] : ['--runs', 'fa'];
+    const r = spawnSync('python3', [HISTORY, '--history-dir', hist, ...args], { encoding: 'utf8', env: cleanEnv() });
+    assert.equal(r.status, 2, JSON.stringify(args));
+    assert.match(r.stderr, /usage/);
+  }
+});

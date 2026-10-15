@@ -4,6 +4,7 @@ trends by engine version, and suggestions ranked across runs.
 
 usage:
   python3 history [--history-dir DIR] [--since YYYY-MM-DD] [--project NAME]
+  python3 history --runs A,B [--json] [--history-dir DIR]
 
 The history dir is _history.history_dir(DIR): --history-dir, else
 PL_HISTORY_DIR, else <CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/history.
@@ -74,9 +75,34 @@ history.md is plain ASCII: the per-run table, recurring slowdowns, token
 trends, suggestions and the insufficient-data list. Neither file holds
 command, output or prompt text.
 
+history --runs A,B compares two runs (each a run id or a folder name) and
+writes nothing: it never runs autopsy, so a run whose autopsy is missing or
+not current (as above) is reported as such. It prints text, or with --json:
+
+  {"runs": [<run>, <run>], "comparable": bool, "reasons": [str]}
+
+where each run has run_id, folder, plan, plan_sha256 (of the archived plan:
+the file in the run folder named as the index entry's plan; unavailable when
+absent), task_ids (sorted), lanes (lane ids in order), commands_sha256 (of
+the manifest's commands, keys sorted), engine_version, claude_code_version
+(the most common version in the transcripts' first lines), launches,
+status, acceptance, wall_s, fixed_s, task_s (_history.run_figures),
+full_suite_s (the sum of median_s of the project_suite entries of
+checks.commands), tokens_total, tokens_partial and autopsy (current, stale
+or missing); a figure that cannot be read is "unavailable". The pair is
+comparable only when none of these reasons holds, listed in this order:
+"plan unavailable for <id>", "plan differs", "tasks differ", "lanes differ",
+"commands differ", "autopsy <stale|missing> for <id>", "tokens partial for
+<id>". The text starts with "comparable" or "not comparable: <reasons>",
+then the values of each run side by side; never a percentage. --runs with
+--since or --project, the same run twice, an id the index does not hold or
+holds more than once (all its folders are named) exit 2.
+
 Exit 0 on success; 2 on a usage error, a history dir or index.json that
 cannot be read, or history.json and history.md that cannot be written.
 """
+import glob
+import hashlib
 import json
 import os
 import re
@@ -90,11 +116,13 @@ import _history  # noqa: E402
 import _shell  # noqa: E402
 
 UNAVAILABLE = _autopsy.UNAVAILABLE
-USAGE = "usage: history [--history-dir DIR] [--since YYYY-MM-DD] [--project NAME]"
+USAGE = ("usage: history [--history-dir DIR] [--since YYYY-MM-DD] [--project NAME]\n"
+         "       history --runs A,B [--json] [--history-dir DIR]")
 SUMMARY_MAX_LINES = 15
 TOP_RECURRING = 3
 _DAY = re.compile(r"^(\d{4}-\d\d-\d\d)")
-_OPTIONS = ("--history-dir", "--since", "--project")
+_OPTIONS = ("--history-dir", "--since", "--project", "--runs")
+_FLAGS = ("--json",)
 UNCLEAN_TEXT = ("The checks likely ran on uncommitted changes or with untracked files in the checkout. "
                 + _autopsy.UNCLEAN_TEXT)
 
@@ -109,10 +137,14 @@ class UsageError(Exception):
 def parse_args(args):
     """{option: value} for --history-dir, --since and --project (None when
     absent). --since must be a real calendar day."""
-    opts = dict.fromkeys(_OPTIONS)
+    opts = dict.fromkeys(_OPTIONS + _FLAGS)
     i = 0
     while i < len(args):
         a = args[i]
+        if a in _FLAGS:
+            opts[a] = True
+            i += 1
+            continue
         if a not in _OPTIONS:
             raise UsageError("unknown argument " + a)
         if i + 1 >= len(args) or not args[i + 1] or args[i + 1] in _OPTIONS:
@@ -127,6 +159,17 @@ def parse_args(args):
             ok = False
         if not ok:
             raise UsageError("--since needs a date as YYYY-MM-DD, not " + since)
+    if opts["--runs"] is not None:
+        if opts["--since"] is not None or opts["--project"] is not None:
+            raise UsageError("--runs compares two runs; it takes no --since or --project")
+        pair = [x.strip() for x in opts["--runs"].split(",")]
+        if len(pair) != 2 or not all(pair):
+            raise UsageError("--runs needs two runs, as A,B")
+        if pair[0] == pair[1]:
+            raise UsageError("--runs names the same run twice")
+        opts["--runs"] = pair
+    elif opts["--json"]:
+        raise UsageError("--json goes with --runs")
     return opts
 
 
@@ -545,6 +588,123 @@ def render_summary(history, hdir, redone, md_path, opts):
     return "\n".join(lines) + "\n"
 
 
+# ---- history --runs A,B ----
+
+def resolve_run(index, token):
+    """The one index entry whose run_id or folder is token; UsageError when
+    there is none or more than one (naming their folders)."""
+    hits = [e for e in index["runs"]
+            if e.get("run_id") == token or (isinstance(e.get("folder"), str) and e["folder"].rstrip("/\\") == token)]
+    if not hits:
+        raise UsageError("no run " + token + " in the index")
+    if len(hits) > 1:
+        raise UsageError("run " + token + " is in the index more than once: "
+                         + ", ".join(str(e.get("folder")) for e in hits))
+    return hits[0]
+
+
+def _sha256_file(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return UNAVAILABLE
+
+
+def _claude_code_version(folder, lines_per_file=50):
+    """The most common 'version' in the first lines of the run's agent
+    transcripts, else UNAVAILABLE."""
+    counts = {}
+    for wf in _autopsy.wf_dirs(folder):
+        for path in sorted(glob.glob(os.path.join(glob.escape(wf), "agent-*.jsonl"))):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for n, line in enumerate(f):
+                        if n >= lines_per_file:
+                            break
+                        try:
+                            version = json.loads(line).get("version")
+                        except (ValueError, AttributeError):
+                            continue
+                        if isinstance(version, str) and version:
+                            counts[version] = counts.get(version, 0) + 1
+            except OSError:
+                continue
+    return max(sorted(counts), key=lambda v: counts[v]) if counts else UNAVAILABLE
+
+
+def run_card(hdir, entry):
+    """One run's values for --runs (see the usage text)."""
+    folder = run_folder(hdir, entry)
+    data = _read_json(os.path.join(folder, "autopsy.json")) if folder else None
+    if not isinstance(data, dict):
+        data, state = {}, "missing"
+    else:
+        state = "current" if current_autopsy(folder) is not None else "stale"
+    manifest_path = _autopsy.find_manifest(folder) if folder and os.path.isdir(folder) else None
+    manifest = _read_json(manifest_path) if manifest_path else None
+    manifest = manifest if isinstance(manifest, dict) else {}
+    plan = entry.get("plan") if _known(entry.get("plan")) else UNAVAILABLE
+    plan_name = plan.replace("\\", "/").rsplit("/", 1)[-1] if plan != UNAVAILABLE else ""
+    plan_sha = _sha256_file(os.path.join(folder, plan_name)) if folder and plan_name else UNAVAILABLE
+    lanes = manifest.get("lanes") if isinstance(manifest.get("lanes"), list) else None
+    ids = sorted(_history._task_ids(manifest)) if manifest else UNAVAILABLE
+    commands = manifest.get("commands")
+    row = build_row(entry, data)
+    figures = _history.run_figures(data, manifest) or {}
+    costs = _dig(data, "checks", "commands")
+    suite = [c.get("median_s") for c in costs if isinstance(c, dict) and c.get("project_suite")] \
+        if isinstance(costs, list) else []
+    return {
+        "run_id": row["run_id"], "folder": row["folder"], "plan": plan, "plan_sha256": plan_sha,
+        "task_ids": ids,
+        "lanes": [lane.get("id") for lane in lanes if isinstance(lane, dict)] if lanes is not None else UNAVAILABLE,
+        "commands_sha256": hashlib.sha256(json.dumps(commands, sort_keys=True).encode("utf-8")).hexdigest()
+        if commands is not None else UNAVAILABLE,
+        "engine_version": row["engine_version"],
+        "claude_code_version": _claude_code_version(folder) if folder and os.path.isdir(folder) else UNAVAILABLE,
+        "launches": entry.get("launches", UNAVAILABLE), "status": entry.get("status", UNAVAILABLE),
+        "acceptance": row["acceptance"],
+        "wall_s": figures.get("wall_s", UNAVAILABLE), "fixed_s": figures.get("fixed_s", UNAVAILABLE),
+        "task_s": figures.get("task_s", UNAVAILABLE),
+        "full_suite_s": round(sum(suite), 1) if suite and all(_num(x) for x in suite) else UNAVAILABLE,
+        "tokens_total": row["tokens_total"], "tokens_partial": row["tokens_partial"], "autopsy": state,
+    }
+
+
+def compare_runs(cards):
+    """{runs, comparable, reasons} for two run cards."""
+    a, b = cards
+    reasons = ["plan unavailable for " + c["run_id"] for c in cards if c["plan_sha256"] == UNAVAILABLE]
+    if not reasons and a["plan_sha256"] != b["plan_sha256"]:
+        reasons.append("plan differs")
+    for key, reason in (("task_ids", "tasks differ"), ("lanes", "lanes differ"), ("commands_sha256", "commands differ")):
+        if a[key] == UNAVAILABLE or a[key] != b[key]:
+            reasons.append(reason)
+    reasons += ["autopsy %s for %s" % (c["autopsy"], c["run_id"]) for c in cards if c["autopsy"] != "current"]
+    reasons += ["tokens partial for " + c["run_id"] for c in cards if c["tokens_partial"] is True]
+    return {"runs": cards, "comparable": not reasons, "reasons": reasons}
+
+
+def render_runs(result):
+    """The text form: the verdict, then each value of both runs."""
+    lines = ["comparable" if result["comparable"] else "not comparable: " + "; ".join(result["reasons"])]
+    a, b = result["runs"]
+    for key in a:
+        show = lambda v: ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)  # noqa: E731
+        lines.append("%s: %s | %s" % (key, show(a[key]), show(b[key])))
+    return "\n".join(_ascii(line) for line in lines) + "\n"
+
+
+def runs_main(hdir, index, pair, as_json):
+    entries = [resolve_run(index, token) for token in pair]
+    if entries[0] is entries[1]:
+        raise UsageError("--runs names the same run twice")
+    result = compare_runs([run_card(hdir, e) for e in entries])
+    sys.stdout.write(json.dumps(result, indent=2) + "\n" if as_json else render_runs(result))
+    return 0
+
+
 def main(argv):
     _shell.setup_io()
     try:
@@ -562,6 +722,12 @@ def main(argv):
     except _history.HistoryError as e:
         print("history: " + str(e), file=sys.stderr)
         return 2
+    if opts["--runs"] is not None:
+        try:
+            return runs_main(hdir, index, opts["--runs"], bool(opts["--json"]))
+        except UsageError as e:
+            print("history: " + str(e), file=sys.stderr)
+            return 2
     selected = select(index["runs"], opts["--since"], opts["--project"])
     analyses = []
     redone = 0
