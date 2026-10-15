@@ -297,6 +297,12 @@ Other things to know:
   stop the run for you instead. You can switch modes when the table is shown. A task the
   adjudicator parks is deferred, never counted as delivered; security tasks are never
   parked, and `allow_deferral: false` forbids parking altogether.
+- **Carry-over.** Rulings (pre-flight's, the adjudicator's, implementers') live in the ledger
+  and bind every agent that starts after them, a relaunch included; a relaunch's pre-flight
+  never re-rules work already built. Task minors an earlier launch left open reach the final
+  review, where one reviewer owns the checklist. A task that changes a file another lane or a
+  later task owns needs a ruling first; edits to earlier tasks' files are flagged. See
+  `reference.md` ("Carry-over").
 - **Transient failures** (agent errors, missing results) relaunch once automatically.
   Anything substantive stops the run and asks you.
 - **Where files go.** Manifests and ledgers are stored beside the plan, or under

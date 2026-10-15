@@ -105,7 +105,7 @@ function planAgents(m) {
     }
   };
 
-  if (!lite) add('Pre-flight', null, null, 'preflight', standard);
+  if (!lite && preflightNeeded(m)) add('Pre-flight', null, null, 'preflight', standard);
   addTasks('Prelude', null, m.prelude);
   for (const lane of m.lanes) addTasks(lane.name, lane.id, lane.tasks);
   if (!lite) {
@@ -197,6 +197,14 @@ function taskState(m, id) {
 // Tasks of a group (prelude, a lane, join) that still need an agent.
 function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
+}
+
+// Pre-flight checks the plan for the tasks still to run. On a relaunch where
+// every task is done and reviewed there is none, and a pre-flight there could
+// only re-rule work already built (f1a's resume: a new ruling changed built
+// code through the final review), so neither the run nor the plan has one.
+function preflightNeeded(m) {
+  return hasWork(m, [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]);
 }
 
 // The task_checks entry a unit uses (spec 4.1): its task's, or for a batch

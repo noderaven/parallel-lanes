@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.2: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.3: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -714,6 +714,24 @@ function validateManifest(m) {
     }
   }
 
+  // carried_minors (1.6.3): the open task minors an earlier launch left, as
+  // ledger status prints them: {open: [minor ids], covered: [task ids]}.
+  if ('carried_minors' in m) {
+    const c = m.carried_minors;
+    const ids = (v) => Array.isArray(v) && v.every(isText);
+    if (!isObject(c) || !ids(c.open) || !ids(c.covered)) {
+      err('carried_minors: must be {open: [minor ids], covered: [task ids]}');
+    }
+  }
+  // inputs_changed (1.6.3): whether the plan and the spec changed since the
+  // last launch (ledger status inputs), for a relaunch's pre-flight.
+  if ('inputs_changed' in m) {
+    const flag = (v) => v === true || v === false || v === null;
+    const c = m.inputs_changed;
+    if (!isObject(c) || !('plan' in c) || !('spec' in c) || !flag(c.plan) || !flag(c.spec)) {
+      err('inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
+    }
+  }
   // start_points: feature heads from the ledger run_started events.
   if ('start_points' in m) {
     if (!isObject(m.start_points)) {
@@ -852,7 +870,7 @@ function planAgents(m) {
     }
   };
 
-  if (!lite) add('Pre-flight', null, null, 'preflight', standard);
+  if (!lite && preflightNeeded(m)) add('Pre-flight', null, null, 'preflight', standard);
   addTasks('Prelude', null, m.prelude);
   for (const lane of m.lanes) addTasks(lane.name, lane.id, lane.tasks);
   if (!lite) {
@@ -944,6 +962,14 @@ function taskState(m, id) {
 // Tasks of a group (prelude, a lane, join) that still need an agent.
 function hasWork(m, tasks) {
   return tasks.some((t) => taskState(m, t.id) !== 'skip');
+}
+
+// Pre-flight checks the plan for the tasks still to run. On a relaunch where
+// every task is done and reviewed there is none, and a pre-flight there could
+// only re-rule work already built (f1a's resume: a new ruling changed built
+// code through the final review), so neither the run nor the plan has one.
+function preflightNeeded(m) {
+  return hasWork(m, [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]);
 }
 
 // The task_checks entry a unit uses (spec 4.1): its task's, or for a batch
@@ -1076,6 +1102,19 @@ function ledgerCommand(m, laneId, entry, dir) {
   const ledger = `${m.skill_dir}/scripts/ledger`;
   return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(ledger)} append ${shellQuote(m.repo.ledger_dir)} ` +
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
+}
+
+// A read-only ledger command (1.6.3: rulings, minors, owners, undeclared),
+// started in the agent's checkout dir like every helper command it is given.
+function ledgerReadCommand(m, dir, sub, ...args) {
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} ${sub} `
+    + `${shellQuote(m.repo.ledger_dir)}${args.map((a) => ` ${a}`).join('')}`;
+}
+
+// The lines every agent after the task loop gets: the full rulings print,
+// run from dir (the agent's checkout).
+function rulingsReadLines(m, dir) {
+  return ['Every ruling in force, with its id (a read-only command):', `  ${ledgerReadCommand(m, dir, 'rulings')}`];
 }
 
 // The commands of one group for a ledger lane (null: project commands only);
@@ -1423,12 +1462,14 @@ function startFindingNote(findings) {
 
 // The rulings already made for this run (m.run_rulings, set only by the
 // workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
-// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
-// ruling quoted as written. Empty when there are none.
+// ruling), as prompt lines: a heading and one '- PF-<n>: <ruling>' line each,
+// every ruling quoted as written. PF-<n> is the id agents cite and override it
+// by during this launch; carry-launch records it with the ruling afterwards
+// (1.6.3). Empty when there are none.
 function runRulingsLines(m) {
   const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
   if (rulings.length === 0) return [];
-  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
 // The message a task fix round commits with: 'fix: address review findings
@@ -1470,13 +1511,15 @@ function commitWithLine(message) {
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
 // amendments are adjudicator rulings that amend the task's brief for this run.
-function taskContext(m, task, where, guidance = null) {
+// by is the role a ruling the agent records carries: 'implementer' (implement
+// and fix) or 'reviewer' (review and re-review).
+function taskContext(m, task, where, guidance = null, by = 'implementer') {
   const files = taskFiles(m, task);
   const tasks = unitTasks(task);
   const userNote = (t) => m.notes && m.notes[t.id];
   // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
-    { task: tasks[0].id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+    { task: tasks[0].id, event: 'ruling', by, text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
@@ -1519,7 +1562,33 @@ function taskContext(m, task, where, guidance = null) {
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
     `  ${ruling}`,
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
+    ...carryOverLines(m, task, where, by),
   ].join('\n');
+}
+
+// What every task agent is told about the rulings in force, and what an
+// implementer is told about owners and observed failures (1.6.3).
+function carryOverLines(m, task, where, by) {
+  const ids = unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`).join(' ');
+  const lines = [
+    'The start command prints the rulings in force under "===== rulings in force =====": they bind you. Cite one by',
+    'its id (for example alpha-R3 or PF-2).',
+  ];
+  if (by !== 'implementer') return lines;
+  return [
+    ...lines,
+    'To depart from a ruling in force, add "overrides": ["<id>"] to your ruling\'s JSON.',
+    'An implementer may override only an implementer ruling of its own lane; to depart from any other, report status',
+    'question naming its id.',
+    'Before changing a file outside your Files list, run (a read-only command):',
+    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, "'<path relative to the worktree>'")}`,
+    'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
+    'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
+    'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
+    'A check failure you judge outside your task (it passed on a rerun, or the failing test covers code your task did',
+    'not touch): record it as a ruling whose JSON adds "scope": "run", with the text',
+    'Observed: <test or command> failed - <why outside this task> - <rerun result>.',
+  ];
 }
 
 function fallbackImplementer() {
@@ -1613,8 +1682,11 @@ function startCommand(m, task, where, opts = {}) {
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
     parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
-      ...declared.flatMap((f) => ['--declared', shellQuote(f)]));
+      ...declared.flatMap((f) => ['--declared', shellQuote(f)]),
+      '--owners', shellQuote(`${m.repo.ledger_dir}/owners.json`));
   }
+  // The rulings in force (1.6.3): a join task sees every lane's.
+  parts.push('--rulings', shellQuote(m.repo.ledger_dir), shellQuote(where.lane === 'join' ? '-' : where.lane));
   if (present(opts.start)) {
     parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
   }
@@ -1827,9 +1899,14 @@ function scopeLines(task) {
   if (declaredFiles(task).length === 0) return [];
   return [
     "The start command lists, under its \"===== files changed outside the task's Files list =====\" line, every",
-    `file the range changes that the ${unitNoun(task)}'s Files list does not name. Judge each: a change the task did`,
-    "not need (above all to a file another task or lane owns) is an important finding on that file; a change the",
-    'task needed is fine.',
+    `file the range changes that the ${unitNoun(task)}'s Files list does not name, with its owner, and any changed`,
+    'file of the Files list that another task also lists. Judge each:',
+    '- owned by a task earlier in the run: fine when the task needed the change;',
+    '- owned by a task in another lane running alongside, or a later task: an important finding unless a pre-flight or'
+      + ' adjudicator ruling in force covers it (cite its id); an implementer\'s own ruling never does;',
+    "- also in another task's Files: check the plan's split of that file; doing another task's planned part is a",
+    '  finding (important if it breaks that task, else minor);',
+    '- no task owns it: a change the task did not need is an important finding on that file; a needed one is fine.',
   ];
 }
 
@@ -1853,7 +1930,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     reviewResultText(m, task, where, rounds, head),
   ].join('\n');
@@ -1927,7 +2004,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
     reviewResultText(m, task, where, round, head),
@@ -2204,6 +2281,32 @@ function verifySchema() {
   };
 }
 
+// A relaunch's pre-flight (1.6.3): the tasks already built, the rulings that
+// bind it, and whether the plan or spec changed since the last launch
+// (inputs_changed, copied from ledger status). [] on a first launch.
+function relaunchPreflightLines(m) {
+  // A relaunch: tasks are done, or the session carried an earlier launch
+  // (carried_minors, set on every resume) even when none got done.
+  const done = Array.isArray(m.done) ? m.done : [];
+  if (done.length === 0 && !m.carried_minors) return [];
+  const ic = m.inputs_changed;
+  const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
+  let changed = 'Whether the plan or the spec changed since the last launch is not known.';
+  if (known && ic.plan && ic.spec) changed = 'The plan and the spec changed since the last launch.';
+  else if (known && ic.plan) changed = 'The plan changed since the last launch; the spec did not.';
+  else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
+  else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
+  return [
+    `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
+    'Earlier rulings bind; read them with (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Check only the tasks still to run and their dependence on built work.',
+    'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
+    `since that ruling; then report it as a conflict. ${changed}`,
+    '',
+  ];
+}
+
 function preflightPrompt(m) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
@@ -2214,6 +2317,7 @@ function preflightPrompt(m) {
     'Run layout:',
     layoutText(m),
     '',
+    ...relaunchPreflightLines(m),
     'Check:',
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
@@ -2603,23 +2707,43 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
-// The task minors checklist for a final reviewer (taskMinorFindings): []
-// when there are none.
-function taskMinorsLines(minors) {
-  if (!Array.isArray(minors) || minors.length === 0) return [];
+// The task minors checklist for the reviewer that owns it (taskMinorFindings
+// of this launch, and the open ones an earlier launch left, read from the
+// ledger): [] when there are none.
+function taskMinorsLines(m, minors) {
+  const here = Array.isArray(minors) ? minors : [];
+  const carried = carriedMinorIds(m);
+  if (here.length === 0 && carried.length === 0) return [];
+  const ledger = ledgerReadCommand(m, featureDir(m), 'minors');
   return [
-    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
-    findingsText(minors),
+    ...(here.length > 0 ? [
+      'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+      findingsText(here),
+    ] : []),
+    ...(carried.length > 0 ? [
+      'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
+      '(a read-only command):',
+      `  ${ledger}`,
+      `Carried: ${carried.join(', ')}`,
+    ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
     'issue (for example "[<id>] ..."); otherwise leave it.',
     '',
   ];
 }
 
+// For a lens that does not own the checklist, when there is one: [] otherwise.
+function otherReviewerMinorsLines(m, minors) {
+  const any = (Array.isArray(minors) && minors.length > 0) || carriedMinorIds(m).length > 0;
+  return any ? ['Task minors are checked by another reviewer: raise one only if you judge it critical or'
+    + ' important, citing its id.', ''] : [];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, the task minors checklist, and the
-// findings/head result.
-function finalReviewFrame(m, intro, focus, minors = []) {
+// branch range, the commit-rules scan, the task minors checklist (or, with
+// other true, the line for a lens that does not own it: minors is then the
+// checklist another lens has), and the findings/head result.
+function finalReviewFrame(m, intro, focus, minors = [], other = false) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -2635,8 +2759,13 @@ function finalReviewFrame(m, intro, focus, minors = []) {
     '',
     focus,
     '',
-    ...taskMinorsLines(minors),
+    ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
+    "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
+    'Files each task changed outside its Files list, with their owners (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
+    "Check each change was needed and, where it is another lane's or a later task's file, covered by a ruling.",
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
@@ -2649,9 +2778,10 @@ function finalReviewFrame(m, intro, focus, minors = []) {
   ].join('\n');
 }
 
-// minors: the task minors checklist (taskMinorsLines).
-function finalReviewPrompt(m, lens, e2e, minors = []) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
+// minors: the task minors checklist (taskMinorsLines); other: this lens does
+// not own the checklist (it gets otherReviewerMinorsLines when one exists).
+function finalReviewPrompt(m, lens, e2e, minors = [], other = false) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors, other);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
@@ -2698,6 +2828,7 @@ function finalFixPrompt(m, findings, base) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -2757,6 +2888,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
       'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
@@ -2849,6 +2981,7 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -3059,6 +3192,9 @@ function adjudicatorPrompt(m, ctx) {
       `  ${brief}`,
     );
   }
+  // The run's rulings bind the adjudicator too (pre-flight's, and its own
+  // pre-flight ruling once made): runRulingsLines, [] when there are none.
+  parts.push(...runRulingsLines(m));
   parts.push(
     '',
     'Details (the diff range, the implementer report file, and the blocked reason or question, or the',
@@ -3093,8 +3229,12 @@ function adjudicatorPrompt(m, ctx) {
     '  - plan_broken: a plan so broken every path is a guess',
     'Anything else is not a reason to stop: answer, clarify, park, or unblock instead.',
     '',
+    ...rulingsReadLines(m, dir),
     'Record your ruling, in the format `Ruling: decision - why - cost if wrong`, as a ledger ruling event with:',
     `  ${ruling}`,
+    'In its JSON add "scope": "run" when it concerns code, tests or checks outside this task\'s lane,',
+    '"overrides": ["<id>"] when it departs from a ruling in force, and',
+    '"files": ["<path>"] for each file it permits the task to change outside its Files list.',
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
     'For park or unblock, run the command the details above give for that outcome; it prints JSON with a head.',
     '',
@@ -4095,7 +4235,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const lenses = m.profile === 'lite'
     ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
+      // One lens owns the task minors checklist (1.6.3): the security lens,
+      // which worked it in every archived run; the others only escalate.
+      .map(([key, name]) => [`final review ${key}`, name,
+        finalReviewPrompt(m, key, e2e, taskMinors, key !== 'security')]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -4122,6 +4265,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
     lens_heads: lensHeads, repairs: [],
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
+    carried_minors_open: carriedMinorIds(m).filter((id) => !raised.includes(`[${id}]`)),
   };
   const unbound = reviewProblemOf(lensHeads, results);
   if (unbound !== null) final.review_problem = unbound;
@@ -4205,6 +4349,12 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   }
   if (repaired && repaired.unreviewed !== null) final.unreviewed_fix = repaired.unreviewed;
   return final;
+}
+
+// The open task minors an earlier launch left (carried_minors.open, which the
+// session copies from ledger status): [] without them.
+function carriedMinorIds(m) {
+  return m.carried_minors && Array.isArray(m.carried_minors.open) ? m.carried_minors.open : [];
 }
 
 // The exit-code contract (1.6.2 spec 4.3): true when at least one command
@@ -4463,7 +4613,9 @@ function scheduleFix(m, entry) {
 
 // The whole run. io = {agent, log, phase, parallel}. Returns the report:
 // {status:'complete'|'stopped'|'preflight_conflicts'|'invalid', run_id,
-//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes}},
+//  tasks:{<id>:{status, rounds, tier_used, commits:[base,head]|null, notes,
+//    minor_findings (the approving review's, taskMinorFindings; [] unless done
+//    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
 //  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
@@ -4489,7 +4641,9 @@ function scheduleFix(m, entry) {
 // (done and reviewed earlier), or not_run. Under profile lite no
 // pre-flight agent runs (preflight has no conflicts, rulings, undeclared or schedule
 // entries) and integrate stays null (validateManifest rejects lite with a
-// post_integrate hook, so no configured hook is skipped).
+// post_integrate hook, so no configured hook is skipped). Nor does one on a
+// relaunch with every task done and reviewed (preflightNeeded): preflight is
+// then empty with skipped 'no task left to run'.
 async function runAll(manifest, io) {
   // Windows paths in forward-slash form, and hooks {} when absent, before
   // anything reads them.
@@ -4532,6 +4686,8 @@ async function runAll(manifest, io) {
       tier_used: null,
       commits: range ? [range.base, range.head] : null,
       notes: '',
+      minor_findings: [],
+      rulings: [],
     };
   }
   // The minor findings of approved task reviews, for the final lenses (a
@@ -4549,6 +4705,10 @@ async function runAll(manifest, io) {
         tier_used: r.tier_used,
         commits: present(r.base) && isSha(r.head) ? [r.base, r.head] : null,
         notes: r.notes,
+        // Kept as data for a later launch (1.6.3): the approving review's
+        // minor findings (done tasks only) and the adjudicator's rulings.
+        minor_findings: r.status === 'done' && Array.isArray(r.minor_findings) ? r.minor_findings : [],
+        rulings: Array.isArray(r.rulings) ? r.rulings : [],
       };
     }
   };
@@ -4654,7 +4814,13 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], adjudicated: null };
+  } else if (!preflightNeeded(m)) {
+    // A relaunch with every task done and reviewed: no pre-flight agent, so no
+    // rulings (preflightNeeded says why).
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run',
+      adjudicated: null };
+    io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
     const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
@@ -4678,7 +4844,10 @@ async function runAll(manifest, io) {
     const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
       .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    // adjudicated: the index in rulings of the adjudicator's ruling on the
+    // conflicts, which the adjudicator recorded in the ledger itself, so
+    // carry-launch skips it (1.6.3); null when there is none.
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule, adjudicated: null };
     if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
@@ -4699,6 +4868,7 @@ async function runAll(manifest, io) {
       // The ruling joins the run rulings, so it reaches every task agent
       // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
+      preflight.adjudicated = preflight.rulings.length - 1;
       m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
@@ -4966,11 +5136,14 @@ async function runAll(manifest, io) {
   // earlier launch committed and reviewed are not re-run, so their approved
   // reviews' minor findings never reached the final lenses. Every resume
   // has such tasks, so this is a note (no source), not a warning.
+  // Tasks the session's carried_minors covers (carry-launch's snapshot) had
+  // their open minors carried to the security lens: only the rest are noted.
+  const covered = new Set(m.carried_minors ? m.carried_minors.covered : []);
   const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
-    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+    .filter((t) => taskState(m, t.id) === 'skip' && !covered.has(t.id)).map((t) => t.id);
   if (earlier.length > 0) {
     final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
-      + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'
+      + ' did not reach the final lenses or task_minors_open: no carried snapshot covers them; read those'
       + " tasks' approved reviews in the earlier launch's report");
   }
   delivered = final.head;
@@ -5053,7 +5226,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

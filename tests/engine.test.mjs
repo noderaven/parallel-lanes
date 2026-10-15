@@ -408,6 +408,22 @@ test('ledgerCommand starts in the checkout of the agent that runs it', () => {
   }
 });
 
+// The ledger event a prompt's ruling command appends (its single-quoted JSON).
+function rulingEvent(prompt) {
+  const line = prompt.split('\n').find((l) => l.includes(' append ') && l.includes('"event":"ruling"'));
+  assert.ok(line, 'a ruling ledger command');
+  return JSON.parse(line.match(/'(\{[^']*\})'\s*$/)[1]);
+}
+
+test('the ruling command of each task prompt records the role of the agent that runs it', () => {
+  const p = allPrompts(manifest());
+  assert.equal(rulingEvent(p.implement).by, 'implementer');
+  assert.equal(rulingEvent(p.fix).by, 'implementer');
+  assert.equal(rulingEvent(p.review).by, 'reviewer');
+  assert.equal(rulingEvent(p.reReview).by, 'reviewer');
+  assert.equal(rulingEvent(p.implement).task, 'T2');
+});
+
 // Every prompt that hands an agent a Python helper command: the four task
 // prompts and the adjudicator's (task-brief and the ruling ledger command).
 function pythonPrompts(m) {
@@ -1513,7 +1529,7 @@ test('a user answer from a resume keeps its own label beside the run rulings', (
   const lines = p.split('\n');
   const at = lines.indexOf(RUN_RULINGS);
   assert.ok(at >= 0, p);
-  assert.equal(lines[at + 1], '- R1');
+  assert.equal(lines[at + 1], '- PF-1: R1');
   // The ruling is not given the user's label.
   assert.ok(!lines.some((l) => l.includes(USER_ANSWER) && l.includes('R1')), p);
   // Without run rulings there is no heading.

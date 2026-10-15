@@ -214,7 +214,8 @@ test('happy path: complete, phases in order, report filled in', async () => {
     assert.deepEqual(t.commits, [bases[id], H(`${id}-h`)]);
   }
   assert.deepEqual(result.stopped_lanes, []);
-  assert.deepEqual(result.preflight, { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], schedule: [] });
+  assert.deepEqual(result.preflight,
+    { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], schedule: [], adjudicated: null });
   assert.equal(result.integrate.status, 'done');
   assert.equal(result.integrate.post_integrate.status, 'done');
   assert.deepEqual(result.e2e.items.map((i) => i.result), ['PASS']);
@@ -377,7 +378,8 @@ test('resume with every task done and reviewed: no task agents, integration stil
   const m = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
   const { result, calls, logs } = await run(m, phaseScript());
   assert.equal(result.status, 'complete');
-  assert.deepEqual(labels(calls).slice(0, 3), ['pre-flight', 'integrate', 'post-integrate']);
+  // No pre-flight: no task is left to run (preflightNeeded, 1.6.3).
+  assert.deepEqual(labels(calls).slice(0, 2), ['integrate', 'post-integrate']);
   assert.ok(!calls.some((c) => c.phase.startsWith('Lane ') || c.phase === 'Prelude' || c.phase === 'Join'));
   for (const id of ALL) assert.equal(result.tasks[id].status, 'skipped', id);
   assert.ok(logs.includes('parallel-lanes: resuming run run-1: 5 tasks already committed'), JSON.stringify(logs));
@@ -846,7 +848,7 @@ test('no final findings: no fix or re-review agent', async () => {
   assert.deepEqual(result.final, {
     findings: [], fixed: [], declined: [], open: [], cannot_verify: [], missing_lenses: [], head: H('T5-h'),
     lens_heads: ['superpowers', 'security', 'correctness'].map((lens) => ({ lens, head: H('T5-h') })),
-    task_minors_open: [], repairs: [],
+    task_minors_open: [], carried_minors_open: [], repairs: [],
   });
   assert.equal(result.delivered_sha, H('T5-h'));
   assert.ok(!labels(calls).includes('e2e recheck'), 'the e2e result already covers the delivered revision');
@@ -1470,7 +1472,7 @@ test('autonomous pre-flight conflict: an adjudicator answer continues the run an
   // The ruling reaches every not-yet-done task as a run ruling.
   for (const id of ALL) {
     const impl = calls.find((c) => c.label === `${id} implement`).prompt;
-    assert.ok(impl.includes('Rulings already made for this run (binding):\n- use the v2 contract'), id);
+    assert.ok(impl.includes('Rulings already made for this run (binding):\n- PF-1: use the v2 contract'), id);
   }
   const adj = calls.find((c) => c.label === 'run adjudicate');
   assert.equal(adj.phase, 'Pre-flight');
@@ -2474,6 +2476,61 @@ function fixRoundScript(extra = {}) {
   };
 }
 
+test('a relaunch with every task done and reviewed runs no pre-flight and makes no rulings', async () => {
+  const resumed = manifest({ done: [...ALL], reviewed: [...ALL], backfill: backfillFor(ALL) });
+  const { result, calls } = await run(resumed, phaseScript());
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(!calls.some((c) => c.label === 'pre-flight'), calls.map((c) => c.label).join(', '));
+  assert.deepEqual(result.preflight,
+    { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run', adjudicated: null });
+  assert.ok(calls.some((c) => c.label === 'integrate'));
+  // The final lenses get no run rulings.
+  assert.ok(!calls.find((c) => c.label === 'final review sp').prompt.includes(RUN_RULINGS));
+});
+
+test('a relaunch with one task left to review still runs pre-flight', async () => {
+  const reviewed = ALL.filter((id) => id !== 'T5');
+  const resumed = manifest({ done: [...ALL], reviewed, backfill: backfillFor(ALL) });
+  const { result, calls } = await run(resumed, { ...phaseScript(), 'T5 review': [approve()] });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.ok(calls.some((c) => c.label === 'pre-flight'));
+  assert.equal(result.preflight.skipped, undefined);
+});
+
+test('pre-flight rulings reach the adjudicator of a blocked task as run rulings', async () => {
+  const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
+  const blocked = { status: 'blocked', head: 'T2-b', tests: '', notes: 'stuck' };
+  const { result, calls } = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [], code_deps: [] }] }),
+    ...taskScript(ALL),
+    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'park', text: 'park it', head: H('T1-h') }],
+  });
+  assert.equal(result.tasks.T2.status, 'deferred', JSON.stringify(result.tasks.T2));
+  const adj = calls.find((c) => c.label === 'T2 adjudicate');
+  assert.ok(adj.prompt.includes(`${RUN_RULINGS}\n- PF-1: Ruling: A - why - cost\n- PF-2: Ruling: B - why - cost`), adj.prompt);
+});
+
+test("pre-flight's own rulings reach the adjudicator of its conflicts", async () => {
+  const { calls } = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4 overlap'], rulings: ['Ruling: A - why - cost'],
+      undeclared: [], code_deps: [] }] }),
+    ...taskScript(ALL),
+    'run adjudicate': [{ outcome: 'answer', text: 'use the v2 contract' }],
+  });
+  const adj = calls.find((c) => c.label === 'run adjudicate');
+  assert.ok(adj.prompt.includes(`${RUN_RULINGS}\n- PF-1: Ruling: A - why - cost`), adj.prompt);
+});
+
+test('an adjudicator with no run rulings gets no rulings heading', async () => {
+  const blocked = { status: 'blocked', head: 'T2-b', tests: '', notes: 'stuck' };
+  const { calls } = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [] }] }),
+    ...taskScript(ALL),
+    'T2 implement': [blocked], 'T2 adjudicate': [{ outcome: 'park', text: 'park it', head: H('T1-h') }],
+  });
+  assert.ok(!calls.find((c) => c.label === 'T2 adjudicate').prompt.includes(RUN_RULINGS));
+});
+
 test('pre-flight rulings reach every task prompt and the final lenses as run rulings', async () => {
   const rulings = ['Ruling: A - why - cost', 'Ruling: B - why - cost'];
   const { result, calls } = await run(manifest(),
@@ -2484,7 +2541,7 @@ test('pre-flight rulings reach every task prompt and the final lenses as run rul
     assert.ok(prompts.some((c) => c.label === role), role);
   }
   for (const c of prompts) {
-    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: A - why - cost\n- Ruling: B - why - cost`), c.label);
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- PF-1: Ruling: A - why - cost\n- PF-2: Ruling: B - why - cost`), c.label);
     assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
   }
 });
@@ -2499,7 +2556,7 @@ test('an adjudicated pre-flight ruling joins the run rulings, not the user answe
   const prompts = taskCalls(calls);
   assert.ok(prompts.length >= ALL.length * 2, String(prompts.length));
   for (const c of prompts) {
-    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- Ruling: C - x - y`), c.label);
+    assert.ok(c.prompt.includes(`${RUN_RULINGS}\n- PF-1: Ruling: C - x - y`), c.label);
     assert.ok(!c.prompt.includes(USER_ANSWER), c.label);
   }
 });
@@ -2512,7 +2569,7 @@ test('run rulings keep their text whole in every task prompt', async () => {
   assert.equal(result.status, 'complete', JSON.stringify(result));
   for (const c of taskCalls(calls)) {
     assert.equal(c.prompt.split(ruling).length, 2, `${c.label}: the ruling once, whole`);
-    assert.ok(c.prompt.includes(`- ${ruling}\n- ${other}`), `${c.label}: still one ruling, then the next`);
+    assert.ok(c.prompt.includes(`- PF-1: ${ruling}\n- PF-2: ${other}`), `${c.label}: still one ruling, then the next`);
   }
 });
 
@@ -2668,9 +2725,101 @@ test('final lenses get the open minor findings of approved task reviews', async 
     'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
   };
   const { calls } = await run(manifest(), script);
+  // One lens owns the checklist (1.6.3: the security lens worked it in every
+  // run); the other two only escalate a task minor they judge serious.
+  const security = calls.find((c) => c.label === 'final review security').prompt;
+  assert.ok(security.includes('[T2-1]') && security.includes('rename the helper'), security);
+  for (const label of ['final review sp', 'final review correctness']) {
+    const p = calls.find((c) => c.label === label).prompt;
+    assert.ok(!p.includes('rename the helper'), `${label}: ${p}`);
+    assert.ok(p.includes('Task minors are checked by another reviewer: raise one only if you judge it critical or'
+      + ' important, citing its id.'), `${label}: ${p}`);
+  }
+});
+
+test('without task minors no lens gets the checklist or the other-reviewer line', async () => {
+  const { calls } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   for (const label of lensLabels) {
     const p = calls.find((c) => c.label === label).prompt;
-    assert.ok(p.includes('[T2-1]') && p.includes('rename the helper'), `${label}: ${p}`);
+    assert.ok(!p.includes('Minor findings of approved task reviews') && !p.includes('checked by another reviewer'), label);
+  }
+});
+
+test('a pre-flight adjudication is marked by its index in preflight.rulings', async () => {
+  const { result } = await run(manifest(), {
+    ...phaseScript({ 'pre-flight': [{ conflicts: ['T2 vs T4'], rulings: ['Ruling: A - w - c'], undeclared: [], code_deps: [] }] }),
+    ...taskScript(ALL),
+    'run adjudicate': [{ outcome: 'answer', text: 'use the v2 contract' }],
+  });
+  assert.deepEqual(result.preflight.rulings, ['Ruling: A - w - c', 'use the v2 contract']);
+  assert.equal(result.preflight.adjudicated, 1);
+});
+
+// A resume whose earlier launch left T2-1 open (carry-launch's snapshot):
+// the session copies the ids into carried_minors.
+const carriedResume = (extra = {}) => manifest({
+  done: ['T1', 'T2'], reviewed: ['T1', 'T2'], backfill: backfillFor(['T1', 'T2']),
+  carried_minors: { open: ['T2-1'], covered: ['T1', 'T2'] }, ...extra,
+});
+
+test('carried minors reach the security lens through ledger minors and are open until raised', async () => {
+  const { result, calls } = await run(carriedResume(), { ...phaseScript(), ...taskScript(['T3', 'T4', 'T5']) });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  const security = calls.find((c) => c.label === 'final review security').prompt;
+  assert.ok(security.includes("scripts/ledger' minors '/work/ledger'"), security);
+  assert.ok(security.includes('Carried: T2-1'), security);
+  assert.deepEqual(result.final.carried_minors_open, ['T2-1']);
+  // Both skipped tasks are covered by the snapshot: no cannot-verify note.
+  assert.ok(!result.final.cannot_verify.some((c) => typeof c === 'string' && c.includes('earlier launch approved')));
+  const raised = await run(carriedResume(), {
+    ...phaseScript({ 'final review security': [{ findings: [{ ...finding('x'), severity: 'minor', issue: '[T2-1] still holds' }],
+      cannot_verify: [], head: H('T5-h') }] }),
+    ...taskScript(['T3', 'T4', 'T5']),
+  });
+  assert.deepEqual(raised.result.final.carried_minors_open, []);
+});
+
+test('the cannot-verify note names only skipped tasks the snapshot does not cover', async () => {
+  const { result } = await run(carriedResume({ carried_minors: { open: [], covered: ['T1'] } }),
+    { ...phaseScript(), ...taskScript(['T3', 'T4', 'T5']) });
+  const note = result.final.cannot_verify.find((c) => typeof c === 'string' && c.includes('earlier launch approved'));
+  assert.ok(note && note.includes('(T2)') && !note.includes('T1,'), JSON.stringify(result.final.cannot_verify));
+  assert.deepEqual(result.final.carried_minors_open, []);
+});
+
+test("the result keeps each task's approved minor findings and its rulings", async () => {
+  const blocked = { status: 'blocked', head: 'T3-b', tests: '', notes: 'which key?' };
+  const { result } = await run(manifest(), {
+    ...phaseScript(),
+    ...taskScript(ALL),
+    'T2 review': [{ verdict: 'approve', findings: [minorT2], cannot_verify: [] }],
+    'T3 implement': [blocked, done('T3-b', H('T3-h'))],
+    'T3 adjudicate': [{ outcome: 'answer', text: 'Ruling: use the id key - stable - a rename later' }],
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(result.tasks.T2.minor_findings,
+    [{ id: 'T2-1', severity: 'minor', file: 'src/T2.js', line: 5, issue: 'rename the helper', fix: 'rename it' }]);
+  assert.deepEqual(result.tasks.T2.rulings, []);
+  assert.deepEqual(result.tasks.T3.rulings, ['Ruling: use the id key - stable - a rename later']);
+  assert.deepEqual(result.tasks.T3.minor_findings, []);
+});
+
+test('tasks the run did not do carry empty minor findings and rulings', async () => {
+  const resumed = manifest({ done: ['T1'], reviewed: ['T1'], backfill: backfillFor(['T1']) });
+  const { result } = await run(resumed, { ...phaseScript(), ...taskScript(['T2', 'T3', 'T4', 'T5']) });
+  assert.equal(result.tasks.T1.status, 'skipped');
+  assert.deepEqual([result.tasks.T1.minor_findings, result.tasks.T1.rulings], [[], []]);
+  // T2 stops lane alpha, so T3 and the join's T5 never run (T4's lane beta does).
+  const stopped = await run(manifest(), {
+    ...phaseScript(), ...taskScript(['T1', 'T4']),
+    'T2 implement': [{ status: 'blocked', head: 'T2-b', tests: '', notes: 'stuck' }],
+    'T2 adjudicate': [{ outcome: 'stop', text: 'cannot', stop_condition: 'plan_broken' }],
+  });
+  assert.equal(stopped.result.status, 'stopped');
+  for (const id of ['T3', 'T5']) {
+    const t = stopped.result.tasks[id];
+    assert.equal(t.status, 'not_run', id);
+    assert.deepEqual([t.minor_findings, t.rulings], [[], []], id);
   }
 });
 

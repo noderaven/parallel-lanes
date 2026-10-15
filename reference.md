@@ -62,6 +62,8 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
 | `profile` | `full` (default) or `lite` (see Profiles). |
 | `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved, setup_skipped}` (`setup_skipped`: the lanes whose setup commands were skipped because every task is done and reviewed; validation rejects a listed lane with pending work, and then setup reruns). Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
+| `carried_minors` | Optional (1.6.3), set on a resume: `{open, covered}` from `ledger status`'s `minors`, copied as printed: the ids of the task minors earlier launches left open, and the tasks the snapshot covers ("Carry-over"). |
+| `inputs_changed` | Optional (1.6.3), set on a resume: `{plan, spec}` from `ledger status --plan --spec`'s `inputs` (`plan` is `plan_changed`, `spec` is `spec_changed`; each `true`, `false` or `null`), read before setup, so a relaunch's pre-flight knows what changed since the last launch. |
 | `start_points` | The feature heads `ledger status` prints after setup, copied exactly as it prints them: `prelude` from setup, `join` only once a launch got past integration (a new run has no `join` key). |
 | `dry_run` | `true` only in the confirmation call. |
 | `done`, `reviewed` | `[]` for a new run; on resume, from `ledger status --plan`. Never by hand. |
@@ -274,8 +276,14 @@ run is still not accepted. A security-flagged task is never parked or unblocked,
 findings (`adjudicator_stop: security`), and `allow_deferral: false` refuses it for every task
 (`adjudicator_stop: deferral_not_allowed`). A task adjudicated twice and still blocked ends with
 `adjudication_cap`. Every ruling is a
-ledger `ruling` event `Ruling: decision - why - cost if wrong`; pre-flight rulings are in
-`preflight.rulings`.
+ledger `ruling` event `Ruling: decision - why - cost if wrong` whose `by` names its role:
+`adjudicator`, `implementer` (implement and fix agents) or `reviewer` (review and re-review
+agents); a ruling with no `by` was written by a task agent before 1.6.3 (in every archive
+checked an implementer or fixer, but a reviewer had the same command) and is read as an
+implementer's. Pre-flight rulings are in `preflight.rulings`, and from 1.6.3 also in the ledger
+once `carry-launch` records them ("Carry-over"). A task's adjudicator rulings are also in the run result's
+`tasks.<id>.rulings`, and its approving review's minor findings in `tasks.<id>.minor_findings`
+(`[]` unless the task was done in that launch), so a later launch can read both.
 
 Pre-flight also returns `code_deps` (`[{task, producer, what}]`, required, may be empty): code a
 task needs from another task's work. An entry the run order already meets (the placement rule
@@ -286,16 +294,83 @@ with `preflight_conflicts` in both modes (the adjudicator is not called), and
 `preflight.schedule` lists each as `{task, producer, what, fix}`, `fix` being the move that meets
 it (`move T to join after P`, `move T after P in the prelude`, or `move T to join, or into P's
 lane after it`). `preflight.schedule` is always present on a full-profile run (`[]` when there
-is none) and is `[]` under lite, which has no pre-flight agent.
+is none) and is `[]` under lite, which has no pre-flight agent. A relaunch with every task done
+and reviewed has none either: there is no task left to check, and a pre-flight there could only
+re-rule work already built. Its `preflight` is empty with `skipped: "no task left to run"`, and
+the dry run plans no pre-flight agent.
 
 Run rulings: pre-flight's own rulings, then the adjudicator's ruling on pre-flight conflicts,
-reach every task not yet done and every final reviewer as "Rulings already made for this run
-(binding)", in that order, each quoted as written, so no agent decides a settled point again.
+reach every task not yet done, every adjudicator and every final reviewer as "Rulings already
+made for this run (binding)", in that order, each quoted as written, so no agent decides a settled point again.
 The workflow builds that list (`run_rulings`) itself during the run and never reads it from
 the manifest file. The user's answers (`notes`) keep their own label, and an adjudicator's
 `answer` or `clarify_plan` for one task reaches only that task. Both appear in the hand-back under "Rulings made on your behalf". Under
 `supervised` there is no adjudicator: a blocked task, a question, or the review cap
 (`review_rounds`) stops the run.
+
+## Carry-over
+
+From 1.6.3 what earlier agents decided or found reaches the agents after them, once.
+
+**The ledger holds every ruling.** A `ruling` event may carry `by` (`implementer`, `reviewer`,
+`adjudicator`, `preflight`), `scope` (`lane` or `run`), `overrides` (the ids it departs from),
+`files` (paths an adjudicator ruling permits outside a task's Files list), `pf` and `wf`. The
+ledger checks the values, not whether an agent told the truth. A ruling's id is `<file
+stem>-R<n>`, n counting that ledger file's rulings in append order (`rig-R4`, `_run-R2`); this
+launch's pre-flight rulings are numbered `PF-1`... in the prompts until `carry-launch` records
+them. Run-wide: pre-flight rulings, an adjudicator ruling about code, tests or checks outside the
+task's lane, and an observed failure; everything else is lane-wide.
+`<python> <skill_dir>/scripts/ledger rulings <ledger_dir> [--lane <lane>]` prints the rulings in
+force (with `--lane`: `_run`, the prelude, that lane, and every run-scope one), then the
+overridden ones.
+
+**Who sees them.** Every task agent's start command prints its lane's rulings under `=====
+rulings in force =====` (join tasks: all); the adjudicator, the final lenses, the final fix, the
+final re-review, the verify repair and a relaunch's pre-flight get the `ledger rulings` command.
+An implementer may override only an implementer ruling of its own lane; departing from any
+other is a question the adjudicator settles. An adjudicator may override any ruling, naming it;
+pre-flight never does. A final lens does not raise a matter a ruling in force settles unless it
+is critical or important, and then cites the ruling.
+
+**carry-launch.** After each launch (Launch step 5), `<python> <skill_dir>/scripts/ledger
+carry-launch <ledger_dir> <transcript dir>` reads that launch's Workflow result file and records,
+once per wf id: each pre-flight ruling (by `preflight`, scope `run`, its `PF-n`), skipping the
+pre-flight adjudication the adjudicator recorded itself (`preflight.adjudicated`); one `minors`
+snapshot, the task minors still open after that launch; and a `carried` event that binds any
+`PF-n` a ruling of that launch overrode. Launches are carried in launch order (each
+`doctor-<wf>.json` names its `setup_event`; carrying one while an earlier one is not carried
+exits 3 naming it). An override takes effect only within the rules and only in a view that
+shows the ruling that makes it; otherwise the print marks it `(against the rule)`. On a resume, `carry-launch <ledger_dir> <wf id>` finds a
+launch whose session died by its wf id under the Claude config dir's
+`projects/*/*/workflows/<wf>.json` (the ledger's `doctor-<wf>.json` files name the wf ids). Exit 3
+means that launch is not carried (no readable result); say so and go on. `ledger minors
+<ledger_dir>` prints the open minors; `ledger status` prints `minors` (`{open: [ids], covered:
+[task ids]}`) and `overrides`.
+
+**Task minors.** Only the security lens gets the task-minor checklist (it worked it in every
+archived run); the superpowers and correctness lenses raise a task minor only when they judge it
+critical or important. On a resume the session copies `ledger status`'s `minors` into
+`carried_minors`; the security lens reads their text through `ledger minors`.
+
+**A relaunch's pre-flight** is told which tasks are built, gets the `ledger rulings` command and
+`inputs_changed`, and checks only the tasks still to run: a matter an earlier ruling settled is
+not a conflict and gets no new ruling unless the plan or spec changed since. With no task left to
+run there is no pre-flight (`preflight.skipped`).
+
+**Outside the Files list.** Setup writes `<ledger_dir>/owners.json`: which tasks list each path,
+and where each task runs. A reviewer's scope list and `<python> <skill_dir>/scripts/ledger owners
+<ledger_dir> --task <id> <path>...` say, for each path: owned by a task `earlier in the run`
+(fine when the task needed the change, and flagged), `another lane, running alongside` or
+`later` (needs a pre-flight or adjudicator ruling in force that covers it; an implementer asks
+instead of changing it, and its own ruling never counts), `in your Files list; also in X's
+Files` (the reviewer checks the plan's split of that shared file), or `no task owns it`.
+`ledger undeclared <ledger_dir>` (and `ledger status --manifest`) report `{task: [{path, owner,
+relation}]}`.
+
+**Observed failures.** A check failure an implementer judges outside its task (it passed on a
+rerun, or the failing test covers code the task did not touch) is a run-wide ruling
+`Observed: <test or command> failed - <why outside this task> - <rerun result>`, so verify, a
+repair agent and the hand-back know it. How the failure itself is handled does not change.
 
 ## Fix commits
 
@@ -382,6 +457,10 @@ raised it).
   progress together when the cap is lower. Raising the cap runs more agents at once, and each
   running agent takes memory, so raise it only on a machine with memory to spare; lowering
   `max_parallel_lanes` instead keeps the table accurate.
+
+The end of a run records the spend, carries the launch and releases the lock in one command
+line (SKILL.md Launch step 5), so the spend is never forgotten once the lock goes, and a refused
+record (exit 2) keeps the lock until it is fixed; a carry-launch that fails never keeps it.
 
 ## Check ownership
 
@@ -484,6 +563,11 @@ to run longer than 9 minutes) goes through one procedure built on
 5. After a stop (exit 5), reserve and start once more; after a second stop do not start it
    again and report the checks as failed, never as passed, with both outcomes the wait
    printed.
+
+Quitting Claude Code while a check runs stops it: from Claude Code 2.1.300, exit force-kills a
+background command still running 1.5 seconds after being asked to stop. The wait then reports
+`stopped` with reason `died` (exit 5), and anything the killed check left in the checkout shows
+as `checks_unclean`.
 
 A report with `tree_changed` true (below) means the checkout changed while the checks ran: run
 them once more, with a new reserve. Rerun only once; if the checkout changed again, keep that
@@ -592,6 +676,11 @@ failure), so a wrapper that needs a wall-time limit times the whole command and 
 itself.
 
 ## Active-run markers and stops
+
+Setup's exit 4 naming another run (`the checkout ... is in use by run ...`) means that run holds
+the checkout: setup changed nothing, so release this run's own launch lock first (`active-run
+release <run_id> setup_failed --owner <token>`, or `active-run release <run_id> --remove --owner
+<token>` for a new run that never started), then stop and report it.
 
 Markers live in `<config dir>/parallel-lanes/active/` (`$PL_ACTIVE_DIR` overrides).
 `scripts/active-run acquire <run_id> <manifest>` creates `<run_id>.lock` atomically (it fails
@@ -864,11 +953,12 @@ gets an id `<task>-<n>`, with `T` put in front of a task id that starts with a d
 gives `T3-1`, task T2 gives `T2-1`), and goes to the final lenses as a checklist: a lens raises
 one by putting its id in brackets in a finding's issue, or leaves it. `final.task_minors_open`
 lists the ones no lens raised: show them in the report, so minors from task reviews are not
-lost. Task minors are not stored in the ledger: after a resume, the tasks an earlier launch
-committed and reviewed are not re-run, so their minors reach neither the final lenses nor
-`task_minors_open`; the run says so in a `cannot_verify` note (a plain string, so not a warning,
-since every resume has such tasks) naming those tasks (check them in the earlier launch's
-report). The fixer gives each id a disposition with its evidence; the re-review names the
+lost. From 1.6.3 only the security lens gets the checklist, and the minors an earlier launch
+left open are carried ("Carry-over"): they reach it through `ledger minors`, and
+`final.carried_minors_open` lists the carried ids no lens raised. A skipped task that no
+snapshot covers (a launch `carry-launch` could not read, or a 1.6.2 launch) still reaches neither
+the lenses nor `task_minors_open`; the run says so in a `cannot_verify` note (a plain string, so
+not a warning) naming those tasks (check them in the earlier launch's report). The fixer gives each id a disposition with its evidence; the re-review names the
 revision it judged (`head`). A finding the fix gave no disposition for, a disposition or
 re-review result with blank evidence, a re-review of another revision than the fix head, or two
 different dispositions or results for one id leave the finding open (the new findings such a
@@ -878,7 +968,11 @@ batch's files count for each of its tasks): list them in the report so the user 
 that went beyond the plan.
 
 The hand-back appends the report, saves it beside the manifest, and lists
-"Rulings made on your behalf" from the ledger `ruling` events plus `preflight.rulings`. When
+"Rulings made on your behalf" from `<python> <skill_dir>/scripts/ledger rulings <ledger_dir>`
+(each with its id and role, overridden ones apart), plus this launch's `preflight.rulings` when
+the launch is not carried yet; then the rulings that override others (`ledger status`'s
+`overrides`, flagging an implementer that overrode a pre-flight or adjudicator ruling) and the
+observed failures (rulings whose text starts `Observed:`). When
 a task result's `rulings` has an entry starting `refused (security-gated):` or
 `refused (deferral_not_allowed):`, the policy refused the adjudicator's park or unblock: list
 that ruling with the prefix, never as one that took effect. An adjudicator that itself chose stop (`adjudicator_stop: <condition>` with no
@@ -899,9 +993,10 @@ ledger's `committed` events), review rounds, tier and escalations, notes, cannot
 "Rulings made on your behalf" and "Dependencies pre-flight added" (above). Then integration and
 post-integrate notes, E2E PASS/FAIL and the revision it checked, final review (fixed, declined,
 open, cannot verify, and the task minors no final lens raised, `final.task_minors_open`),
-acceptance warnings, `agents_spawned`, `agent_type_fallback`, and the `undeclared` files of
-`ledger status <ledger_dir> --manifest <manifest file>` (changed outside their task's Files
-list).
+acceptance warnings, `agents_spawned`, `agent_type_fallback`, the carried minors left open
+(`final.carried_minors_open`), and the `undeclared` files of `ledger status <ledger_dir>
+--manifest <manifest file>` (changed outside their task's Files list), each with its owner and
+relation; mark each `alongside` or `later` one no adjudicator ruling's `files` covers.
 
 ### Run tools line
 

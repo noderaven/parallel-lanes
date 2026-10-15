@@ -57,6 +57,19 @@ function ledgerCommand(m, laneId, entry, dir) {
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
+// A read-only ledger command (1.6.3: rulings, minors, owners, undeclared),
+// started in the agent's checkout dir like every helper command it is given.
+function ledgerReadCommand(m, dir, sub, ...args) {
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} ${sub} `
+    + `${shellQuote(m.repo.ledger_dir)}${args.map((a) => ` ${a}`).join('')}`;
+}
+
+// The lines every agent after the task loop gets: the full rulings print,
+// run from dir (the agent's checkout).
+function rulingsReadLines(m, dir) {
+  return ['Every ruling in force, with its id (a read-only command):', `  ${ledgerReadCommand(m, dir, 'rulings')}`];
+}
+
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
@@ -402,12 +415,14 @@ function startFindingNote(findings) {
 
 // The rulings already made for this run (m.run_rulings, set only by the
 // workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
-// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
-// ruling quoted as written. Empty when there are none.
+// ruling), as prompt lines: a heading and one '- PF-<n>: <ruling>' line each,
+// every ruling quoted as written. PF-<n> is the id agents cite and override it
+// by during this launch; carry-launch records it with the ruling afterwards
+// (1.6.3). Empty when there are none.
 function runRulingsLines(m) {
   const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
   if (rulings.length === 0) return [];
-  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
 // The message a task fix round commits with: 'fix: address review findings
@@ -449,13 +464,15 @@ function commitWithLine(message) {
 // {notes, amendments}: notes are decided on the user's behalf in this run (an
 // adjudicator answer, or a note an unblocked task carries to the next one);
 // amendments are adjudicator rulings that amend the task's brief for this run.
-function taskContext(m, task, where, guidance = null) {
+// by is the role a ruling the agent records carries: 'implementer' (implement
+// and fix) or 'reviewer' (review and re-review).
+function taskContext(m, task, where, guidance = null, by = 'implementer') {
   const files = taskFiles(m, task);
   const tasks = unitTasks(task);
   const userNote = (t) => m.notes && m.notes[t.id];
   // A batch records its rulings under its first task.
   const ruling = ledgerCommand(m, where.lane,
-    { task: tasks[0].id, event: 'ruling', text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
+    { task: tasks[0].id, event: 'ruling', by, text: 'Ruling: <decision> - <why> - <cost if wrong>' }, where.dir);
   const runNotes = (guidance && guidance.notes) || [];
   const amendments = (guidance && guidance.amendments) || [];
   const briefs = isBatch(task) ? [
@@ -498,7 +515,33 @@ function taskContext(m, task, where, guidance = null) {
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
     `  ${ruling}`,
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
+    ...carryOverLines(m, task, where, by),
   ].join('\n');
+}
+
+// What every task agent is told about the rulings in force, and what an
+// implementer is told about owners and observed failures (1.6.3).
+function carryOverLines(m, task, where, by) {
+  const ids = unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`).join(' ');
+  const lines = [
+    'The start command prints the rulings in force under "===== rulings in force =====": they bind you. Cite one by',
+    'its id (for example alpha-R3 or PF-2).',
+  ];
+  if (by !== 'implementer') return lines;
+  return [
+    ...lines,
+    'To depart from a ruling in force, add "overrides": ["<id>"] to your ruling\'s JSON.',
+    'An implementer may override only an implementer ruling of its own lane; to depart from any other, report status',
+    'question naming its id.',
+    'Before changing a file outside your Files list, run (a read-only command):',
+    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, "'<path relative to the worktree>'")}`,
+    'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
+    'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
+    'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
+    'A check failure you judge outside your task (it passed on a rerun, or the failing test covers code your task did',
+    'not touch): record it as a ruling whose JSON adds "scope": "run", with the text',
+    'Observed: <test or command> failed - <why outside this task> - <rerun result>.',
+  ];
 }
 
 function fallbackImplementer() {
@@ -592,8 +635,11 @@ function startCommand(m, task, where, opts = {}) {
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
     parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
-      ...declared.flatMap((f) => ['--declared', shellQuote(f)]));
+      ...declared.flatMap((f) => ['--declared', shellQuote(f)]),
+      '--owners', shellQuote(`${m.repo.ledger_dir}/owners.json`));
   }
+  // The rulings in force (1.6.3): a join task sees every lane's.
+  parts.push('--rulings', shellQuote(m.repo.ledger_dir), shellQuote(where.lane === 'join' ? '-' : where.lane));
   if (present(opts.start)) {
     parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
   }
@@ -806,9 +852,14 @@ function scopeLines(task) {
   if (declaredFiles(task).length === 0) return [];
   return [
     "The start command lists, under its \"===== files changed outside the task's Files list =====\" line, every",
-    `file the range changes that the ${unitNoun(task)}'s Files list does not name. Judge each: a change the task did`,
-    "not need (above all to a file another task or lane owns) is an important finding on that file; a change the",
-    'task needed is fine.',
+    `file the range changes that the ${unitNoun(task)}'s Files list does not name, with its owner, and any changed`,
+    'file of the Files list that another task also lists. Judge each:',
+    '- owned by a task earlier in the run: fine when the task needed the change;',
+    '- owned by a task in another lane running alongside, or a later task: an important finding unless a pre-flight or'
+      + ' adjudicator ruling in force covers it (cite its id); an implementer\'s own ruling never does;',
+    "- also in another task's Files: check the plan's split of that file; doing another task's planned part is a",
+    '  finding (important if it breaks that task, else minor);',
+    '- no task owns it: a change the task did not need is an important finding on that file; a needed one is fine.',
   ];
 }
 
@@ -832,7 +883,7 @@ function reviewPrompt(m, task, where, base, head, rounds = 0, guidance = null) {
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     reviewResultText(m, task, where, rounds, head),
   ].join('\n');
@@ -906,7 +957,7 @@ function reReviewPrompt(m, task, where, base, head, findings, round = 1, guidanc
     ...scopeLines(task),
     taskEvidenceLine(m, task),
     '',
-    taskContext(m, task, where, guidance),
+    taskContext(m, task, where, guidance, 'reviewer'),
     '',
     'List every finding still open, and any new critical or important problem the fix introduced, as findings.',
     reviewResultText(m, task, where, round, head),

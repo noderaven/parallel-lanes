@@ -227,6 +227,32 @@ function verifySchema() {
   };
 }
 
+// A relaunch's pre-flight (1.6.3): the tasks already built, the rulings that
+// bind it, and whether the plan or spec changed since the last launch
+// (inputs_changed, copied from ledger status). [] on a first launch.
+function relaunchPreflightLines(m) {
+  // A relaunch: tasks are done, or the session carried an earlier launch
+  // (carried_minors, set on every resume) even when none got done.
+  const done = Array.isArray(m.done) ? m.done : [];
+  if (done.length === 0 && !m.carried_minors) return [];
+  const ic = m.inputs_changed;
+  const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
+  let changed = 'Whether the plan or the spec changed since the last launch is not known.';
+  if (known && ic.plan && ic.spec) changed = 'The plan and the spec changed since the last launch.';
+  else if (known && ic.plan) changed = 'The plan changed since the last launch; the spec did not.';
+  else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
+  else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
+  return [
+    `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
+    'Earlier rulings bind; read them with (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Check only the tasks still to run and their dependence on built work.',
+    'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
+    `since that ruling; then report it as a conflict. ${changed}`,
+    '',
+  ];
+}
+
 function preflightPrompt(m) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
@@ -237,6 +263,7 @@ function preflightPrompt(m) {
     'Run layout:',
     layoutText(m),
     '',
+    ...relaunchPreflightLines(m),
     'Check:',
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
@@ -626,23 +653,43 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
-// The task minors checklist for a final reviewer (taskMinorFindings): []
-// when there are none.
-function taskMinorsLines(minors) {
-  if (!Array.isArray(minors) || minors.length === 0) return [];
+// The task minors checklist for the reviewer that owns it (taskMinorFindings
+// of this launch, and the open ones an earlier launch left, read from the
+// ledger): [] when there are none.
+function taskMinorsLines(m, minors) {
+  const here = Array.isArray(minors) ? minors : [];
+  const carried = carriedMinorIds(m);
+  if (here.length === 0 && carried.length === 0) return [];
+  const ledger = ledgerReadCommand(m, featureDir(m), 'minors');
   return [
-    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
-    findingsText(minors),
+    ...(here.length > 0 ? [
+      'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+      findingsText(here),
+    ] : []),
+    ...(carried.length > 0 ? [
+      'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
+      '(a read-only command):',
+      `  ${ledger}`,
+      `Carried: ${carried.join(', ')}`,
+    ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
     'issue (for example "[<id>] ..."); otherwise leave it.',
     '',
   ];
 }
 
+// For a lens that does not own the checklist, when there is one: [] otherwise.
+function otherReviewerMinorsLines(m, minors) {
+  const any = (Array.isArray(minors) && minors.length > 0) || carriedMinorIds(m).length > 0;
+  return any ? ['Task minors are checked by another reviewer: raise one only if you judge it critical or'
+    + ' important, citing its id.', ''] : [];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, the task minors checklist, and the
-// findings/head result.
-function finalReviewFrame(m, intro, focus, minors = []) {
+// branch range, the commit-rules scan, the task minors checklist (or, with
+// other true, the line for a lens that does not own it: minors is then the
+// checklist another lens has), and the findings/head result.
+function finalReviewFrame(m, intro, focus, minors = [], other = false) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -658,8 +705,13 @@ function finalReviewFrame(m, intro, focus, minors = []) {
     '',
     focus,
     '',
-    ...taskMinorsLines(minors),
+    ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
+    "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
+    'Files each task changed outside its Files list, with their owners (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
+    "Check each change was needed and, where it is another lane's or a later task's file, covered by a ruling.",
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
@@ -672,9 +724,10 @@ function finalReviewFrame(m, intro, focus, minors = []) {
   ].join('\n');
 }
 
-// minors: the task minors checklist (taskMinorsLines).
-function finalReviewPrompt(m, lens, e2e, minors = []) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
+// minors: the task minors checklist (taskMinorsLines); other: this lens does
+// not own the checklist (it gets otherReviewerMinorsLines when one exists).
+function finalReviewPrompt(m, lens, e2e, minors = [], other = false) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors, other);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
@@ -721,6 +774,7 @@ function finalFixPrompt(m, findings, base) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -780,6 +834,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
       'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
@@ -872,6 +927,7 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',

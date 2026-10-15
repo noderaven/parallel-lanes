@@ -360,6 +360,64 @@ test('start-task --scope lists the files a range changes outside the declared on
   assert.equal(startTask(c.lane, c.plan, '--scope', base, head, '--brief', 'T1', out).code, 2);
 });
 
+test('start-task --owners names the owner of each changed path, and shared declared files', () => {
+  const c = newCase();
+  const base = git(c.lane, 'rev-parse', 'HEAD');
+  write(join(c.lane, 'src', 'a.js'), 'a\n');
+  write(join(c.lane, 'src', 'b.js'), 'b\n');
+  write(join(c.lane, 'shared.css'), 's\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'work');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const owners = join(c.root, 'owners.json');
+  write(owners, JSON.stringify({
+    repo: {}, tasks: { T1: { where: 'alpha', pos: 0 }, T2: { where: 'beta', pos: 0 }, T5: { where: 'join', pos: 0 } },
+    files: { 'src/a.js': ['T1'], 'src/b.js': ['T2'], 'shared.css': ['T1', 'T5'] },
+  }));
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--scope', base, head, '--declared', 'src/a.js', '--declared', 'shared.css',
+    '--owners', owners, '--brief', 'T1', out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\n"
+    + "src/b.js (owned by T2, another lane, running alongside)\n"
+    + "shared.css (in your Files list; also in T5's Files)\n"), res.stdout);
+});
+
+test('start-task still starts without an owner map, or when the rulings print fails', () => {
+  const c = newCase();
+  const base = git(c.lane, 'rev-parse', 'HEAD');
+  write(join(c.lane, 'src', 'b.js'), 'b\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'work');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--scope', base, head, '--declared', 'src/a.js',
+    '--owners', join(c.root, 'no-such-owners.json'), '--brief', 'T1', out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\nsrc/b.js\n"), res.stdout);
+  // A torn ledger line makes ledger rulings fail: the agent still starts and sees why.
+  const ledgerDir = join(c.root, 'torn ledger');
+  write(join(ledgerDir, 'alpha.jsonl'), '{"task":\n');
+  const torn = startTask(c.lane, c.plan, '--rulings', ledgerDir, 'alpha', '--brief', 'T1', out);
+  assert.equal(torn.code, 0, torn.stderr);
+  assert.match(torn.stdout, /===== rulings in force =====\n\(could not read the rulings: [^\n]+\)\n/);
+});
+
+test('start-task --rulings prints the rulings in force for the lane', () => {
+  const c = newCase();
+  const ledgerDir = join(c.root, 'ledger');
+  const append = (lane, entry) => assert.equal(script('ledger')('append', ledgerDir, lane, JSON.stringify(entry)).code, 0);
+  append('alpha', { task: 'T1', event: 'ruling', by: 'implementer', text: 'MINE' });
+  append('beta', { task: 'T2', event: 'ruling', by: 'implementer', text: 'THEIRS' });
+  const out = join(c.root, 'briefs', 'T1.md');
+  const res = startTask(c.lane, c.plan, '--rulings', ledgerDir, 'alpha', '--brief', 'T1', out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.includes('===== rulings in force =====\nalpha-R1 [implementer, T1, lane] MINE\n'), res.stdout);
+  assert.ok(!res.stdout.includes('THEIRS'), res.stdout);
+  const all = startTask(c.lane, c.plan, '--rulings', ledgerDir, '-', '--brief', 'T1', out);
+  assert.ok(all.stdout.includes('THEIRS'), all.stdout);
+});
+
 test('start-task without --brief exits 2', () => {
   const c = newCase();
   const res = startTask(c.lane, c.plan);

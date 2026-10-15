@@ -76,6 +76,9 @@ function adjudicatorPrompt(m, ctx) {
       `  ${brief}`,
     );
   }
+  // The run's rulings bind the adjudicator too (pre-flight's, and its own
+  // pre-flight ruling once made): runRulingsLines, [] when there are none.
+  parts.push(...runRulingsLines(m));
   parts.push(
     '',
     'Details (the diff range, the implementer report file, and the blocked reason or question, or the',
@@ -110,8 +113,12 @@ function adjudicatorPrompt(m, ctx) {
     '  - plan_broken: a plan so broken every path is a guess',
     'Anything else is not a reason to stop: answer, clarify, park, or unblock instead.',
     '',
+    ...rulingsReadLines(m, dir),
     'Record your ruling, in the format `Ruling: decision - why - cost if wrong`, as a ledger ruling event with:',
     `  ${ruling}`,
+    'In its JSON add "scope": "run" when it concerns code, tests or checks outside this task\'s lane,',
+    '"overrides": ["<id>"] when it departs from a ruling in force, and',
+    '"files": ["<path>"] for each file it permits the task to change outside its Files list.',
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
     'For park or unblock, run the command the details above give for that outcome; it prints JSON with a head.',
     '',
