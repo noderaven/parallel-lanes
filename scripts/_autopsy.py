@@ -99,7 +99,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 6
+AUTOPSY_VERSION = 7
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -2062,6 +2062,84 @@ def task_check_evidence(run):
     return entries, malformed
 
 
+def _median(values):
+    ordered = sorted(values)
+    n = len(ordered)
+    if not n:
+        return None
+    return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0
+
+
+def command_costs(run):
+    """(commands, unconfigured, skipped, widened) from every file in the
+    ledger's checks/ whose top level holds a results list (task checks,
+    integrate, verify, final fix, accept):
+    - commands: [{check, group, runs, total_s, median_s, project_suite}] in
+      configured_checks order, for each configured command a timed result
+      ran; a result counts when its command equals the configured one and
+      its duration_s is a number. project_suite: a commands.<group> entry
+      (no lane or task prefix). Never command text: check ids only.
+    - unconfigured: {runs, total_s} of timed results whose command the
+      manifest does not name (a focused rerun), without their text.
+    - skipped: files that are error records (an error key and no results)
+      or unreadable, plus results without a numeric duration_s.
+    - widened: {targeted_median_s, calls: [{unit, codes, s}]}: the
+      task-checks evidence (task-*.json, name order) selected widened, each
+      with its reason codes and the sum of its results' duration_s, and the
+      median of the targeted ones' sums (UNAVAILABLE without one)."""
+    configured = configured_checks(run["manifest"])
+    by_command = dict((command, check_id) for check_id, command, _full in configured)
+    times = {}
+    unconfigured = {"runs": 0, "total_s": 0.0}
+    skipped = 0
+    targeted, widened = [], []
+    ledger = find_ledger(run["folder"])
+    for path in _files(os.path.join(ledger, "checks"), "*.json") if ledger else []:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            continue
+        if not data["results"] and "error" in data:
+            skipped += 1
+            continue
+        total = 0.0
+        for r in data["results"]:
+            s = r.get("duration_s") if isinstance(r, dict) else None
+            if not _is_num(s):
+                skipped += 1
+                continue
+            total += s
+            check_id = by_command.get(r.get("command"))
+            if check_id is None:
+                unconfigured["runs"] += 1
+                unconfigured["total_s"] += s
+            else:
+                times.setdefault(check_id, []).append(s)
+        policy = data.get("policy")
+        if _basename(path).startswith("task-") and isinstance(policy, dict) and isinstance(policy.get("unit"), str):
+            if policy.get("selected") == "targeted":
+                targeted.append(total)
+            elif policy.get("selected") == "widened":
+                codes = [x.get("code") for x in policy.get("reasons") or []
+                         if isinstance(x, dict) and isinstance(x.get("code"), str)]
+                widened.append({"unit": policy["unit"], "codes": codes, "s": seconds(total)})
+    commands = []
+    for check_id, _command, _full in configured:
+        if check_id in times:
+            ts = times[check_id]
+            commands.append({"check": check_id, "group": check_id.split("#")[0].rsplit(".", 1)[-1],
+                             "runs": len(ts), "total_s": seconds(sum(ts)), "median_s": seconds(_median(ts)),
+                             "project_suite": "." not in check_id})
+    unconfigured["total_s"] = seconds(unconfigured["total_s"])
+    median = _median(targeted)
+    return commands, unconfigured, skipped, {"targeted_median_s": UNAVAILABLE if median is None else seconds(median),
+                                             "calls": widened}
+
+
 def _match_evidence(found, evidence):
     """Give each task-checks execution of found (sorted by start) its
     evidence. A call with --evidence F (meta evidence_file) gets the entry
@@ -2163,11 +2241,14 @@ def checks_section(run):
     the test group)."""
     repairs = repairs_section(run)
     setup = setup_section(run["manifest"])
+    commands, unconfigured, skipped, widened = command_costs(run)
+    costs = {"commands": commands, "commands_unconfigured": unconfigured, "commands_skipped": skipped,
+             "widened": widened}
     if not _has_tool_events(run):
-        return {"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
-                "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE},
-                "task_check_calls": UNAVAILABLE, "project_test_runs": UNAVAILABLE,
-                "repairs": repairs, "setup": setup, "waits": UNAVAILABLE}
+        return dict({"executions": UNAVAILABLE, "by_check": UNAVAILABLE,
+                     "full_suite_runs": {"total": UNAVAILABLE, "inferred": UNAVAILABLE, "by_role": UNAVAILABLE},
+                     "task_check_calls": UNAVAILABLE, "project_test_runs": UNAVAILABLE,
+                     "repairs": repairs, "setup": setup, "waits": UNAVAILABLE}, **costs)
     checks = configured_checks(run["manifest"])
     on_path = set(id(a) for a in critical_agents(run))
     ledger = find_ledger(run["folder"])
@@ -2238,7 +2319,7 @@ def checks_section(run):
                                 "inferred": sum(1 for x in executions if x["full_suite"] == INFERRED),
                                 "by_role": by_role},
             "task_check_calls": calls, "project_test_runs": project, "repairs": repairs, "setup": setup,
-            "waits": waits_section(run)}
+            "waits": waits_section(run), **costs}
 
 
 # ---- suggestions ----
@@ -2975,7 +3056,8 @@ def _md_waits(waits):
 def _md_checks(a):
     checks = a["checks"]
     if checks["executions"] == UNAVAILABLE:
-        return ["Check executions: unavailable (the run has no timed tool events).", ""] + _md_counters(checks)
+        return (["Check executions: unavailable (the run has no timed tool events)."]
+                + _md_widened(checks.get("widened")) + [""] + _md_counters(checks))
     executions = checks["executions"]
     lines = ["%s; %d on the critical path; %d in the background." % (
         _count_word(len(executions), "execution"), sum(1 for x in executions if x["on_critical_path"]),
@@ -2988,7 +3070,21 @@ def _md_checks(a):
         lines += ["", "Check ids name manifest commands: test#1 is commands.test[0], "
                       "<lane>.test#1 is lane_commands.<lane>.test[0]. <task>.task.test#1 is "
                       "task_checks.<task>.test[0]."]
-    return lines + [""] + _md_counters(checks)
+    return lines + _md_widened(checks.get("widened")) + [""] + _md_counters(checks)
+
+
+def _md_widened(widened):
+    """The widened task-checks table, or nothing without a widened call."""
+    if not isinstance(widened, dict) or not widened.get("calls"):
+        return []
+    median = widened.get("targeted_median_s")
+    rows = []
+    for c in widened["calls"]:
+        diff = c["s"] - median if _is_num(c["s"]) and _is_num(median) else None
+        rows.append([c["unit"], ", ".join(c["codes"]) or "-", _secs(c["s"]), _secs(median),
+                     UNAVAILABLE if diff is None else ("+" if diff >= 0 else "-") + _secs(abs(diff))])
+    return ["", "Widened task checks, compared with the run's median targeted call (measured):", ""] + _table(
+        ["Unit", "Reasons", "Duration", "Median targeted", "Difference"], rows)
 
 
 def _md_slowdowns(a):

@@ -430,13 +430,13 @@ test('legacy full_suite_runs is unchanged on the existing fixtures', () => {
   assert.ok(existsSync(join(dir, 'autopsy.md')));
 });
 
-test('AUTOPSY_VERSION is 6', () => {
+test('AUTOPSY_VERSION is 7', () => {
   assert.deepEqual(python(['print(json.dumps([_autopsy.AUTOPSY_VERSION, _autopsy.SUGGESTIONS["long_tool_call"]]))']), [
-    6, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
+    7, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
       + 'checks once before committing.',
   ]);
   const dir = buildRun({ launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 6);
+  assert.equal(autopsy(dir).json.autopsy_version, 7);
 });
 
 test('autopsy counts an empty task evidence file as malformed and unmatched', () => {
@@ -461,4 +461,76 @@ test('autopsy counts an empty task evidence file as malformed and unmatched', ()
     'print(json.dumps([[e["path"].replace(chr(92), "/").split("/")[-1] for e in entries], malformed]))',
   ], [dir]);
   assert.deepEqual(found, [['task-A1.2.json'], 1]);
+});
+
+// 1.6.4: check time per configured command (by check id, never command text)
+// from every evidence file with a results list, and the widened-checks table.
+const result = (command, s, group = 'test') => ({ group, command, exit: 0, started: T('10:00:00'),
+  ended: T('10:00:00'), duration_s: s, log: '/l/checks/x.1.log', tail: '' });
+const ONE_AGENT = [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }];
+
+test('checks.commands sums each configured command by check id', () => {
+  const m = manifest({ task_checks: { A1: { test: [TARGETED] } } });
+  const dir = buildRun({ m, launches: ONE_AGENT, evidenceFiles: {
+    'task-A1.1.json': evidence({ unit: 'A1', selected: 'widened', started: T('10:00:10'), results: [result(TEST_CMD, 300)] }),
+    'task-A2.1.json': evidence({ unit: 'A2', selected: 'widened', started: T('10:00:20'),
+      results: [result(TEST_CMD, 500), result('eslint .', 4, 'lint')] }),
+    'task-A3.1.json': evidence({ unit: 'A3', started: T('10:00:30'), results: [result(TARGETED, 60)] }),
+    'integrate.1.json': { checkout: '/w', results: [result(TEST_CMD, 700)], ok: true },
+  } });
+  const c = autopsy(dir).json.checks;
+  assert.deepEqual(c.commands, [
+    { check: 'test#1', group: 'test', runs: 3, total_s: 1500, median_s: 500, project_suite: true },
+    { check: 'lint#1', group: 'lint', runs: 1, total_s: 4, median_s: 4, project_suite: true },
+    { check: 'A1.task.test#1', group: 'test', runs: 1, total_s: 60, median_s: 60, project_suite: false },
+  ]);
+  assert.deepEqual(c.commands_unconfigured, { runs: 0, total_s: 0 });
+  assert.equal(c.commands_skipped, 0);
+});
+
+test('commands the manifest does not name are counted without their text', () => {
+  const dir = buildRun({ launches: ONE_AGENT, evidenceFiles: {
+    'long.1.json': { checkout: '/w', results: [result('node focused-SECRET-123.mjs', 90)], ok: true },
+  } });
+  const { json, md } = autopsy(dir);
+  assert.deepEqual(json.checks.commands_unconfigured, { runs: 1, total_s: 90 });
+  assert.deepEqual(json.checks.commands, []);
+  assert.ok(!JSON.stringify(json).includes('SECRET-123'));
+  assert.ok(!md.includes('SECRET-123'));
+});
+
+test('error records and untimed results are skipped and counted', () => {
+  const dir = buildRun({ launches: ONE_AGENT, evidenceFiles: {
+    'task-A1.1.json': evidence({ unit: 'A1', started: T('10:00:10'), results: [], ok: false, error: 'boom' }),
+    'integrate.1.json': '{not json',
+    'verify-x.json': { checkout: '/w', results: [{ group: 'test', command: TEST_CMD, exit: 0 }], ok: true },
+    'notes.json': { something: 'else' },
+  } });
+  const c = autopsy(dir).json.checks;
+  assert.deepEqual(c.commands, []);
+  assert.equal(c.commands_skipped, 3);
+});
+
+test('the widened table lists each widened call against the median targeted call', () => {
+  const dir = buildRun({ launches: ONE_AGENT, evidenceFiles: {
+    'task-A1.1.json': evidence({ unit: 'A1', selected: 'widened', started: T('10:00:10'),
+      reasons: [{ code: 'outside_files', detail: 'outside the Files list: x' }, { code: 'widen_path', detail: 'y' }],
+      results: [result(TEST_CMD, 800), result('eslint .', 100, 'lint')] }),
+    'task-A2.1.json': evidence({ unit: 'A2', started: T('10:00:20'), results: [result(TARGETED, 100)] }),
+    'task-A3.1.json': evidence({ unit: 'A3', started: T('10:00:30'), results: [result(TARGETED, 300)] }),
+  } });
+  const { json, md } = autopsy(dir);
+  assert.deepEqual(json.checks.widened, { targeted_median_s: 200,
+    calls: [{ unit: 'A1', codes: ['outside_files', 'widen_path'], s: 900 }] });
+  assert.match(md, /^Widened task checks, compared with the run's median targeted call \(measured\):$/m);
+  assert.ok(md.includes('| A1 | outside_files, widen_path | 900.0 s | 200.0 s | +700.0 s |'), md);
+});
+
+test('no widened table without a widened call', () => {
+  const dir = buildRun({ launches: ONE_AGENT, evidenceFiles: {
+    'task-A2.1.json': evidence({ unit: 'A2', started: T('10:00:20'), results: [result(TARGETED, 100)] }),
+  } });
+  const { json, md } = autopsy(dir);
+  assert.deepEqual(json.checks.widened, { targeted_median_s: 100, calls: [] });
+  assert.ok(!md.includes('Widened task checks'));
 });
