@@ -146,6 +146,27 @@ test('an untracked file outside the Files list widens', () => {
   assert.deepEqual(json.policy.changed, ['new.js']);
 });
 
+test('the printed report caps long path lists; the evidence file keeps them whole', () => {
+  // 1.6.0 deferred minor: the printed line carried every changed and outside path.
+  const r = repo({ 'src/a.js': '1\n' });
+  const names = Array.from({ length: 60 }, (_, i) => `gen/${'x'.repeat(40)}${String(i).padStart(2, '0')}.js`);
+  mkdirSync(join(r.dir, 'gen'));
+  for (const n of names) writeFileSync(join(r.dir, n), 'x\n');
+  const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+  assert.equal(status, 0);
+  const saved = JSON.parse(readFileSync(join(r.ledger, 'checks', 'task-U1.1.json'), 'utf8'));
+  assert.deepEqual(saved.policy.changed, names);
+  assert.ok(saved.policy.reasons[0].detail.includes(names[59]));
+  assert.equal(saved.printed_cut, undefined);
+  assert.deepEqual(json.policy.changed, names.slice(0, 50));
+  assert.ok(json.policy.reasons[0].detail.length <= 2100);
+  assert.ok(!json.policy.reasons[0].detail.includes(names[59]));
+  assert.match(json.printed_cut, /50 of 60 changed paths/);
+  assert.ok(json.printed_cut.includes('task-U1.1.json'));
+  // Everything else is the file's report.
+  assert.deepEqual({ ...json, policy: null, printed_cut: undefined }, { ...saved, policy: null, printed_cut: undefined });
+});
+
 test('a rename counts both paths', () => {
   const r = repo({ 'src/a.js': '1\n' });
   git(r.dir, 'mv', 'src/a.js', 'src/z.js');

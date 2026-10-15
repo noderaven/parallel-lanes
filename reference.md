@@ -501,7 +501,8 @@ agent's `--force-full`. Matching is case-sensitive; a `\` in a changed path is n
 Safety: ids must be safe file names and the base a sha (else exit 2, nothing written); the
 evidence file `<ledger>/checks/task-<unit>.<n>.json` is created exclusively inside the ledger
 (else exit 3); exit 1 always means a check failed, and any other failure exits 3 with an
-error record. The evidence is a record and a count: nothing reads it to accept, skip or reuse
+error record. The printed line lists at most 50 changed paths and cuts long reasons, with a `printed_cut`
+note; the evidence file keeps everything. The evidence is a record and a count: nothing reads it to accept, skip or reuse
 checks.
 
 **Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
