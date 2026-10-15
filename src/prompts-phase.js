@@ -227,6 +227,29 @@ function verifySchema() {
   };
 }
 
+// A relaunch's pre-flight (1.6.3): the tasks already built, the rulings that
+// bind it, and whether the plan or spec changed since the last launch
+// (inputs_changed, copied from ledger status). [] on a first launch.
+function relaunchPreflightLines(m) {
+  if (!Array.isArray(m.done) || m.done.length === 0) return [];
+  const ic = m.inputs_changed;
+  const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
+  let changed = 'Whether the plan or the spec changed since the last launch is not known.';
+  if (known && ic.plan && ic.spec) changed = 'The plan and the spec changed since the last launch.';
+  else if (known && ic.plan) changed = 'The plan changed since the last launch; the spec did not.';
+  else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
+  else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
+  return [
+    `Built tasks (done in an earlier launch; never rule on their code): ${m.done.join(', ')}`,
+    'Earlier rulings bind; read them with (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Check only the tasks still to run and their dependence on built work.',
+    'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
+    `since that ruling; then report it as a conflict. ${changed}`,
+    '',
+  ];
+}
+
 function preflightPrompt(m) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
@@ -237,6 +260,7 @@ function preflightPrompt(m) {
     'Run layout:',
     layoutText(m),
     '',
+    ...relaunchPreflightLines(m),
     'Check:',
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
@@ -633,7 +657,7 @@ function taskMinorsLines(m, minors) {
   const here = Array.isArray(minors) ? minors : [];
   const carried = carriedMinorIds(m);
   if (here.length === 0 && carried.length === 0) return [];
-  const ledger = `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} minors ${shellQuote(m.repo.ledger_dir)}`;
+  const ledger = ledgerReadCommand(m, featureDir(m), 'minors');
   return [
     ...(here.length > 0 ? [
       'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
@@ -641,7 +665,8 @@ function taskMinorsLines(m, minors) {
     ] : []),
     ...(carried.length > 0 ? [
       'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
-      `(a read-only command): ${ledger}`,
+      '(a read-only command):',
+      `  ${ledger}`,
       `Carried: ${carried.join(', ')}`,
     ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
@@ -679,6 +704,11 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     '',
     ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
+    "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
+    'Files each task changed outside its Files list, with their owners (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
+    "Check each change was needed and, where it is another lane's or a later task's file, covered by a ruling.",
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
@@ -741,6 +771,7 @@ function finalFixPrompt(m, findings, base) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -800,6 +831,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
       'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
@@ -892,6 +924,7 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',

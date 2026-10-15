@@ -1104,6 +1104,19 @@ function ledgerCommand(m, laneId, entry, dir) {
     `${shellQuote(laneId)} ${shellQuote(JSON.stringify(entry))}`;
 }
 
+// A read-only ledger command (1.6.3: rulings, minors, owners, undeclared),
+// started in the agent's checkout dir like every helper command it is given.
+function ledgerReadCommand(m, dir, sub, ...args) {
+  return `cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} ${sub} `
+    + `${shellQuote(m.repo.ledger_dir)}${args.map((a) => ` ${a}`).join('')}`;
+}
+
+// The lines every agent after the task loop gets: the full rulings print,
+// run from dir (the agent's checkout).
+function rulingsReadLines(m, dir) {
+  return ['Every ruling in force, with its id (a read-only command):', `  ${ledgerReadCommand(m, dir, 'rulings')}`];
+}
+
 // The commands of one group for a ledger lane (null: project commands only);
 // lane_commands override per group.
 function commandGroup(m, laneId, name) {
@@ -1549,7 +1562,33 @@ function taskContext(m, task, where, guidance = null, by = 'implementer') {
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
     `  ${ruling}`,
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
+    ...carryOverLines(m, task, where, by),
   ].join('\n');
+}
+
+// What every task agent is told about the rulings in force, and what an
+// implementer is told about owners and observed failures (1.6.3).
+function carryOverLines(m, task, where, by) {
+  const ids = unitTasks(task).map((t) => `--task ${shellQuote(t.id)}`).join(' ');
+  const lines = [
+    'The start command prints the rulings in force under "===== rulings in force =====": they bind you. Cite one by',
+    'its id (for example alpha-R3 or PF-2).',
+  ];
+  if (by !== 'implementer') return lines;
+  return [
+    ...lines,
+    'To depart from a ruling in force, add "overrides": ["<id>"] to your ruling\'s JSON.',
+    'An implementer may override only an implementer ruling of its own lane; to depart from any other, report status',
+    'question naming its id.',
+    'Before changing a file outside your Files list, run (a read-only command):',
+    `  ${ledgerReadCommand(m, where.dir, 'owners', ids, '<path>')}`,
+    'A file owned by a task in another lane running alongside, or by a later task (or a later task\'s planned part of',
+    'a file you share), needs a pre-flight or adjudicator ruling in force that lists it; without one, report status',
+    'question instead of changing it. A file of a task earlier in the run is fine when your task needs the change.',
+    'A check failure you judge outside your task (it passed on a rerun, or the failing test covers code your task did',
+    'not touch): record it as a ruling whose JSON adds "scope": "run", with the text',
+    'Observed: <test or command> failed - <why outside this task> - <rerun result>.',
+  ];
 }
 
 function fallbackImplementer() {
@@ -1643,8 +1682,11 @@ function startCommand(m, task, where, opts = {}) {
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
     parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
-      ...declared.flatMap((f) => ['--declared', shellQuote(f)]));
+      ...declared.flatMap((f) => ['--declared', shellQuote(f)]),
+      '--owners', shellQuote(`${m.repo.ledger_dir}/owners.json`));
   }
+  // The rulings in force (1.6.3): a join task sees every lane's.
+  parts.push('--rulings', shellQuote(m.repo.ledger_dir), shellQuote(where.lane === 'join' ? '-' : where.lane));
   if (present(opts.start)) {
     parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
   }
@@ -1857,9 +1899,14 @@ function scopeLines(task) {
   if (declaredFiles(task).length === 0) return [];
   return [
     "The start command lists, under its \"===== files changed outside the task's Files list =====\" line, every",
-    `file the range changes that the ${unitNoun(task)}'s Files list does not name. Judge each: a change the task did`,
-    "not need (above all to a file another task or lane owns) is an important finding on that file; a change the",
-    'task needed is fine.',
+    `file the range changes that the ${unitNoun(task)}'s Files list does not name, with its owner, and any changed`,
+    'file of the Files list that another task also lists. Judge each:',
+    '- owned by a task earlier in the run: fine when the task needed the change;',
+    '- owned by a task in another lane running alongside, or a later task: an important finding unless a pre-flight or'
+      + ' adjudicator ruling in force covers it (cite its id); an implementer\'s own ruling never does;',
+    "- also in another task's Files: check the plan's split of that file; doing another task's planned part is a",
+    '  finding (important if it breaks that task, else minor);',
+    '- no task owns it: a change the task did not need is an important finding on that file; a needed one is fine.',
   ];
 }
 
@@ -2234,6 +2281,29 @@ function verifySchema() {
   };
 }
 
+// A relaunch's pre-flight (1.6.3): the tasks already built, the rulings that
+// bind it, and whether the plan or spec changed since the last launch
+// (inputs_changed, copied from ledger status). [] on a first launch.
+function relaunchPreflightLines(m) {
+  if (!Array.isArray(m.done) || m.done.length === 0) return [];
+  const ic = m.inputs_changed;
+  const known = ic && typeof ic.plan === 'boolean' && typeof ic.spec === 'boolean';
+  let changed = 'Whether the plan or the spec changed since the last launch is not known.';
+  if (known && ic.plan && ic.spec) changed = 'The plan and the spec changed since the last launch.';
+  else if (known && ic.plan) changed = 'The plan changed since the last launch; the spec did not.';
+  else if (known && ic.spec) changed = 'The spec changed since the last launch; the plan did not.';
+  else if (known) changed = 'Neither the plan nor the spec changed since the last launch.';
+  return [
+    `Built tasks (done in an earlier launch; never rule on their code): ${m.done.join(', ')}`,
+    'Earlier rulings bind; read them with (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Check only the tasks still to run and their dependence on built work.',
+    'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
+    `since that ruling; then report it as a conflict. ${changed}`,
+    '',
+  ];
+}
+
 function preflightPrompt(m) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
@@ -2244,6 +2314,7 @@ function preflightPrompt(m) {
     'Run layout:',
     layoutText(m),
     '',
+    ...relaunchPreflightLines(m),
     'Check:',
     '1. Every task id above has a "Task <ID>:" heading in the plan.',
     '2. The plan against the spec: contradictions, and defects the plan mandates (instructions that are wrong',
@@ -2640,7 +2711,7 @@ function taskMinorsLines(m, minors) {
   const here = Array.isArray(minors) ? minors : [];
   const carried = carriedMinorIds(m);
   if (here.length === 0 && carried.length === 0) return [];
-  const ledger = `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} minors ${shellQuote(m.repo.ledger_dir)}`;
+  const ledger = ledgerReadCommand(m, featureDir(m), 'minors');
   return [
     ...(here.length > 0 ? [
       'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
@@ -2648,7 +2719,8 @@ function taskMinorsLines(m, minors) {
     ] : []),
     ...(carried.length > 0 ? [
       'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
-      `(a read-only command): ${ledger}`,
+      '(a read-only command):',
+      `  ${ledger}`,
       `Carried: ${carried.join(', ')}`,
     ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
@@ -2686,6 +2758,11 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     '',
     ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
+    "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
+    'Files each task changed outside its Files list, with their owners (a read-only command):',
+    `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
+    "Check each change was needed and, where it is another lane's or a later task's file, covered by a ruling.",
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
@@ -2748,6 +2825,7 @@ function finalFixPrompt(m, findings, base) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -2807,6 +2885,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
       'check the fix for new critical or important problems; do not re-review code the fix did not touch.',
     ] : ['Check the repairs for new critical or important problems; do not re-review code they did not touch.']),
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     ...fixMessagesLines(),
     phaseRules(m),
     '',
@@ -2899,6 +2978,7 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     `Plan: ${m.plan}`,
     `Spec: ${m.spec === null ? '(none)' : m.spec}`,
     ...runRulingsLines(m),
+    ...rulingsReadLines(m, featureDir(m)),
     keepFilesRule(),
     phaseRules(m),
     '',
@@ -3146,8 +3226,12 @@ function adjudicatorPrompt(m, ctx) {
     '  - plan_broken: a plan so broken every path is a guess',
     'Anything else is not a reason to stop: answer, clarify, park, or unblock instead.',
     '',
+    ...rulingsReadLines(m, dir),
     'Record your ruling, in the format `Ruling: decision - why - cost if wrong`, as a ledger ruling event with:',
     `  ${ruling}`,
+    'In its JSON add "scope": "run" when it concerns code, tests or checks outside this task\'s lane,',
+    '"overrides": ["<id>"] when it departs from a ruling in force, and',
+    '"files": ["<path>"] for each file it permits the task to change outside its Files list.',
     'Ledger entries are shell single-quoted JSON: fill the <...> placeholders and keep quote characters out of the text.',
     'For park or unblock, run the command the details above give for that outcome; it prints JSON with a head.',
     '',
