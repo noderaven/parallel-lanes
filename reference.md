@@ -491,7 +491,10 @@ tool call never ends the agent's turn.
   worktree never ran the project's setup, and integration still runs every check.
 
 Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
-changed path the Files list does not cover), `widen_path` (a changed path under
+changed path the Files list does not cover, nor an adjudicator ruling in force permits: one filed
+under the unit's task, or under `_run` for a path no task's Files list names, in the folder of a
+file the unit declares; such a path is
+listed in `policy.permitted` with the ruling's id), `widen_path` (a changed path under
 `widen_paths`), `forced` (the agent's `--force-full '<why>'`, for a shared contract,
 configuration, generated or ignored inputs, a dependency that is not a direct import, or a
 targeted list that turned out invalid), `git_failed`. Changed paths are the working tree

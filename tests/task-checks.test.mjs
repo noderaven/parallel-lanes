@@ -138,6 +138,82 @@ test('a widen entry naming an existing directory without a trailing / covers fil
   assert.equal(file.json.policy.selected, 'targeted');
 });
 
+// The ledger's ruling events and owner map, as the run writes them.
+function ledgerFile(r, stem, events) {
+  writeFileSync(join(r.ledger, `${stem}.jsonl`), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}
+function ownerMap(r, files) {
+  writeFileSync(join(r.ledger, 'owners.json'), JSON.stringify({
+    tasks: { U1: { where: 'alpha', pos: 0 }, U2: { where: 'alpha', pos: 1 }, U9: { where: 'beta', pos: 0 } }, files }));
+}
+const permit = (task, files, extra = {}) => ({ event: 'ruling', task, by: 'adjudicator', text: 'Ruling: x - y - z', files, ...extra });
+
+test('a file an adjudicator ruling in force permits counts as declared, and the policy names the ruling', () => {
+  // d1a DI3: the pre-flight adjudicator permitted ToolRackSlot.cs (no task listed it), filed under _run;
+  // task-checks widened anyway (outside_files), 1089 s instead of about 600 s.
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js'])]);
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+  assert.equal(status, 0);
+  assert.equal(json.policy.selected, 'targeted');
+  assert.deepEqual(json.policy.permitted, [{ path: 'src/slot.js', ruling: '_run-R1' }]);
+  // Filed under the unit's own task (in its lane file), the files count whatever the owner map says.
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/slot.js': ['U9'] });
+  rmSync(join(r.ledger, '_run.jsonl'));
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'])]);
+  assert.deepEqual(run(r, { args: ['--declared', 'src/a.js'] }).json.policy.permitted,
+    [{ path: 'src/slot.js', ruling: 'alpha-R1' }]);
+});
+
+test('only an adjudicator ruling in force, for this unit or an unowned path, permits a file', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  const widens = (why) => {
+    const { status, json } = run(r, { args: ['--declared', 'src/a.js'] });
+    assert.equal(status, 0, why);
+    assert.deepEqual(codes(json), ['outside_files'], why);
+    assert.deepEqual(json.policy.permitted, [], why);
+  };
+  const reset = () => { for (const n of readdirSync(r.ledger)) if (n.endsWith('.jsonl') || n === 'owners.json') rmSync(join(r.ledger, n)); };
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  // An implementer's own ruling never permits (it could switch off its own widening).
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'], { by: 'implementer' })]);
+  widens('implementer ruling');
+  ledgerFile(r, 'alpha', [permit('U1', ['src/slot.js'], { by: 'reviewer' })]);
+  widens('reviewer ruling');
+  // Another task's ruling.
+  ledgerFile(r, 'alpha', [permit('U2', ['src/slot.js'])]);
+  widens('another task');
+  reset();
+  // A _run ruling for a path another task owns, or with no owner map to tell.
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js'])]);
+  ownerMap(r, { 'src/a.js': ['U1'], 'src/slot.js': ['U9'] });
+  widens('owned elsewhere');
+  rmSync(join(r.ledger, 'owners.json'));
+  widens('no owner map');
+  // A _run ruling's unowned path counts only for a unit declaring a file in the same folder
+  // (d1a: ToolRackSlot.cs beside DI3's ToolRack.cs), so it does not exempt every other task.
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  mkdirSync(join(r.dir, 'other'));
+  writeFileSync(join(r.dir, 'other/far.js'), 'new\n');
+  rmSync(join(r.dir, 'src/slot.js'));
+  ledgerFile(r, '_run', [permit('_run', ['other/far.js'])]);
+  widens('another folder');
+  rmSync(join(r.dir, 'other'), { recursive: true });
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  // An overridden ruling is no longer in force.
+  ownerMap(r, { 'src/a.js': ['U1'] });
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js']), permit('_run', [], { overrides: ['_run-R1'] })]);
+  widens('overridden');
+  // An unreadable ledger keeps the strict rule.
+  writeFileSync(join(r.ledger, '_run.jsonl'), '{not json\n');
+  widens('unreadable ledger');
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');

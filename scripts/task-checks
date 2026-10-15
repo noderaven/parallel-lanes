@@ -19,7 +19,7 @@ Selection (policy.selected):
   targeted  an entry and no widening reason: the --targeted list runs.
 policy.reasons lists every reason that applies, as {code, detail}, in this
 order: no_entry, no_files (no --declared), outside_files (a changed path the
-Files list does not cover), widen_path (a changed path a --widen entry
+Files list does not cover, nor a ruling permits), widen_path (a changed path a --widen entry
 covers), forced (--force-full, its REASON as detail), git_failed (the changed
 paths could not be listed).
 
@@ -37,6 +37,15 @@ normalized (posixpath.normpath) and compared case-sensitively, so on a
 case-insensitive filesystem a case mismatch only widens. A --declared or
 --widen value that is absolute or leaves the project after normalizing is a
 usage error.
+
+Permitted paths: a changed path outside the Files list that an adjudicator
+ruling in force permits this unit (its 'files': filed under one of the
+--task ids, or under _run for a path no task's Files list names in
+LEDGER_DIR/owners.json, in the same folder as a --declared file) counts as
+declared and is listed in
+policy.permitted as {path, ruling}. Implementer, reviewer and pre-flight
+rulings permit nothing. The ledger script's adjudicator_permits finds them;
+when the ledger or owner map cannot be read, none are permitted.
 
 The chosen list runs through run-checks (DIR --out FILE --root LEDGER_DIR
 --lock-held). FILE, the result file, is:
@@ -58,7 +67,7 @@ never takes run-checks' report, written before policy is added, for the
 result. run-checks writes its JSON to FILE and its logs beside it; this
 helper adds policy:
   {unit, tasks, lane, base, started, entry, selected, reasons, changed,
-   offered: {targeted, lane, wide}, project_test_executed}
+   permitted, offered: {targeted, lane, wide}, project_test_executed}
 started is the UTC time this helper began (ISO 8601, milliseconds, Z);
 project_test_executed is true when an executed command equals a
 --project-test value. The file is rewritten in one step
@@ -93,6 +102,9 @@ error record once FILE is known). Exit 1 always means a check failed.
 """
 
 import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import posixpath
@@ -239,6 +251,7 @@ def validate(args):
     for value in [args["unit"], args["lane"], *args["tasks"]] + ([args["entry"]] if args["entry"] else []):
         if not SAFE_ID.match(value):
             fail(2, f"unsafe id {value!r}")
+    args["declared_raw"] = list(args["declared"])
     for flag, key in (("--declared", "declared"), ("--widen", "widen")):
         keys = []
         for value in args[key]:
@@ -284,9 +297,31 @@ def covered(path, entries):
     return False
 
 
+def permits(args):
+    """[((path, is_dir), ruling id)]: the paths the adjudicator rulings in
+    force permit this unit (ledger's adjudicator_permits, one helper for both
+    scripts); [] when the ledger cannot be read, so the strict rule holds."""
+    try:
+        loader = importlib.machinery.SourceFileLoader("_pl_ledger", os.path.join(HERE, "ledger"))
+        spec = importlib.util.spec_from_loader("_pl_ledger", loader)
+        ledger = importlib.util.module_from_spec(spec)
+        with contextlib.redirect_stderr(io.StringIO()):
+            loader.exec_module(ledger)
+            found = ledger.adjudicator_permits(args["ledger"], args["tasks"], args["declared_raw"])
+    except (Exception, SystemExit):  # noqa: BLE001 - any failure keeps the strict rule
+        return []
+    out = []
+    for path, ruling in found:
+        key = entry_key(path) if isinstance(path, str) else None
+        if key is not None:
+            out.append((key, ruling))
+    return out
+
+
 def select(args, changed):
-    """(selected, reasons) per the docstring's rules."""
+    """(selected, reasons, permitted) per the docstring's rules."""
     reasons = []
+    permitted = []
     if args["entry"] is None:
         reasons.append({"code": "no_entry", "detail": "no task_checks entry for this unit"})
     if not args["declared"]:
@@ -294,6 +329,12 @@ def select(args, changed):
     if changed is not None:
         if args["declared"]:
             outside = [p for p in changed if not covered(p, args["declared"])]
+            allowed = permits(args) if outside else []
+            for p in list(outside):
+                ruling = next((rid for key, rid in allowed if covered(p, [key])), None)
+                if ruling is not None:
+                    permitted.append({"path": p, "ruling": ruling})
+                    outside.remove(p)
             if outside:
                 reasons.append({"code": "outside_files", "detail": "outside the Files list: " + ", ".join(outside)})
         shared = [p for p in changed if covered(p, args["widen"])]
@@ -304,8 +345,8 @@ def select(args, changed):
     if changed is None:
         reasons.append({"code": "git_failed", "detail": "could not list the changed files"})
     if args["entry"] is None:
-        return "lane", reasons
-    return ("widened" if reasons else "targeted"), reasons
+        return "lane", reasons, permitted
+    return ("widened" if reasons else "targeted"), reasons, permitted
 
 
 def reserve(ledger, unit):
@@ -405,13 +446,14 @@ def run(argv):
 def plan(args, started):
     """(the command list to run, the policy) for validated args."""
     changed = changed_paths(args["dir"], args["base"])
-    selected, reasons = select(args, changed)
+    selected, reasons, permitted = select(args, changed)
     chosen = {"targeted": args["targeted"], "lane": args["lane_cmds"], "widened": args["wide_cmds"]}[selected]
     as_list = lambda pairs: [{"group": g, "command": c} for g, c in pairs]  # noqa: E731
     policy = {
         "unit": args["unit"], "tasks": args["tasks"], "lane": args["lane"], "base": args["base"],
         "started": started, "entry": args["entry"], "selected": selected, "reasons": reasons,
         "changed": changed if changed is not None else [],
+        "permitted": permitted,
         "offered": {"targeted": as_list(args["targeted"]) if args["entry"] is not None else None,
                     "lane": as_list(args["lane_cmds"]), "wide": as_list(args["wide_cmds"])},
         "project_test_executed": False,
