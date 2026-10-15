@@ -714,6 +714,24 @@ function validateManifest(m) {
     }
   }
 
+  // carried_minors (1.6.3): the open task minors an earlier launch left, as
+  // ledger status prints them: {open: [minor ids], covered: [task ids]}.
+  if ('carried_minors' in m) {
+    const c = m.carried_minors;
+    const ids = (v) => Array.isArray(v) && v.every(isText);
+    if (!isObject(c) || !ids(c.open) || !ids(c.covered)) {
+      err('carried_minors: must be {open: [minor ids], covered: [task ids]}');
+    }
+  }
+  // inputs_changed (1.6.3): whether the plan and the spec changed since the
+  // last launch (ledger status inputs), for a relaunch's pre-flight.
+  if ('inputs_changed' in m) {
+    const flag = (v) => v === true || v === false || v === null;
+    const c = m.inputs_changed;
+    if (!isObject(c) || !('plan' in c) || !('spec' in c) || !flag(c.plan) || !flag(c.spec)) {
+      err('inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
+    }
+  }
   // start_points: feature heads from the ledger run_started events.
   if ('start_points' in m) {
     if (!isObject(m.start_points)) {
@@ -1431,12 +1449,14 @@ function startFindingNote(findings) {
 
 // The rulings already made for this run (m.run_rulings, set only by the
 // workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
-// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
-// ruling quoted as written. Empty when there are none.
+// ruling), as prompt lines: a heading and one '- PF-<n>: <ruling>' line each,
+// every ruling quoted as written. PF-<n> is the id agents cite and override it
+// by during this launch; carry-launch records it with the ruling afterwards
+// (1.6.3). Empty when there are none.
 function runRulingsLines(m) {
   const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
   if (rulings.length === 0) return [];
-  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
 // The message a task fix round commits with: 'fix: address review findings
@@ -2613,23 +2633,42 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
-// The task minors checklist for a final reviewer (taskMinorFindings): []
-// when there are none.
-function taskMinorsLines(minors) {
-  if (!Array.isArray(minors) || minors.length === 0) return [];
+// The task minors checklist for the reviewer that owns it (taskMinorFindings
+// of this launch, and the open ones an earlier launch left, read from the
+// ledger): [] when there are none.
+function taskMinorsLines(m, minors) {
+  const here = Array.isArray(minors) ? minors : [];
+  const carried = carriedMinorIds(m);
+  if (here.length === 0 && carried.length === 0) return [];
+  const ledger = `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} minors ${shellQuote(m.repo.ledger_dir)}`;
   return [
-    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
-    findingsText(minors),
+    ...(here.length > 0 ? [
+      'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+      findingsText(here),
+    ] : []),
+    ...(carried.length > 0 ? [
+      'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
+      `(a read-only command): ${ledger}`,
+      `Carried: ${carried.join(', ')}`,
+    ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
     'issue (for example "[<id>] ..."); otherwise leave it.',
     '',
   ];
 }
 
+// For a lens that does not own the checklist, when there is one: [] otherwise.
+function otherReviewerMinorsLines(m, minors) {
+  const any = (Array.isArray(minors) && minors.length > 0) || carriedMinorIds(m).length > 0;
+  return any ? ['Task minors are checked by another reviewer: raise one only if you judge it critical or'
+    + ' important, citing its id.', ''] : [];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, the task minors checklist, and the
-// findings/head result.
-function finalReviewFrame(m, intro, focus, minors = []) {
+// branch range, the commit-rules scan, the task minors checklist (or, with
+// other true, the line for a lens that does not own it: minors is then the
+// checklist another lens has), and the findings/head result.
+function finalReviewFrame(m, intro, focus, minors = [], other = false) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -2645,7 +2684,7 @@ function finalReviewFrame(m, intro, focus, minors = []) {
     '',
     focus,
     '',
-    ...taskMinorsLines(minors),
+    ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
@@ -2659,9 +2698,10 @@ function finalReviewFrame(m, intro, focus, minors = []) {
   ].join('\n');
 }
 
-// minors: the task minors checklist (taskMinorsLines).
-function finalReviewPrompt(m, lens, e2e, minors = []) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
+// minors: the task minors checklist (taskMinorsLines); other: this lens does
+// not own the checklist (it gets otherReviewerMinorsLines when one exists).
+function finalReviewPrompt(m, lens, e2e, minors = [], other = false) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors, other);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.
@@ -4108,7 +4148,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const lenses = m.profile === 'lite'
     ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
+      // One lens owns the task minors checklist (1.6.3): the security lens,
+      // which worked it in every archived run; the others only escalate.
+      .map(([key, name]) => [`final review ${key}`, name,
+        finalReviewPrompt(m, key, e2e, taskMinors, key !== 'security')]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -4135,6 +4178,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
     lens_heads: lensHeads, repairs: [],
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
+    carried_minors_open: carriedMinorIds(m).filter((id) => !raised.includes(`[${id}]`)),
   };
   const unbound = reviewProblemOf(lensHeads, results);
   if (unbound !== null) final.review_problem = unbound;
@@ -4218,6 +4262,12 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   }
   if (repaired && repaired.unreviewed !== null) final.unreviewed_fix = repaired.unreviewed;
   return final;
+}
+
+// The open task minors an earlier launch left (carried_minors.open, which the
+// session copies from ledger status): [] without them.
+function carriedMinorIds(m) {
+  return m.carried_minors && Array.isArray(m.carried_minors.open) ? m.carried_minors.open : [];
 }
 
 // The exit-code contract (1.6.2 spec 4.3): true when at least one command
@@ -4677,11 +4727,12 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], adjudicated: null };
   } else if (!preflightNeeded(m)) {
     // A relaunch with every task done and reviewed: no pre-flight agent, so no
     // rulings (preflightNeeded says why).
-    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run' };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run',
+      adjudicated: null };
     io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
@@ -4706,7 +4757,10 @@ async function runAll(manifest, io) {
     const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
       .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    // adjudicated: the index in rulings of the adjudicator's ruling on the
+    // conflicts, which the adjudicator recorded in the ledger itself, so
+    // carry-launch skips it (1.6.3); null when there is none.
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule, adjudicated: null };
     if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
@@ -4727,6 +4781,7 @@ async function runAll(manifest, io) {
       // The ruling joins the run rulings, so it reaches every task agent
       // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
+      preflight.adjudicated = preflight.rulings.length - 1;
       m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
@@ -4994,8 +5049,11 @@ async function runAll(manifest, io) {
   // earlier launch committed and reviewed are not re-run, so their approved
   // reviews' minor findings never reached the final lenses. Every resume
   // has such tasks, so this is a note (no source), not a warning.
+  // Tasks the session's carried_minors covers (carry-launch's snapshot) had
+  // their open minors carried to the security lens: only the rest are noted.
+  const covered = new Set(m.carried_minors ? m.carried_minors.covered : []);
   const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
-    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+    .filter((t) => taskState(m, t.id) === 'skip' && !covered.has(t.id)).map((t) => t.id);
   if (earlier.length > 0) {
     final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
       + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'

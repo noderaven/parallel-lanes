@@ -626,23 +626,42 @@ function finalLensFocus(m, lens, e2e) {
   ].join('\n');
 }
 
-// The task minors checklist for a final reviewer (taskMinorFindings): []
-// when there are none.
-function taskMinorsLines(minors) {
-  if (!Array.isArray(minors) || minors.length === 0) return [];
+// The task minors checklist for the reviewer that owns it (taskMinorFindings
+// of this launch, and the open ones an earlier launch left, read from the
+// ledger): [] when there are none.
+function taskMinorsLines(m, minors) {
+  const here = Array.isArray(minors) ? minors : [];
+  const carried = carriedMinorIds(m);
+  if (here.length === 0 && carried.length === 0) return [];
+  const ledger = `${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/ledger`)} minors ${shellQuote(m.repo.ledger_dir)}`;
   return [
-    'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
-    findingsText(minors),
+    ...(here.length > 0 ? [
+      'Minor findings of approved task reviews, never acted on (each with its id in brackets):',
+      findingsText(here),
+    ] : []),
+    ...(carried.length > 0 ? [
+      'Minor findings an earlier launch\'s task reviews approved and no final review has raised yet. Read them with',
+      `(a read-only command): ${ledger}`,
+      `Carried: ${carried.join(', ')}`,
+    ] : []),
     'For each one that still holds and is worth fixing, raise it as a finding with its id in brackets in the',
     'issue (for example "[<id>] ..."); otherwise leave it.',
     '',
   ];
 }
 
+// For a lens that does not own the checklist, when there is one: [] otherwise.
+function otherReviewerMinorsLines(m, minors) {
+  const any = (Array.isArray(minors) && minors.length > 0) || carriedMinorIds(m).length > 0;
+  return any ? ['Task minors are checked by another reviewer: raise one only if you judge it critical or'
+    + ' important, citing its id.', ''] : [];
+}
+
 // A final reviewer's prompt around its focus text: read-only, the whole
-// branch range, the commit-rules scan, the task minors checklist, and the
-// findings/head result.
-function finalReviewFrame(m, intro, focus, minors = []) {
+// branch range, the commit-rules scan, the task minors checklist (or, with
+// other true, the line for a lens that does not own it: minors is then the
+// checklist another lens has), and the findings/head result.
+function finalReviewFrame(m, intro, focus, minors = [], other = false) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const log = `git -C ${dir} log ${q(`${m.repo.base_ref}..${m.repo.branch}`)}`;
@@ -658,7 +677,7 @@ function finalReviewFrame(m, intro, focus, minors = []) {
     '',
     focus,
     '',
-    ...taskMinorsLines(minors),
+    ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
@@ -672,9 +691,10 @@ function finalReviewFrame(m, intro, focus, minors = []) {
   ].join('\n');
 }
 
-// minors: the task minors checklist (taskMinorsLines).
-function finalReviewPrompt(m, lens, e2e, minors = []) {
-  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors);
+// minors: the task minors checklist (taskMinorsLines); other: this lens does
+// not own the checklist (it gets otherReviewerMinorsLines when one exists).
+function finalReviewPrompt(m, lens, e2e, minors = [], other = false) {
+  return finalReviewFrame(m, 'You are a final reviewer', finalLensFocus(m, lens, e2e), minors, other);
 }
 
 // Profile lite: one reviewer covers the three lenses of the full profile.

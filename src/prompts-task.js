@@ -402,12 +402,14 @@ function startFindingNote(findings) {
 
 // The rulings already made for this run (m.run_rulings, set only by the
 // workflow: pre-flight's rulings in order, then the adjudicator's pre-flight
-// ruling), as prompt lines: a heading and one '- <ruling>' line each, every
-// ruling quoted as written. Empty when there are none.
+// ruling), as prompt lines: a heading and one '- PF-<n>: <ruling>' line each,
+// every ruling quoted as written. PF-<n> is the id agents cite and override it
+// by during this launch; carry-launch records it with the ruling afterwards
+// (1.6.3). Empty when there are none.
 function runRulingsLines(m) {
   const rulings = Array.isArray(m.run_rulings) ? m.run_rulings : [];
   if (rulings.length === 0) return [];
-  return ['Rulings already made for this run (binding):', ...rulings.map((r) => `- ${r}`)];
+  return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
 // The message a task fix round commits with: 'fix: address review findings

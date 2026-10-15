@@ -623,6 +623,24 @@ function validateManifest(m) {
     }
   }
 
+  // carried_minors (1.6.3): the open task minors an earlier launch left, as
+  // ledger status prints them: {open: [minor ids], covered: [task ids]}.
+  if ('carried_minors' in m) {
+    const c = m.carried_minors;
+    const ids = (v) => Array.isArray(v) && v.every(isText);
+    if (!isObject(c) || !ids(c.open) || !ids(c.covered)) {
+      err('carried_minors: must be {open: [minor ids], covered: [task ids]}');
+    }
+  }
+  // inputs_changed (1.6.3): whether the plan and the spec changed since the
+  // last launch (ledger status inputs), for a relaunch's pre-flight.
+  if ('inputs_changed' in m) {
+    const flag = (v) => v === true || v === false || v === null;
+    const c = m.inputs_changed;
+    if (!isObject(c) || !('plan' in c) || !('spec' in c) || !flag(c.plan) || !flag(c.spec)) {
+      err('inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
+    }
+  }
   // start_points: feature heads from the ledger run_started events.
   if ('start_points' in m) {
     if (!isObject(m.start_points)) {

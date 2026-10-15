@@ -750,3 +750,23 @@ test('setup_skipped must name lanes without pending work', () => {
   m.setup_result = { ...m.setup_result, setup_skipped: 'alpha' };
   assertError(validateManifest(m), 'setup_result.setup_skipped: must be a list of lane ids');
 });
+
+test('carried_minors holds open ids and covered task ids, as ledger status prints them', () => {
+  for (const ok of [{ open: [], covered: [] }, { open: ['T2-1'], covered: ['T1', 'T2'] }]) {
+    assert.deepEqual(validateManifest({ ...validManifest(), carried_minors: ok }), []);
+  }
+  for (const bad of [[], 'T2-1', { open: 'T2-1', covered: [] }, { open: [], covered: [3] }, { open: [''], covered: [] }]) {
+    assertError(validateManifest({ ...validManifest(), carried_minors: bad }),
+      'carried_minors: must be {open: [minor ids], covered: [task ids]}');
+  }
+});
+
+test('inputs_changed says whether the plan and spec changed since the last launch', () => {
+  for (const ok of [{ plan: true, spec: false }, { plan: null, spec: null }]) {
+    assert.deepEqual(validateManifest({ ...validManifest(), inputs_changed: ok }), []);
+  }
+  for (const bad of [true, { plan: 'yes', spec: false }, { plan: true }]) {
+    assertError(validateManifest({ ...validManifest(), inputs_changed: bad }),
+      'inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
+  }
+});

@@ -42,7 +42,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const lenses = m.profile === 'lite'
     ? [['final review', 'combined', combinedFinalReviewPrompt(m, { e2e, minors: taskMinors })]]
     : [['sp', 'superpowers'], ['security', 'security'], ['correctness', 'correctness']]
-      .map(([key, name]) => [`final review ${key}`, name, finalReviewPrompt(m, key, e2e, taskMinors)]);
+      // One lens owns the task minors checklist (1.6.3): the security lens,
+      // which worked it in every archived run; the others only escalate.
+      .map(([key, name]) => [`final review ${key}`, name,
+        finalReviewPrompt(m, key, e2e, taskMinors, key !== 'security')]);
   const results = await io.parallel(lenses.map(([label, , prompt]) => () =>
     call(label, prompt, finalReviewSchema())));
   const cannotVerify = [];
@@ -69,6 +72,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     findings, fixed: [], declined: [], open: [], cannot_verify: cannotVerify, missing_lenses: missing, head: tip,
     lens_heads: lensHeads, repairs: [],
     task_minors_open: taskMinors.filter((t) => !raised.includes(`[${t.id}]`)),
+    carried_minors_open: carriedMinorIds(m).filter((id) => !raised.includes(`[${id}]`)),
   };
   const unbound = reviewProblemOf(lensHeads, results);
   if (unbound !== null) final.review_problem = unbound;
@@ -152,6 +156,12 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   }
   if (repaired && repaired.unreviewed !== null) final.unreviewed_fix = repaired.unreviewed;
   return final;
+}
+
+// The open task minors an earlier launch left (carried_minors.open, which the
+// session copies from ledger status): [] without them.
+function carriedMinorIds(m) {
+  return m.carried_minors && Array.isArray(m.carried_minors.open) ? m.carried_minors.open : [];
 }
 
 // The exit-code contract (1.6.2 spec 4.3): true when at least one command
@@ -611,11 +621,12 @@ async function runAll(manifest, io) {
   // the single lane runs on the feature branch, so there is no integration.
   const lite = m.profile === 'lite';
   if (lite) {
-    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [] };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], adjudicated: null };
   } else if (!preflightNeeded(m)) {
     // A relaunch with every task done and reviewed: no pre-flight agent, so no
     // rulings (preflightNeeded says why).
-    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run' };
+    preflight = { conflicts: [], rulings: [], undeclared: [], schedule: [], skipped: 'no task left to run',
+      adjudicated: null };
     io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
@@ -640,7 +651,10 @@ async function runAll(manifest, io) {
     const schedule = codeDeps.kept.filter((e) => !codeDepMet(m, e.task, e.producer))
       .map((e) => ({ ...e, fix: scheduleFix(m, e) }));
     for (const e of kept) io.log(`parallel-lanes: pre-flight: ${e.task} also consumes ${e.producer} (${e.what})`);
-    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule };
+    // adjudicated: the index in rulings of the adjudicator's ruling on the
+    // conflicts, which the adjudicator recorded in the ledger itself, so
+    // carry-launch skips it (1.6.3); null when there is none.
+    preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule, adjudicated: null };
     if (schedule.length > 0) return report('preflight_conflicts');
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
@@ -661,6 +675,7 @@ async function runAll(manifest, io) {
       // The ruling joins the run rulings, so it reaches every task agent
       // still to run and the final reviewers.
       preflight.rulings.push(ruling.text);
+      preflight.adjudicated = preflight.rulings.length - 1;
       m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
@@ -928,8 +943,11 @@ async function runAll(manifest, io) {
   // earlier launch committed and reviewed are not re-run, so their approved
   // reviews' minor findings never reached the final lenses. Every resume
   // has such tasks, so this is a note (no source), not a warning.
+  // Tasks the session's carried_minors covers (carry-launch's snapshot) had
+  // their open minors carried to the security lens: only the rest are noted.
+  const covered = new Set(m.carried_minors ? m.carried_minors.covered : []);
   const earlier = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]
-    .filter((t) => taskState(m, t.id) === 'skip').map((t) => t.id);
+    .filter((t) => taskState(m, t.id) === 'skip' && !covered.has(t.id)).map((t) => t.id);
   if (earlier.length > 0) {
     final.cannot_verify.push(`the minor findings of the task reviews an earlier launch approved (${earlier.join(', ')})`
       + ' did not reach the final lenses or task_minors_open: a resumed run does not carry them; read those'

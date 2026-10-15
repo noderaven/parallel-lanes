@@ -1529,7 +1529,7 @@ test('a user answer from a resume keeps its own label beside the run rulings', (
   const lines = p.split('\n');
   const at = lines.indexOf(RUN_RULINGS);
   assert.ok(at >= 0, p);
-  assert.equal(lines[at + 1], '- R1');
+  assert.equal(lines[at + 1], '- PF-1: R1');
   // The ruling is not given the user's label.
   assert.ok(!lines.some((l) => l.includes(USER_ANSWER) && l.includes('R1')), p);
   // Without run rulings there is no heading.
