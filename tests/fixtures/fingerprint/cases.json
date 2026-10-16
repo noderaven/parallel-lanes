@@ -7,6 +7,6 @@
   {"name": "the NUL separator counts (1 of 2)", "paths": ["a", "bc"], "fingerprint": "2:609747a3"},
   {"name": "the NUL separator counts (2 of 2)", "paths": ["ab", "c"], "fingerprint": "2:ef850b27"},
   {"name": "spaces and quotes", "paths": ["docs/it's here.md", "src/my file.js", "a$b`c\\d.txt"], "fingerprint": "3:a2a1486f"},
-  {"name": "non-ASCII", "paths": ["src/café.js", "文档/说明.md", "emoji/😀.txt"], "fingerprint": "3:e9065fdf"},
+  {"name": "non-ASCII", "paths": ["src/caf\u00e9.js", "\u6587\u6863/\u8bf4\u660e.md", "emoji/\ud83d\ude00.txt"], "fingerprint": "3:e9065fdf"},
   {"name": "a lone surrogate", "paths": ["bad\ud800name.txt"], "fingerprint": "1:bf305012"}
 ]
