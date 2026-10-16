@@ -34,6 +34,9 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     notices: errors.length === 0 ? launchNotices(dry, agents) : null,
     // The check policy at a glance (spec 4.9); null when invalid.
     checks: errors.length === 0 ? checksSummary(dry) : null,
+    // How the join runs (1.6.5): {mode, reason, waves}, before pre-flight's
+    // moves; null when invalid.
+    join_waves: errors.length === 0 ? wavePlan(dry) : null,
   };
 }
 

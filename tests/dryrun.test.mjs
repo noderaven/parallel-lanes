@@ -480,3 +480,75 @@ test('task_checks leaves finalChecks, finalSetup and expectedChecks unchanged', 
   assert.deepEqual(finalSetup(withChecks), finalSetup(base));
   assert.deepEqual(expectedChecks(withChecks), expectedChecks(base));
 });
+
+// ---- 1.6.5: join waves in the dry run ----
+
+const dep = (...ids) => ids.map((id) => ({ id, kind: 'code' }));
+// d1a's join shape: waves [DJ1], [DJ2, DJ4], [DJ3, DJ5, DJ6, DJ7].
+function wavesManifest(overrides = {}) {
+  return manifest({
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2', ['src/a.js'])] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T3', ['src/b.js'])] },
+      { id: 'gamma', name: 'Lane gamma', tasks: [task('T4', ['src/c.js'])] },
+    ],
+    join: [
+      task('DJ1', ['j1.cs'], { depends_on: [] }),
+      task('DJ2', ['j2.cs'], { depends_on: dep('DJ1') }),
+      task('DJ3', ['j3.cs'], { depends_on: dep('DJ1', 'DJ2') }),
+      task('DJ4', ['j4.cs'], { depends_on: dep('DJ1') }),
+      task('DJ5', ['j5.cs'], { depends_on: dep('DJ1', 'DJ4') }),
+      task('DJ6', ['j6.cs'], { depends_on: dep('DJ4') }),
+      task('DJ7', ['j7.cs'], { depends_on: dep('DJ4') }),
+    ],
+    ...overrides,
+  });
+}
+
+test('d1a-shaped manifest gives waves 1-2-4', async () => {
+  const dry = await loadScript({ args: wavesManifest() });
+  assert.deepEqual(dry.errors, []);
+  assert.deepEqual(dry.join_waves, {
+    mode: 'waves', reason: null, waves: [['DJ1'], ['DJ2', 'DJ4'], ['DJ3', 'DJ5', 'DJ6', 'DJ7']],
+  });
+});
+
+test('a serial join says why', async () => {
+  const dry = await loadScript({ args: manifest() });
+  assert.deepEqual(dry.join_waves, { mode: 'serial', reason: 'no wave has two units', waves: [['T5']] });
+  assert.ok(!dry.notices.launch.includes('join waves'));
+  assert.ok(!dry.agents.some((a) => /^(wave_|recovery_)/.test(a.role)));
+});
+
+test('the wave merge agents are counted', () => {
+  // The last multi-unit wave's checks (DJ3's task_checks entry) add the fix
+  // and its re-review and recheck, as the upper bound.
+  const checked = wavesManifest({ task_checks: { DJ3: { test: ['npm test -- dj3'] } } });
+  const roles = planAgents(checked).filter((a) => a.phase === 'Join' && !a.task).map((a) => a.role);
+  assert.deepEqual(roles, ['wave_merge', 'wave_merge', 'wave_checks_fix', 'wave_checks_re_review', 'wave_checks']);
+  const merge = planAgents(wavesManifest()).find((a) => a.role === 'wave_merge');
+  assert.deepEqual([merge.model, merge.effort], ['sonnet', 'high']);
+  const fix = planAgents(checked).find((a) => a.role === 'wave_checks_fix');
+  assert.deepEqual([fix.model, fix.effort], ['opus', 'high']);
+  const unchecked = planAgents(wavesManifest()).filter((a) => a.phase === 'Join' && !a.task).map((a) => a.role);
+  assert.deepEqual(unchecked, ['wave_merge', 'wave_merge'], 'no checks after the last wave: no fix to reserve');
+});
+
+test('a relaunch lists the recovery merge', () => {
+  const m = wavesManifest({
+    dry_run: false,
+    done: ['T2', 'T3', 'T4', 'DJ1'], reviewed: ['T2', 'T3', 'T4', 'DJ1'],
+    backfill: Object.fromEntries(['T2', 'T3', 'T4', 'DJ1'].map((id) => [id, { base: H(`${id}b`), head: H(id) }])),
+    join_started: true,
+    unit_branches: { DJ2: { branch: 'pl-run-1-u-DJ2', dir: '/work/wt/lane-alpha' } },
+  });
+  const agents = planAgents(m);
+  const join = agents.filter((a) => a.phase === 'Join');
+  assert.equal(join[0].role, 'recovery_merge');
+  assert.ok(!agents.some((a) => a.role === 'wave_merge'), 'a relaunch runs the rest serially');
+});
+
+test('the launch notice names the waves', async () => {
+  const dry = await loadScript({ args: wavesManifest() });
+  assert.match(dry.notices.launch, /, join waves 1-2-4$/);
+});

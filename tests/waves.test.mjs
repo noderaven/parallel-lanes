@@ -204,3 +204,17 @@ test('a join that cannot run in waves gets no wave in owners.json', () => {
     assert.equal(r['J1-J2'], 'later');
   }
 });
+
+test('wave labels are Join phase agents to autopsy, not task agents', () => {
+  const got = python([
+    'import _transcripts',
+    'ids = json.load(sys.stdin)',
+    'labels = ["wave 2 merge", "wave 2 resolve J2", "wave checks fix", "wave checks re-review", "wave checks",',
+    '          "recovery merge", "recovery resolve J2", "J2 implement"]',
+    'print(json.dumps([list(_transcripts.parse_label(l, ids)[:2]) for l in labels]))',
+  ], ['J1', 'J2']);
+  assert.deepEqual(got, [
+    [null, 'wave 2 merge'], [null, 'wave 2 resolve J2'], [null, 'wave checks fix'], [null, 'wave checks re-review'],
+    [null, 'wave checks'], [null, 'recovery merge'], [null, 'recovery resolve J2'], ['J2', 'implement'],
+  ]);
+});

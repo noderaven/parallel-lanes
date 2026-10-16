@@ -911,7 +911,25 @@ function planAgents(m) {
     add('Integrate', null, null, 'integrate', sonnetHigh);
     if (m.hooks.post_integrate) add('Integrate', null, null, 'post_integrate', standard);
   }
+  // Join waves (1.6.5): a relaunch after waves starts with the recovery
+  // merge; a launch that runs waves merges each multi-unit wave, and when the
+  // last one has checks, lists their fix, its re-review and the recheck as
+  // the upper bound.
+  if (!lite && joinStarted(m) && Object.keys(m.unit_branches || {}).length > 0) {
+    add('Join', null, null, 'recovery_merge', sonnetHigh);
+  }
   addTasks('Join', null, m.join);
+  const joinPlan = lite ? null : wavePlan(m);
+  if (joinPlan && joinPlan.mode === 'waves') {
+    const multi = joinPlan.waves.filter((w) => w.length > 1);
+    for (let i = 0; i < multi.length; i += 1) add('Join', null, null, 'wave_merge', sonnetHigh);
+    const last = multi[multi.length - 1];
+    if (waveChecksOf(m, joinUnits(m).filter((u) => last.includes(u.id))).length > 0) {
+      add('Join', null, null, 'wave_checks_fix', standard);
+      add('Join', null, null, 'wave_checks_re_review', standard);
+      add('Join', null, null, 'wave_checks', sonnetHigh);
+    }
+  }
   if (m.hooks.e2e) add('E2E', null, null, 'e2e', sonnetHigh);
   const lenses = lite
     ? ['final_review_combined']
@@ -930,8 +948,10 @@ function planAgents(m) {
 // agents; resume counts m.done. Expects a valid manifest.
 function launchNotices(m, agents) {
   const lanes = new Set(agents.filter((a) => a.lane !== null).map((a) => a.lane)).size;
+  const joinPlan = wavePlan(m);
+  const waves = joinPlan.mode === 'waves' ? `, join waves ${joinPlan.waves.map((w) => w.length).join('-')}` : '';
   return {
-    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents`,
+    launch: `parallel-lanes: launching run ${m.run_id}: ${lanes} lanes, ${agents.length} agents${waves}`,
     resume: `parallel-lanes: resuming run ${m.run_id}: ${m.done.length} tasks already committed`,
   };
 }
@@ -6059,6 +6079,9 @@ if (args !== null && typeof args === 'object' && args.dry_run === true) {
     notices: errors.length === 0 ? launchNotices(dry, agents) : null,
     // The check policy at a glance (spec 4.9); null when invalid.
     checks: errors.length === 0 ? checksSummary(dry) : null,
+    // How the join runs (1.6.5): {mode, reason, waves}, before pre-flight's
+    // moves; null when invalid.
+    join_waves: errors.length === 0 ? wavePlan(dry) : null,
   };
 }
 

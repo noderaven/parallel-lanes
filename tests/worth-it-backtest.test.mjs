@@ -32,11 +32,14 @@ function archive(runs) {
     mkdirSync(folder);
     const lanes = {};
     const prelude = [];
+    const joinTasks = [];
     for (const t of r.tasks) {
       if (t.lane === null) prelude.push({ id: t.id });
+      // lane 'join': an independent join task (depends_on [], its own file).
+      else if (t.lane === 'join') joinTasks.push({ id: t.id, depends_on: [], files: [`${t.id}.cs`] });
       else (lanes[t.lane] = lanes[t.lane] || []).push({ id: t.id });
     }
-    writeFileSync(join(folder, 'p.lanes.json'), JSON.stringify({ prelude, join: [],
+    writeFileSync(join(folder, 'p.lanes.json'), JSON.stringify({ prelude, join: joinTasks,
       lanes: Object.entries(lanes).map(([id, tasks]) => ({ id, tasks })), limits: { max_parallel_lanes: 5 } }));
     const agents = r.tasks.map((t) => ({ task: t.id, launch: 'wf_1', start: T(r.day, 600), end: T(r.day, 600 + t.s) }));
     const end = 600 + Math.max(...r.tasks.map((t) => t.s));
@@ -81,4 +84,15 @@ test('the back-test refuses the live history dir', () => {
   assert.match(r.stderr, /copy the history first/);
   const usage = spawnSync('python3', ['-B', SCRIPT], { encoding: 'utf8', env: env() });
   assert.equal(usage.status, 2);
+});
+
+test('--waves counts an independent join as one wave', () => {
+  const dir = archive([{ id: 'c1', day: 4, project: '/z/r', tasks: [{ id: 'T1', lane: 'a', s: 600 },
+    { id: 'T2', lane: 'b', s: 600 }, { id: 'J1', lane: 'join', s: 600 }, { id: 'J2', lane: 'join', s: 600 }] }]);
+  const serial = spawnSync('python3', ['-B', SCRIPT, dir], { encoding: 'utf8', env: env() });
+  assert.equal(serial.status, 0, serial.stderr);
+  assert.match(serial.stdout, /^c1 .* N\s+4 .* slots\s+3 /m);
+  const waves = spawnSync('python3', ['-B', SCRIPT, dir, '--waves'], { encoding: 'utf8', env: env() });
+  assert.equal(waves.status, 0, waves.stderr);
+  assert.match(waves.stdout, /^c1 .* N\s+4 .* slots\s+2 /m);
 });
