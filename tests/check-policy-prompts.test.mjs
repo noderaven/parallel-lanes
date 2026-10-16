@@ -198,6 +198,27 @@ test('the fix fallback is not the implement fallback', () => {
   assert.ok(implementPrompt(m, t(m, 'T2'), where, H('b')).includes(impl));
 });
 
+// ---- 1.6.6: agents write long files with Edit and Write (spec 4.6)
+
+test('agentRules names the Bash command limit and how to add to a file', () => {
+  const text = flat(agentRules());
+  assert.ok(text.includes('7,000 characters'), text);
+  assert.ok(text.includes('heredoc'), text);
+  assert.ok(text.includes('Read it and then Edit it, or Write the whole file'), text);
+  assert.ok(text.includes('shell quoting'), text);
+});
+
+test('no fix prompt says append for the fix report', () => {
+  const finding = { id: 'F1', severity: 'important', file: 'src/T2.js', line: 1, issue: 'x', fix: 'y' };
+  for (const m of [manifest(), manifest({ sp_dir: null })]) {
+    const where = laneWhere(m, lane(m, 'alpha'));
+    const p = fixPrompt(m, t(m, 'T2'), where, [finding], { status: 'done' }, H('b'));
+    assert.ok(p.includes('fix report'), p);
+    assert.ok(!/append a fix report/.test(flat(p)), p);
+    assert.ok(flat(p).includes('with your file-editing tools'), p);
+  }
+});
+
 test('fixMessagesLines names the repair message', () => {
   assert.ok(flat(fixMessagesLines().join('\n')).includes(`\`${repairFixMessage()}\``));
 });
