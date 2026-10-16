@@ -75,7 +75,7 @@ Fedora:
 sudo dnf install -y git jq python3 nodejs
 ```
 
-The test suite needs Node 22 or later (`node --version`). If your distribution's `nodejs`
+The test suite needs Node 24 or later (`node --version`). If your distribution's `nodejs`
 package is older, install a current release from https://nodejs.org instead; the skill
 itself does not use Node.
 
@@ -98,7 +98,7 @@ too: install it there and follow the Linux steps.
   winget install OpenJS.NodeJS.LTS
   ```
 
-  Node is optional (tests only; Node 22 or later). Any Python 3.8 or later works: the skill looks for
+  Node is optional (tests only; Node 24 or later). Any Python 3.8 or later works: the skill looks for
   `python3`, then `python`, then `py -3`, and skips the Microsoft Store `python3` stub.
 - **Git in another place:** the skill finds Git Bash on PATH (also through the `Git\cmd` folder
   the Git installer puts there) or under `C:\Program Files\Git`.

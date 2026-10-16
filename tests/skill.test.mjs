@@ -304,15 +304,17 @@ test('reference.md documents the Workflow concurrency cap', () => {
   assert.ok(text.includes('CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS'), 'reference.md lacks the concurrency cap');
 });
 
-test('README asks for Node 22 and no longer calls Windows preliminary', () => {
+test('README asks for Node 24 and no longer calls Windows preliminary', () => {
   const text = read(README_MD).toString('utf8');
-  assert.ok(text.includes('Node 22') || text.includes('**node** 22'), 'README does not ask for Node 22');
+  assert.ok(text.includes('Node 24'), 'README does not ask for Node 24');
+  assert.ok(!text.includes('Node 22'), 'README still asks for Node 22');
   assert.ok(!/preliminary/i.test(text), 'README still calls Windows support preliminary');
 });
 
-test('CI tests Node 22, not Node 18', () => {
+test('CI tests Node 24, not Node 22 or 18', () => {
   const text = read(CI_YML).toString('utf8');
-  assert.ok(text.includes('node: 22'), 'CI has no Node 22 job');
+  assert.ok(text.includes('node: 24'), 'CI has no Node 24 job');
+  assert.ok(!text.includes('node: 22'), 'CI still has a Node 22 job');
   assert.ok(!text.includes('node: 18'), 'CI still has a Node 18 job');
 });
 
