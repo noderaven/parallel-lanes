@@ -386,3 +386,38 @@ test('task prompts tell agents to set PL_PHASE for commands they run themselves'
   const lane = flat(implementPrompt(m, m.lanes[0].tasks[0], laneWhere(m, m.lanes[0]), H('b')));
   assert.ok(lane.includes('PL_PHASE=lane'), lane);
 });
+
+// ---- 1.6.7: final reviewers run focused checks in their own scratch folder (spec 4.6) ----
+
+const { finalReviewPrompt, combinedFinalReviewPrompt } = await loadHelpers(['finalReviewPrompt', 'combinedFinalReviewPrompt']);
+
+const FOCUSED = 'Run only the focused checks a finding needs; do not run the full project commands.';
+const VERIFY_RUNS = ' Verify runs every check at the delivered revision after the review.';
+const SCRATCH = 'Put any scratch copy or file in your own folder made with mktemp -d, outside the checkout,'
+  + " the project and the session's scratchpad, and remove it when done.";
+
+test('final reviewers run focused checks in their own scratch folder', () => {
+  const finalPrompts = (m) => [
+    ...['sp', 'security', 'correctness'].map((lens) => [lens, finalReviewPrompt(m, lens, null)]),
+    ['lite', combinedFinalReviewPrompt(m, { e2e: null })],
+  ];
+  const m = manifest();
+  assert.ok(finalChecks(m).length > 0);
+  for (const [name, p] of finalPrompts(m)) {
+    const lines = p.split('\n');
+    assert.ok(lines.includes(FOCUSED + VERIFY_RUNS), `${name}: ${p}`);
+    assert.ok(lines.includes(SCRATCH), `${name}: ${p}`);
+    // Both come before the phase rules.
+    const rulesAt = p.indexOf('Never amend, rebase, reset, or force-update a branch.');
+    assert.ok(rulesAt > p.indexOf(SCRATCH) && p.indexOf(SCRATCH) > p.indexOf(FOCUSED), `${name}: order`);
+  }
+  // No project checks: nothing for verify to run, so no verify sentence.
+  const bare = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
+  assert.equal(finalChecks(bare).length, 0);
+  for (const [name, p] of finalPrompts(bare)) {
+    const lines = p.split('\n');
+    assert.ok(lines.includes(FOCUSED), `${name}: ${p}`);
+    assert.ok(!p.includes(VERIFY_RUNS.trim()), `${name}: ${p}`);
+    assert.ok(lines.includes(SCRATCH), `${name}: ${p}`);
+  }
+});

@@ -64,9 +64,13 @@ function agentRules() {
       'and the Bash tool fails on a command of about 7,000 characters or more (a long heredoc is one). ' +
       'To add to an existing file such as a report, Read it and then Edit it, or Write the whole file. ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
-      'formatters, codemods, and other maintenance commands.',
+      'formatters, codemods, and other maintenance commands. ' +
+      'Edit and Write turn a backslash-u escape you type into the character itself: to keep such an escape in ' +
+      'a file (for example where the project wants plain ASCII), generate that text with a script (for example ' +
+      "json.dumps(..., ensure_ascii=True)) and check the file's bytes before you commit.",
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
-      'an Edit or Write on a file not read first, or changed since, fails and costs a retry.',
+      'an Edit or Write on a file not read first, or changed since, fails and costs a retry. ' +
+      'Read it with the Read tool: output of grep, sed or cat through Bash does not count.',
   ].join('\n');
 }
 
@@ -3233,6 +3237,10 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     'Also scan every commit message in the range and the whole diff for anything the commit rules forbid;',
     'report each as a finding (for a commit message use file "commit <sha>" and line 0).',
     ...fixMessagesLines(),
+    'Run only the focused checks a finding needs; do not run the full project commands.'
+      + (finalChecks(m).length > 0 ? ' Verify runs every check at the delivered revision after the review.' : ''),
+    'Put any scratch copy or file in your own folder made with mktemp -d, outside the checkout,'
+      + " the project and the session's scratchpad, and remove it when done.",
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
