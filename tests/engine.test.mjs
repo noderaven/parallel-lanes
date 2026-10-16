@@ -1305,9 +1305,15 @@ test('every agent gets the file-editing rule', () => {
     'generators (for example scripts/build), formatters, codemods',
     // f1a 17, hx1 10, d1a 12 edit_retry slowdowns: an Edit or Write on a file not read first fails.
     'Read a file right before you edit or overwrite it',
+    // 1.6.7 (spec 4.7): Edit and Write turn a typed escape into the character.
+    'turn a backslash-u escape you type into the character itself',
+    'ensure_ascii=True',
+    'Read it with the Read tool: output of grep, sed or cat through Bash does not count.',
   ]) {
     assert.ok(r.includes(phrase), phrase);
   }
+  // The escape rule gives no literal escape as its example.
+  assert.ok(!r.includes('\\'), r);
 });
 
 test('the agent rules are plain ASCII', () => {
@@ -1511,9 +1517,12 @@ test('prompts carry only the project rules: no ASCII or trailer rule of their ow
     postIntegrate: postIntegratePrompt(m),
     preflight: preflightPrompt(m),
   };
+  // The agent rules' escape sentence (1.6.7, spec 4.7) names plain ASCII only as an example of
+  // a project that wants it; it imposes no ASCII rule.
+  const escape = agentRules().match(/Edit and Write turn a backslash-u escape[^\n]*?before you commit\./)[0];
   for (const [name, text] of Object.entries(prompts)) {
     assert.ok(text.includes(rules), `${name}: the project's rules`);
-    const own = text.split(rules).join('');
+    const own = text.split(rules).join('').split(escape).join('');
     assert.ok(!/ASCII/i.test(own), `${name}: an ASCII rule of its own`);
     assert.ok(!/trailer|co-authored|AI (name|attribution)|Claude/i.test(own), `${name}: a trailer or AI rule of its own`);
   }
