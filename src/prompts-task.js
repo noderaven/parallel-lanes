@@ -576,8 +576,9 @@ function fallbackFixer() {
   return [
     'Built-in instructions (superpowers not found):',
     'Fix exactly the findings listed below, nothing more. Rerun the tests that cover the amended code, commit with',
-    'the commit rules below, and append a fix report (what changed, covering tests, command, output) to the',
-    'implementer report file. If you cannot fix a finding, report blocked with the specifics instead of guessing.',
+    'the commit rules below, and add a fix report (what changed, covering tests, command, output) to the',
+    'implementer report file with your file-editing tools. If you cannot fix a finding, report blocked with the',
+    'specifics instead of guessing.',
   ].join('\n');
 }
 
@@ -988,8 +989,8 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ].join('\n'),
     '',
     ...reopenLines(m, task, where, reopen),
-    `The branch is at ${head}. Fix these findings, commit on top of it, and append a fix report (what changed,`,
-    `covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, commit on top of it, and add a fix report (what changed,`,
+    `covering tests, command, output) to ${files.report} with your file-editing tools.`,
     'Rerun the tests that cover the amended code; do not run the task checks or the full suite: the re-review',
     'judges the fix, and integration and verify run the full checks.',
     commitWithLine(fixCommitMessage(task)),
