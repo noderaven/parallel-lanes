@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.5: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.6: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -60,7 +60,9 @@ function agentRules() {
     'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
       "previous one's output: every separate call costs a full turn.",
     'Change file contents with your file-editing tools (Edit, Write). Text written through shell heredocs, ' +
-      'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
+      'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks), ' +
+      'and the Bash tool fails on a command of about 7,000 characters or more (a long heredoc is one). ' +
+      'To add to an existing file such as a report, Read it and then Edit it, or Write the whole file. ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
       'formatters, codemods, and other maintenance commands.',
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
@@ -1084,20 +1086,69 @@ function repairReserve(m) {
   return 7 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
 }
 
-// The dry run's checks summary (spec 4.9). Units are the units with work,
-// built as planAgents builds them.
-function checksSummary(m) {
-  const withEntry = [];
-  const withoutEntry = [];
+// The units with work, built as planAgents builds them, each with its ledger
+// lane (a lane id, prelude or join), in run order: [{unit, laneId}].
+function unitsWithWork(m) {
+  const out = [];
   const groups = [['prelude', m.prelude], ...m.lanes.map((l) => [l.id, l.tasks]), ['join', m.join]];
   for (const [laneId, tasks] of groups) {
     for (let i = 0; i < tasks.length;) {
       const group = batchGroup(m, tasks, i);
       i += group.length;
       if (taskState(m, group[0].id) === 'skip') continue;
-      const unit = group.length > 1 ? batchUnit(group) : group[0];
-      (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+      out.push({ unit: group.length > 1 ? batchUnit(group) : group[0], laneId });
     }
+  }
+  return out;
+}
+
+// The length of each check command the run would hand an agent (1.6.6 spec
+// 4.7), as [{what, length}]: each unit's task-checks command, then the
+// integration's run-checks call; a unit or integration with no check
+// command is left out. Each is measured with the result file it would get
+// (<ledger_dir>/checks/task-<unit id>.1.json, integrate.1.json) in place of
+// resultPath() and a 40-character base; a join unit, whose wave may place it
+// in a lane worktree, is measured in the longest of the feature checkout and
+// the lane worktree dirs.
+function checkCommandLengths(m) {
+  const out = [];
+  const placed = (cmd, name) => cmd.replace(resultPath(), () => shellQuote(`${m.repo.ledger_dir}/checks/${name}.1.json`));
+  const base = '0'.repeat(40);
+  const joinDir = [featureDir(m), ...m.lanes.map((l) => laneWhere(m, l).dir)]
+    .reduce((a, b) => (b.length > a.length ? b : a));
+  for (const { unit, laneId } of unitsWithWork(m)) {
+    let where;
+    if (laneId === 'prelude') where = featureWhere(m, 'prelude');
+    else if (laneId === 'join') where = { dir: joinDir, lane: 'join' };
+    else where = laneWhere(m, m.lanes.find((l) => l.id === laneId));
+    const cmd = taskChecksCommand(m, unit, where, base);
+    if (cmd !== null) out.push({ what: `${unit.id}'s task-checks command`, length: placed(cmd, `task-${unit.id}`).length });
+  }
+  const integration = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  if (integration !== null) {
+    out.push({ what: 'the integration checks command', length: placed(integration, 'integrate').length });
+  }
+  return out;
+}
+
+// The dry-run warning for a check command near the Bash tool's limit on
+// Windows (about 7,000 characters; 1.6.6 spec 4.7): [] when every length is
+// at most 6,000, else one warning, for the longest.
+function longCommandWarnings(lengths) {
+  const over = lengths.filter((l) => l.length > 6000);
+  if (over.length === 0) return [];
+  const longest = over.reduce((a, b) => (b.length > a.length ? b : a));
+  return [`${longest.what} is about ${longest.length} characters; the Bash tool on Windows fails at about 7,000:`
+    + " shorten the project's check commands, for example with a wrapper script"];
+}
+
+// The dry run's checks summary (spec 4.9). Units are the units with work,
+// built as planAgents builds them.
+function checksSummary(m) {
+  const withEntry = [];
+  const withoutEntry = [];
+  for (const { unit, laneId } of unitsWithWork(m)) {
+    (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
   }
   const project = (group, command) => commandGroup(m, null, group).includes(command);
   const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
@@ -1115,7 +1166,10 @@ function checksSummary(m) {
     widen_paths_count: widen.length,
     repair_limit: repairLimit(m),
     repairs_spent: m.repairs_spent || 0,
-    warnings: hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : [],
+    warnings: [
+      ...(hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : []),
+      ...longCommandWarnings(checkCommandLengths(m)),
+    ],
   };
 }
 
@@ -1418,24 +1472,29 @@ function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
 // The scripts/task-checks call a task's implementer runs once before
 // committing (spec 4.2, 4.3), in where.dir for the unit's range from base,
 // writing to the result file the agent reserved (--evidence resultPath());
-// null when the ledger lane has no test, lint or build command.
+// null when the ledger lane has no test, lint or build command. 1.6.6 (spec
+// 4.5): the Files list goes as its fingerprint (task-checks reads the list
+// from owners.json), and a wide list equal to the lane list as --wide-as-lane,
+// so the command does not grow with the Files list.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
   if (lane.length === 0) return null;
   const q = shellQuote;
   const pairs = (flag, checks) => checks.flatMap((c) => [flag, q(c.group), q(c.command)]);
   const entry = taskChecksEntry(m, task, where.lane);
+  const declared = declaredFiles(task);
+  const wide = wideChecks(m, where.lane);
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
     '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
-    ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
+    ...(declared.length === 0 ? [] : ['--declared-from-owners', q(declaredFingerprint(declared))]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
     ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
     ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
     ...pairs('--lane-cmd', lane),
-    ...pairs('--wide-cmd', wideChecks(m, where.lane)),
+    ...(JSON.stringify(wide) === JSON.stringify(lane) ? ['--wide-as-lane'] : pairs('--wide-cmd', wide)),
   ].join(' ');
 }
 
@@ -1458,6 +1517,8 @@ function taskChecksLines(m, task, where, base) {
         'and the result file the wait read.',
       ],
     }),
+    'If the call fails with an error that names owners.json, report blocked with its message; do not run setup or',
+    'pass --declared yourself.',
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
     'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
@@ -1697,8 +1758,9 @@ function fallbackFixer() {
   return [
     'Built-in instructions (superpowers not found):',
     'Fix exactly the findings listed below, nothing more. Rerun the tests that cover the amended code, commit with',
-    'the commit rules below, and append a fix report (what changed, covering tests, command, output) to the',
-    'implementer report file. If you cannot fix a finding, report blocked with the specifics instead of guessing.',
+    'the commit rules below, and add a fix report (what changed, covering tests, command, output) to the',
+    'implementer report file with your file-editing tools. If you cannot fix a finding, report blocked with the',
+    'specifics instead of guessing.',
   ].join('\n');
 }
 
@@ -1742,12 +1804,41 @@ function declaredFiles(task) {
   return out;
 }
 
+// The fingerprint of a declared list, N:HHHHHHHH: N the number of paths, H the
+// 32-bit FNV-1a hash of the paths' UTF-8 bytes joined with one NUL byte, as
+// _owners.fingerprint computes it (tests/fixtures/fingerprint/cases.json).
+// The UTF-8 encoder is written out (the Workflow runtime need not have
+// TextEncoder); a lone surrogate gets its 3-byte form, as Python's
+// surrogatepass gives it.
+function declaredFingerprint(paths) {
+  let h = 0x811c9dc5;
+  const add = (byte) => { h = Math.imul(h ^ byte, 0x01000193) >>> 0; };
+  paths.forEach((p, i) => {
+    if (i > 0) add(0);
+    for (let j = 0; j < p.length; j += 1) {
+      const cp = p.codePointAt(j);
+      if (cp > 0xffff) j += 1;
+      if (cp < 0x80) {
+        add(cp);
+      } else if (cp < 0x800) {
+        add(0xc0 | (cp >> 6)); add(0x80 | (cp & 0x3f));
+      } else if (cp < 0x10000) {
+        add(0xe0 | (cp >> 12)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      } else {
+        add(0xf0 | (cp >> 18)); add(0x80 | ((cp >> 12) & 0x3f)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      }
+    }
+  });
+  return `${paths.length}:${h.toString(16).padStart(8, '0')}`;
+}
+
 // The start-task command a task agent runs first: the optional fast-forward
 // to the feature branch (opts.sync), every brief of the unit regenerated from
 // the current plan and printed, and with opts.pkg = {base, head} and
 // superpowers present the review package for base..head. With opts.pkg and a
 // Files list it also lists the files base..head changes outside that list
-// (--scope); with opts.start (the task base, implement only) it records that
+// (--scope; 1.6.6: the list goes as its fingerprint, and start-task reads it
+// from owners.json); with opts.start (the task base, implement only) it records that
 // base in the ledger once the briefs are written (--record-start). For a
 // join wave unit (where.unit_branch, 1.6.5) the implement start (opts.start)
 // also puts the worktree on the unit's branch from where.from and runs the
@@ -1780,7 +1871,7 @@ function startCommand(m, task, where, opts = {}) {
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
     parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
-      ...declared.flatMap((f) => ['--declared', shellQuote(f)]),
+      '--declared-from-owners', shellQuote(declaredFingerprint(declared)),
       '--owners', shellQuote(`${m.repo.ledger_dir}/owners.json`));
   }
   // The rulings in force (1.6.3): a join task sees every lane's.
@@ -2081,8 +2172,8 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ].join('\n'),
     '',
     ...reopenLines(m, task, where, reopen),
-    `The branch is at ${head}. Fix these findings, commit on top of it, and append a fix report (what changed,`,
-    `covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, commit on top of it, and add a fix report (what changed,`,
+    `covering tests, command, output) to ${files.report} with your file-editing tools.`,
     'Rerun the tests that cover the amended code; do not run the task checks or the full suite: the re-review',
     'judges the fix, and integration and verify run the full checks.',
     commitWithLine(fixCommitMessage(task)),
@@ -6094,7 +6185,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.5';
+const VERSION = '1.6.6';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

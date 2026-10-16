@@ -7,8 +7,15 @@ start-task --owners read it.
 
   {"repo": {"mode", "root", "git_dir"},
    "tasks": {id: {"where": "prelude" | <lane id> | "join", "pos": n,
-                  "wave": n (join tasks, when the join can run in waves)}},
+                  "wave": n (join tasks, when the join can run in waves),
+                  "declared": [paths] (the task's Files list as given, 1.6.6)}},
    "files": {<path key>: [task ids, in run order]}}
+
+A unit's declared list (its tasks' `declared`, in order, each exact string
+once) is checked against the engine's fingerprint of the same list
+(declaredFingerprint in src/prompts-task.js): "N:HHHHHHHH", N the number of
+paths and H the 32-bit FNV-1a hash of the paths' UTF-8 bytes joined with one
+NUL byte (1.6.6).
 
 A task changing another task's file is judged by when that task runs:
 "earlier" (an earlier task of the same list, the prelude seen from a lane or
@@ -20,6 +27,7 @@ that moves a task to a later wave.
 import json
 import os
 import posixpath
+import re
 import sys
 
 sys.dont_write_bytecode = True
@@ -58,7 +66,11 @@ def build(manifest):
     files = {}
     for where, items in lists:
         for pos, t in enumerate(items):
-            tasks[t["id"]] = {"where": where, "pos": pos}
+            declared = []
+            for f in t.get("files") or []:
+                if f not in declared:
+                    declared.append(f)
+            tasks[t["id"]] = {"where": where, "pos": pos, "declared": declared}
             for f in t.get("files") or []:
                 key = path_key(f)
                 if key is not None and t["id"] not in files.setdefault(key, []):
@@ -79,6 +91,52 @@ def load(path):
     if not isinstance(data, dict) or not isinstance(data.get("tasks"), dict) or not isinstance(data.get("files"), dict):
         raise ValueError("not an owner map")
     return data
+
+
+FINGERPRINT = re.compile(r"^[1-9][0-9]*:[0-9a-f]{8}$")
+
+
+def fingerprint(paths):
+    """N:HHHHHHHH for a declared list: N the number of paths, H the 32-bit
+    FNV-1a hash of the paths' UTF-8 bytes joined with one NUL byte (a lone
+    surrogate as its 3-byte form). Match it with FINGERPRINT.fullmatch: `$`
+    alone also matches before a trailing newline."""
+    h = 0x811C9DC5
+    for byte in b"\x00".join(p.encode("utf-8", "surrogatepass") for p in paths):
+        h = ((h ^ byte) * 0x01000193) & 0xFFFFFFFF
+    return f"{len(paths)}:{h:08x}"
+
+
+def declared_for(owners, task_ids):
+    """The unit's declared list: each task's `declared` in the given order,
+    the first occurrence of each exact string kept."""
+    tasks = owners.get("tasks") or {}
+    out = []
+    for tid in task_ids:
+        entry = tasks.get(tid)
+        if not isinstance(entry, dict):
+            raise ValueError(f"task {tid} is not in it")
+        declared = entry.get("declared")
+        if not isinstance(declared, list) or not all(isinstance(p, str) for p in declared):
+            raise ValueError(f"task {tid} has no declared list")
+        for p in declared:
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def owners_declared(path, task_ids, expected):
+    """The unit's declared list from the owner map at path, checked against
+    the engine's fingerprint expected. Raises ValueError(reason)."""
+    try:
+        owners = load(path)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"owners.json cannot be read: {e}")
+    declared = declared_for(owners, task_ids)
+    actual = fingerprint(declared)
+    if actual != expected:
+        raise ValueError(f"expected {expected}, found {actual}")
+    return declared
 
 
 def relation(owners, unit_ids, other):

@@ -433,6 +433,77 @@ test('the summary warns when task_checks has entries and widen_paths is empty', 
   assert.deepEqual(plain.result.checks.units_with_entry, []);
 });
 
+// ---- 1.6.6 long check commands (spec 4.7) ----
+
+const { longCommandWarnings, checkCommandLengths } = await loadHelpers(['longCommandWarnings', 'checkCommandLengths']);
+
+test('longCommandWarnings warns only over 6,000', () => {
+  assert.deepEqual(longCommandWarnings([]), []);
+  assert.deepEqual(longCommandWarnings([{ what: 'X', length: 6000 }]), []);
+  assert.deepEqual(longCommandWarnings([{ what: 'X', length: 6001 }, { what: 'Y', length: 100 }]), [
+    "X is about 6001 characters; the Bash tool on Windows fails at about 7,000: shorten the project's check commands, for example with a wrapper script",
+  ]);
+  // One warning, for the longest.
+  assert.deepEqual(longCommandWarnings([{ what: 'X', length: 6500 }, { what: 'Y', length: 7100 }]), [
+    "Y is about 7100 characters; the Bash tool on Windows fails at about 7,000: shorten the project's check commands, for example with a wrapper script",
+  ]);
+});
+
+test('the dry run warns about a long task-checks command', async () => {
+  const pad = `npm test ${'x'.repeat(7000 - 9)}`;
+  assert.equal(pad.length, 7000);
+  const m = policyManifest({ commands: { setup: [], test: [pad], lint: [], build: [] } });
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.errors, []);
+  const { warnings } = result.checks;
+  assert.equal(warnings.length, 1, JSON.stringify(warnings));
+  assert.match(warnings[0], /^(T1|T2-T3|T4|T5)'s task-checks command is about \d+ characters; the Bash tool on Windows/);
+  const lengths = checkCommandLengths(m);
+  const longest = Math.max(...lengths.map((l) => l.length));
+  assert.ok(longest > 7000, String(longest));
+  assert.ok(warnings[0].includes(`is about ${longest} characters`));
+  assert.deepEqual(lengths.map((l) => l.what), [
+    "T1's task-checks command", "T2-T3's task-checks command", "T4's task-checks command",
+    "T5's task-checks command", 'the integration checks command',
+  ]);
+});
+
+test('the dry run warns about a long integration command', async () => {
+  const long = (tag) => `${tag} ${'x'.repeat(2400 - tag.length - 1)}`;
+  const m = manifest({
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2', ['src/a.js']), task('T3', ['src/a2.js'])] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T4', ['src/b.js'])] },
+      { id: 'gamma', name: 'Lane gamma', tasks: [task('T6', ['src/c.js'])] },
+    ],
+    lane_commands: {
+      alpha: { test: [long('test-alpha')] },
+      beta: { test: [long('test-beta')] },
+      gamma: { test: [long('test-gamma')] },
+    },
+  });
+  assert.equal(long('test-alpha').length, 2400);
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.errors, []);
+  const { warnings } = result.checks;
+  assert.equal(warnings.length, 1, JSON.stringify(warnings));
+  assert.match(warnings[0], /^the integration checks command is about \d+ characters; /);
+  const lengths = checkCommandLengths(m);
+  const tasks = lengths.filter((l) => l.what !== 'the integration checks command');
+  assert.deepEqual(tasks.map((l) => l.what), ['T1', 'T2', 'T3', 'T4', 'T6', 'T5'].map((id) => `${id}'s task-checks command`));
+  for (const l of tasks) assert.ok(l.length <= 6000, `${l.what}: ${l.length}`);
+  const integration = lengths.find((l) => l.what === 'the integration checks command');
+  assert.ok(integration.length > 6000, String(integration.length));
+});
+
+test('no check commands, no warning and no throw', async () => {
+  const m = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.checks.warnings, []);
+  assert.deepEqual(checkCommandLengths(m), []);
+});
+
 test('an invalid manifest has no checks summary', async () => {
   const { result } = await dryRun(manifest({ task_checks: 'x' }));
   assert.ok(result.errors.length > 0);

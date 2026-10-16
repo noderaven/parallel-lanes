@@ -45,7 +45,9 @@ function agentRules() {
     'Combine independent shell commands into one call (with && or ;) when no command depends on reading the ' +
       "previous one's output: every separate call costs a full turn.",
     'Change file contents with your file-editing tools (Edit, Write). Text written through shell heredocs, ' +
-      'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks). ' +
+      'sed, or inline scripts can be corrupted by shell quoting (apostrophes, backslashes, $ and backticks), ' +
+      'and the Bash tool fails on a command of about 7,000 characters or more (a long heredoc is one). ' +
+      'To add to an existing file such as a report, Read it and then Edit it, or Write the whole file. ' +
       "Running the project's own tools that change files is fine: generators (for example scripts/build), " +
       'formatters, codemods, and other maintenance commands.',
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +

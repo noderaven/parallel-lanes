@@ -6,13 +6,14 @@ const {
   runTask, runLane, runLanes,
   implementPrompt, reviewPrompt, fixPrompt, reReviewPrompt, ledgerCommand,
   implementSchema, implementResultText, finalFixSchema, reviewSettings,
-  finalFixPrompt, agentRules, adjudicatorPrompt, finalChecks, finalSetup,
+  finalFixPrompt, agentRules, adjudicatorPrompt, finalChecks, finalSetup, declaredFingerprint,
 } = await loadHelpers([
   'runTask', 'runLane', 'runLanes',
   'implementPrompt', 'reviewPrompt', 'fixPrompt', 'reReviewPrompt', 'ledgerCommand',
   'implementSchema', 'implementResultText', 'finalFixSchema', 'reviewSettings',
-  'finalFixPrompt', 'agentRules', 'adjudicatorPrompt', 'finalChecks', 'finalSetup',
+  'finalFixPrompt', 'agentRules', 'adjudicatorPrompt', 'finalChecks', 'finalSetup', 'declaredFingerprint',
 ]);
+const fp = declaredFingerprint;
 
 function task(id, extra = {}) {
   return { id, title: `Task ${id}`, files: [`src/${id}.js`], tier: 'standard', security: false, ...extra };
@@ -533,6 +534,8 @@ test('lane_commands override the project commands for that lane', () => {
   // test command is still offered as the widened list (spec 4.2).
   assert.ok(text.includes("--lane-cmd 'test' 'uv run pytest -q'"));
   assert.ok(text.includes("--wide-cmd 'test' 'npm test'"));
+  // 1.6.6: the wide list is longer than the lane list, so the pairs stay.
+  assert.ok(!text.includes('--wide-as-lane'));
 });
 
 // ---- The final check inventory (1.4.0, F3) ----
@@ -1472,12 +1475,12 @@ test('reviews get the files their range changes outside the Files list, and judg
     [reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')), H('b0'), H('h1')],
     [reReviewPrompt(m, task('T2'), WHERE, H('h1'), H('h2'), [finding('x')]), H('h1'), H('h2')],
   ]) {
-    assert.ok(text.includes(`--scope '${base}' '${head}' --declared 'src/T2.js'`), text);
+    assert.ok(text.includes(`--scope '${base}' '${head}' --declared-from-owners '${fp(['src/T2.js'])}' --owners `), text);
     assert.ok(text.includes("files changed outside the task's Files list"), text);
     assert.ok(/a change the task did not need[^.]*is an important finding/.test(text.replace(/\n/g, ' ')), text);
   }
   const batch = reviewPrompt(m, unit, WHERE, H('b0'), H('h1'));
-  assert.ok(batch.includes("--declared 'src/T2.js' --declared 'docs/a.md' --declared 'src/T3.js'"), batch);
+  assert.ok(batch.includes(`--declared-from-owners '${fp(['src/T2.js', 'docs/a.md', 'src/T3.js'])}'`), batch);
   // Without superpowers the scope list still comes from start-task.
   assert.ok(reviewPrompt(manifest({ sp_dir: null }), task('T2'), WHERE, H('b0'), H('h1')).includes(`--scope '${H('b0')}' '${H('h1')}'`));
   // A task with no Files list has nothing to compare against.

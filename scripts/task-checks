@@ -2,16 +2,37 @@
 """Run a task's checks before it commits: targeted, the lane's, or widened.
 
 usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE
-                   --task ID [--task ID ...] [--declared PATH ...] [--widen PATH ...]
-                   [--project-test CMD ...]
+                   --task ID [--task ID ...]
+                   [--declared PATH ... | --declared-from-owners N:HHHHHHHH]
+                   [--widen PATH ...] [--project-test CMD ...]
                    [--entry TASK_ID --targeted GROUP CMD [--targeted GROUP CMD ...]]
-                   --lane-cmd GROUP CMD [...] --wide-cmd GROUP CMD [...]
+                   --lane-cmd GROUP CMD [...] (--wide-cmd GROUP CMD [...] | --wide-as-lane)
                    [--force-full REASON] [--evidence PATH] [--phase NAME]
 
 Options come in any order. The workflow builds the call (spec 4.2 of the
 1.6.0 check policy); the task's implementer runs it once before committing.
 --phase NAME goes to run-checks, which sets PL_PHASE=NAME for the checks
 (without it PL_PHASE is removed); NAME is one of run-checks' phases.
+
+--declared-from-owners N:HHHHHHHH (1.6.6) stands for the unit's --declared
+list, which keeps the engine-built call short: the list is read from
+LEDGER_DIR/owners.json, each --task's `declared` in the order given, the
+first occurrence of each exact string kept (_owners.owners_declared), and
+checked against the fingerprint the engine computed from its own list (N the
+number of paths, H their 32-bit FNV-1a hash, as _owners.fingerprint). A
+value that is not a fingerprint (N of 0 included), or one given with
+--declared, is a usage error. When owners.json is missing or unreadable, a
+--task is not in it, a task has no `declared`, a path in it is absolute or
+leaves the project, or the fingerprint differs, the call selects and runs
+nothing and exits 3 with the error "the run's owner map (owners.json) does
+not match this unit's Files list (<reason>): report blocked with this
+message; do not run setup and do not pass --declared yourself (the session
+reruns setup)", written as the error record when FILE is known (with
+--evidence; without it nothing is written).
+
+--wide-as-lane (1.6.6) stands for --wide-cmd pairs equal to the --lane-cmd
+pairs: the lane list is used as the wide list. It cannot be given with
+--wide-cmd; one of the two is required.
 
 Selection (policy.selected):
   lane      no --entry: the unit has no task_checks entry, so the --lane-cmd
@@ -20,7 +41,8 @@ Selection (policy.selected):
             (the project's checks plus the lane's own additions);
   targeted  an entry and no widening reason: the --targeted list runs.
 policy.reasons lists every reason that applies, as {code, detail}, in this
-order: no_entry, no_files (no --declared), outside_files (a changed path the
+order: no_entry, no_files (no --declared and no --declared-from-owners),
+outside_files (a changed path the
 Files list does not cover, nor a ruling permits), widen_path (a changed path a --widen entry
 covers), forced (--force-full, its REASON as detail), git_failed (the changed
 paths could not be listed).
@@ -86,7 +108,8 @@ Error records: once FILE is known (a valid --evidence PATH, or the reserved
 file), every later failure writes {"results": [], "ok": false, "error":
 <message>, "policy": <the policy, or null when not yet built>} to FILE before
 the exit: a usage error after a valid --evidence (exit 2), the lock not
-taken within 5 s, or an unexpected error (exit 3). A background run's output
+taken within 5 s, an owner-map mismatch, or an unexpected error (exit 3). A
+background run's output
 is invisible to the agent that started it; the record says why it ended.
 
 This evidence covers a working tree before a commit. Nothing reads it to
@@ -100,7 +123,8 @@ BASE must be a commit sha (7 to 40 lowercase hex digits).
 Exit: run-checks' exit when it printed JSON and exited 0 or 1 (0 every check
 passed, 1 a check failed); 2 on a usage error (nothing is written, except
 the error record after a valid --evidence); 3 when the reserved path is
-outside LEDGER_DIR, FILE's lock cannot be taken, run-checks printed no JSON
+outside LEDGER_DIR, FILE's lock cannot be taken, the owner map does not
+match --declared-from-owners, run-checks printed no JSON
 or exited with another code, or any unexpected error happened (with the
 error record once FILE is known). Exit 1 always means a check failed.
 """
@@ -122,6 +146,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import _await  # noqa: E402
+import _owners  # noqa: E402
 import _shell  # noqa: E402
 
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
@@ -133,16 +158,21 @@ ERROR_TAIL = 2000
 PRINT_PATHS = 50
 PRINT_DETAIL = 2000
 USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
-         "--task ID [...] [--declared PATH ...] [--widen PATH ...] [--project-test CMD ...] "
+         "--task ID [...] [--declared PATH ... | --declared-from-owners N:HHHHHHHH] "
+         "[--widen PATH ...] [--project-test CMD ...] "
          "[--entry TASK_ID --targeted GROUP CMD ...] --lane-cmd GROUP CMD [...] "
-         "--wide-cmd GROUP CMD [...] [--force-full REASON] [--evidence PATH] [--phase NAME]")
+         "(--wide-cmd GROUP CMD [...] | --wide-as-lane) [--force-full REASON] [--evidence PATH] "
+         "[--phase NAME]")
 # run-checks' phases (--phase sets PL_PHASE for the checks).
 PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify")
 SINGLE = {"--base": "base", "--ledger": "ledger", "--unit": "unit", "--lane": "lane",
-          "--entry": "entry", "--force-full": "forced", "--evidence": "evidence", "--phase": "phase"}
+          "--entry": "entry", "--force-full": "forced", "--evidence": "evidence", "--phase": "phase",
+          "--declared-from-owners": "owners_fp"}
 REPEATED = {"--task": "tasks", "--declared": "declared", "--widen": "widen",
             "--project-test": "project_tests"}
 PAIRS = {"--targeted": "targeted", "--lane-cmd": "lane_cmds", "--wide-cmd": "wide_cmds"}
+# Options that take no value.
+FLAGS = {"--wide-as-lane": "wide_as_lane"}
 
 
 # The result file once it is known (validated --evidence, or the reserved
@@ -185,7 +215,8 @@ def parse(argv):
     first usage error the reading met (checked by validate), or None. A token
     that is not an option is skipped."""
     args = {"dir": None, "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
-            "forced": None, "evidence": None, "phase": None, "tasks": [], "declared": [], "widen": [], "project_tests": [],
+            "forced": None, "evidence": None, "phase": None, "owners_fp": None, "wide_as_lane": False,
+            "tasks": [], "declared": [], "widen": [], "project_tests": [],
             "targeted": [], "lane_cmds": [], "wide_cmds": []}
     errors = []
     rest = argv
@@ -209,6 +240,11 @@ def parse(argv):
         elif flag in PAIRS and len(rest) >= 3 and rest[1] and rest[2]:
             args[PAIRS[flag]].append((rest[1], rest[2]))
             rest = rest[3:]
+        elif flag in FLAGS:
+            if args[FLAGS[flag]]:
+                errors.append(f"{flag} given twice")
+            args[FLAGS[flag]] = True
+            rest = rest[1:]
         else:
             errors.append(USAGE)
             rest = rest[1:]
@@ -250,8 +286,15 @@ def validate(args):
         fail(2, "at least one --task is required")
     if args["phase"] is not None and args["phase"] not in PHASES:
         fail(2, f"--phase {args['phase']!r} is not one of {', '.join(PHASES)}")
-    if not args["lane_cmds"] or not args["wide_cmds"]:
-        fail(2, "--lane-cmd and --wide-cmd are required")
+    if not args["lane_cmds"] or not (args["wide_cmds"] or args["wide_as_lane"]):
+        fail(2, "--lane-cmd and --wide-cmd (or --wide-as-lane) are required")
+    if args["wide_as_lane"] and args["wide_cmds"]:
+        fail(2, "--wide-as-lane and --wide-cmd do not go together")
+    if args["owners_fp"] is not None:
+        if not _owners.FINGERPRINT.fullmatch(args["owners_fp"]):
+            fail(2, f"--declared-from-owners {args['owners_fp']!r} is not a fingerprint N:HHHHHHHH")
+        if args["declared"]:
+            fail(2, "--declared-from-owners and --declared do not go together")
     if (args["entry"] is None) != (not args["targeted"]):
         fail(2, "--entry and --targeted come together")
     if not SHA.match(args["base"]):
@@ -273,6 +316,34 @@ def validate(args):
     # A --widen entry naming an existing directory covers it without the '/':
     # widening is the safe side. --declared keeps the strict rule.
     args["widen"] = [(e, d or os.path.isdir(os.path.join(args["dir"], e))) for e, d in args["widen"]]
+    if args["wide_as_lane"]:
+        args["wide_cmds"] = list(args["lane_cmds"])
+
+
+OWNERS_MISMATCH = ("the run's owner map (owners.json) does not match this unit's Files list ({}): "
+                   "report blocked with this message; do not run setup and do not pass --declared "
+                   "yourself (the session reruns setup)")
+
+
+def resolve_declared(args):
+    """With --declared-from-owners: the unit's declared list from
+    LEDGER_DIR/owners.json, checked against the fingerprint, as declared_raw
+    and declared; exit 3 with the mismatch error otherwise."""
+    if args["owners_fp"] is None:
+        return
+    path = os.path.join(args["ledger"], "owners.json")
+    try:
+        declared = _owners.owners_declared(path, args["tasks"], args["owners_fp"])
+    except ValueError as e:
+        fail(3, OWNERS_MISMATCH.format(e))
+    keys = []
+    for value in declared:
+        k = entry_key(value)
+        if k is None:
+            fail(3, OWNERS_MISMATCH.format(f"owners.json lists {value!r}, which is not a project-relative path"))
+        keys.append(k)
+    args["declared_raw"] = declared
+    args["declared"] = keys
 
 
 def git_paths(directory, *git_args):
@@ -442,11 +513,13 @@ def run(argv):
 
         def work():
             validate(args)
+            resolve_declared(args)
             chosen, policy = plan(args, started)
             run_checks(args, chosen, policy, out)
         holding(out, work)
     else:
         validate(args)
+        resolve_declared(args)
         chosen, policy = plan(args, started)
         out = reserve(args["ledger"], args["unit"])
         holding(out, lambda: run_checks(args, chosen, policy, out))

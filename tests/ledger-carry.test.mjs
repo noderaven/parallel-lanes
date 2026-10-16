@@ -271,7 +271,7 @@ test('write-owners maps every path to the tasks that list it, and owners annotat
   assert.equal(res.code, 0, res.stderr);
   const map = JSON.parse(readFileSync(join(dir, 'owners.json'), 'utf8'));
   assert.deepEqual(map.files['shared.css'], ['T2', 'T4']);
-  assert.deepEqual(map.tasks.T3, { where: 'alpha', pos: 1 });
+  assert.deepEqual(map.tasks.T3, { where: 'alpha', pos: 1, declared: ['.\\SRC\\x2.js'] });
   const out = ownersOf(dir, '--task', 'T2', 'src/y.js', 'a.txt', 'src/z.js', 'shared.css', 'new.js', 'src/x2.js', 'SRC/X.js');
   assert.ok(out.includes('src/y.js (owned by T4, another lane, running alongside)'), out);
   assert.ok(out.includes('a.txt (owned by P1, earlier in the run)'), out);

@@ -383,6 +383,112 @@ test('start-task --owners names the owner of each changed path, and shared decla
     + "shared.css (in your Files list; also in T5's Files)\n"), res.stdout);
 });
 
+// The engine's fingerprint of a declared list, as _owners.fingerprint computes
+// it. Non-ASCII characters go to Python as JSON escapes.
+function fp(paths) {
+  const json = JSON.stringify(paths).replace(/[^\x00-\x7f]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const res = sh('python3', ['-B', '-c',
+    'import json, sys; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); '
+    + 'import _owners; print(_owners.fingerprint(json.loads(sys.argv[2])))', SCRIPTS, json]);
+  assert.equal(res.code, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+// The --owners test's repo and owner map, with T1's declared list added.
+function ownersCase(declared = ['src/a.js', 'shared.css']) {
+  const c = newCase();
+  const base = git(c.lane, 'rev-parse', 'HEAD');
+  write(join(c.lane, 'src', 'a.js'), 'a\n');
+  write(join(c.lane, 'src', 'b.js'), 'b\n');
+  write(join(c.lane, 'shared.css'), 's\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'work');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const owners = join(c.root, 'owners.json');
+  write(owners, JSON.stringify({
+    repo: {},
+    tasks: {
+      T1: { where: 'alpha', pos: 0, declared },
+      T2: { where: 'beta', pos: 0, declared: ['src/b.js'] },
+      T5: { where: 'join', pos: 0, declared: ['shared.css'] },
+    },
+    files: { 'src/a.js': ['T1'], 'src/b.js': ['T2'], 'shared.css': ['T1', 'T5'] },
+  }));
+  return { ...c, base, head, owners, out: join(c.root, 'briefs', 'T1.md') };
+}
+
+const COULD_NOT = "===== files changed outside the task's Files list =====\n"
+  + "(could not build the list: the run's owner map does not match this unit's Files list; judge scope from the brief)\n";
+
+test('start-task --declared-from-owners prints the scope block --declared prints', () => {
+  const c = ownersCase();
+  const listed = startTask(c.lane, c.plan, '--scope', c.base, c.head, '--declared', 'src/a.js', '--declared', 'shared.css',
+    '--owners', c.owners, '--brief', 'T1', c.out);
+  const fromOwners = startTask(c.lane, c.plan, '--scope', c.base, c.head, '--declared-from-owners', fp(['src/a.js', 'shared.css']),
+    '--owners', c.owners, '--brief', 'T1', c.out);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.equal(fromOwners.code, 0, fromOwners.stderr);
+  assert.equal(fromOwners.stdout, listed.stdout);
+  assert.ok(fromOwners.stdout.endsWith("===== files changed outside the task's Files list =====\n"
+    + "src/b.js (owned by T2, another lane, running alongside)\n"
+    + "shared.css (in your Files list; also in T5's Files)\n"), fromOwners.stdout);
+});
+
+test('start-task --declared-from-owners keeps a path with a quote, a space and non-ASCII', () => {
+  const quoted = "docs/it's here.md";
+  const accented = 'caf\u{e9} menu.txt';
+  const c = ownersCase([quoted]);
+  write(join(c.lane, 'docs', "it's here.md"), 'q\n');
+  write(join(c.lane, accented), 'c\n');
+  git(c.lane, 'add', '-A');
+  git(c.lane, 'commit', '-q', '-m', 'more work');
+  const head = git(c.lane, 'rev-parse', 'HEAD');
+  const res = startTask(c.lane, c.plan, '--scope', c.head, head, '--declared-from-owners', fp([quoted]),
+    '--owners', c.owners, '--brief', 'T1', c.out);
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(res.stdout.endsWith("===== files changed outside the task's Files list =====\n"
+    + `${accented} (no task owns it)\n`), res.stdout);
+  assert.ok(!res.stdout.includes('here.md ('), res.stdout);
+});
+
+test('start-task goes on when the owner map does not match', () => {
+  const c = ownersCase();
+  const torn = join(c.root, 'torn owners.json');
+  write(torn, '{"tasks":');
+  const cases = [
+    ['a wrong fingerprint', c.owners, fp(['src/a.js'])],
+    ['a missing owners file', join(c.root, 'no-such-owners.json'), fp(['src/a.js', 'shared.css'])],
+    ['an unreadable owners file', torn, fp(['src/a.js', 'shared.css'])],
+  ];
+  for (const [what, owners, value] of cases) {
+    rmSync(c.out, { force: true });
+    const res = startTask(c.lane, c.plan, '--scope', c.base, c.head, '--declared-from-owners', value,
+      '--owners', owners, '--brief', 'T1', c.out);
+    assert.equal(res.code, 0, `${what}: ${res.stderr}`);
+    assert.ok(existsSync(c.out), `${what}: the brief is written`);
+    assert.ok(res.stdout.includes(`===== brief T1: ${shown(c.out)} =====\n`), `${what}: ${res.stdout}`);
+    assert.ok(res.stdout.endsWith(COULD_NOT), `${what}: ${res.stdout}`);
+  }
+});
+
+test('start-task --declared-from-owners usage errors exit 2', () => {
+  const c = ownersCase();
+  const value = fp(['src/a.js', 'shared.css']);
+  const calls = [
+    ['without --owners', '--scope', c.base, c.head, '--declared-from-owners', value],
+    ['with --declared', '--scope', c.base, c.head, '--declared-from-owners', value, '--declared', 'src/a.js',
+      '--owners', c.owners],
+    ['with a zero count', '--scope', c.base, c.head, '--declared-from-owners', '0:811c9dc5', '--owners', c.owners],
+    ['with a trailing newline', '--scope', c.base, c.head, '--declared-from-owners', `${value}\n`, '--owners', c.owners],
+    ['without --scope', '--declared-from-owners', value, '--owners', c.owners],
+  ];
+  for (const [what, ...args] of calls) {
+    const res = startTask(c.lane, c.plan, ...args, '--brief', 'T1', c.out);
+    assert.equal(res.code, 2, `${what}: ${res.stderr}`);
+    assert.equal(res.stdout, '', what);
+  }
+});
+
 test('start-task still starts without an owner map, or when the rulings print fails', () => {
   const c = newCase();
   const base = git(c.lane, 'rev-parse', 'HEAD');

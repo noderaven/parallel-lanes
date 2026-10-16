@@ -297,24 +297,29 @@ function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
 // The scripts/task-checks call a task's implementer runs once before
 // committing (spec 4.2, 4.3), in where.dir for the unit's range from base,
 // writing to the result file the agent reserved (--evidence resultPath());
-// null when the ledger lane has no test, lint or build command.
+// null when the ledger lane has no test, lint or build command. 1.6.6 (spec
+// 4.5): the Files list goes as its fingerprint (task-checks reads the list
+// from owners.json), and a wide list equal to the lane list as --wide-as-lane,
+// so the command does not grow with the Files list.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
   if (lane.length === 0) return null;
   const q = shellQuote;
   const pairs = (flag, checks) => checks.flatMap((c) => [flag, q(c.group), q(c.command)]);
   const entry = taskChecksEntry(m, task, where.lane);
+  const declared = declaredFiles(task);
+  const wide = wideChecks(m, where.lane);
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
     '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
-    ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
+    ...(declared.length === 0 ? [] : ['--declared-from-owners', q(declaredFingerprint(declared))]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
     ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
     ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
     ...pairs('--lane-cmd', lane),
-    ...pairs('--wide-cmd', wideChecks(m, where.lane)),
+    ...(JSON.stringify(wide) === JSON.stringify(lane) ? ['--wide-as-lane'] : pairs('--wide-cmd', wide)),
   ].join(' ');
 }
 
@@ -337,6 +342,8 @@ function taskChecksLines(m, task, where, base) {
         'and the result file the wait read.',
       ],
     }),
+    'If the call fails with an error that names owners.json, report blocked with its message; do not run setup or',
+    'pass --declared yourself.',
     'It picks the targeted checks, or the wider ones when your change reaches beyond them, runs them, and records',
     'its choice. While iterating, run only the focused tests for what you change. When the call fails, fix and',
     'rerun it; do not commit with failing checks (report blocked instead). If you know your change reaches code the',
@@ -576,8 +583,9 @@ function fallbackFixer() {
   return [
     'Built-in instructions (superpowers not found):',
     'Fix exactly the findings listed below, nothing more. Rerun the tests that cover the amended code, commit with',
-    'the commit rules below, and append a fix report (what changed, covering tests, command, output) to the',
-    'implementer report file. If you cannot fix a finding, report blocked with the specifics instead of guessing.',
+    'the commit rules below, and add a fix report (what changed, covering tests, command, output) to the',
+    'implementer report file with your file-editing tools. If you cannot fix a finding, report blocked with the',
+    'specifics instead of guessing.',
   ].join('\n');
 }
 
@@ -621,12 +629,41 @@ function declaredFiles(task) {
   return out;
 }
 
+// The fingerprint of a declared list, N:HHHHHHHH: N the number of paths, H the
+// 32-bit FNV-1a hash of the paths' UTF-8 bytes joined with one NUL byte, as
+// _owners.fingerprint computes it (tests/fixtures/fingerprint/cases.json).
+// The UTF-8 encoder is written out (the Workflow runtime need not have
+// TextEncoder); a lone surrogate gets its 3-byte form, as Python's
+// surrogatepass gives it.
+function declaredFingerprint(paths) {
+  let h = 0x811c9dc5;
+  const add = (byte) => { h = Math.imul(h ^ byte, 0x01000193) >>> 0; };
+  paths.forEach((p, i) => {
+    if (i > 0) add(0);
+    for (let j = 0; j < p.length; j += 1) {
+      const cp = p.codePointAt(j);
+      if (cp > 0xffff) j += 1;
+      if (cp < 0x80) {
+        add(cp);
+      } else if (cp < 0x800) {
+        add(0xc0 | (cp >> 6)); add(0x80 | (cp & 0x3f));
+      } else if (cp < 0x10000) {
+        add(0xe0 | (cp >> 12)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      } else {
+        add(0xf0 | (cp >> 18)); add(0x80 | ((cp >> 12) & 0x3f)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      }
+    }
+  });
+  return `${paths.length}:${h.toString(16).padStart(8, '0')}`;
+}
+
 // The start-task command a task agent runs first: the optional fast-forward
 // to the feature branch (opts.sync), every brief of the unit regenerated from
 // the current plan and printed, and with opts.pkg = {base, head} and
 // superpowers present the review package for base..head. With opts.pkg and a
 // Files list it also lists the files base..head changes outside that list
-// (--scope); with opts.start (the task base, implement only) it records that
+// (--scope; 1.6.6: the list goes as its fingerprint, and start-task reads it
+// from owners.json); with opts.start (the task base, implement only) it records that
 // base in the ledger once the briefs are written (--record-start). For a
 // join wave unit (where.unit_branch, 1.6.5) the implement start (opts.start)
 // also puts the worktree on the unit's branch from where.from and runs the
@@ -659,7 +696,7 @@ function startCommand(m, task, where, opts = {}) {
   const declared = declaredFiles(task);
   if (pkg && declared.length > 0) {
     parts.push('--scope', shellQuote(pkg.base), shellQuote(pkg.head),
-      ...declared.flatMap((f) => ['--declared', shellQuote(f)]),
+      '--declared-from-owners', shellQuote(declaredFingerprint(declared)),
       '--owners', shellQuote(`${m.repo.ledger_dir}/owners.json`));
   }
   // The rulings in force (1.6.3): a join task sees every lane's.
@@ -960,8 +997,8 @@ function fixPrompt(m, task, where, findings, report, head, guidance = null, reop
     ].join('\n'),
     '',
     ...reopenLines(m, task, where, reopen),
-    `The branch is at ${head}. Fix these findings, commit on top of it, and append a fix report (what changed,`,
-    `covering tests, command, output) to ${files.report}.`,
+    `The branch is at ${head}. Fix these findings, commit on top of it, and add a fix report (what changed,`,
+    `covering tests, command, output) to ${files.report} with your file-editing tools.`,
     'Rerun the tests that cover the amended code; do not run the task checks or the full suite: the re-review',
     'judges the fix, and integration and verify run the full checks.',
     commitWithLine(fixCommitMessage(task)),

@@ -157,8 +157,12 @@ The header shown with the dry-run table lists: mode, base and feature branch, wo
 `excluded` with reasons, batches, and whether deferral is allowed. Doctor's warnings go in it
 too. One line comes from the dry run's `checks` summary, for example "Checks: targeted entries
 for 9 of 12 units; delivery runs 3 checks (1 added by lane_commands); repairs up to 2", and its
-`warnings` follow it (today one: "changes to shared files will not widen task checks", when
-`task_checks` has entries and `widen_paths` is empty). One line comes from the dry run's
+`warnings` follow it. There are two: "changes to shared files will not widen task checks", when
+`task_checks` has entries and `widen_paths` is empty; and (1.6.6) "<what> is about <N>
+characters; the Bash tool on Windows fails at about 7,000: shorten the project's check commands,
+for example with a wrapper script", when the longest engine-built check command is over 6,000
+characters, with <what> "<unit id>'s task-checks command" or "the integration checks command"
+and <N> its length (see "Command length" in Check ownership). One line comes from the dry run's
 `join_waves`: "Join: waves 1-2-4 (DJ1 | DJ2, DJ4 | DJ3, DJ5, DJ6, DJ7)", or "Join: serial
 (<reason>)" (see Join waves).
 
@@ -521,6 +525,20 @@ Files` (the reviewer checks the plan's split of that shared file), or `no task o
 `ledger undeclared <ledger_dir>` (and `ledger status --manifest`) report `{task: [{path, owner,
 relation}]}`.
 
+From 1.6.6 owners.json also gives each task its `declared`: its exact Files list as the manifest
+gives it (no case change or normalising, manifest order, each exact string once, `[]` for a task
+without one). The reviewer's start-task call builds its scope list from it: `--scope BASE HEAD
+--declared-from-owners N:HHHHHHHH --owners <ledger_dir>/owners.json` takes the `--brief` tasks'
+`declared` lists, in `--brief` order, each exact string once, and checks them against the
+engine's fingerprint (see "task-checks" in Check ownership); the owner annotations print as
+with `--declared`. When the owner map is missing or unreadable, a `--brief` task is not in it or has no
+declared list, or the fingerprint differs, the
+scope section is the one line "(could not build the list: the run's owner map does not match
+this unit's Files list; judge scope from the brief)", the briefs and package are written as
+usual and start-task exits 0: the list is advice, and a failed start would spend a fix agent on
+something no agent can repair. `--declared-from-owners` needs `--scope` and `--owners` and does
+not go with `--declared`; `--declared PATH` still works by hand.
+
 **Observed failures.** A check failure an implementer judges outside its task (it passed on a
 rerun, or the failing test covers code the task did not touch) is a run-wide ruling
 `Observed: <test or command> failed - <why outside this task> - <rerun result>`, so verify, a
@@ -659,6 +677,47 @@ evidence file `<ledger>/checks/task-<unit>.<n>.json` is created exclusively insi
 error record. The printed line lists at most 50 changed paths and cuts long reasons, with a `printed_cut`
 note; the evidence file keeps everything. The evidence is a record and a count: nothing reads it to accept, skip or reuse
 checks.
+
+**The engine's short forms** (1.6.6). The call the engine builds does not list the unit's Files:
+- `--declared-from-owners N:HHHHHHHH` stands for the `--declared` list (passed when the unit
+  declares files; with none, neither is passed and `no_files` holds). task-checks reads
+  `<ledger_dir>/owners.json`, takes each `--task`'s `declared` in the order given, keeps the first
+  occurrence of each exact string (as the engine's `declaredFiles` does for a batch or join
+  unit), and compares the fingerprint: N the number of paths, H the 32-bit FNV-1a hash of their
+  UTF-8 bytes joined with one NUL byte, as 8 lowercase hex digits (the engine and
+  `scripts/_owners.py` compute it alike). A value that is not of that form (N of 0 included),
+  or one given with `--declared`, is a usage error (exit 2). When owners.json is missing or
+  unreadable, a `--task` is not in it, a task has no `declared`, a path in it is absolute or
+  leaves the project, or the fingerprint differs, task-checks selects and runs nothing, writes
+  its error record to the evidence file and exits 3 (without `--evidence` it exits 3 and writes
+  nothing; `await-checks wait` then exits 3, not
+  `stopped`), with the error "the run's owner map (owners.json) does not match this unit's
+  Files list (<reason>): report blocked with this message; do not run setup and do not pass
+  --declared yourself (the session reruns setup)". The implementer's prompt says the same: "If
+  the call fails with an error that names owners.json, report blocked with its message; do not
+  run setup or pass --declared yourself." The session reruns setup (Relaunch or Resume), which
+  writes owners.json again from the manifest. Past the check nothing changes: the same
+  `no_files`, `outside_files`, permits and policy as with the list.
+- `--wide-as-lane` stands for the `--wide-cmd` pairs when the wide list equals the lane list
+  (the same groups and commands in the same order, as with no `lane_commands`, or a lane whose
+  `lane_commands` setup differs from the project's): the lane list is used as the wide list, so
+  no recorded or printed value changes. It does not go with `--wide-cmd`; one of the two is
+  required. A lane with extra commands and the project's setup still gets the `--wide-cmd` pairs.
+- `--declared PATH` and `--wide-cmd` still work by hand; a call without the new options behaves
+  as in 1.6.5. `--project-test` and `--targeted` stay as they are: they are bounded by the
+  project's commands.
+
+**Command length** (1.6.6). The Bash tool on Windows fails a command of about 7,000 characters
+or more before bash runs it ("unexpected EOF while looking for matching"), however well it is
+quoted. On one 2026-10-16 run, 7 of 40 task-checks calls (all of 6,907 characters or more), 1
+reviewer start and 6 heredocs written by agents failed this way; each had to be redone another
+way, and the empty evidence files showed as unavailable calls and stopped waits. 1.6.6 keeps the
+engine-built commands short: the declared files travel as a fingerprint and the wide list as
+`--wide-as-lane`, so what remains grows only with the project's check commands. Agents write
+and extend long files with Edit and Write, not heredocs (the rule every agent gets). The dry run
+warns when a unit's task-checks command, or the integration's run-checks command, would be over
+6,000 characters (see Confirmation header); the fix is to shorten the project's check commands,
+for example with a wrapper script. The warning is advice and never refuses.
 
 **Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
 - Due only when verify ran at the head, with exactly the configured inventory, no
