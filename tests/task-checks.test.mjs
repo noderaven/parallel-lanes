@@ -57,12 +57,13 @@ const L = 'node t.mjs L';
 const W = 'node t.mjs W';
 
 // Runs task-checks with unit U1 (task U1), the given extra arguments, and the
-// lane and wide lists; entry: true adds --entry U1 --targeted test T.
-function run(r, { entry = true, args = [], unit = 'U1', tasks = [unit], lane = 'alpha', entryId = null } = {}) {
+// lane and wide lists; entry: true adds --entry U1 --targeted test T; wide:
+// false drops the --wide-cmd pair.
+function run(r, { entry = true, args = [], unit = 'U1', tasks = [unit], lane = 'alpha', entryId = null, wide = true } = {}) {
   const argv = [SCRIPT, r.dir, '--base', r.base, '--ledger', r.ledger, '--unit', unit, '--lane', lane,
     ...tasks.flatMap((t) => ['--task', t]),
     ...(entry ? ['--entry', entryId || tasks[tasks.length - 1], '--targeted', 'test', T] : []),
-    '--lane-cmd', 'test', L, '--wide-cmd', 'test', W, '--project-test', W, ...args];
+    '--lane-cmd', 'test', L, ...(wide ? ['--wide-cmd', 'test', W] : []), '--project-test', W, ...args];
   const res = spawnSync('python3', argv, { encoding: 'utf8', env: { ...process.env, ...GIT_ENV } });
   let json = null;
   try { json = JSON.parse(res.stdout); } catch { /* left null */ }
@@ -142,9 +143,11 @@ test('a widen entry naming an existing directory without a trailing / covers fil
 function ledgerFile(r, stem, events) {
   writeFileSync(join(r.ledger, `${stem}.jsonl`), events.map((e) => JSON.stringify(e)).join('\n') + '\n');
 }
-function ownerMap(r, files) {
-  writeFileSync(join(r.ledger, 'owners.json'), JSON.stringify({
-    tasks: { U1: { where: 'alpha', pos: 0 }, U2: { where: 'alpha', pos: 1 }, U9: { where: 'beta', pos: 0 } }, files }));
+// declared: {task id: its Files list}, recorded as that task's `declared` (1.6.6).
+function ownerMap(r, files, declared = {}) {
+  const tasks = { U1: { where: 'alpha', pos: 0 }, U2: { where: 'alpha', pos: 1 }, U9: { where: 'beta', pos: 0 } };
+  for (const [id, entry] of Object.entries(tasks)) if (id in declared) entry.declared = declared[id];
+  writeFileSync(join(r.ledger, 'owners.json'), JSON.stringify({ tasks, files }));
 }
 const permit = (task, files, extra = {}) => ({ event: 'ruling', task, by: 'adjudicator', text: 'Ruling: x - y - z', files, ...extra });
 
@@ -732,4 +735,147 @@ test('without --evidence the 1.6.0 reservation still works', () => {
   assert.deepEqual(JSON.parse(readFileSync(join(checks, 'task-U1.2.json'), 'utf8')), second.json);
   assert.equal(second.json.policy.selected, 'lane');
   assert.deepEqual(sidecars(checks), [], 'no sidecar is left');
+});
+
+// ---- --declared-from-owners and --wide-as-lane (1.6.6, spec 4.3, 4.5) ----
+
+const fwd = (p) => p.replace(/\\/g, '/');
+// The fingerprint of a declared list, from Python _owners.fingerprint.
+function fp(paths) {
+  const code = [
+    'import json, sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import _owners',
+    'print(_owners.fingerprint(json.loads(sys.argv[1])))',
+  ].join('\n');
+  const res = spawnSync('python3', ['-c', code, JSON.stringify(paths)], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.trim();
+}
+// The policy without started, which differs between two calls.
+const policyOf = (json) => { const { started, ...rest } = json.policy; return rest; };
+
+test('--declared-from-owners gives the policy --declared gives', () => {
+  const r = repo({ 'src/a.js': '1\n', 'src/b.js': '1\n', 'shared.css': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'src/b.js'), '2\n');
+  // One task: src/b.js is outside its Files list.
+  ownerMap(r, { 'src/a.js': ['U1'] }, { U1: ['src/a.js'] });
+  const owners = run(r, { args: ['--declared-from-owners', fp(['src/a.js'])] });
+  const explicit = run(r, { args: ['--declared', 'src/a.js'] });
+  assert.equal(owners.status, 0, owners.stderr);
+  assert.deepEqual(codes(owners.json), ['outside_files']);
+  assert.match(owners.json.policy.reasons[0].detail, /src\/b\.js/);
+  assert.deepEqual(policyOf(owners.json), policyOf(explicit.json));
+  // A batch whose tasks share a path: each exact string once, first occurrence kept.
+  ownerMap(r, { 'src/a.js': ['U1'], 'shared.css': ['U1', 'U2'], 'src/b.js': ['U2'] },
+    { U1: ['src/a.js', 'shared.css'], U2: ['shared.css', 'src/b.js'] });
+  writeFileSync(join(r.dir, 'shared.css'), '2\n');
+  writeFileSync(join(r.dir, 'src/c.js'), 'new\n');
+  const list = ['src/a.js', 'shared.css', 'src/b.js'];
+  const batch = { unit: 'U1-U2', tasks: ['U1', 'U2'] };
+  const batchOwners = run(r, { ...batch, args: ['--declared-from-owners', fp(list)] });
+  const batchExplicit = run(r, { ...batch, args: list.flatMap((p) => ['--declared', p]) });
+  assert.equal(batchOwners.status, 0, batchOwners.stderr);
+  assert.deepEqual(codes(batchOwners.json), ['outside_files']);
+  assert.match(batchOwners.json.policy.reasons[0].detail, /^outside the Files list: src\/c\.js$/);
+  assert.deepEqual(policyOf(batchOwners.json), policyOf(batchExplicit.json));
+});
+
+test('a path from owners.json with a space, a quote and non-ASCII reaches outside_files and permitted', () => {
+  const r = repo({ "docs/it's here.md": '1\n', 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, "docs/it's here.md"), '2\n');
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  writeFileSync(join(r.dir, 'caf\u00e9 menu.txt'), 'new\n');
+  writeFileSync(join(r.dir, 'src/slot.js'), 'new\n');
+  // A _run permit covers only a path in the folder of a declared file: src/a.js puts src/ there,
+  // so the permit shows the declared list from owners.json reaches the permits.
+  ledgerFile(r, '_run', [permit('_run', ['src/slot.js'])]);
+  const declared = ["docs/it's here.md", 'src/a.js'];
+  ownerMap(r, { "docs/it's here.md": ['U1'], 'src/a.js': ['U1'] }, { U1: declared });
+  const { status, json, stderr } = run(r, { args: ['--declared-from-owners', fp(declared)] });
+  assert.equal(status, 0, stderr);
+  assert.deepEqual(json.policy.changed, ['caf\u00e9 menu.txt', "docs/it's here.md", 'src/a.js', 'src/slot.js']);
+  assert.deepEqual(codes(json), ['outside_files']);
+  assert.equal(json.policy.reasons[0].detail, 'outside the Files list: caf\u00e9 menu.txt');
+  assert.deepEqual(json.policy.permitted, [{ path: 'src/slot.js', ruling: '_run-R1' }]);
+});
+
+test('an owner-map mismatch writes the error record and exits 3', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  const good = fp(['src/a.js']);
+  for (const [what, setUp, value, opts] of [
+    ['a wrong fingerprint', () => ownerMap(r, {}, { U1: ['src/a.js'] }), fp(['src/b.js']), {}],
+    ['no owners.json', () => rmSync(join(r.ledger, 'owners.json'), { force: true }), good, {}],
+    ['an unknown --task', () => ownerMap(r, {}, { U1: ['src/a.js'] }), good, { tasks: ['U1', 'U7'] }],
+    ['a task without declared', () => ownerMap(r, {}, {}), good, {}],
+    ['a declared absolute path', () => ownerMap(r, {}, { U1: ['/abs/x.js'] }), fp(['/abs/x.js']), {}],
+  ]) {
+    setUp();
+    const file = reserve(r);
+    const res = run(r, { ...opts, args: ['--declared-from-owners', value, '--evidence', file] });
+    assert.equal(res.status, 3, `${what}: ${res.stderr}`);
+    const record = JSON.parse(readFileSync(file, 'utf8'));
+    assert.deepEqual(record.results, [], what);
+    assert.equal(record.ok, false, what);
+    assert.ok(record.error.includes('owners.json'), `${what}: ${record.error}`);
+    assert.ok(record.error.includes('report blocked'), `${what}: ${record.error}`);
+    assert.ok(record.error.startsWith("the run's owner map (owners.json) does not match this unit's Files list ("),
+      `${what}: ${record.error}`);
+    assert.ok(record.error.endsWith('do not run setup and do not pass --declared yourself (the session reruns setup)'),
+      `${what}: ${record.error}`);
+    assert.equal(record.policy, null, what);
+    const waited = spawnSync('python3', [AWAIT, 'wait', file, '--max', '30'], { encoding: 'utf8', env: ENV });
+    assert.equal(waited.status, 3, `${what}: ${waited.stderr}`);
+  }
+});
+
+test('the ledger in forward-slash form still finds owners.json', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  ownerMap(r, { 'src/a.js': ['U1'] }, { U1: ['src/a.js'] });
+  const res = run({ ...r, ledger: fwd(r.ledger) }, { args: ['--declared-from-owners', fp(['src/a.js'])] });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.json.policy.selected, 'targeted');
+});
+
+test('owner-map usage errors exit 2 with nothing written', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  ownerMap(r, { 'src/a.js': ['U1'] }, { U1: ['src/a.js'] });
+  for (const args of [
+    ['--declared-from-owners', '0:811c9dc5'],
+    ['--declared-from-owners', '3:XYZ'],
+    ['--declared-from-owners', `${fp(['src/a.js'])}\n`],
+    ['--declared-from-owners', fp(['src/a.js']), '--declared', 'src/a.js'],
+  ]) {
+    const res = run(r, { args });
+    assert.equal(res.status, 2, `${JSON.stringify(args)}: ${res.stderr}`);
+    assert.match(res.stderr, /^task-checks: --declared-from-owners /, JSON.stringify(args));
+  }
+  const checks = join(r.ledger, 'checks');
+  assert.deepEqual(existsSync(checks) ? readdirSync(checks) : [], []);
+});
+
+test('--wide-as-lane gives the policy the lane pairs as --wide-cmd give', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  const asLane = run(r, { wide: false, args: ['--wide-as-lane', '--force-full', 'x'] });
+  const pairs = run(r, { wide: false, args: ['--wide-cmd', 'test', L, '--force-full', 'x'] });
+  assert.equal(asLane.status, 0, asLane.stderr);
+  assert.equal(asLane.json.policy.selected, 'widened');
+  assert.deepEqual(ran(asLane.json), [L]);
+  assert.deepEqual(asLane.json.policy.offered.wide, [{ group: 'test', command: L }]);
+  assert.deepEqual(policyOf(asLane.json), policyOf(pairs.json));
+});
+
+test('--wide-as-lane with --wide-cmd, or neither, exits 2', () => {
+  const r = repo();
+  const both = run(r, { args: ['--wide-as-lane'] });
+  assert.equal(both.status, 2, 'with --wide-cmd');
+  assert.match(both.stderr, /--wide-as-lane and --wide-cmd do not go together/);
+  const neither = run(r, { wide: false });
+  assert.equal(neither.status, 2, 'neither');
+  assert.match(neither.stderr, /--lane-cmd and --wide-cmd \(or --wide-as-lane\) are required/);
+  assert.ok(!existsSync(join(r.ledger, 'checks')), 'nothing was written');
 });
