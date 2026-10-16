@@ -338,6 +338,38 @@
       },
       "additionalProperties": false
     },
+    "join_started": {
+      "description": "1.6.5: ledger status join_started, a join task started in an earlier launch (the join then runs serially). Required once start_points.join is set.",
+      "type": "boolean"
+    },
+    "unit_branches": {
+      "description": "1.6.5: ledger status unit_branches, the join units that ran on their own branch pl-<run_id>-u-<unit> in a lane worktree.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["branch", "dir"],
+        "properties": {
+          "branch": {
+            "type": "string",
+            "pattern": "^pl-[a-z0-9-]+-u-[A-Za-z0-9_]"
+          },
+          "dir": {
+            "$ref": "#/$defs/text"
+          }
+        }
+      }
+    },
+    "wave_merges": {
+      "description": "1.6.5: ledger status wave_merges, the wave_merged events of earlier launches ({wave or recovery, units, head, overlaps, conflict_files}).",
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "join_tip": {
+      "description": "1.6.5: ledger backfill join_tip, the join's last commit; integration's history audit allows final-fix commits after it.",
+      "$ref": "#/$defs/text"
+    },
     "done": {
       "$ref": "#/$defs/textList"
     },

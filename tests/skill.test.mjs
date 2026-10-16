@@ -677,7 +677,7 @@ test('reference.md documents the check policy fields', () => {
 
 test('SKILL.md lists checks among the dry-run fields and points to the check policy fields', () => {
   const skill = flat(SKILL_MD);
-  assert.ok(skill.includes('`{dry_run, errors, agents, lanes_effective, notices, checks}`'), 'dry-run fields');
+  assert.ok(skill.includes('`{dry_run, errors, agents, lanes_effective, notices, checks, join_waves}`'), 'dry-run fields');
   assert.ok(skill.includes('`task_checks`') && skill.includes('`widen_paths`'), 'manifest step');
 });
 

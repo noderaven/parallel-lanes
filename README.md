@@ -281,7 +281,8 @@ session lists it, and you can resume with one word. Finished tasks are skipped.
    `scripts/setup` also locks the project checkout in git mode (two runs cannot switch one
    checkout to their feature branches), creates the feature branch and lane worktrees, saving any changes it has
    to discard under a git ref first. The phases run: pre-flight conflict check, prelude,
-   lanes in parallel, integration, join, E2E, a final review with three lenses and one fix
+   lanes in parallel, integration, join (its tasks in waves: those whose `depends_on` allow it
+   run side by side on their own branches and are merged after each wave), E2E, a final review with three lenses and one fix
    round, and a verify step that reruns the project checks (every lane's checks included) and any stale E2E or
    post-integration check on the exact revision delivered. The full pre-flight stops the run,
    naming the move that fixes it, when a task needs code from a task scheduled after it.
