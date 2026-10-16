@@ -170,7 +170,9 @@ test('setup: a fresh git run creates the branch and lane worktrees and prints se
   const base = git(c.project, 'rev-parse', 'main');
   const { worktrees, ...result } = setupOk(c, manifest(c));
 
-  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [], setup_skipped: [], returned: [] });
+  assert.deepEqual(result, {
+    feature_head: base, discarded: [], preserved: [], setup_skipped: [], returned: [], git_identity: [],
+  });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -185,6 +187,13 @@ test('setup: a fresh git run creates the branch and lane worktrees and prints se
     'b-override',
   ]);
   assert.equal(git(c.project, 'status', '--porcelain'), '');
+});
+
+test("setup: git_identity holds the commit rules' pairs", () => {
+  const c = newCase();
+  const rules = 'Commit with git -c user.name=n -c user.email=e@x.invalid commit.';
+  const result = setupOk(c, manifest(c, { commit_rules: rules }));
+  assert.deepEqual(result.git_identity, ['user.name=n', 'user.email=e@x.invalid']);
 });
 
 test('setup: a rerun reuses branches and worktrees and lists the discarded edits', () => {
@@ -417,7 +426,9 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
   });
   const feature = `${c.worktreeRoot}/feature`;
   const { worktrees, ...result } = setupOk(c, m);
-  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [], setup_skipped: [], returned: [] });
+  assert.deepEqual(result, {
+    feature_head: baseline, discarded: [], preserved: [], setup_skipped: [], returned: [], git_identity: [],
+  });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(feature, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');

@@ -36,9 +36,11 @@ GIT_NO_LAZY_FETCH=1 (a partial clone does not fetch a missing object), and
 the upstream tip is read with git ls-remote.
 
 Hard failures (they block a launch):
-- git_identity: git var GIT_COMMITTER_IDENT fails with user.useConfigOnly
-  set (so git does not invent user@host), after the -c user.name=... and
-  -c user.email=... pairs commit_rules passes.
+- git_identity: git var GIT_COMMITTER_IDENT or git var GIT_AUTHOR_IDENT
+  fails with user.useConfigOnly set (so git does not invent user@host),
+  after the -c user.name=... and -c user.email=... pairs commit_rules passes
+  (_identity.identity_pairs). A commit needs both: a committer identity
+  alone (GIT_COMMITTER_NAME/EMAIL) still fails "Author identity unknown".
 - base_not_current: the local repo.base_ref does not contain its upstream's
   tip. The detail is behind (the base is an ancestor of the tip), diverged
   (neither contains the other) or unknown (the tip is not in the local repo,
@@ -99,6 +101,7 @@ import sys
 import tempfile
 import time
 
+import _identity
 import _shell
 
 # The skill's folder: the scripts folder's parent, which holds VERSION.
@@ -514,45 +517,29 @@ def _git_prefix(repo, probes):
     return ["-C", root]
 
 
-# -c NAME=VALUE in commit_rules: the pair quoted, NAME="VALUE", or a bare word.
-_CONFIG_PAIR = re.compile(
-    r"""(?:^|[\s`(])-c\s+(?:"([^"]*)"|'([^']*)'|([\w.]+=(?:"[^"]*"|'[^']*'))|([^\s`]+))""")
-_IDENTITY_KEYS = ("user.name=", "user.email=")
-
-
-def identity_pairs(commit_rules):
-    """The -c user.name=... and -c user.email=... pairs commit_rules passes."""
-    pairs = []
-    for m in _CONFIG_PAIR.finditer(commit_rules or ""):
-        if m.group(4) is not None:
-            # A bare word may end a sentence or a parenthesis.
-            pair = m.group(4).rstrip(".,;:)")
-        else:
-            pair = next(g for g in m.groups()[:3] if g is not None)
-        key, eq, value = pair.partition("=")
-        if eq and (key.lower() + "=") in _IDENTITY_KEYS and value.strip(" \"'"):
-            pairs.append(key + "=" + value.strip(" \"'"))
-    return pairs
+# The commit rules' -c user.name/user.email pairs; kept here under its old
+# name for any caller of _doctor.identity_pairs.
+identity_pairs = _identity.identity_pairs
 
 
 def check_git_identity(manifest, probes, prefix, report):
-    rules = manifest.get("commit_rules")
-    pairs = identity_pairs(rules if isinstance(rules, str) else "")
+    """git commit needs both identities: the committer's, then the author's."""
     args = list(prefix) if prefix else ["-C", tempfile.gettempdir()]
-    for pair in pairs:
+    for pair in identity_pairs(manifest.get("commit_rules")):
         args += ["-c", pair]
-    args += ["-c", "user.useConfigOnly=true", "var", "GIT_COMMITTER_IDENT"]
-    res = probes.git(args)
-    if res.code == 0 and res.out.strip():
-        report.passed("git_identity")
-        return
-    report.fail(
-        "git_identity",
-        "git has no committer identity (git var GIT_COMMITTER_IDENT fails)",
-        "set one with git config --global user.name NAME and git config --global "
-        "user.email EMAIL, or name one that commit_rules passes as git -c "
-        "user.name=... -c user.email=... commit.",
-    )
+    args += ["-c", "user.useConfigOnly=true", "var"]
+    for who, var in (("committer", "GIT_COMMITTER_IDENT"), ("author", "GIT_AUTHOR_IDENT")):
+        res = probes.git(args + [var])
+        if res.code != 0 or not res.out.strip():
+            report.fail(
+                "git_identity",
+                "git has no " + who + " identity (git var " + var + " fails)",
+                "set one with git config --global user.name NAME and git config --global "
+                "user.email EMAIL, or name one that commit_rules passes as git -c "
+                "user.name=... -c user.email=... commit.",
+            )
+            return
+    report.passed("git_identity")
 
 
 def _ancestor(probes, prefix, a, b):
