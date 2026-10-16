@@ -3,7 +3,8 @@
 
 usage: start-task DIR PLAN [--sync BRANCH] [--package SCRIPT BASE HEAD OUT]
                   [--artifacts ROOT] [--record-start LEDGER_DIR LANE BASE]
-                  [--scope BASE HEAD --declared PATH [--declared PATH ...] [--owners FILE]]
+                  [--scope BASE HEAD (--declared PATH [--declared PATH ...] [--owners FILE]
+                                      | --declared-from-owners N:HHHHHHHH --owners FILE)]
                   [--rulings LEDGER_DIR LANE]
                   [--unit-branch NAME SHA --run-id RUN [--setup COMMAND ...]]
                   [--restart]
@@ -53,14 +54,26 @@ In order:
              (in DIR) changes that are not a --declared PATH (normalized and
              case-insensitive; a rename changes both paths), one per line
              after a "===== files changed outside the task's Files list ====="
-             line, or "(none)". --scope without --declared exits 2. With
-             --owners FILE (the ledger's owners.json, written by setup) each
-             path carries what it is, seen from the --brief tasks: "(owned by
+             line, or "(none)". --scope with neither --declared nor
+             --declared-from-owners exits 2. --declared-from-owners
+             N:HHHHHHHH (1.6.6) stands for the --declared list: the --brief
+             tasks' `declared` lists in FILE, in --brief order, each exact
+             string once, whose fingerprint (_owners.fingerprint) must be
+             N:HHHHHHHH. It needs --scope and --owners, does not go with
+             --declared, and a value not of that form exits 2. FILE is
+             read right after the --artifacts check, before any git work.
+             When it is missing or unreadable, or the fingerprint differs,
+             the section is the one line "(could not build the list: the
+             run's owner map does not match this unit's Files list; judge
+             scope from the brief)", everything else runs as before and the
+             exit stays 0. With --owners FILE (the ledger's owners.json,
+             written by setup) each path carries what it is, seen from the
+             --brief tasks: "(owned by
              X, earlier in the run)", "(owned by X, another lane, running
              alongside)", "(owned by X, later)" or "(no task owns it)"; a
              changed declared path that another task also lists follows as
-             "(in your Files list; also in X's Files)". A missing FILE prints
-             the plain list; an unreadable one exits 3.
+             "(in your Files list; also in X's Files)". Under --declared, a
+             missing FILE prints the plain list and an unreadable one exits 3.
   --rulings  prints `ledger rulings LEDGER_DIR --lane LANE` (LANE "-": every
              ruling) under a "===== rulings in force =====" line, after the
              briefs; when that fails, one "(could not read the rulings: ...)"
@@ -113,6 +126,10 @@ ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
 # The same forms as the ledger's UNIT_BRANCH and validate.js' runIdPattern.
 UNIT_BRANCH = re.compile(r"^pl-[a-z0-9-]+-u-[A-Za-z0-9_][A-Za-z0-9._-]*$")
 RUN_ID = re.compile(r"^[a-z0-9-]+$")
+# The scope section under --declared-from-owners when the owner map does not
+# give the unit's declared list.
+UNMATCHED = ("(could not build the list: the run's owner map does not match this unit's Files list; "
+             "judge scope from the brief)")
 
 
 def fail(code, message):
@@ -153,6 +170,7 @@ def parse(argv):
     parser.add_argument("--scope", nargs=2, metavar=("BASE", "HEAD"))
     parser.add_argument("--declared", action="append", default=[], metavar="PATH")
     parser.add_argument("--owners", metavar="FILE")
+    parser.add_argument("--declared-from-owners", metavar="N:HHHHHHHH")
     parser.add_argument("--rulings", nargs=2, metavar=("LEDGER_DIR", "LANE"))
     parser.add_argument("--unit-branch", nargs=2, metavar=("NAME", "SHA"))
     parser.add_argument("--run-id", metavar="RUN")
@@ -170,10 +188,19 @@ def parse(argv):
         parser.error("--setup needs --unit-branch")
     if args.restart and args.record_start is None:
         parser.error("--restart needs --record-start")
+    if args.declared_from_owners is not None:
+        if args.scope is None:
+            parser.error("--declared-from-owners needs --scope")
+        if args.owners is None:
+            parser.error("--declared-from-owners needs --owners")
+        if args.declared:
+            parser.error("--declared-from-owners and --declared do not go together")
+        if not _owners.FINGERPRINT.fullmatch(args.declared_from_owners):
+            parser.error(f"--declared-from-owners {args.declared_from_owners!r} is not of the form N:HHHHHHHH")
     if args.owners is not None and args.scope is None:
         parser.error("--owners needs --scope")
-    if args.scope is not None and not args.declared:
-        parser.error("--scope needs at least one --declared PATH")
+    if args.scope is not None and not args.declared and args.declared_from_owners is None:
+        parser.error("--scope needs at least one --declared PATH, or --declared-from-owners")
     for task_id, _ in args.brief:
         if not _brief.is_safe_id(task_id):
             parser.error(f"unsafe task id {task_id!r}")
@@ -258,6 +285,35 @@ def switch_unit_branch(directory, args):
     return name, lines
 
 
+def scope_list(directory, args):
+    """The --scope section's lines: the changed paths outside args.declared,
+    annotated from the owner map when there is one."""
+    res = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+              "--end-of-options", *args.scope)
+    if res.returncode != 0:
+        fail(1, f"git diff {' '.join(args.scope)} failed in {directory!r}: {res.stderr.strip()}")
+    declared = {path_key(p) for p in args.declared}
+    changed = [p for p in res.stdout.splitlines() if p]
+    outside = sorted(p for p in changed if path_key(p) not in declared)
+    lines = outside
+    if args.owners is not None and os.path.exists(args.owners):
+        # A ledger set up before 1.6.3 has no owner map: the plain list.
+        try:
+            owners = _owners.load(args.owners)
+        except (OSError, ValueError) as e:
+            if args.declared_from_owners is not None:
+                return UNMATCHED
+            fail(3, f"cannot read the owner map {args.owners!r}: {e}")
+        unit = [task_id for task_id, _ in args.brief]
+        shared = sorted(p for p in changed if path_key(p) in declared
+                        and any(t not in unit for t in owners["files"].get(_owners.path_key(p), [])))
+        lines = [f"{p} ({_owners.annotate(owners, unit, p)})" for p in outside + shared]
+    elif args.declared_from_owners is not None:
+        # Read at the start, gone now: never the plain list.
+        return UNMATCHED
+    return "\n".join(lines) if lines else "(none)"
+
+
 def main(argv):
     _shell.setup_io()
     try:
@@ -276,6 +332,15 @@ def run(args):
         for path in outs:
             if os.path.islink(path) or not contained(path, args.artifacts):
                 fail(3, f"artifact path {path!r} is outside {args.artifacts!r}; nothing written")
+    # The scope list is advisory: an owner map that is missing, unreadable or
+    # does not match the engine's fingerprint never stops the start.
+    unmatched = False
+    if args.declared_from_owners is not None:
+        try:
+            args.declared = _owners.owners_declared(
+                args.owners, [task_id for task_id, _ in args.brief], args.declared_from_owners)
+        except ValueError:
+            unmatched = True
     branch = rev_parse(3, directory, "--abbrev-ref", "HEAD")
     start_base = None
     if args.record_start is not None:
@@ -344,26 +409,8 @@ def run(args):
         out.append(f"===== review package =====\n{res.stdout}")
 
     if args.scope is not None:
-        res = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
-                  "--end-of-options", *args.scope)
-        if res.returncode != 0:
-            fail(1, f"git diff {' '.join(args.scope)} failed in {directory!r}: {res.stderr.strip()}")
-        declared = {path_key(p) for p in args.declared}
-        changed = [p for p in res.stdout.splitlines() if p]
-        outside = sorted(p for p in changed if path_key(p) not in declared)
-        lines = outside
-        if args.owners is not None and os.path.exists(args.owners):
-            # A ledger set up before 1.6.3 has no owner map: the plain list.
-            try:
-                owners = _owners.load(args.owners)
-            except (OSError, ValueError) as e:
-                fail(3, f"cannot read the owner map {args.owners!r}: {e}")
-            unit = [task_id for task_id, _ in args.brief]
-            shared = sorted(p for p in changed if path_key(p) in declared
-                            and any(t not in unit for t in owners["files"].get(_owners.path_key(p), [])))
-            lines = [f"{p} ({_owners.annotate(owners, unit, p)})" for p in outside + shared]
         out.append("===== files changed outside the task's Files list =====\n"
-                   + ("\n".join(lines) if lines else "(none)") + "\n")
+                   + (UNMATCHED if unmatched else scope_list(directory, args)) + "\n")
 
     if start_base is not None:
         ledger_dir, lane, _ = args.record_start
