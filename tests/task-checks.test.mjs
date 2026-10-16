@@ -592,7 +592,7 @@ function writerAlive(file) {
     'import _await',
     'print(json.dumps(_await.writer_alive(sys.argv[1])))',
   ].join('\n');
-  const res = spawnSync('python3', ['-c', code, file], { encoding: 'utf8', env: ENV });
+  const res = spawnSync('python3', ['-B', '-c', code, file], { encoding: 'utf8', env: ENV });
   assert.equal(res.status, 0, res.stderr);
   return JSON.parse(res.stdout);
 }
@@ -749,7 +749,7 @@ function fp(paths) {
     'import _owners',
     'print(_owners.fingerprint(json.loads(sys.argv[1])))',
   ].join('\n');
-  const res = spawnSync('python3', ['-c', code, JSON.stringify(paths)], { encoding: 'utf8', env: ENV });
+  const res = spawnSync('python3', ['-B', '-c', code, JSON.stringify(paths)], { encoding: 'utf8', env: ENV });
   assert.equal(res.status, 0, res.stderr);
   return res.stdout.trim();
 }
@@ -812,6 +812,7 @@ test('an owner-map mismatch writes the error record and exits 3', () => {
     ['an unknown --task', () => ownerMap(r, {}, { U1: ['src/a.js'] }), good, { tasks: ['U1', 'U7'] }],
     ['a task without declared', () => ownerMap(r, {}, {}), good, {}],
     ['a declared absolute path', () => ownerMap(r, {}, { U1: ['/abs/x.js'] }), fp(['/abs/x.js']), {}],
+    ['a declared path leaving the project', () => ownerMap(r, {}, { U1: ['../x.js'] }), fp(['../x.js']), {}],
   ]) {
     setUp();
     const file = reserve(r);

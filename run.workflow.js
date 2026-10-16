@@ -1112,7 +1112,7 @@ function unitsWithWork(m) {
 // the lane worktree dirs.
 function checkCommandLengths(m) {
   const out = [];
-  const placed = (cmd, name) => cmd.replace(resultPath(), shellQuote(`${m.repo.ledger_dir}/checks/${name}.1.json`));
+  const placed = (cmd, name) => cmd.replace(resultPath(), () => shellQuote(`${m.repo.ledger_dir}/checks/${name}.1.json`));
   const base = '0'.repeat(40);
   const joinDir = [featureDir(m), ...m.lanes.map((l) => laneWhere(m, l).dir)]
     .reduce((a, b) => (b.length > a.length ? b : a));

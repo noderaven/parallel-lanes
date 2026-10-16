@@ -62,7 +62,8 @@ In order:
              N:HHHHHHHH. It needs --scope and --owners, does not go with
              --declared, and a value not of that form exits 2. FILE is
              read right after the --artifacts check, before any git work.
-             When it is missing or unreadable, or the fingerprint differs,
+             When it is missing or unreadable, a --brief task is not in it
+             or has no declared list, or the fingerprint differs,
              the section is the one line "(could not build the list: the
              run's owner map does not match this unit's Files list; judge
              scope from the brief)", everything else runs as before and the

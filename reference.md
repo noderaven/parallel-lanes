@@ -531,7 +531,8 @@ without one). The reviewer's start-task call builds its scope list from it: `--s
 --declared-from-owners N:HHHHHHHH --owners <ledger_dir>/owners.json` takes the `--brief` tasks'
 `declared` lists, in `--brief` order, each exact string once, and checks them against the
 engine's fingerprint (see "task-checks" in Check ownership); the owner annotations print as
-with `--declared`. When the owner map is missing or unreadable, or the fingerprint differs, the
+with `--declared`. When the owner map is missing or unreadable, a `--brief` task is not in it or has no
+declared list, or the fingerprint differs, the
 scope section is the one line "(could not build the list: the run's owner map does not match
 this unit's Files list; judge scope from the brief)", the briefs and package are written as
 usual and start-task exits 0: the list is advice, and a failed start would spend a fix agent on
@@ -688,7 +689,8 @@ checks.
   or one given with `--declared`, is a usage error (exit 2). When owners.json is missing or
   unreadable, a `--task` is not in it, a task has no `declared`, a path in it is absolute or
   leaves the project, or the fingerprint differs, task-checks selects and runs nothing, writes
-  its error record to the evidence file and exits 3 (`await-checks wait` then exits 3, not
+  its error record to the evidence file and exits 3 (without `--evidence` it exits 3 and writes
+  nothing; `await-checks wait` then exits 3, not
   `stopped`), with the error "the run's owner map (owners.json) does not match this unit's
   Files list (<reason>): report blocked with this message; do not run setup and do not pass
   --declared yourself (the session reruns setup)". The implementer's prompt says the same: "If
