@@ -1086,20 +1086,69 @@ function repairReserve(m) {
   return 7 + (hooks.e2e ? 4 : 0) + (hooks.post_integrate && m.profile !== 'lite' ? 2 : 0);
 }
 
-// The dry run's checks summary (spec 4.9). Units are the units with work,
-// built as planAgents builds them.
-function checksSummary(m) {
-  const withEntry = [];
-  const withoutEntry = [];
+// The units with work, built as planAgents builds them, each with its ledger
+// lane (a lane id, prelude or join), in run order: [{unit, laneId}].
+function unitsWithWork(m) {
+  const out = [];
   const groups = [['prelude', m.prelude], ...m.lanes.map((l) => [l.id, l.tasks]), ['join', m.join]];
   for (const [laneId, tasks] of groups) {
     for (let i = 0; i < tasks.length;) {
       const group = batchGroup(m, tasks, i);
       i += group.length;
       if (taskState(m, group[0].id) === 'skip') continue;
-      const unit = group.length > 1 ? batchUnit(group) : group[0];
-      (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+      out.push({ unit: group.length > 1 ? batchUnit(group) : group[0], laneId });
     }
+  }
+  return out;
+}
+
+// The length of each check command the run would hand an agent (1.6.6 spec
+// 4.7), as [{what, length}]: each unit's task-checks command, then the
+// integration's run-checks call; a unit or integration with no check
+// command is left out. Each is measured with the result file it would get
+// (<ledger_dir>/checks/task-<unit id>.1.json, integrate.1.json) in place of
+// resultPath() and a 40-character base; a join unit, whose wave may place it
+// in a lane worktree, is measured in the longest of the feature checkout and
+// the lane worktree dirs.
+function checkCommandLengths(m) {
+  const out = [];
+  const placed = (cmd, name) => cmd.replace(resultPath(), shellQuote(`${m.repo.ledger_dir}/checks/${name}.1.json`));
+  const base = '0'.repeat(40);
+  const joinDir = [featureDir(m), ...m.lanes.map((l) => laneWhere(m, l).dir)]
+    .reduce((a, b) => (b.length > a.length ? b : a));
+  for (const { unit, laneId } of unitsWithWork(m)) {
+    let where;
+    if (laneId === 'prelude') where = featureWhere(m, 'prelude');
+    else if (laneId === 'join') where = { dir: joinDir, lane: 'join' };
+    else where = laneWhere(m, m.lanes.find((l) => l.id === laneId));
+    const cmd = taskChecksCommand(m, unit, where, base);
+    if (cmd !== null) out.push({ what: `${unit.id}'s task-checks command`, length: placed(cmd, `task-${unit.id}`).length });
+  }
+  const integration = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  if (integration !== null) {
+    out.push({ what: 'the integration checks command', length: placed(integration, 'integrate').length });
+  }
+  return out;
+}
+
+// The dry-run warning for a check command near the Bash tool's limit on
+// Windows (about 7,000 characters; 1.6.6 spec 4.7): [] when every length is
+// at most 6,000, else one warning, for the longest.
+function longCommandWarnings(lengths) {
+  const over = lengths.filter((l) => l.length > 6000);
+  if (over.length === 0) return [];
+  const longest = over.reduce((a, b) => (b.length > a.length ? b : a));
+  return [`${longest.what} is about ${longest.length} characters; the Bash tool on Windows fails at about 7,000:`
+    + " shorten the project's check commands, for example with a wrapper script"];
+}
+
+// The dry run's checks summary (spec 4.9). Units are the units with work,
+// built as planAgents builds them.
+function checksSummary(m) {
+  const withEntry = [];
+  const withoutEntry = [];
+  for (const { unit, laneId } of unitsWithWork(m)) {
+    (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
   }
   const project = (group, command) => commandGroup(m, null, group).includes(command);
   const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
@@ -1117,7 +1166,10 @@ function checksSummary(m) {
     widen_paths_count: widen.length,
     repair_limit: repairLimit(m),
     repairs_spent: m.repairs_spent || 0,
-    warnings: hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : [],
+    warnings: [
+      ...(hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : []),
+      ...longCommandWarnings(checkCommandLengths(m)),
+    ],
   };
 }
 
