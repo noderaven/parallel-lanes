@@ -3,9 +3,13 @@
 // reviewers see the unit's task-check evidence; no task agent gets the
 // every-check run-checks line.
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadHelpers, H } from './harness.mjs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadHelpers, H, SKILL_DIR } from './harness.mjs';
+import { BASH, tempDir } from './platform.mjs';
 
 const {
   implementPrompt, reviewPrompt, reReviewPrompt, fixPrompt, laneChecks, wideChecks, taskChecksCommand,
@@ -13,7 +17,8 @@ const {
   repairFixMessage, procedureLines, reserveCommand, waitCommand, longCheckRuleLines, resultPath, agentRules,
   preflightPrompt, integratePrompt, resolveConflictsPrompt, postIntegrateFixPrompt, postIntegrateReReviewPrompt,
   postIntegratePrompt, e2ePrompt, finalReviewPrompt, combinedFinalReviewPrompt, finalFixPrompt, finalReReviewPrompt,
-  verifyPrompt, verifyRepairPrompt, adjudicatorPrompt,
+  verifyPrompt, verifyRepairPrompt, adjudicatorPrompt, declaredFingerprint, declaredFiles, startCommand, taskChecksLines,
+  shellQuote,
 } = await loadHelpers([
   'implementPrompt', 'reviewPrompt', 'reReviewPrompt', 'fixPrompt', 'laneChecks', 'wideChecks', 'taskChecksCommand',
   'taskEvidenceLine', 'fixMessagesLines', 'fallbackImplementer', 'fallbackFixer', 'laneWhere', 'featureWhere',
@@ -21,7 +26,9 @@ const {
   'resultPath', 'agentRules', 'preflightPrompt', 'integratePrompt', 'resolveConflictsPrompt', 'postIntegrateFixPrompt',
   'postIntegrateReReviewPrompt', 'postIntegratePrompt', 'e2ePrompt', 'finalReviewPrompt', 'combinedFinalReviewPrompt',
   'finalFixPrompt', 'finalReReviewPrompt', 'verifyPrompt', 'verifyRepairPrompt', 'adjudicatorPrompt',
+  'declaredFingerprint', 'declaredFiles', 'startCommand', 'taskChecksLines', 'shellQuote',
 ]);
+const fp = declaredFingerprint;
 
 function task(id, extra = {}) {
   return { id, title: `Task ${id}`, files: [`src/${id}.js`, `tests/${id}.test.mjs`], tier: 'standard', security: false, ...extra };
@@ -69,11 +76,14 @@ test('an implement prompt carries the task-checks call with the entry', () => {
   assert.match(p, /scripts\/task-checks' '\/work\/wt\/lane-alpha'/);
   for (const part of [
     `--base '${H('base')}'`, "--ledger '/work/ledger'", "--unit 'T2'", "--lane 'alpha'", "--task 'T2'",
-    "--declared 'src/T2.js'", "--declared 'tests/T2.test.mjs'", "--widen 'package.json'", "--widen 'tests/harness.mjs'",
-    "--project-test 'npm test'", "--entry 'T2'", "--targeted 'test' 'node --test tests/t2.test.mjs'",
-    "--targeted 'lint' 'npm run lint'", "--lane-cmd 'test' 'npm test'", "--lane-cmd 'lint' 'npm run lint'",
-    "--wide-cmd 'test' 'npm test'",
+    `--declared-from-owners '${fp(['src/T2.js', 'tests/T2.test.mjs'])}'`, "--widen 'package.json'",
+    "--widen 'tests/harness.mjs'", "--project-test 'npm test'", "--entry 'T2'",
+    "--targeted 'test' 'node --test tests/t2.test.mjs'", "--targeted 'lint' 'npm run lint'",
+    "--lane-cmd 'test' 'npm test'", "--lane-cmd 'lint' 'npm run lint'", '--wide-as-lane',
   ]) assert.ok(p.includes(part), part);
+  // No --declared list (the prompt's owners.json sentence names the option, unquoted).
+  assert.ok(!/--declared '/.test(p), p);
+  assert.ok(!p.includes('--wide-cmd'), p);
   const text = flat(p);
   assert.ok(text.includes('Before you commit, run the task checks once, with the procedure below.'));
   assert.ok(text.includes('While iterating, run only the focused tests for what you change.'));
@@ -81,21 +91,23 @@ test('an implement prompt carries the task-checks call with the entry', () => {
   assert.ok(!p.includes('- every check at once'));
 });
 
-test('a task without an entry gets no --entry and still gets --lane-cmd and --wide-cmd', () => {
+test('a task without an entry gets no --entry and still gets --lane-cmd and --wide-as-lane', () => {
   const m = manifest();
   const cmd = taskChecksCommand(m, t(m, 'T4'), laneWhere(m, lane(m, 'beta')), H('b'));
   assert.ok(!cmd.includes('--entry') && !cmd.includes('--targeted'), cmd);
-  assert.ok(cmd.includes("--lane-cmd 'test' 'npm test'") && cmd.includes("--wide-cmd 'test' 'npm test'"), cmd);
+  assert.ok(cmd.includes("--lane-cmd 'test' 'npm test'") && cmd.includes('--wide-as-lane'), cmd);
 });
 
-test('a batch unit uses its last task\'s entry and passes every --task and --declared', () => {
+test('a batch unit uses its last task\'s entry and passes every --task and the fingerprint of every file', () => {
   const m = manifest();
   const unit = batchUnit([t(m, 'T2'), t(m, 'T3')]);
   const cmd = taskChecksCommand(m, unit, laneWhere(m, lane(m, 'alpha')), H('b'));
   assert.ok(cmd.includes("--unit 'T2-T3'"), cmd);
   assert.ok(cmd.includes("--task 'T2' --task 'T3'"), cmd);
   assert.ok(cmd.includes("--entry 'T3'") && cmd.includes("'node --test tests/t3.test.mjs'"), cmd);
-  for (const f of ['src/T2.js', 'tests/T2.test.mjs', 'src/T3.js', 'tests/T3.test.mjs']) assert.ok(cmd.includes(`--declared '${f}'`), f);
+  const files = ['src/T2.js', 'tests/T2.test.mjs', 'src/T3.js', 'tests/T3.test.mjs'];
+  assert.ok(cmd.includes(`--declared-from-owners '${fp(files)}'`), cmd);
+  assert.ok(!cmd.includes('--declared '), cmd);
 });
 
 test('prelude and join tasks get project-wide --wide-cmd lists', () => {
@@ -482,4 +494,177 @@ test('the result placeholder is single-quoted in every start command', () => {
   }
   const all = Object.values(everyPrompt()).join('\n');
   assert.ok(all.includes("--evidence '<P>'") && all.includes("--out '<P>'"));
+});
+
+// ---- The declared-files fingerprint and --wide-as-lane (1.6.6, spec 4.5) ----
+
+const SCRIPTS = join(SKILL_DIR, 'scripts');
+const GIT_ENV = {
+  GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.invalid',
+  GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.invalid',
+};
+const ENV = { ...process.env, ...GIT_ENV };
+const fwd = (p) => p.replace(/\\/g, '/');
+const fpOf = (cmd) => (cmd.match(/--declared-from-owners '([^']+)'/) || [])[1];
+
+// The fingerprint of a declared list, from Python _owners.fingerprint. The
+// list goes over as ASCII JSON (\u escapes), so argv encoding plays no part.
+function pyFingerprint(paths) {
+  const code = [
+    'import json, sys',
+    'sys.dont_write_bytecode = True',
+    `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
+    'import _owners',
+    'print(_owners.fingerprint(json.loads(sys.argv[1])))',
+  ].join('\n');
+  const json = JSON.stringify(paths).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const res = spawnSync('python3', ['-B', '-c', code, json], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+test('the task-checks and start-task commands do not grow with the Files list', () => {
+  const m = manifest();
+  const where = laneWhere(m, lane(m, 'alpha'));
+  const one = task('T2', { files: ['src/f0.js'] });
+  const many = task('T2', { files: Array.from({ length: 200 }, (_, i) => `src/f${i}.js`) });
+  const checks = [one, many].map((x) => taskChecksCommand(m, x, where, H('b')));
+  assert.ok(Math.abs(checks[0].length - checks[1].length) <= 2, `${checks[0].length} vs ${checks[1].length}`);
+  const pkg = { pkg: { base: H('b'), head: H('h') } };
+  const starts = [one, many].map((x) => startCommand(m, x, where, pkg));
+  assert.ok(starts[1].includes('--declared-from-owners'), starts[1]);
+  assert.ok(Math.abs(starts[0].length - starts[1].length) <= 2, `${starts[0].length} vs ${starts[1].length}`);
+});
+
+test('an e1a-sized unit\'s task-checks command is under 4,000 characters', () => {
+  // A command of exactly n characters: its group, its number, then padding.
+  const sized = (group, i, n) => { const head = `${group}-runner --step ${i} `; return head + 'x'.repeat(n - head.length); };
+  const groups = ['test', 'lint', 'build'];
+  const commands = { setup: [] };
+  for (const g of groups) commands[g] = [0, 1, 2].map((i) => sized(g, i, 133));
+  // PF-6: the entry sets test, lint and build itself, about 500 characters in all.
+  const entry = {};
+  for (const g of groups) entry[g] = [sized(`${g}-t`, 0, 166)];
+  const files = Array.from({ length: 60 }, (_, i) => `src/Feature/Area${String(i).padStart(2, '0')}/` + 'y'.repeat(40) + '.cs');
+  const m = manifest({ commands, task_checks: { T2: entry } });
+  const cmd = taskChecksCommand(m, task('T2', { files }), laneWhere(m, lane(m, 'alpha')), H('b'));
+  assert.ok(Object.values(commands).flat().join('').length >= 1150, 'about 1,200 characters of project commands');
+  assert.ok(cmd.length < 4000, String(cmd.length));
+  assert.ok(cmd.includes('--wide-as-lane'), cmd);
+  assert.ok(cmd.includes(`--declared-from-owners '${fp(files)}'`), cmd);
+});
+
+test('--wide-as-lane only when the wide list equals the lane list', () => {
+  const where = (m) => laneWhere(m, lane(m, 'alpha'));
+  const plain = manifest();
+  assert.ok(taskChecksCommand(plain, t(plain, 'T2'), where(plain), H('b')).includes('--wide-as-lane'));
+  const own = manifest({ lane_commands: { alpha: { test: ['npm test -- alpha'] } } });
+  const ownCmd = taskChecksCommand(own, t(own, 'T2'), where(own), H('b'));
+  assert.ok(!ownCmd.includes('--wide-as-lane'), ownCmd);
+  assert.ok(ownCmd.includes("--wide-cmd 'test' 'npm test' --wide-cmd 'lint' 'npm run lint' --wide-cmd 'test' 'npm test -- alpha'"),
+    ownCmd);
+  // A lane with its own setup widens to its own checks: the wide list is the lane list.
+  const setup = manifest({ lane_commands: { alpha: { setup: ['uv sync'], test: ['pytest'] } } });
+  const setupCmd = taskChecksCommand(setup, t(setup, 'T2'), where(setup), H('b'));
+  assert.ok(setupCmd.includes('--wide-as-lane') && !setupCmd.includes('--wide-cmd'), setupCmd);
+});
+
+test('the engine\'s fingerprint matches the helpers\' for a unit', () => {
+  const m = manifest();
+  const unit = batchUnit([
+    task('T2', { files: ['src/a.js', 'docs/caf\u00e9 menu.md'] }),
+    task('T3', { files: ['docs/caf\u00e9 menu.md', "notes/it's \u{1d11e}.txt", 'src/a.js'] }),
+  ]);
+  const cmd = taskChecksCommand(m, unit, laneWhere(m, lane(m, 'alpha')), H('b'));
+  assert.deepEqual(declaredFiles(unit), ['src/a.js', 'docs/caf\u00e9 menu.md', "notes/it's \u{1d11e}.txt"]);
+  assert.equal(fpOf(cmd), pyFingerprint(declaredFiles(unit)));
+  assert.equal(fpOf(cmd), fp(declaredFiles(unit)));
+});
+
+test('taskChecksLines tells the implementer to report blocked on an owners.json error', () => {
+  const m = manifest();
+  const text = flat(taskChecksLines(m, t(m, 'T2'), laneWhere(m, lane(m, 'alpha')), H('b')).join('\n'));
+  assert.ok(text.includes('If the call fails with an error that names owners.json, report blocked with its message; '
+    + 'do not run setup or pass --declared yourself.'), text);
+});
+
+const TMP = tempDir('pl-check-policy-');
+after(() => rmSync(TMP, { recursive: true, force: true }));
+
+function git(dir, ...args) {
+  const res = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, res.stderr);
+  return res.stdout.trim();
+}
+
+function python(script, ...args) {
+  const res = spawnSync('python3', ['-B', join(SCRIPTS, script), ...args], { encoding: 'utf8', env: ENV });
+  assert.equal(res.status, 0, `${script}: ${res.stderr}`);
+  return res.stdout.trim();
+}
+
+const policyOf = (record) => { const { started, ...rest } = record.policy; return rest; };
+
+test('the engine-built task-checks command gives the same policy on real git', () => {
+  const dir = join(TMP, 'e2e', 'repo');
+  const ledger = join(TMP, 'e2e', 'ledger');
+  mkdirSync(ledger, { recursive: true });
+  for (const f of ['src/a.js', 'src/b.js', 'docs/other.md']) {
+    mkdirSync(join(dir, f, '..'), { recursive: true });
+    writeFileSync(join(dir, f), '1\n');
+  }
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'base');
+  const base = git(dir, 'rev-parse', 'HEAD');
+  const unit = task('U1', { files: ['src/a.js', 'src/b.js'] });
+  const m = manifest({
+    repo: {
+      mode: 'git', root: fwd(dir), git_dir: null, base_ref: 'main', branch: 'pl/run-1',
+      worktree_root: fwd(join(TMP, 'e2e')), ledger_dir: fwd(ledger),
+    },
+    commands: { setup: [], test: ['node --version'], lint: ['node -v'], build: ['git --version'] },
+    prelude: [],
+    lanes: [{ id: 'alpha', name: 'Lane alpha', tasks: [unit] }],
+    join: [],
+    task_checks: { U1: { test: ['node --version'] } },
+    widen_paths: [],
+    skill_dir: fwd(SKILL_DIR),
+  });
+  // owners.json as setup writes it.
+  const manifestFile = join(TMP, 'e2e', 'manifest.json');
+  writeFileSync(manifestFile, JSON.stringify(m, null, 2));
+  python('ledger', 'write-owners', fwd(ledger), manifestFile);
+  // One declared file and one undeclared file change.
+  writeFileSync(join(dir, 'src/a.js'), '2\n');
+  writeFileSync(join(dir, 'docs/other.md'), '2\n');
+  git(dir, 'commit', '-q', '-am', 'change');
+  const head = git(dir, 'rev-parse', 'HEAD');
+  const where = { dir: fwd(dir), branch: 'pl-run-1-alpha', lane: 'alpha' };
+  const cmd = taskChecksCommand(m, unit, where, base);
+  assert.ok(cmd.includes('--declared-from-owners') && cmd.includes('--wide-as-lane'), cmd);
+  // The same call in the 1.6.5 form: the explicit list and the lane pairs.
+  const old = cmd
+    .split(`--declared-from-owners '${fpOf(cmd)}'`).join(unit.files.map((f) => `--declared ${shellQuote(f)}`).join(' '))
+    .split('--wide-as-lane').join(laneChecks(m, 'alpha')
+      .map((c) => `--wide-cmd ${shellQuote(c.group)} ${shellQuote(c.command)}`).join(' '));
+  assert.ok(!old.includes('--declared-from-owners') && !old.includes('--wide-as-lane'), old);
+  const records = [cmd, old].map((call) => {
+    const file = python('await-checks', 'reserve', '--ledger', fwd(ledger), '--name', 'task-U1');
+    const res = spawnSync(BASH, ['-c', call.split(resultPath()).join(shellQuote(file))], { encoding: 'utf8', env: ENV });
+    assert.equal(res.status, 0, `${res.stdout}\n${res.stderr}`);
+    return JSON.parse(readFileSync(file, 'utf8'));
+  });
+  assert.ok(!records[0].error, records[0].error);
+  const outside = records.map((r) => r.policy.reasons.find((x) => x.code === 'outside_files'));
+  assert.ok(outside[0], JSON.stringify(records[0].policy));
+  assert.match(outside[0].detail, /docs\/other\.md/);
+  assert.deepEqual(outside[0], outside[1]);
+  assert.deepEqual(policyOf(records[0]), policyOf(records[1]));
+  // The review's scope check uses the same fingerprint.
+  const start = startCommand(m, unit, where, { pkg: { base, head } });
+  const scope = start.match(/--scope '[^']+' '[^']+' --declared-from-owners '([^']+)' --owners /);
+  assert.ok(scope, start);
+  assert.equal(scope[1], fpOf(cmd));
 });
