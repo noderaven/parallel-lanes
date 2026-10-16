@@ -94,8 +94,13 @@ On success setup appends {"task":"_run","event":"run_started","phase":
 to the ledger lane _run in repo.ledger_dir (ledger status --plan/--spec
 compares the hashes on a resume) and prints the manifest's setup_result:
   {"feature_head": <sha of repo.branch>, "worktrees": {<lane id>: <path>},
-   "discarded": [...], "preserved": [...], "setup_skipped": [<lane id>]}
+   "discarded": [...], "preserved": [...], "setup_skipped": [<lane id>],
+   "returned": [{"worktree", "from"}], "git_identity": ["user.name=...", "user.email=..."]}
 The worktree paths are exactly the paths the run uses for the lanes.
+git_identity is _identity.identity_pairs(commit_rules): the -c user.name and
+user.email pairs the manifest's commit rules pass (keys lower case, at most
+one per key, user.name first), or [] when they pass none; the run passes
+them to the merges and commits it spells out.
 
 On Windows MANIFEST and repo.root, repo.git_dir, repo.worktree_root and
 repo.ledger_dir may be in any form (C:\\x, /c/x, /tmp/x); they are used, and
@@ -120,6 +125,7 @@ import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _identity  # noqa: E402
 import _locks  # noqa: E402
 import _owners  # noqa: E402
 import _shell  # noqa: E402
@@ -479,7 +485,8 @@ def setup(m, owner=None):
         raise Failure(1, f"cannot write the owner map {owners_file!r}: {e}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
     return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved,
-            "setup_skipped": skipped, "returned": returned}
+            "setup_skipped": skipped, "returned": returned,
+            "git_identity": _identity.identity_pairs(m.get("commit_rules"))}
 
 
 def main(argv):

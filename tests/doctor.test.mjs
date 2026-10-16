@@ -156,6 +156,17 @@ test('a missing git identity fails unless commit_rules passes one', () => {
   assert.equal(named(ok.out.failures, 'git_identity'), undefined);
 });
 
+test('a committer-only identity fails git_identity', () => {
+  // git commit needs an author too: a committer identity alone is not enough.
+  const f = fixture();
+  const env = { ...NO_IDENTITY, GIT_COMMITTER_NAME: 'c', GIT_COMMITTER_EMAIL: 'c@x.invalid' };
+  const r = doctor(f.manifest(), { env });
+  assert.equal(r.code, 3, r.stderr);
+  assert.equal(r.out.status, 'blocked');
+  assert.ok(named(r.out.failures, 'git_identity'), JSON.stringify(r.out));
+  assert.equal(outcome(r.out, 'git_identity'), 'failed');
+});
+
 test('a base behind its upstream fails a new run', () => {
   const f = fixture();
   f.advanceOrigin('b.txt');
