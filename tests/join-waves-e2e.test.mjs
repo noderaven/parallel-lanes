@@ -173,7 +173,7 @@ test('a join wave runs on unit branches in lane worktrees and is merged', async 
     assert.ok(/cd '[^']*\/wt\/lane-[ab]'/.test(lineAfter(p, /^Run this first/)), `${id} runs in a lane worktree`);
   }
   const subs = subjects(c, 'main..feature/w');
-  assert.ok(subs.includes('join wave 1: merge J1') && subs.includes('join wave 1: merge J2'), subs.join('\n'));
+  assert.ok(subs.includes('chore: join wave 1: merge J1') && subs.includes('chore: join wave 1: merge J2'), subs.join('\n'));
   assert.ok(existsSync(join(c.repo, 'J1.txt')) && existsSync(join(c.repo, 'J2.txt')));
   const events = readFileSync(`${c.m.repo.ledger_dir}/_run.jsonl`, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(events.some((e) => e.event === 'wave_merged' && e.wave === 1 && e.units.join() === 'J1,J2'));
@@ -186,8 +186,8 @@ test('a stop mid-wave relaunches through setup, recovery and the serial continua
   assert.equal(first.status, 'stopped');
   assert.equal(first.tasks.J1.status, 'done');
   assert.equal(first.tasks.J2.status, 'blocked');
-  assert.ok(subjects(c, 'main..feature/w').includes('join wave 1: merge J1'), 'the finished unit was merged');
-  assert.ok(!subjects(c, 'main..feature/w').includes('join wave 1: merge J2'), 'the stopped unit was not');
+  assert.ok(subjects(c, 'main..feature/w').includes('chore: join wave 1: merge J1'), 'the finished unit was merged');
+  assert.ok(!subjects(c, 'main..feature/w').includes('chore: join wave 1: merge J2'), 'the stopped unit was not');
   const j2Head = git(c.repo, 'rev-parse', 'pl-w1-u-J2');
 
   // The relaunch, as SKILL.md's resume builds it: setup returns both lane

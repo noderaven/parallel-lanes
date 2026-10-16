@@ -184,6 +184,29 @@ test('wave_merged needs exactly one of wave and recovery', () => {
   }
 });
 
+test('wave_merged with no units needs a conflict or a failure', () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: [], merged: [], head: 'abc',
+    conflict_unit: 'A', conflict_files: ['x'] });
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', recovery: true, units: [], merged: [], head: 'abc',
+    failed: { unit: 'A', error: 'e' } });
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], merged: ['A'], head: 'abd',
+    conflict_files: ['x'], resolved: true });
+  for (const bad of [
+    { task: '_run', event: 'wave_merged', wave: 1, units: [], head: 'abc' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: [], merged: [], head: 'abc', conflict_unit: 'A' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], merged: ['Z'], head: 'abc' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], merged: 'A', head: 'abc' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: [], merged: [], head: 'abc', failed: { unit: 'A', error: '' } },
+    { task: '_run', event: 'wave_merged', wave: 1, units: [], merged: [], head: 'abc', failed: { unit: '', error: 'e' } },
+    { task: '_run', event: 'wave_merged', wave: 1, units: [], merged: [], head: 'abc', failed: 'A' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], head: 'abc', conflict_unit: '' },
+    { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], merged: ['A'], head: 'abc', resolved: false },
+  ]) {
+    assert.equal(ledger('append', dir, '_run', JSON.stringify(bad)).code, 2, JSON.stringify(bad));
+  }
+});
+
 test('started accepts dir, unit_branch and restart', () => {
   const dir = freshDir();
   appendOk(dir, 'join', { task: 'DJ2', event: 'started', base: 'abc', dir: 'C:/wt/lane-a',
@@ -322,6 +345,18 @@ test('wave_merges lists merge events in order', () => {
   ]);
 });
 
+test('ledger status copies the new wave_merged fields', () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], merged: ['A'], head: 'm1',
+    conflict_files: ['x'], conflict_unit: 'B', failed: { unit: 'B', error: 'e' }, resolved: true });
+  appendOk(dir, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A'], head: 'm1' });
+  assert.deepEqual(statusOf(dir).wave_merges, [
+    { wave: 1, units: ['A'], head: 'm1', overlaps: [], conflict_files: ['x'], merged: ['A'], conflict_unit: 'B',
+      failed: { unit: 'B', error: 'e' }, resolved: true },
+    { wave: 1, units: ['A'], head: 'm1', overlaps: [], conflict_files: [] },
+  ]);
+});
+
 test('backfill continues past an unfinished wave unit', () => {
   const c = joinCase(['A', 'B', 'C']);
   for (const [id, branch] of [['A', 'pl-r-u-A'], ['B', 'pl-r-u-B'], ['C', 'pl-r-u-C']]) {
@@ -362,6 +397,32 @@ test('join_tip is the descendant of wave and serial heads', () => {
   assert.equal(out.code, 0, JSON.stringify(out.errors));
   assert.equal(out.join_tip, d);
   assert.deepEqual(out.backfill.D, { base: m, head: d });
+});
+
+test('join_tip ignores events that merged nothing', () => {
+  const c = joinCase(['A', 'B', 'D']);
+  for (const [id, branch] of [['A', 'pl-r-u-A'], ['B', 'pl-r-u-B']]) {
+    appendOk(c.ledger, 'join', { task: id, event: 'started', base: c.w, dir: 'C:/wt/x', unit_branch: branch });
+  }
+  const a = unitCommit(c, 'pl-r-u-A', c.w, 'A', 'a.txt');
+  const b = unitCommit(c, 'pl-r-u-B', c.w, 'B', 'b.txt');
+  git(c.repo, 'checkout', '-q', 'feat');
+  git(c.repo, 'merge', '-q', '--no-ff', '-m', 'chore: join wave 1: merge A', a);
+  git(c.repo, 'merge', '-q', '--no-ff', '-m', 'chore: join wave 1: merge B', b);
+  const m = git(c.repo, 'rev-parse', 'HEAD');
+  // An event written before 1.6.7 (no merged field) still counts.
+  appendOk(c.ledger, '_run', { task: '_run', event: 'wave_merged', wave: 1, units: ['A', 'B'], head: m });
+  appendOk(c.ledger, 'join', { task: 'D', event: 'started', base: m });
+  const d = unitCommit(c, 'feat', m, 'D', 'd.txt');
+  // A commit after D that no join task made: a refused wave merge records
+  // the checkout's head, and must not move the tip there.
+  git(c.repo, 'commit', '-q', '--allow-empty', '-m', 'not a join merge');
+  const later = git(c.repo, 'rev-parse', 'HEAD');
+  appendOk(c.ledger, '_run', { task: '_run', event: 'wave_merged', wave: 2, units: [], merged: [], head: later,
+    failed: { unit: 'E', error: 'e' } });
+  const out = backfillOf(c);
+  assert.equal(out.code, 0, JSON.stringify(out.errors));
+  assert.equal(out.join_tip, d);
 });
 
 test('join_tip refuses unordered heads', () => {
