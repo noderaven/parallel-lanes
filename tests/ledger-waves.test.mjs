@@ -43,13 +43,16 @@ function statusOf(dir, ...extra) {
 
 const lines = (dir, lane) => readFileSync(join(dir, `${lane}.jsonl`), 'ascii').split('\n').filter((l) => l !== '');
 
-// A Python child that loads scripts/ledger as a module.
+// A Python child that loads scripts/ledger as a module (spec_from_loader and
+// exec_module: load_module is gone in Python 3.15).
 const LOADER = [
   'import sys, os',
   'sys.dont_write_bytecode = True',
   `sys.path.insert(0, ${JSON.stringify(SCRIPTS)})`,
-  'from importlib.machinery import SourceFileLoader',
-  `L = SourceFileLoader("ledger_mod", ${JSON.stringify(join(SCRIPTS, 'ledger'))}).load_module()`,
+  'import importlib.machinery, importlib.util',
+  `ldr = importlib.machinery.SourceFileLoader("ledger_mod", ${JSON.stringify(join(SCRIPTS, 'ledger'))})`,
+  'L = importlib.util.module_from_spec(importlib.util.spec_from_loader("ledger_mod", ldr))',
+  'ldr.exec_module(L)',
 ];
 
 function child(code) {
