@@ -307,7 +307,23 @@ test('setup writes the owner map from the manifest', () => {
   setupOk(c, m);
   const owners = JSON.parse(readFileSync(join(c.ledgerDir, 'owners.json'), 'utf8'));
   assert.deepEqual(owners.files, { 'src/a.js': ['a1'], 'shared.css': ['a1', 'b1'] });
-  assert.deepEqual(owners.tasks, { a1: { where: 'a', pos: 0 }, b1: { where: 'b', pos: 0 } });
+  assert.deepEqual(owners.tasks, {
+    a1: { where: 'a', pos: 0, declared: ['src/a.js', 'shared.css'] },
+    b1: { where: 'b', pos: 0, declared: ['shared.css'] },
+  });
+});
+
+test('setup records each task\'s Files list as given, each exact string once', () => {
+  const c = newCase();
+  const m = manifest(c, { lanes: [
+    { id: 'a', name: 'Lane A', tasks: [{ id: 'a1', files: ['src/A.js', './src/a.js', 'src/A.js'] }] },
+    { id: 'b', name: 'Lane B', tasks: [{ id: 'b1' }] },
+  ] });
+  setupOk(c, m);
+  const owners = JSON.parse(readFileSync(join(c.ledgerDir, 'owners.json'), 'utf8'));
+  assert.deepEqual(owners.tasks.a1.declared, ['src/A.js', './src/a.js']);
+  assert.deepEqual(owners.tasks.b1.declared, []);
+  assert.deepEqual(owners.files, { 'src/a.js': ['a1'] });
 });
 
 test('setup: ledger records run_started and status reports the earliest start point', () => {

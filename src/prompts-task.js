@@ -621,6 +621,34 @@ function declaredFiles(task) {
   return out;
 }
 
+// The fingerprint of a declared list, N:HHHHHHHH: N the number of paths, H the
+// 32-bit FNV-1a hash of the paths' UTF-8 bytes joined with one NUL byte, as
+// _owners.fingerprint computes it (tests/fixtures/fingerprint/cases.json).
+// The UTF-8 encoder is written out (the Workflow runtime need not have
+// TextEncoder); a lone surrogate gets its 3-byte form, as Python's
+// surrogatepass gives it.
+function declaredFingerprint(paths) {
+  let h = 0x811c9dc5;
+  const add = (byte) => { h = Math.imul(h ^ byte, 0x01000193) >>> 0; };
+  paths.forEach((p, i) => {
+    if (i > 0) add(0);
+    for (let j = 0; j < p.length; j += 1) {
+      const cp = p.codePointAt(j);
+      if (cp > 0xffff) j += 1;
+      if (cp < 0x80) {
+        add(cp);
+      } else if (cp < 0x800) {
+        add(0xc0 | (cp >> 6)); add(0x80 | (cp & 0x3f));
+      } else if (cp < 0x10000) {
+        add(0xe0 | (cp >> 12)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      } else {
+        add(0xf0 | (cp >> 18)); add(0x80 | ((cp >> 12) & 0x3f)); add(0x80 | ((cp >> 6) & 0x3f)); add(0x80 | (cp & 0x3f));
+      }
+    }
+  });
+  return `${paths.length}:${h.toString(16).padStart(8, '0')}`;
+}
+
 // The start-task command a task agent runs first: the optional fast-forward
 // to the feature branch (opts.sync), every brief of the unit regenerated from
 // the current plan and printed, and with opts.pkg = {base, head} and

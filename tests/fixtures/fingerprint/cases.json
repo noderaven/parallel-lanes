@@ -1,0 +1,12 @@
+[
+  {"name": "published FNV-1a vector a", "paths": ["a"], "fingerprint": "1:e40c292c"},
+  {"name": "published FNV-1a vector foobar", "paths": ["foobar"], "fingerprint": "1:bf9cf968"},
+  {"name": "two paths", "paths": ["src/a.js", "tests/a.test.mjs"], "fingerprint": "2:56442afd"},
+  {"name": "case and dot variants are distinct", "paths": ["src/a.js", "./src/a.js", "SRC/A.js"], "fingerprint": "3:8920a8a1"},
+  {"name": "order matters", "paths": ["SRC/A.js", "./src/a.js", "src/a.js"], "fingerprint": "3:74e2b2a1"},
+  {"name": "the NUL separator counts (1 of 2)", "paths": ["a", "bc"], "fingerprint": "2:609747a3"},
+  {"name": "the NUL separator counts (2 of 2)", "paths": ["ab", "c"], "fingerprint": "2:ef850b27"},
+  {"name": "spaces and quotes", "paths": ["docs/it's here.md", "src/my file.js", "a$b`c\\d.txt"], "fingerprint": "3:a2a1486f"},
+  {"name": "non-ASCII", "paths": ["src/café.js", "文档/说明.md", "emoji/😀.txt"], "fingerprint": "3:e9065fdf"},
+  {"name": "a lone surrogate", "paths": ["bad\ud800name.txt"], "fingerprint": "1:bf305012"}
+]
