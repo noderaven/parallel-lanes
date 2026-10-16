@@ -720,3 +720,20 @@ test('an unknown SHA for a new unit branch exits 3 and changes nothing', () => {
   assert.equal(readFileSync(join(c.lane, 'a.txt'), 'utf8'), 'edited\n');
   assert.deepEqual(abandoned(c), []);
 });
+
+test('an existing unit branch not built on SHA is saved and made again at SHA', () => {
+  const c = newCase();
+  assert.equal(unitStart(c).code, 0);
+  const old = commit(c.lane, 'unit.txt', 'built on the old base\n', 'unit work');
+  git(c.lane, 'checkout', '-q', 'lane-a');
+  const tip = commit(c.lane, 'lane2.txt', 'lane rework\n', 'lane rework');
+  const res = startTask(c.lane, c.plan, '--unit-branch', 'pl-r1-u-T1', tip, '--run-id', 'r1', '--brief', 'T1', briefOut(c));
+  assert.equal(res.code, 0, res.stderr);
+  assert.match(res.stdout, /\nunit branch: pl-r1-u-T1 \(recreated\)\n/);
+  assert.equal(git(c.lane, 'rev-parse', 'HEAD'), tip);
+  const saved = git(c.project, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/parallel-lanes/r1/abandoned')
+    .split('\n').filter((l) => l.includes('pl-r1-u-T1-'));
+  assert.equal(saved.length, 1, 'the old branch head is kept under the abandoned refs');
+  assert.ok(saved[0].endsWith(old));
+  assert.match(res.stdout, new RegExp(`\\nsaved: refs/parallel-lanes/r1/abandoned/pl-r1-u-T1-\\S+ \\(${old}\\)\\n`));
+});

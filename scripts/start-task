@@ -19,7 +19,10 @@ In order:
              setup makes of a reused worktree, _snapshot) and discarded,
              and NAME is checked out ("switched"), or created at SHA when
              it does not exist ("created"; a SHA that is not a commit exits
-             3 before anything changes). Then each --setup COMMAND runs
+             3 before anything changes). A NAME an earlier launch left that
+             is not built on SHA has its head saved under the abandoned refs
+             (refs/parallel-lanes/RUN/abandoned/NAME-<stamp>) and is made
+             again at SHA ("recreated"). Then each --setup COMMAND runs
              with bash -c in DIR, in order (the feature checkout's setup:
              the worktree's environment predates the merged lanes); one
              that fails exits 1. Needs --run-id; not with --sync.
@@ -72,7 +75,7 @@ package script, so DIR alone names the repository.
 stdout, only on success:
   branch: <abbrev-ref of DIR>
   head: <full sha of DIR's HEAD after any sync>
-  unit branch: NAME (created|switched|kept)  (--unit-branch)
+  unit branch: NAME (created|switched|recreated|kept)  (--unit-branch)
   saved: <ref> (<commit>)              per snapshot --unit-branch made
   ===== brief <TASK_ID>: <OUT> =====   then the brief text, per brief
   ===== rulings in force =====         then the rulings (--rulings)
@@ -88,6 +91,7 @@ task-brief's code if a brief fails, the ledger's if a started append fails.
 """
 
 import argparse
+import datetime
 import json
 import os
 import posixpath
@@ -220,22 +224,31 @@ def switch_unit_branch(directory, args):
     if current == name:
         state = "kept"
     else:
-        exists = git(directory, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0
-        start = None
-        if not exists:
-            res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^{{commit}}")
-            if res.returncode != 0 or not res.stdout.strip():
-                fail(3, f"--unit-branch start {sha!r} is not a commit in {directory!r}; nothing changed")
-            start = res.stdout.strip()
+        res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{sha}^{{commit}}")
+        if res.returncode != 0 or not res.stdout.strip():
+            fail(3, f"--unit-branch start {sha!r} is not a commit in {directory!r}; nothing changed")
+        start = res.stdout.strip()
+        old = git(directory, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
+        exists = old.returncode == 0
+        # A branch an earlier launch left that is not built on SHA (the tip
+        # moved since): its head is kept under the abandoned refs and the
+        # branch is made again at SHA, so the unit never builds on a stale base.
+        stale = exists and git(directory, "merge-base", "--is-ancestor", start, old.stdout.strip()).returncode != 0
         try:
             _snapshot.discard_changes(directory, args.run_id, [], preserved, by="start-task")
         except _snapshot.Failure as e:
             fail(e.code, str(e))
-        res = git(directory, "checkout", "-q", name) if exists else \
-            git(directory, "checkout", "-q", "-b", name, start)
+        if stale:
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            ref = f"refs/parallel-lanes/{args.run_id}/abandoned/{name}-{stamp}"
+            if git(directory, "update-ref", ref, old.stdout.strip()).returncode != 0:
+                fail(1, f"saving the head of {name!r} under {ref} failed")
+            preserved.append({"ref": ref, "commit": old.stdout.strip()})
+        res = git(directory, "checkout", "-q", name) if exists and not stale else \
+            git(directory, "checkout", "-q", "-B" if stale else "-b", name, start)
         if res.returncode != 0:
             fail(1, f"checking out {name!r} in {directory!r} failed: {res.stderr.strip()}")
-        state = "switched" if exists else "created"
+        state = "recreated" if stale else ("switched" if exists else "created")
     lines.append(f"unit branch: {name} ({state})\n")
     lines += [f"saved: {p['ref']} ({p['commit']})\n" for p in preserved]
     for command in args.setup:

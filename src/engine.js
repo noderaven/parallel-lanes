@@ -572,10 +572,14 @@ async function runJoinWaves(m, waves, base, laneDirs, io, merge) {
 // does not move the tip; a task that ran on a unit branch (m.unit_branches)
 // and is not done and reviewed starts again from the tip as a restart (its
 // prompt names its earlier work); a task done but not reviewed that ran on
-// the feature checkout is reviewed over its backfill range; any other task
-// runs from the tip. Returns runTaskList's {results, stopped, head}, head
+// the feature checkout, or whose unit's head is in the feature history
+// (inHistory: unit ids the recovery merge found merged, its approval gone
+// stale), is reviewed over its backfill range and moves the tip only when a
+// fix moved it; any other task runs from its latest started base
+// (m.start_bases, so an earlier attempt's partial commits stay in its range),
+// else from the tip. Returns runTaskList's {results, stopped, head}, head
 // the tip.
-async function runJoinContinuation(m, tasks, where, tip, io, name) {
+async function runJoinContinuation(m, tasks, where, tip, io, name, inHistory = new Set()) {
   const results = [];
   const branches = m.unit_branches || {};
   const own = (id) => Object.prototype.hasOwnProperty.call(branches, id);
@@ -603,7 +607,7 @@ async function runJoinContinuation(m, tasks, where, tip, io, name) {
     }
     const unit = group.length > 1 ? batchUnit(group) : task;
     const note = unitTasks(unit).flatMap((t) => carried.get(t.id) || []).join('\n') || null;
-    const ranOn = group.find((t) => own(t.id));
+    const ranOn = inHistory.has(unit.id) ? null : group.find((t) => own(t.id));
     let r;
     if (ranOn) {
       const b = branches[ranOn.id];
@@ -615,7 +619,8 @@ async function runJoinContinuation(m, tasks, where, tip, io, name) {
         notes: 'done but not reviewed, and no backfill commits', rulings: [],
       };
     } else {
-      r = await runTask(m, unit, where, tip, io, null, note);
+      const started = (m.start_bases || {})[task.id];
+      r = await runTask(m, unit, where, present(started) ? started : tip, io, null, note);
     }
     if (r.next_note) carry(unit, i, r.next_note);
     const finished = r.status === 'done' || r.status === 'deferred';
@@ -626,9 +631,9 @@ async function runJoinContinuation(m, tasks, where, tip, io, name) {
       io.log(`${name}: stopped at ${task.id} (${r.notes})`);
       return { results, stopped: r.notes, head: tip };
     }
-    // A task reviewed on its range ran at the tip: a wave after an unreviewed
-    // single-unit wave never started, so its head is the tip.
-    tip = r.head;
+    // A task reviewed on its recorded range is already in the history: it
+    // moves the tip only when a fix added a commit there.
+    if (!(state === 'review' && !ranOn && range && r.head === range.head)) tip = r.head;
   }
   return { results, stopped: null, head: tip };
 }

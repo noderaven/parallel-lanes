@@ -525,13 +525,16 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
 // with checks (the last multi-unit wave's, waveChecksOf) and every unit
 // merged, it runs them on the merged tip and records wave_checked.
 // wave null: a relaunch's recovery merge (design 4.5), merge-wave --recovery.
-function waveMergePrompt(m, wave, units, checks = []) {
+// known ([{id, head}], recovery only): units that ran on their own branch and
+// are not to be merged; merge-wave reports which are in the history already.
+function waveMergePrompt(m, wave, units, checks = [], known = []) {
   const q = shellQuote;
   const dir = featureDir(m);
   const recovery = wave === null;
   const merge = [`cd ${q(dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/merge-wave`)} ${q(dir)}`,
     q(m.repo.ledger_dir), ...(recovery ? ['--recovery'] : ['--wave', q(String(wave))]),
-    ...units.flatMap((u) => ['--unit', q(u.id), q(u.base), q(u.head)])].join(' ');
+    ...units.flatMap((u) => ['--unit', q(u.id), q(u.base), q(u.head)]),
+    ...known.flatMap((u) => ['--known', q(u.id), q(u.head)])].join(' ');
   const run = checks.length > 0 ? runChecksCommand(m, dir, checks, resultPath(), 'join') : null;
   const record = (extra) => ledgerCommand(m, '_run',
     { task: '_run', event: 'wave_checked', wave, head: '<head>', ...extra }, dir);
@@ -569,7 +572,7 @@ function waveMergePrompt(m, wave, units, checks = []) {
     phaseRules(m),
     '',
     'Return status done (every unit merged), conflict or failed; head = the head merge-wave printed; merged,',
-    'conflict_unit (empty when none), conflict_files and overlaps copied from its JSON;',
+    'conflict_unit (empty when none), conflict_files, overlaps and in_history copied from its JSON;',
     ...(run === null ? [] : ['checks = {ok, unfinished, notes} for the checks of step 3 (notes: the failing commands);']),
     'notes.',
   ].join('\n');
@@ -584,6 +587,7 @@ function waveMergeSchema() {
       merged: { type: 'array', items: { type: 'string' } },
       conflict_unit: { type: 'string' },
       conflict_files: { type: 'array', items: { type: 'string' } },
+      in_history: { type: 'array', items: { type: 'string' } },
       overlaps: {
         type: 'array',
         items: {

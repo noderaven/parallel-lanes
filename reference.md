@@ -104,6 +104,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `unit_branches` | Resume and relaunch: `ledger status`'s `unit_branches`, `{<join task id>: {branch, dir}}`: the join units that ran on their own branch. |
 | `wave_merges` | Resume and relaunch: `ledger status`'s `wave_merges`, the earlier launches' wave merges (overlaps and conflicts for the final lenses). |
 | `join_tip` | Resume and relaunch: `ledger backfill`'s `join_tip` when not null: the join's last commit, which integration's history audit allows final-fix commits after. |
+| `start_bases` | Resume and relaunch: `ledger status`'s `start_bases`, `{<task id>: base}` for tasks not done, from their latest `started` event: a join task resumed on the feature checkout after waves starts there, so its earlier partial commits stay in its range. |
 | `notes` | Optional, resume: `{<task id>: "<the user's answer>"}` for blocked questions; passed to that task's agents as "The user's answer for this task". |
 | `sp_dir` | Output of `find-superpowers`, or `null`. |
 | `agent_type` | Optional. The output of `bash <skill_dir>/scripts/find-agent-type` (exit 0), else `null`. Recompute it at every launch, relaunch, and resume. When set, every agent except `e2e`, `post-integrate`, and `post-integrate fix` runs as that custom agent type (a lean toolset; hook instructions may need any tool); a spawn that fails with it (throws or returns no result) is retried once on the default type, and both attempts count toward `max_agents`. After the first such throw, or the second typed agent that returns no result while its retry succeeds, every later agent of the run uses the default type: the run log says so and the run result carries `agent_type_fallback: true`. |
@@ -329,10 +330,15 @@ worktrees, when no wave has two units, and when the join started in an earlier l
 - A relaunch with `join_started` and `unit_branches`: setup puts each lane worktree left on one of
   the run's unit branches back on its lane branch (output `returned`), saving its changes; a
   recovery merge (`merge-wave --recovery`, `join recovery: merge ID`) brings in every unit that
-  ran on its own branch and is done and reviewed or deferred; the rest of the join runs serially
-  on the feature checkout from that tip. A unit that ran on its own branch and is not done and
-  reviewed starts again from the tip (`start-task --restart`: the ledger drops its earlier
-  attempt), told its branch and abandoned refs to reuse. Integration's history audit allows the
+  ran on its own branch and is done and reviewed or deferred, and reports (`--known`,
+  `in_history`) which of the other such units an earlier launch already merged; the rest of the
+  join runs serially on the feature checkout from that tip. A merged unit whose approval went
+  stale is reviewed again over its recorded range without moving the tip. A unit that ran on its
+  own branch, is not done and reviewed, and is not in the history starts again from the tip
+  (`start-task --restart`: the ledger drops its earlier attempt), told its branch and abandoned
+  refs to reuse. Any other unit starts from its latest `started` base (`start_bases`), else the
+  tip. A unit branch an earlier launch left that is not built on the wave's base is saved under
+  the abandoned refs and made again (`start-task` prints `recreated`). Integration's history audit allows the
   merge, resolver and wave checks fix commits, and final-fix commits after `join_tip`.
 - `run-checks --phase NAME` (and `task-checks --phase`) sets `PL_PHASE=NAME` (prelude, lane,
   join, integrate, post-integrate, final-fix, verify) for every check; without it `PL_PHASE` is
@@ -341,8 +347,8 @@ worktrees, when no wave has two units, and when the join started in an earlier l
 - Ledger: appends hold each lane file's OS lock (up to 5 s); a reader skips a last line without a
   newline that is not JSON. New events `wave_merged` and `wave_checked` (task `_run`); `started`
   may carry `dir`, `unit_branch` and `restart`. `ledger status` adds `join_started`,
-  `unit_branches`, `wave_merges`; `ledger backfill` skips unfinished join tasks once the join
-  started and adds `join_tip`.
+  `unit_branches`, `wave_merges`, `start_bases`; `ledger backfill` skips unfinished join tasks
+  once the join started and adds `join_tip`.
 - The dry run returns `join_waves` `{mode, reason, waves}` (before pre-flight's moves), counts the
   wave merges (and the wave checks fix, re-review and recheck as the upper bound) or a relaunch's
   recovery merge, and the launch notice ends with the wave sizes. Pre-flight is shown the waves;
@@ -353,7 +359,9 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   wave are `alongside`. Lane ids may not start with `u-`. `cleanup` claims lane worktrees on the
   run's unit branches and removes merged unit branches; an unmerged one stays. autopsy reads the
   wave labels (`wave N merge`, `wave N resolve ID`, `wave checks fix`, `wave checks re-review`,
-  `wave checks`, `recovery merge`, `recovery resolve ID`) as Join phase agents.
+  `wave checks`, `recovery merge`, `recovery resolve ID`) as Join phase agents. A supervised
+  conflict stop gives the exact `git merge --no-ff -m 'join wave N: merge ID' <sha>` to run by
+  hand, so integration's history audit accepts it on the relaunch.
 - `worth-it --join-deps ID:DEPS` (one per join task) counts the join as the sum over its waves of
   ceil(size / lanes at once), declared files not checked; without it, one slot per join task.
   `tools/worth-it-backtest.py --waves` counts the archived joins in waves.

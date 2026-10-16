@@ -899,11 +899,12 @@ async function runAll(manifest, io) {
   // multi-unit wave's, design 4.4) the merge agent runs them; a failure gets
   // one fix, its re-review and a recheck (autonomous) or stops (supervised).
   // entry is the wave's report entry, filled in. Returns {head} or {stopped}.
-  const mergeUnits = async (wave, units, checks, entry) => {
+  const mergeUnits = async (wave, units, checks, entry, known = []) => {
     const name = wave === null ? 'recovery' : `wave ${wave}`;
     let r = null;
     for (let attempt = 0; attempt <= units.length; attempt += 1) {
-      r = await callM(`${name} merge`, 'Join', waveMergePrompt(m, wave, units, checks), waveMergeSchema(), sonnetHigh);
+      r = await callM(`${name} merge`, 'Join', waveMergePrompt(m, wave, units, checks, known), waveMergeSchema(),
+        sonnetHigh);
       if (state.refused.length > 0) return { stopped: 'an agent was refused' };
       if (!r || r.status !== 'conflict') break;
       const unit = units.find((u) => u.id === r.conflict_unit)
@@ -911,8 +912,10 @@ async function runAll(manifest, io) {
       const files = Array.isArray(r.conflict_files) ? r.conflict_files : [];
       for (const f of files) if (!entry.conflict_files.includes(f)) entry.conflict_files.push(f);
       if (!autonomous) {
+        const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
         return { stopped: `join ${name}: ${unit.id} conflicts in ${files.join(', ') || 'files git reported'}; `
-          + `merge ${unit.head} into ${m.repo.branch} by hand in ${featureDir(m)}, then relaunch` };
+          + `merge it by hand with git -C ${shellQuote(featureDir(m))} merge --no-ff -m ${shellQuote(message)} `
+          + `${unit.head}, resolve and commit, then relaunch` };
       }
       const res = await callM(`${name} resolve ${unit.id}`, 'Join', waveResolvePrompt(m, wave, unit, files),
         statusSchema(), standard);
@@ -929,6 +932,7 @@ async function runAll(manifest, io) {
     let head = r.head;
     entry.head = head;
     entry.overlaps = Array.isArray(r.overlaps) ? r.overlaps : [];
+    entry.in_history = Array.isArray(r.in_history) ? r.in_history : [];
     if (checks.length > 0) {
       const c = r.checks && typeof r.checks === 'object' ? r.checks
         : { ok: false, unfinished: true, notes: `${name} merge returned no checks result` };
@@ -984,14 +988,21 @@ async function runAll(manifest, io) {
     // A relaunch after waves (design 4.5): merge what the waves finished and
     // had reviewed, then the rest serially from that tip.
     const units = recoveryUnits(m);
+    // The other units that ran on their own branch: the merge reports which
+    // of them an earlier launch merged (their approval may have gone stale).
+    const known = joinUnits(m).filter((u) => !units.some((x) => x.id === u.id)
+      && unitTasks(u).some((t) => Object.prototype.hasOwnProperty.call(m.unit_branches, t.id)))
+      .map((u) => ({ id: u.id, range: (m.backfill || {})[unitTasks(u)[unitTasks(u).length - 1].id] }))
+      .filter((u) => u.range).map((u) => ({ id: u.id, head: u.range.head }));
     const entry = { ...newEntry(null, units.map((u) => u.id), joinBase), recovery: true };
-    const rec = await mergeUnits(null, units, [], entry);
+    const rec = await mergeUnits(null, units, [], entry, known);
     if (units.length > 0) {
       joinWaves = [entry];
       m = { ...m, join_waves_now: joinWaves };
     }
     join = rec.stopped !== undefined ? { results: [], stopped: rec.stopped, head: joinBase }
-      : await runJoinContinuation(m, m.join, featureWhere(m, 'join'), rec.head, counted, 'Join');
+      : await runJoinContinuation(m, m.join, featureWhere(m, 'join'), rec.head, counted, 'Join',
+        new Set(entry.in_history || []));
   } else {
     join = await runTaskList(m, m.join, featureWhere(m, 'join'), joinBase, counted, 'Join', joinFromPhase);
   }

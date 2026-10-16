@@ -370,6 +370,13 @@
       "description": "1.6.5: ledger backfill join_tip, the join's last commit; integration's history audit allows final-fix commits after it.",
       "$ref": "#/$defs/text"
     },
+    "start_bases": {
+      "description": "1.6.5: ledger status start_bases, the base each task not done started its latest attempt from; a join task resumed on the feature checkout after waves starts there.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/text"
+      }
+    },
     "done": {
       "$ref": "#/$defs/textList"
     },

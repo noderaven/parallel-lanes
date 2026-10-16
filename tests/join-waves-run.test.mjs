@@ -146,6 +146,7 @@ test('a supervised conflict stops with the sha to merge by hand', async () => {
   assert.ok(!labels(calls).some((l) => l.includes('resolve')));
   const why = result.stopped_lanes.find((s) => s.lane === 'join').reason;
   assert.ok(why.includes(H('J2')) && /by hand/.test(why) && why.includes('src/x.js'), why);
+  assert.ok(why.includes(`merge --no-ff -m 'join wave 1: merge J2' ${H('J2')}`), `the exact command: ${why}`);
 });
 
 const withChecks = (extra = {}) => manifest({
@@ -272,7 +273,7 @@ test('waveChecksFixPrompt uses the fix message', () => {
 
 // ---- Task 10: a relaunch after waves ran: recovery merge, restarts, serial from the tip ----
 
-const { integratePrompt, recoveryUnits } = await loadHelpers(['integratePrompt', 'recoveryUnits']);
+const { integratePrompt, recoveryUnits, validateManifest } = await loadHelpers(['integratePrompt', 'recoveryUnits', 'validateManifest']);
 
 // A relaunch of manifest(): the lanes and J1 (wave 1, on the feature checkout)
 // done and reviewed; wave 2's J2 and J3 ran on unit branches; join_started.
@@ -448,4 +449,53 @@ test('a serial join\'s pre-flight prompt is unchanged', async () => {
     'J2 implement': [done(H('J1'), H('J2'))], 'wave 1 merge': [], 'J3 implement': [], 'J3 review': [],
   }));
   assert.ok(!callOf(calls, 'pre-flight').prompt.includes('Join waves'));
+});
+
+// ---- Final review fixes ----
+
+test('a stale merged wave unit is reviewed over its range, not redone', async () => {
+  const m = relaunch({ reviewed: ['A1', 'B1', 'J1'] });
+  const { result, calls } = await run(m, relaunchScript(H('J3'), {
+    'recovery merge': [{ status: 'done', head: H('R1'), merged: [], in_history: ['J2'], conflict_unit: '',
+      conflict_files: [], overlaps: [], notes: '' }],
+    'J2 review': [approve()],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  const rec = callOf(calls, 'recovery merge').prompt;
+  assert.ok(rec.includes(`--known 'J2' '${H('J2')}'`), rec);
+  assert.ok(!labels(calls).includes('J2 implement'), 'merged work is not redone');
+  assert.ok(callOf(calls, 'J2 review').prompt.includes(`${H('J1')}..${H('J2')}`), 'reviewed over its recorded range');
+  assert.ok(callOf(calls, 'J3 implement').prompt.includes(`Task base: ${H('R1')}`), 'the tip does not move back');
+  assert.equal(result.final.head, H('J3'));
+});
+
+test('a stale feature-checkout unit does not move the join head back', async () => {
+  const m = relaunch({ reviewed: ['A1', 'B1', 'J2'] });
+  const { result, calls } = await run(m, relaunchScript(H('J3'), {
+    'recovery merge': [{ status: 'done', head: H('R1'), merged: [], in_history: ['J2'], conflict_unit: '',
+      conflict_files: [], overlaps: [], notes: '' }],
+    'J1 review': [approve()],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.ok(callOf(calls, 'J1 review').prompt.includes(`${H('I1')}..${H('J1')}`));
+  assert.ok(callOf(calls, 'J3 implement').prompt.includes(`Task base: ${H('R1')}`), 'J3 starts at the tip, not at J1');
+  assert.equal(result.final.head, H('J3'));
+});
+
+test('a serial unit stopped part-way restarts its range at its started base', async () => {
+  const m = relaunch({ unit_branches: { J2: { branch: 'pl-run-1-u-J2', dir: '/work/wt/lane-alpha' } },
+    start_bases: { J3: H('S3') } });
+  const { result, calls } = await run(m, relaunchScript(H('J3'), {
+    'J3 implement': [done(H('S3'), H('J3'))],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  const p = callOf(calls, 'J3 implement').prompt;
+  assert.ok(p.includes(`Task base: ${H('S3')}`), 'its earlier partial commits stay in its range');
+  assert.ok(!p.includes('--restart'));
+});
+
+test('start_bases must name tasks of the run', () => {
+  assert.ok(validateManifest(relaunch({ start_bases: { J3: H('S3') } })).length === 0);
+  assert.ok(validateManifest(relaunch({ start_bases: { NOPE: H('S3') } })).some((e) => e.includes('start_bases')));
+  assert.ok(validateManifest(relaunch({ start_bases: [] })).some((e) => e.includes('start_bases')));
 });

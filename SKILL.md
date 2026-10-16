@@ -324,8 +324,8 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
    task up: reference.md "Backfill"), and `repairs_spent` from earlier reports' `final.repairs`;
    put each `carry` entry into `notes`; copy `minors` into `carried_minors`, and `inputs` into
    `inputs_changed` as `{plan: plan_changed, spec: spec_changed}` (reference.md "Carry-over").
-   Copy `join_started`, `unit_branches` and `wave_merges` as they are (reference.md "Join
-   waves"). Tasks in `stale`
+   Copy `join_started`, `unit_branches`, `wave_merges` and `start_bases` as they are
+   (reference.md "Join waves"). Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
    spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again

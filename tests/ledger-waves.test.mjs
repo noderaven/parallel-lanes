@@ -384,3 +384,13 @@ test('no join work gives join_tip null', () => {
   assert.equal(out.code, 0);
   assert.equal(out.join_tip, null);
 });
+
+test('start_bases lists the latest started base of each task not done', () => {
+  const dir = freshDir();
+  appendOk(dir, 'join', { task: 'J1', event: 'started', base: 'a1' });
+  appendOk(dir, 'join', { task: 'J2', event: 'started', base: 'b1' });
+  appendOk(dir, 'join', { task: 'J2', event: 'committed', commits: ['b2'], base: 'b1', head: 'b2' });
+  appendOk(dir, 'join', { task: 'J3', event: 'started', base: 'c1', unit_branch: 'pl-r-u-J3', dir: 'C:/wt/a' });
+  appendOk(dir, 'join', { task: 'J3', event: 'started', base: 'c2', restart: true });
+  assert.deepEqual(statusOf(dir).start_bases, { J1: 'a1', J3: 'c2' });
+});

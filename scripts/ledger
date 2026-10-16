@@ -121,7 +121,8 @@ join_started: join.jsonl holds a 'started' event (the join began in an
 earlier launch: it then runs serially, 1.6.5). unit_branches: {task: {branch,
 dir}} from each join task's latest 'started' event with a unit_branch, since
 its latest restart. wave_merges: the _run wave_merged events in order, each
-{wave or recovery, units, head, overlaps, conflict_files}. A 'started' event
+{wave or recovery, units, head, overlaps, conflict_files}. start_bases: {task:
+base} of each task not done, from its latest 'started' event. A 'started' event
 with restart true begins its task afresh: its earlier events (committed,
 reviewed, blocked, settled) no longer count.
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
@@ -785,6 +786,10 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         "spent": spent,
         "accepted": accepted,
         "undeclared": undeclared,
+        # The base each task not done started its latest attempt from (1.6.5):
+        # a join task resumed on the feature checkout keeps its partial
+        # commits in its range.
+        "start_bases": {t: b for t, b in started.items() if not done.get(t)},
     }, history
 
 

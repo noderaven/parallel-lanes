@@ -681,6 +681,18 @@ function validateManifest(m) {
       }
     }
   }
+  if ('start_bases' in m) {
+    if (!isObject(m.start_bases)) {
+      err('start_bases: must be an object');
+    } else {
+      const all = new Set([m.prelude, ...(Array.isArray(m.lanes) ? m.lanes.map((l) => (isObject(l) ? l.tasks : [])) : []), m.join]
+        .flatMap((list) => (Array.isArray(list) ? list.filter(isObject).map((t) => t.id) : [])));
+      for (const [id, base] of Object.entries(m.start_bases)) {
+        if (!all.has(id)) err(`start_bases.${id}: not a task of the run`);
+        else if (!isText(base)) err(`start_bases.${id}: must be a non-empty string`);
+      }
+    }
+  }
   if ('wave_merges' in m && !(Array.isArray(m.wave_merges) && m.wave_merges.every(isObject))) {
     err('wave_merges: must be a list of objects');
   }

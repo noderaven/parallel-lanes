@@ -182,7 +182,7 @@ test('--recovery with no unit reports HEAD and records nothing', () => {
   const r = mergeWave(c, '--recovery');
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(r.out, { status: 'merged', head: c.w, merged: [], skipped: [], conflict_unit: null,
-    conflict_files: [], overlaps: [], notes: [] });
+    conflict_files: [], overlaps: [], in_history: [], notes: [] });
   assert.deepEqual(events(c), []);
 });
 
@@ -200,4 +200,20 @@ test('usage errors exit 2', () => {
     ['--wave', '1', '--unit', 'A', c.w], ['--wave', '1', '--unit', '../x', a[2], a[3]]]) {
     assert.equal(mergeWave(c, ...args).code, 2, args.join(' '));
   }
+});
+
+test('--known units are reported in_history without being merged', () => {
+  const c = newCase();
+  const a = unit(c, 'A', { 'a.txt': 'a\n' });
+  const b = unit(c, 'B', { 'b.txt': 'b\n' });
+  assert.equal(mergeWave(c, '--wave', '1', ...a).code, 0);
+  const r = mergeWave(c, '--recovery', '--known', 'A', a[3], '--known', 'B', b[3]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.out.merged, []);
+  assert.deepEqual(r.out.in_history, ['A']);
+  assert.deepEqual(events(c).length, 1, 'nothing merged, nothing recorded');
+  const both = mergeWave(c, '--recovery', '--unit', ...b.slice(1), '--known', 'A', a[3]);
+  assert.equal(both.code, 0, both.stderr);
+  assert.deepEqual(both.out.in_history, ['B', 'A']);
+  assert.equal(mergeWave(c, '--recovery', '--known', 'A').code, 2, 'a --known needs ID and HEAD');
 });
