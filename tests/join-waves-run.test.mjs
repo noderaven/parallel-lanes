@@ -141,12 +141,17 @@ test('a failed resolver stops the run', async () => {
 
 test('a supervised conflict stops with the sha to merge by hand', async () => {
   const conflict = merged(H('I1'), { status: 'conflict', merged: ['J1'], conflict_unit: 'J2', conflict_files: ['src/x.js'] });
-  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script(H('J3'), { 'wave 1 merge': [conflict] }));
+  const m = manifest({ autonomy: 'supervised' });
+  m.setup_result.git_identity = ["user.name=Riley O'Q", 'user.email=r@x.invalid'];
+  const { result, calls } = await run(m, script(H('J3'), { 'wave 1 merge': [conflict] }));
   assert.equal(result.status, 'stopped');
   assert.ok(!labels(calls).some((l) => l.includes('resolve')));
   const why = result.stopped_lanes.find((s) => s.lane === 'join').reason;
   assert.ok(why.includes(H('J2')) && /by hand/.test(why) && why.includes('src/x.js'), why);
-  assert.ok(why.includes(`merge --no-ff -m 'join wave 1: merge J2' ${H('J2')}`), `the exact command: ${why}`);
+  const args = "-c 'user.name=Riley O'\\''Q' -c 'user.email=r@x.invalid' ";
+  assert.ok(why.includes(`git -C '/work/repo' ${args}merge --no-ff -m 'join wave 1: merge J2' ${H('J2')}`),
+    `the exact command: ${why}`);
+  assert.ok(why.includes(`git -C '/work/repo' ${args}commit --no-edit`), `the commit: ${why}`);
 });
 
 const withChecks = (extra = {}) => manifest({

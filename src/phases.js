@@ -913,9 +913,10 @@ async function runAll(manifest, io) {
       for (const f of files) if (!entry.conflict_files.includes(f)) entry.conflict_files.push(f);
       if (!autonomous) {
         const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
+        const git = `git -C ${shellQuote(featureDir(m))} ${gitIdentityArgs(m)}`;
         return { stopped: `join ${name}: ${unit.id} conflicts in ${files.join(', ') || 'files git reported'}; `
-          + `merge it by hand with git -C ${shellQuote(featureDir(m))} merge --no-ff -m ${shellQuote(message)} `
-          + `${unit.head}, resolve and commit, then relaunch` };
+          + `merge it by hand with ${git}merge --no-ff -m ${shellQuote(message)} `
+          + `${unit.head}, resolve and commit (${git}commit --no-edit), then relaunch` };
       }
       const res = await callM(`${name} resolve ${unit.id}`, 'Join', waveResolvePrompt(m, wave, unit, files),
         statusSchema(), standard);

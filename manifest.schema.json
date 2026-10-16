@@ -274,6 +274,15 @@
         "discarded": {
           "$ref": "#/$defs/textList"
         },
+        "git_identity": {
+          "description": "The run's git identity, from scripts/setup: the -c user.name=VALUE and user.email=VALUE pairs the commit rules name, user.name first, each key once; [] when the commit rules name none. The engine's merges and the commits it spells out pass them as -c options (merge-wave as --git-config).",
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "pattern": "^user\\.(name|email)=.+$"
+          }
+        },
         "setup_skipped": {
           "description": "Lane ids whose setup commands setup skipped because every task of the lane is in done and reviewed. A lane with no setup commands is never listed. validateManifest rejects a listed lane that has pending work.",
           "type": "array",
