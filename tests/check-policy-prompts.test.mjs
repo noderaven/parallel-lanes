@@ -439,9 +439,17 @@ test('the general long-command rule reaches implementers and phase agents but no
     if (name === 'adjudicator') {
       assert.ok(!p.includes(rule) && !p.includes('longer than 9 minutes'), name);
     } else {
-      assert.ok(p.includes(rule), name);
+      // Task prompts carry it with their ledger lane's phase (1.6.5: run-checks
+      // --phase); phase prompts without one.
+      const phased = [null, 'prelude', 'lane', 'join'].map((ph) => longCheckRuleLines(m, ph).join('\n'));
+      assert.ok(phased.some((r) => p.includes(r)), name);
     }
   }
+});
+
+test('a task prompt\'s long-command rule names the task\'s phase', () => {
+  const rule = flat(longCheckRuleLines(manifest(), 'join').join('\n'));
+  assert.ok(rule.includes("--root '/work/ledger' --phase 'join' --cmd 'GROUP' 'COMMAND'"), rule);
 });
 
 test('the result placeholder is single-quoted in every start command', () => {

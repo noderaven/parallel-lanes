@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The back-test behind scripts/worth-it's THRESHOLD (1.6.4).
 
-usage: python3 -B tools/worth-it-backtest.py HISTORY_COPY_DIR [mean|median]
+usage: python3 -B tools/worth-it-backtest.py HISTORY_COPY_DIR [mean|median] [--waves]
 
 Reads a COPY of a history dir (index.json and the run folders, each with its
 autopsy.json and *.lanes.json); it refuses the live history dir
@@ -22,6 +22,11 @@ writes nothing and prints tables, not a verdict:
 - for thresholds 1 and 2, how often the rule (direct when N - S is at most
   the threshold) agrees with each run's own comparison (direct = N x T + R
   against the actual wall, a model, not a measured direct build).
+With --waves (1.6.5) the join of a manifest with two lanes or more counts
+its waves (_waves, from depends_on and the declared files) as worth-it
+--join-deps does: what 1.6.5 would schedule. Archived runs ran their join
+serially, so their actual walls and the in-sample errors still describe the
+serial join; --waves shows how the rule's verdicts move.
 Exit 0, or 2 on a usage error or the live history dir.
 """
 import glob
@@ -36,13 +41,14 @@ sys.dont_write_bytecode = True
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "scripts")
 sys.path.insert(0, SCRIPTS)
 import _history  # noqa: E402
+import _waves  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader("_worth_it", os.path.join(SCRIPTS, "worth-it"))
 _spec = importlib.util.spec_from_loader("_worth_it", _loader)
 W = importlib.util.module_from_spec(_spec)
 _loader.exec_module(W)
 
-USAGE = "usage: worth-it-backtest.py HISTORY_COPY_DIR [mean|median]"
+USAGE = "usage: worth-it-backtest.py HISTORY_COPY_DIR [mean|median] [--waves]"
 
 
 def _read_json(path):
@@ -50,7 +56,7 @@ def _read_json(path):
         return json.load(f)
 
 
-def load_runs(hdir, aggregate):
+def load_runs(hdir, aggregate, waves=False):
     runs = []
     for entry in _history.read_index(hdir)["runs"]:
         folder = _history.run_folder(hdir, entry)
@@ -73,11 +79,16 @@ def load_runs(hdir, aggregate):
         cap = (manifest.get("limits") or {}).get("max_parallel_lanes") or len(lanes) or 1
         at_once = max(1, min(len(lanes), cap))
         prelude, join = ids(manifest.get("prelude")), ids(manifest.get("join"))
+        sizes = None
+        if waves and len(lanes) >= 2 and join:
+            ran_join = [t for t in manifest.get("join") or [] if isinstance(t, dict) and t.get("id") in ran]
+            sizes = [len(w) for w in _waves.waves(_waves.join_units(ran_join))]
         project = (entry.get("project") or "?").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
         runs.append({
             "run": entry.get("run_id"), "project": project, "status": entry.get("status"),
             "date": entry.get("first_launch") or entry.get("folder") or "",
-            "N": len(ran), "lanes": len(lanes), "slots": W.slots(len(prelude), [len(x) for x in lanes], len(join), at_once),
+            "N": len(ran), "lanes": len(lanes),
+            "slots": W.slots(len(prelude), [len(x) for x in lanes], len(join), at_once, sizes),
             "wall": figures["wall_s"], "F": figures["fixed_s"], "R": figures["final_review_s"],
             "T": aggregate(ran.values()),
         })
@@ -136,6 +147,8 @@ def report(runs, label):
 
 
 def main(argv):
+    waves = "--waves" in argv
+    argv = [a for a in argv if a != "--waves"]
     if not argv or len(argv) > 2 or (len(argv) == 2 and argv[1] not in ("mean", "median")):
         print(USAGE, file=sys.stderr)
         return 2
@@ -146,7 +159,7 @@ def main(argv):
         return 2
     label = argv[1] if len(argv) == 2 else "mean"
     try:
-        runs = load_runs(hdir, statistics.mean if label == "mean" else statistics.median)
+        runs = load_runs(hdir, statistics.mean if label == "mean" else statistics.median, waves)
     except _history.HistoryError as e:
         print("worth-it-backtest: " + str(e), file=sys.stderr)
         return 2

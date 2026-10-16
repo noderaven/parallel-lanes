@@ -170,7 +170,7 @@ test('setup: a fresh git run creates the branch and lane worktrees and prints se
   const base = git(c.project, 'rev-parse', 'main');
   const { worktrees, ...result } = setupOk(c, manifest(c));
 
-  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [], setup_skipped: [] });
+  assert.deepEqual(result, { feature_head: base, discarded: [], preserved: [], setup_skipped: [], returned: [] });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(c.project, 'rev-parse', '--abbrev-ref', 'HEAD'), 'feature/x');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -401,7 +401,7 @@ test('setup: shadow mode creates the feature worktree and never touches the proj
   });
   const feature = `${c.worktreeRoot}/feature`;
   const { worktrees, ...result } = setupOk(c, m);
-  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [], setup_skipped: [] });
+  assert.deepEqual(result, { feature_head: baseline, discarded: [], preserved: [], setup_skipped: [], returned: [] });
   assertSamePaths(worktrees, { a: laneDir(c, 'a'), b: laneDir(c, 'b') });
   assert.equal(git(feature, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1');
   assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
@@ -1046,4 +1046,80 @@ test('setup: setup and the engine agree on pending', async () => {
   assert.deepEqual(expected, ['all', 'empty', 'override'], 'the fixture covers both outcomes');
   const result = setupOk(c, m);
   assert.deepEqual(result.setup_skipped, expected);
+});
+
+// ---- 1.6.5: a lane worktree left on a join unit branch ----
+
+// Leaves lane a's worktree on unit branch pl-r1-u-J1 with one commit and an
+// uncommitted change; returns the unit commit.
+function leaveOnUnitBranch(c) {
+  const wt = laneDir(c, 'a');
+  git(wt, 'checkout', '-q', '-b', 'pl-r1-u-J1');
+  write(wt, 'unit.txt', 'unit work\n');
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'unit work');
+  const head = git(wt, 'rev-parse', 'HEAD');
+  write(wt, 'wip.txt', 'in progress\n');
+  return head;
+}
+
+test('a worktree on a unit branch is returned to its lane branch', () => {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  const unitHead = leaveOnUnitBranch(c);
+  const res = setup(c, m);
+  assert.equal(res.code, 0, res.stderr);
+  const out = JSON.parse(res.stdout);
+  const wt = laneDir(c, 'a');
+  assert.equal(git(wt, 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
+  assert.equal(git(c.project, 'rev-parse', 'pl-r1-u-J1'), unitHead, 'the unit branch keeps its commit');
+  assert.equal(out.returned.length, 1);
+  assert.ok(samePath(out.returned[0].worktree, wt), out.returned[0].worktree);
+  assert.equal(out.returned[0].from, 'pl-r1-u-J1');
+  const saved = out.preserved.find((p) => samePath(p.worktree, wt));
+  assert.ok(saved, JSON.stringify(out.preserved));
+  assert.equal(git(c.project, 'show', `${saved.ref}:wip.txt`), 'in progress');
+  assert.equal(git(wt, 'status', '--porcelain'), '');
+});
+
+test('unit-branch worktree found in any path form', () => {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  leaveOnUnitBranch(c);
+  const other = manifest(c, { repo: { ...m.repo, worktree_root: c.worktreeRoot.replace(/\\/g, '/') } });
+  const res = setup(c, other);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).returned.length, 1);
+  assert.equal(git(laneDir(c, 'a'), 'rev-parse', '--abbrev-ref', 'HEAD'), 'pl-r1-a');
+});
+
+test('a lane worktree with nothing on a unit branch reports no return', () => {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  const res = setup(c, m);
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout).returned, []);
+});
+
+test('a detached or foreign-branch lane worktree is still refused', () => {
+  for (const move of [(wt) => git(wt, 'checkout', '-q', '--detach'), (wt) => git(wt, 'checkout', '-q', '-b', 'other')]) {
+    const c = newCase();
+    const m = manifest(c);
+    setupOk(c, m);
+    move(laneDir(c, 'a'));
+    const res = setup(c, m);
+    assert.equal(res.code, 3, res.stderr);
+    assert.match(res.stderr, /is not a worktree of this repo on pl-r1-a/);
+  }
+});
+
+test('another run\'s unit branch is refused', () => {
+  const c = newCase();
+  const m = manifest(c);
+  setupOk(c, m);
+  git(laneDir(c, 'a'), 'checkout', '-q', '-b', 'pl-r2-u-J1');
+  assert.equal(setup(c, m).code, 3);
 });

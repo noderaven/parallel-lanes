@@ -307,6 +307,13 @@ function validateManifest(m) {
         else if (!new RegExp(laneIdPattern()).test(lane.id)) {
           err(`${where}.id: lane id ${JSON.stringify(lane.id)} must match ${laneIdPattern()}`);
         } else if (['prelude', 'join'].includes(lane.id.toLowerCase())) err(`lane ${lane.id}: id is reserved`);
+        else if (lane.id.toLowerCase().startsWith('u-')) {
+          // A lane's branch pl-<run_id>-<id> would then have a join unit
+          // branch's name, pl-<run_id>-u-<unit> (1.6.5; refs are
+          // case-insensitive on Windows).
+          err(`${where}.id: lane id ${JSON.stringify(lane.id)} must not start with u- `
+            + '(join unit branches use pl-<run_id>-u-<unit>)');
+        }
         else if (laneIds.has(lane.id)) err(`lane ${lane.id}: id appears more than once`);
         else {
           laneIds.add(lane.id);
@@ -651,6 +658,43 @@ function validateManifest(m) {
         else if (!isText(sha)) err(`start_points.${key}: must be a non-empty string`);
       }
     }
+  }
+
+  // Join waves (1.6.5): what ledger status and backfill say about the join.
+  // Once integration recorded the join's start point, the session must say
+  // whether the join started (a started join never runs waves again).
+  if ('join_started' in m && typeof m.join_started !== 'boolean') err('join_started: must be true or false');
+  if (isObject(m.start_points) && 'join' in m.start_points && !('join_started' in m)) {
+    err('join_started: missing; copy it from ledger status (start_points.join is set)');
+  }
+  if ('join_tip' in m && !isText(m.join_tip)) err('join_tip: must be a non-empty string');
+  if ('unit_branches' in m) {
+    if (!isObject(m.unit_branches)) {
+      err('unit_branches: must be an object');
+    } else {
+      const joinTasks = new Set(Array.isArray(m.join) ? m.join.filter(isObject).map((t) => t.id) : []);
+      for (const [id, v] of Object.entries(m.unit_branches)) {
+        if (!joinTasks.has(id)) err(`unit_branches.${id}: not a join task`);
+        else if (!isObject(v) || typeof v.branch !== 'string' || !/^pl-[a-z0-9-]+-u-[A-Za-z0-9_]/.test(v.branch)) {
+          err(`unit_branches.${id}: branch must be a unit branch pl-<run_id>-u-<unit>`);
+        } else if (!isText(v.dir)) err(`unit_branches.${id}: dir must be a non-empty string`);
+      }
+    }
+  }
+  if ('start_bases' in m) {
+    if (!isObject(m.start_bases)) {
+      err('start_bases: must be an object');
+    } else {
+      const all = new Set([m.prelude, ...(Array.isArray(m.lanes) ? m.lanes.map((l) => (isObject(l) ? l.tasks : [])) : []), m.join]
+        .flatMap((list) => (Array.isArray(list) ? list.filter(isObject).map((t) => t.id) : [])));
+      for (const [id, base] of Object.entries(m.start_bases)) {
+        if (!all.has(id)) err(`start_bases.${id}: not a task of the run`);
+        else if (!isText(base)) err(`start_bases.${id}: must be a non-empty string`);
+      }
+    }
+  }
+  if ('wave_merges' in m && !(Array.isArray(m.wave_merges) && m.wave_merges.every(isObject))) {
+    err('wave_merges: must be a list of objects');
   }
 
   return errors;

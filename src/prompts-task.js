@@ -113,18 +113,25 @@ function finalSetup(m) {
   return out;
 }
 
+// The phase a ledger lane's checks run in (run-checks --phase, PL_PHASE):
+// prelude and join tasks have their own; a lane's tasks run in lane.
+function checksPhase(laneId) {
+  return laneId === 'prelude' || laneId === 'join' ? laneId : 'lane';
+}
+
 // The scripts/run-checks call that runs each check of a [{group, command}]
 // list in dir, separately, and exits non-zero when any one fails. out
 // (optional) is the evidence file it writes under the ledger dir:
 // resultPath() goes in as given (already quoted), for the path the agent's
-// reserve prints. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null) {
+// reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
+// with PL_PHASE set to it. null for an empty list.
+function runChecksCommand(m, dir, checks, out = null, phase = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
-    ...evidence, ...parts].join(' ');
+    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...parts].join(' ');
 }
 
 // Every test, lint and build command of a ledger lane, as [{group, command}]
@@ -161,9 +168,9 @@ function wideChecks(m, laneId) {
 }
 
 // The scripts/run-checks call for every test, lint and build command of a
-// ledger lane in dir. null when there is no check command.
-function checksCommand(m, laneId, dir, out = null) {
-  return runChecksCommand(m, dir, laneChecks(m, laneId), out);
+// ledger lane in dir, in phase. null when there is no check command.
+function checksCommand(m, laneId, dir, out = null, phase = null) {
+  return runChecksCommand(m, dir, laneChecks(m, laneId), out, phase);
 }
 
 // What an agent handed a run-checks call is told about its output and logs:
@@ -259,10 +266,12 @@ function changeNothing() {
 
 // The general rule for any other long command (spec 4.4): it runs through
 // run-checks with the same procedure, under the reserve name long. Task
-// prompts (taskContext) and phase prompts (phaseRules) carry it.
-function longCheckRuleLines(m) {
+// prompts (taskContext, with the task's phase) and phase prompts
+// (phaseRules) carry it.
+function longCheckRuleLines(m, phase = null) {
   const start = `cd 'DIR' && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)} 'DIR' `
-    + `--out ${resultPath()} --root ${shellQuote(m.repo.ledger_dir)} --cmd 'GROUP' 'COMMAND'`;
+    + `--out ${resultPath()} --root ${shellQuote(m.repo.ledger_dir)} `
+    + `${phase === null ? '' : `--phase ${shellQuote(phase)} `}--cmd 'GROUP' 'COMMAND'`;
   return [
     'Long commands: any command you expect to run longer than 9 minutes that this prompt does not already hand you',
     'as a check (a wide test filter, a long hook step) runs through run-checks, with DIR the checkout it runs in,',
@@ -273,11 +282,11 @@ function longCheckRuleLines(m) {
 }
 
 // Project commands for a ledger lane; with dir, also the run-checks call that
-// runs every check there at once, with the procedure under the reserve name
-// name.
-function commandsText(m, laneId, dir = null, name = 'checks') {
+// runs every check there at once, in phase, with the procedure under the
+// reserve name name.
+function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
   const lines = ['setup', 'test', 'lint', 'build'].map((group) => `- ${group}: ${commandList(m, laneId, group)}`);
-  const all = dir === null ? null : checksCommand(m, laneId, dir, resultPath());
+  const all = dir === null ? null : checksCommand(m, laneId, dir, resultPath(), phase);
   if (all !== null) {
     lines.push("- every check at once (each command's exit status is kept; it exits non-zero when any fails).",
       ...procedureLines(m, { name, start: all }).map((l) => `  ${l}`), ...checksLogLines());
@@ -298,7 +307,7 @@ function taskChecksCommand(m, task, where, base) {
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
-    '--lane', q(where.lane),
+    '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...declaredFiles(task).flatMap((f) => ['--declared', q(f)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
@@ -507,12 +516,15 @@ function taskContext(m, task, where, guidance = null, by = 'implementer') {
     '',
     'Project commands (run from the worktree; the full set runs at integration and delivery):',
     commandsText(m, where.lane),
+    `Run project commands you start yourself with PL_PHASE=${checksPhase(where.lane)} set (for example`,
+    `\`PL_PHASE=${checksPhase(where.lane)} <command>\`): the project's scripts may read it; the check calls`,
+    'this prompt hands you set it themselves.',
     '',
     `Commit rules (follow exactly): ${m.commit_rules}`,
     'Never commit anything under .superpowers/.',
     'Never push, open pull requests, merge into the base branch, or copy work back to the project.',
     agentRules(),
-    ...longCheckRuleLines(m),
+    ...longCheckRuleLines(m, checksPhase(where.lane)),
     '',
     'Contracts: report blocked for any change to a contract another lane consumes; ' +
       'record smaller decisions as `Ruling: decision - why - cost if wrong` with:',
@@ -615,7 +627,10 @@ function declaredFiles(task) {
 // superpowers present the review package for base..head. With opts.pkg and a
 // Files list it also lists the files base..head changes outside that list
 // (--scope); with opts.start (the task base, implement only) it records that
-// base in the ledger once the briefs are written (--record-start).
+// base in the ledger once the briefs are written (--record-start). For a
+// join wave unit (where.unit_branch, 1.6.5) the implement start (opts.start)
+// also puts the worktree on the unit's branch from where.from and runs the
+// feature checkout's setup there (--unit-branch, --setup).
 function startCommand(m, task, where, opts = {}) {
   const sync = opts.sync || null;
   const pkg = opts.pkg || null;
@@ -624,6 +639,10 @@ function startCommand(m, task, where, opts = {}) {
     shellQuote(where.dir), shellQuote(m.plan), '--artifacts', shellQuote(m.repo.ledger_dir),
   ];
   if (present(sync)) parts.push('--sync', shellQuote(sync));
+  if (present(where.unit_branch) && present(opts.start)) {
+    parts.push('--unit-branch', shellQuote(where.unit_branch), shellQuote(where.from), '--run-id', shellQuote(m.run_id),
+      ...finalSetup(m).flatMap((c) => ['--setup', shellQuote(c)]));
+  }
   if (pkg && m.sp_dir !== null) {
     const script = `${m.sp_dir}/subagent-driven-development/scripts/review-package`;
     const out = `${taskFiles(m, task).reviews}/${task.id}-${pkg.base}..${pkg.head}.diff`;
@@ -647,6 +666,9 @@ function startCommand(m, task, where, opts = {}) {
   parts.push('--rulings', shellQuote(m.repo.ledger_dir), shellQuote(where.lane === 'join' ? '-' : where.lane));
   if (present(opts.start)) {
     parts.push('--record-start', shellQuote(m.repo.ledger_dir), shellQuote(where.lane), shellQuote(opts.start));
+    // A join unit begun again from the tip (1.6.5): the ledger drops its
+    // earlier attempt.
+    if (where.restart) parts.push('--restart');
   }
   return parts.join(' ');
 }
@@ -656,12 +678,16 @@ function startCommand(m, task, where, opts = {}) {
 function startBlock(m, task, where, opts, failure) {
   const what = [
     ...(present(opts.sync) ? ['fast-forwards this worktree to the feature branch (it holds the prelude commits)'] : []),
+    ...(present(where.unit_branch) && present(opts.start)
+      ? [`puts this worktree on the unit's own branch ${where.unit_branch} (saving any uncommitted changes it finds `
+        + 'under the run\'s abandoned refs) and runs the project\'s setup commands there'] : []),
     isBatch(task)
       ? 'regenerates every task brief from the current plan and prints it'
       : 'regenerates the task brief from the current plan and prints it',
     ...(opts.pkg && m.sp_dir !== null ? ['builds the review package'] : []),
     ...(opts.pkg && declaredFiles(task).length > 0 ? ["lists the files the range changes outside the Files list"] : []),
-    ...(present(opts.start) ? ['records the task base in the ledger'] : []),
+    ...(present(opts.start) ? [where.restart ? 'records the task base in the ledger as a restart'
+      : 'records the task base in the ledger'] : []),
   ];
   const files = isBatch(task) ? 'brief files' : 'brief file';
   return [
@@ -783,6 +809,26 @@ function reopenLines(m, task, where, reopen) {
   ];
 }
 
+// What a join unit begun again on the feature checkout is told (1.6.5 design
+// 4.5): restart = {branch, dir, complete}, where its earlier attempt ran in a
+// join wave of an earlier launch. That work never reached the feature branch.
+function restartLines(m, task, restart, base) {
+  const q = shellQuote;
+  const dir = q(featureDir(m));
+  const noun = unitNoun(task);
+  const folder = String(restart.dir).replace(/[\\/]+$/, '').split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]/g, '-');
+  return [
+    `This ${noun} ran before, in a join wave of an earlier launch, on its own branch ${restart.branch} in`,
+    `${restart.dir}, and that work never reached the feature branch. It was ${restart.complete
+      ? 'complete: committed, but its review did not finish' : 'partial: it stopped before it was done'}.`,
+    `Start again from the task base ${base} on the feature branch, and reuse what is right of the earlier work:`,
+    `  its commits: git -C ${dir} log HEAD..${q(restart.branch)} (and git -C ${dir} diff HEAD...${q(restart.branch)})`,
+    `  uncommitted changes saved from that worktree: git -C ${dir} for-each-ref ${q(`refs/parallel-lanes/${m.run_id}/abandoned/${folder}-`)}`,
+    '  (each such ref is a commit; read it with git show).',
+    'Never merge, rebase or reset onto that branch as it is: bring over what is right as your own commits here.',
+  ];
+}
+
 // Prompt for an implementer. base is the task base the script owns (the
 // previous task's head, or the feature tip); retry (optional) is {reason,
 // findings} when a previous attempt in this run blocked or failed review;
@@ -831,6 +877,7 @@ function implementPrompt(m, task, where, base, retry = null, guidance = null, re
         ? ['Open review findings:', findingsText(retry.findings), ...startFindingNote(retry.findings)] : []),
     ].join('\n'));
   }
+  if (where.restart) parts.push('', restartLines(m, task, where.restart, base).join('\n'));
   const checks = taskChecksLines(m, task, where, base);
   if (checks.length > 0) parts.push('', checks.join('\n'));
   parts.push('', [

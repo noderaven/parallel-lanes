@@ -348,3 +348,41 @@ test('integration with no check commands says so in step 3', () => {
   assert.equal(runChecksLines(p).length, 0);
   assert.ok(p.includes('(no test, lint or build command)'), p);
 });
+
+// ---- 1.6.5: every check call names its phase (run-checks --phase, PL_PHASE) ----
+
+const { implementPrompt, featureWhere, laneWhere } = await loadHelpers(['implementPrompt', 'featureWhere', 'laneWhere']);
+
+// Every run-checks or task-checks call line of a prompt (the long-command
+// template of a phase prompt aside: it has no phase).
+const checkCalls = (p) => p.split('\n').filter((l) => /\/scripts\/(run|task)-checks' /.test(l));
+
+test('every run-checks and task-checks call in a prompt names its phase', () => {
+  const m = manifest();
+  const supervised = manifest({ autonomy: 'supervised' });
+  const f = [{ id: 'F1', severity: 'important', file: 'src/a.js', line: 1, issue: 'x', fix: 'y' }];
+  const cases = [
+    ['integrate', integratePrompt(m, H('pre'), {}), true],
+    ['verify', verifyPrompt(m, H('d')), true],
+    ['verify', verifyPrompt(m, H('d'), H('from')), true],
+    ['post-integrate', postIntegrateFixPrompt(m, 'the hook failed', 'hook'), true],
+    ['post-integrate', postIntegratePrompt(m, false, null), true],
+    ['final-fix', finalFixPrompt(supervised, f, H('tip')), true],
+    ['prelude', implementPrompt(m, m.prelude[0], featureWhere(m, 'prelude'), H('b')), false],
+    ['lane', implementPrompt(m, m.lanes[0].tasks[0], laneWhere(m, m.lanes[0]), H('b')), false],
+    ['join', implementPrompt(m, m.join[0], featureWhere(m, 'join'), H('b')), false],
+  ];
+  for (const [phase, prompt, phasePrompt] of cases) {
+    const calls = checkCalls(prompt).filter((l) => !(phasePrompt && l.includes("--cmd 'GROUP' 'COMMAND'")));
+    assert.ok(calls.length > 0, `${phase}: no check call in the prompt`);
+    for (const line of calls) assert.ok(line.includes(`--phase '${phase}'`), `${phase}: ${line}`);
+  }
+});
+
+test('task prompts tell agents to set PL_PHASE for commands they run themselves', () => {
+  const m = manifest();
+  const join = flat(implementPrompt(m, m.join[0], featureWhere(m, 'join'), H('b')));
+  assert.ok(join.includes('Run project commands you start yourself with PL_PHASE=join set'), join);
+  const lane = flat(implementPrompt(m, m.lanes[0].tasks[0], laneWhere(m, m.lanes[0]), H('b')));
+  assert.ok(lane.includes('PL_PHASE=lane'), lane);
+});

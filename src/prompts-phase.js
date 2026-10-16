@@ -253,7 +253,10 @@ function relaunchPreflightLines(m) {
   ];
 }
 
-function preflightPrompt(m) {
+// waves (1.6.5): the join's waves ([[unit id, ...], ...]) when the join runs in
+// waves; pre-flight then also looks for a unit needing another unit of its own
+// wave (design 4.7).
+function preflightPrompt(m, waves = null) {
   return [
     `You are the pre-flight reviewer for parallel-lanes run ${m.run_id}. You are read-only: do not modify any`,
     'file, branch, or worktree.',
@@ -275,6 +278,14 @@ function preflightPrompt(m) {
     '   lane or in the prelude produces (a function, a file format, markup, an API answer)',
     '   without naming that task in its Consumes. Return each in undeclared as',
     '   {task, producer, what}, what in one sentence.',
+    ...(waves === null ? [] : [
+      '5. Join waves: the join runs in these waves. The units of a wave run side by side, each from the feature',
+      '   tip after the previous wave, without the work of the other units of their own wave:',
+      ...waves.map((w, i) => `   wave ${i + 1}: ${w.join(', ')}`),
+      '   For every task that needs work of another unit in its own wave (code, a contract, a test helper, a',
+      '   generated file), report it in code_deps (code) or undeclared (anything else) as {task, producer,',
+      '   what}: the run moves the task to a later wave.',
+    ]),
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
@@ -336,7 +347,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath());
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -355,6 +366,7 @@ function integratePrompt(m, preludeTip, opts = {}) {
       ...checksLogLines().map((l) => ` ${l}`),
     ]),
   ];
+  const keepWorktrees = opts.keepWorktrees || false;
   const cleanup = m.lanes.map((lane) => {
     const w = laneWhere(m, lane);
     return `   - ${q(w.dir)}: if git -C ${q(w.dir)} status --porcelain --untracked-files=all prints nothing, ` +
@@ -364,10 +376,13 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // Every join task committed in an earlier attempt: a final fix of that
   // attempt may have committed after the last join commit.
   const lastJoin = m.join.length > 0 ? (m.backfill || {})[m.join[m.join.length - 1].id] : null;
-  const joinDone = Boolean(lastJoin) && m.join.every((t) => m.done.includes(t.id));
+  // With join waves (1.6.5) the join's last commit is the tip ledger
+  // backfill reports (join_tip), not the last plan-order task's head.
+  const joinTip = present(m.join_tip) ? m.join_tip : (lastJoin ? lastJoin.head : null);
+  const joinDone = present(joinTip) && m.join.every((t) => m.done.includes(t.id));
   const finalFixes = joinDone ? [
     '   Every join task was committed earlier in this run, so final-fix commits from an earlier attempt of',
-    `   this run may follow the last join commit ${lastJoin.head}: allow any commits after it. That includes`,
+    `   this run may follow the last join commit ${joinTip}: allow any commits after it. That includes`,
     `   repair commits after a failing verify (\`${repairFixMessage()}\`).`,
   ] : [];
   const tipLines = m.lanes.map((lane) => {
@@ -435,21 +450,29 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
     '   commits (yours, or from an earlier attempt in this run), and commits an earlier attempt at a join task',
     `   made (join tasks: ${joinIds}; their recorded commits are in ${m.repo.ledger_dir}/join.jsonl).`,
+    "   A join that ran in waves also merged its units' heads ('join wave <n>: merge <unit>' and",
+    "   'join recovery: merge <unit>', a resolver's included) and may have a wave checks fix",
+    '   (`fix: make the wave checks pass`).',
     ...finalFixes,
     "   Any other commit landed on the feature branch outside the run's steps: fail listing it (do not",
     '   rewrite history).',
     `5. Committed scratch: git -C ${dir} diff --name-only ${q(`${m.repo.base_ref}...${m.repo.branch}`)}`,
     '   must list no path under .superpowers/; if it does, fail listing them (do not rewrite history).',
-    ...(testFailure === 'heal' ? [
-      '6. Only when steps 1-5 passed and you return tests_failed false (every project command passes), clean',
-      '   up each lane. When you return tests_failed true, skip this step entirely: a fix agent and a rerun of',
-      '   these steps follow and the rerun cleans up (with checks_unfinished true the run stops instead and the',
-      '   lanes stay for the user). Cleanup:',
-    ] : ['6. Only when steps 1-5 passed, clean up each lane:']),
-    ...cleanup,
-    '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
-    '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',
-    '   could not remove in notes and still return status done.',
+    ...(keepWorktrees ? [
+      '6. Remove no lane worktree and delete no lane branch: the join runs in waves in the lane worktrees,',
+      "   and the run's hand-back cleanup removes them.",
+    ] : [
+      ...(testFailure === 'heal' ? [
+        '6. Only when steps 1-5 passed and you return tests_failed false (every project command passes), clean',
+        '   up each lane. When you return tests_failed true, skip this step entirely: a fix agent and a rerun of',
+        '   these steps follow and the rerun cleans up (with checks_unfinished true the run stops instead and the',
+        '   lanes stay for the user). Cleanup:',
+      ] : ['6. Only when steps 1-5 passed, clean up each lane:']),
+      ...cleanup,
+      '   Leave a worktree with uncommitted files (and its branch) in place and list it in notes; never',
+      '   force a removal or a branch deletion. Cleanup never fails the integration: list anything step 6',
+      '   could not remove in notes and still return status done.',
+    ]),
     '',
     ...review,
     `Plan: ${m.plan}`,
@@ -495,6 +518,227 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   ].join('\n');
 }
 
+// ---- Join waves (1.6.5 design 4.3, 4.4) ----
+
+// The wave merge agent (Sonnet): scripts/merge-wave for the wave's finished
+// units (units: [{id, base, head}], plan order) in the feature checkout;
+// with checks (the last multi-unit wave's, waveChecksOf) and every unit
+// merged, it runs them on the merged tip and records wave_checked.
+// wave null: a relaunch's recovery merge (design 4.5), merge-wave --recovery.
+// known ([{id, head}], recovery only): units that ran on their own branch and
+// are not to be merged; merge-wave reports which are in the history already.
+function waveMergePrompt(m, wave, units, checks = [], known = []) {
+  const q = shellQuote;
+  const dir = featureDir(m);
+  const recovery = wave === null;
+  const merge = [`cd ${q(dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/merge-wave`)} ${q(dir)}`,
+    q(m.repo.ledger_dir), ...(recovery ? ['--recovery'] : ['--wave', q(String(wave))]),
+    ...units.flatMap((u) => ['--unit', q(u.id), q(u.base), q(u.head)]),
+    ...known.flatMap((u) => ['--known', q(u.id), q(u.head)])].join(' ');
+  const run = checks.length > 0 ? runChecksCommand(m, dir, checks, resultPath(), 'join') : null;
+  const record = (extra) => ledgerCommand(m, '_run',
+    { task: '_run', event: 'wave_checked', wave, head: '<head>', ...extra }, dir);
+  return [
+    recovery ? `You are the recovery merge agent for parallel-lanes run ${m.run_id}.`
+      : `You are the wave merge agent for parallel-lanes run ${m.run_id}, join wave ${wave}.`,
+    `Work in ${dir} on the feature branch ${m.repo.branch}; do not switch branches.`,
+    recovery ? (units.length > 0
+      ? 'An earlier launch ran join units in waves; these finished and were reviewed but not merged. Merge their recorded heads.'
+      : 'An earlier launch ran join units in waves; none is left to merge. The command below only reports the head.')
+      : `The units of wave ${wave} ran side by side, each on its own branch; merge their recorded heads.`,
+    '',
+    '1. Run, as one call:',
+    `   ${merge}`,
+    "   It merges each unit's head in this order (skipping one already merged), aborts a merge that",
+    '   conflicts and stops there, records the wave in the ledger, and prints one JSON line. Do not merge',
+    '   anything yourself, resolve a conflict, or change any file.',
+    '2. If it printed status conflict, stop: return status conflict with its head, merged, conflict_unit,',
+    '   conflict_files and overlaps. If it exited 2 or 3, stop: return status failed with its message.',
+    ...(run === null ? [] : [
+      `3. It merged every unit: run the wave's checks on the merged tip (the last wave with more than one unit,`,
+      "   whose merge no later task's checks cover). One run-checks call:",
+      ...procedureLines(m, { name: `wave-${wave}`, start: run }).map((l) => `   ${l}`),
+      ...checksLogLines().map((l) => ` ${l}`),
+      '   Never change code to make a check pass: a failure goes back to the run.',
+      `4. Record the result, with <head> the full sha of git -C ${q(dir)} rev-parse HEAD:`,
+      `   every check passed: ${record({ ok: true })}`,
+      `   a check failed: ${record({ ok: false })}`,
+      '   every failing check exited 75, 124, 128 or above, or the checks stopped twice without a result:',
+      `   ${record({ ok: false, unfinished: true })}`,
+    ]),
+    '',
+    `Plan: ${m.plan}`,
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    'Return status done (every unit merged), conflict or failed; head = the head merge-wave printed; merged,',
+    'conflict_unit (empty when none), conflict_files, overlaps and in_history copied from its JSON;',
+    ...(run === null ? [] : ['checks = {ok, unfinished, notes} for the checks of step 3 (notes: the failing commands);']),
+    'notes.',
+  ].join('\n');
+}
+
+function waveMergeSchema() {
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['done', 'conflict', 'failed'] },
+      head: { type: 'string' },
+      merged: { type: 'array', items: { type: 'string' } },
+      conflict_unit: { type: 'string' },
+      conflict_files: { type: 'array', items: { type: 'string' } },
+      in_history: { type: 'array', items: { type: 'string' } },
+      overlaps: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { path: { type: 'string' }, units: { type: 'array', items: { type: 'string' } } },
+          required: ['path', 'units'],
+        },
+      },
+      checks: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' }, unfinished: { type: 'boolean' }, notes: { type: 'string' } },
+        required: ['ok', 'unfinished', 'notes'],
+      },
+      notes: { type: 'string' },
+    },
+    required: ['status', 'head', 'notes'],
+  };
+}
+
+// The wave resolver (Opus, autonomous): merges one unit's head that
+// conflicted, keeping both sides' intent, and commits; on any failure it
+// aborts the merge so the checkout is clean for a relaunch.
+// wave null: a conflict of the recovery merge.
+function waveResolvePrompt(m, wave, unit, conflictFiles) {
+  const q = shellQuote;
+  const dir = q(featureDir(m));
+  const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
+  const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
+  return [
+    `You are the wave resolver for parallel-lanes run ${m.run_id}, ${wave === null ? 'the recovery merge' : `join wave ${wave}`}.`,
+    `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
+    `Merging unit ${unit.id} (its recorded head ${unit.head}) conflicted in: ${files}.`,
+    '',
+    `1. git -C ${dir} status --porcelain --untracked-files=all must print nothing; otherwise return status`,
+    '   failed (never make it so by deleting, cleaning, or stashing files).',
+    `2. git -C ${dir} merge --no-ff -m ${q(message)} ${q(unit.head)}`,
+    "   Resolve each conflict keeping the intent of both sides: read the plan tasks of the units that touched the",
+    '   file and keep what each meant to do, then commit the merge. Resolve the conflicts only; make no other',
+    '   change, run no project command, rewrite no history, and remove no worktree or branch.',
+    `3. If you cannot resolve it, run git -C ${dir} merge --abort so the checkout is clean, and return status`,
+    '   failed saying why.',
+    '',
+    `Plan: ${m.plan}`,
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    `Return status done when the merge is committed, else failed; head (the full sha printed by git -C ${dir}`,
+    'rev-parse HEAD when you finish); notes (how you resolved each file).',
+  ].join('\n');
+}
+
+// The message the wave checks fix commits with.
+function waveChecksFixMessage() {
+  return 'fix: make the wave checks pass';
+}
+
+// The wave checks fix (Opus, autonomous): one fix for the last multi-unit
+// wave's failing checks, in the feature checkout; a re-review and a check-only
+// rerun (waveChecksPrompt) follow.
+function waveChecksFixPrompt(m, failure) {
+  const dir = shellQuote(featureDir(m));
+  return [
+    `You are fixing the failing wave checks of parallel-lanes run ${m.run_id}.`,
+    `Work in ${featureDir(m)} on ${m.repo.branch}; do not switch branches.`,
+    'The units of the last join wave with more than one unit were merged; their targeted checks then failed:',
+    failure,
+    '',
+    'Find the cause, fix it with the smallest change that is correct, and commit per the commit rules.',
+    commitWithLine(waveChecksFixMessage()),
+    'You may rerun the failing commands named above to reproduce the failure and to confirm your fix; the run',
+    'reruns the wave checks after you.',
+    '',
+    `Plan: ${m.plan}`,
+    `Spec: ${m.spec === null ? '(none)' : m.spec}`,
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    'Return status done when your fix is committed and the failing checks pass, otherwise failed; head = the',
+    `full sha printed by git -C ${dir} rev-parse HEAD when you finish; notes = what you changed and the results.`,
+  ].join('\n');
+}
+
+// The re-review of a wave checks fix (Opus): the fix range only.
+function waveChecksReReviewPrompt(m, base, head) {
+  return postIntegrateReReviewPrompt(m, base, head).replace('re-reviewing a post-integration fix',
+    're-reviewing a fix for the failing join wave checks');
+}
+
+// The check-only rerun of the wave's checks after a fix (Sonnet).
+function waveChecksPrompt(m, wave, checks) {
+  const q = shellQuote;
+  const dir = featureDir(m);
+  const run = runChecksCommand(m, dir, checks, resultPath(), 'join');
+  const record = (extra) => ledgerCommand(m, '_run',
+    { task: '_run', event: 'wave_checked', wave, head: '<head>', ...extra }, dir);
+  return [
+    `You are rechecking join wave ${wave} of parallel-lanes run ${m.run_id} after a fix. Verify only: change no file,`,
+    `make no commit. Work in ${dir} on ${m.repo.branch}.`,
+    'Run the wave checks, as one run-checks call:',
+    ...procedureLines(m, { name: `wave-${wave}`, start: run }),
+    ...checksLogLines(),
+    `Then record the result, with <head> the full sha of git -C ${q(dir)} rev-parse HEAD:`,
+    `  every check passed: ${record({ ok: true })}`,
+    `  a check failed: ${record({ ok: false })}`,
+    '  every failing check exited 75, 124, 128 or above, or the checks stopped twice without a result:',
+    `  ${record({ ok: false, unfinished: true })}`,
+    '',
+    keepFilesRule(),
+    phaseRules(m),
+    '',
+    'Return status done; head = that sha; ok, unfinished and notes (the failing commands) for the checks.',
+  ].join('\n');
+}
+
+function waveChecksSchema() {
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['done', 'failed'] },
+      head: { type: 'string' },
+      ok: { type: 'boolean' },
+      unfinished: { type: 'boolean' },
+      notes: { type: 'string' },
+    },
+    required: ['status', 'head', 'ok', 'unfinished', 'notes'],
+  };
+}
+
+// What the final lenses are told about the join waves (design 4.9): each
+// wave's paths two units changed, and the conflicts the resolver settled,
+// from earlier launches (m.wave_merges, ledger status) and this one
+// (m.join_waves_now, the run result's join_waves).
+function waveLines(m) {
+  const lines = [];
+  const all = [...(Array.isArray(m.wave_merges) ? m.wave_merges : []),
+    ...(Array.isArray(m.join_waves_now) ? m.join_waves_now : [])];
+  for (const w of all) {
+    const name = w.recovery ? 'the recovery merge' : `wave ${w.wave}`;
+    for (const o of Array.isArray(w.overlaps) ? w.overlaps : []) lines.push(`- ${name}: ${o.path} (${o.units.join(', ')})`);
+    const resolved = Array.isArray(w.resolved_files) && w.resolved_files.length > 0 ? w.resolved_files
+      : (Array.isArray(w.conflict_files) ? w.conflict_files : []);
+    if (resolved.length > 0) lines.push(`- ${name}: merge conflicts the wave resolver settled in ${resolved.join(', ')}`);
+  }
+  if (lines.length === 0) return [];
+  return [
+    'Join waves: units of a wave ran side by side on their own branches and were merged. Review these paths',
+    'with every unit named in mind (both sides of a merge must still hold):',
+    ...lines,
+  ];
+}
+
 // The message the final fix commits with. A function, not a constant: the
 // test harness's loadHelpers returns before top-level bindings initialize.
 function finalFixMessage() {
@@ -530,7 +774,7 @@ function postIntegrateFixPrompt(m, failure, path = 'hook') {
       'command.',
     ] : [
       'Rerun every project command afterwards and confirm they pass:',
-      commandsText(m, null, featureDir(m), 'post-integrate-fix'),
+      commandsText(m, null, featureDir(m), 'post-integrate-fix', 'post-integrate'),
     ]),
     m.hooks.post_integrate ? `Post-integration check to keep passing:\n${m.hooks.post_integrate}` : '',
     '',
@@ -579,7 +823,7 @@ function postIntegratePrompt(m, checkOnly = false, checks = null) {
   ] : [
     'Change files only if the instructions call for it; commit any change per the commit rules and rerun',
     'the project commands afterwards:',
-    commandsText(m, null, featureDir(m), 'post-integrate'),
+    commandsText(m, null, featureDir(m), 'post-integrate', 'post-integrate'),
   ];
   return [
     `You are the post-integration agent for parallel-lanes run ${m.run_id}.`,
@@ -708,6 +952,7 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     ...(other ? otherReviewerMinorsLines(m, minors) : taskMinorsLines(m, minors)),
     ...runRulingsLines(m),
     ...rulingsReadLines(m, featureDir(m)),
+    ...waveLines(m),
     "A finding that a ruling in force settles is not raised unless it is critical or important; then raise it and cite the ruling's id.",
     'Files each task changed outside its Files list, with their owners (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'undeclared')}`,
@@ -768,7 +1013,7 @@ function finalFixPrompt(m, findings, base) {
       'check at the delivered revision right after you, and a failure there goes to a repair agent.',
     ] : [
       'decline. Rerun every project command afterwards:',
-      commandsText(m, null, featureDir(m), 'final-fix'),
+      commandsText(m, null, featureDir(m), 'final-fix', 'final-fix'),
     ]),
     'Commit your fixes per the commit rules.',
     commitWithLine(finalFixMessage()),
@@ -865,7 +1110,7 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
 function verifyPrompt(m, sha, from = null) {
   const dir = featureDir(m);
   const q = shellQuote;
-  const base = runChecksCommand(m, dir, finalChecks(m), resultPath());
+  const base = runChecksCommand(m, dir, finalChecks(m), resultPath(), 'verify');
   const cmd = from === null ? base : `${base} --descends-from ${q(from)}`;
   const setup = finalSetup(m);
   const stop = [

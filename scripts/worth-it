@@ -4,7 +4,8 @@ for a run's fixed phases.
 
 usage:
   python3 worth-it PLAN --max-lanes N [--prelude IDS] --lane IDS [--lane IDS ...]
-                   [--join IDS] [--project DIR] [--history-dir DIR]
+                   [--join IDS] [--join-deps ID:DEPS ...] [--project DIR]
+                   [--history-dir DIR]
 
 IDS are comma-separated task ids; --lane repeats, one per lane, in lane order
 and task order; --prelude, --join and a --lane may be empty. N is the lane
@@ -13,7 +14,12 @@ cap the Assessment computed (an integer, at least 1).
 The layout: N tasks, L non-empty lanes, A = min(L, --max-lanes) lanes at
 once (at least 1). Task-slots S = prelude tasks + the makespan of the lanes'
 task counts assigned in order, each to the worker free earliest, across A
-workers (the engine's runLanes) + join tasks. A direct build takes N
+workers (the engine's runLanes) + the join. With --join-deps (1.6.5, one
+per join task: ID, a colon, and the join ids it depends on joined by '+',
+nothing for none; a join task without one depends on every earlier one),
+the join counts the waves the engine runs it in (_waves, declared files not
+checked): the sum over its waves of ceil(size / A); without, one slot per
+join task (a serial join). A direct build takes N
 task-times; the layout saves N - S. recommend is "direct" when the saving is
 THRESHOLD or less, else "parallel".
 
@@ -47,10 +53,11 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _history  # noqa: E402
 import _plan  # noqa: E402
+import _waves  # noqa: E402
 import _shell  # noqa: E402
 
 USAGE = ("usage: worth-it PLAN --max-lanes N [--prelude IDS] --lane IDS [--lane IDS ...] [--join IDS] "
-         "[--project DIR] [--history-dir DIR]")
+         "[--join-deps ID:DEPS ...] [--project DIR] [--history-dir DIR]")
 
 # The back-test of 31 archived runs (2026-10-15, tools/worth-it-backtest.py;
 # the 1.6.4 design, section 4.3): the fixed phases a run adds beyond the
@@ -61,7 +68,7 @@ USAGE = ("usage: worth-it PLAN --max-lanes N [--prelude IDS] --lane IDS [--lane 
 THRESHOLD = 1
 
 _SINGLE = ("--max-lanes", "--prelude", "--join", "--project", "--history-dir")
-_OPTIONS = _SINGLE + ("--lane",)
+_OPTIONS = _SINGLE + ("--lane", "--join-deps")
 
 
 class UsageError(Exception):
@@ -70,15 +77,15 @@ class UsageError(Exception):
 
 def parse_args(args):
     """{plan, max_lanes, prelude, lanes, join, project, history_dir}."""
-    opts = {"plan": None, "--lane": []}
+    opts = {"plan": None, "--lane": [], "--join-deps": []}
     i = 0
     while i < len(args):
         a = args[i]
         if a in _OPTIONS:
             if i + 1 >= len(args) or args[i + 1] in _OPTIONS:
                 raise UsageError(a + " needs a value")
-            if a == "--lane":
-                opts["--lane"].append(args[i + 1])
+            if a in ("--lane", "--join-deps"):
+                opts[a].append(args[i + 1])
             elif a in opts:
                 raise UsageError(a + " given twice")
             else:
@@ -107,6 +114,7 @@ def parse_args(args):
         "prelude": split_ids(opts.get("--prelude", "")),
         "lanes": [split_ids(v) for v in opts["--lane"]],
         "join": split_ids(opts.get("--join", "")),
+        "join_deps": parse_join_deps(opts["--join-deps"]),
         "project": opts.get("--project") or None,
         "history_dir": opts.get("--history-dir") or None,
     }
@@ -116,13 +124,33 @@ def split_ids(value):
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def slots(prelude, lanes, join, at_once):
+def parse_join_deps(values):
+    """{join id: [ids it depends on]} from ID:DEPS values (DEPS '+'-joined,
+    empty for none); a usage error for a value without ':' or an id given twice."""
+    deps = {}
+    for value in values:
+        if ":" not in value:
+            raise UsageError("--join-deps needs ID:DEPS, not " + value)
+        task, _, rest = value.partition(":")
+        task = task.strip()
+        if not task or task in deps:
+            raise UsageError("--join-deps names " + (task or "no task") + (" twice" if task else ""))
+        deps[task] = [x.strip() for x in rest.split("+") if x.strip()]
+    return deps
+
+
+def slots(prelude, lanes, join, at_once, join_waves=None):
     """prelude + the makespan of the lane sizes assigned in order, each to
-    the worker free earliest, across at_once workers + join."""
+    the worker free earliest, across at_once workers + the join: join tasks,
+    or with join_waves (the join's wave sizes) the sum of ceil(size /
+    at_once)."""
     workers = [0] * max(1, min(at_once, len(lanes)))
     for size in lanes:
         i = workers.index(min(workers))
         workers[i] += size
+    if join_waves is not None:
+        width = max(1, at_once)
+        join = sum((size + width - 1) // width for size in join_waves)
     return prelude + (max(workers) if lanes else 0) + join
 
 
@@ -205,7 +233,17 @@ def assess(args):
     if error:
         return {"status": "unavailable", "reason": error, "notes": notes}
     at_once = max(1, min(len(lanes), args["max_lanes"]))
-    used = slots(len(args["prelude"]), [len(lane) for lane in lanes], len(args["join"]), at_once)
+    sizes = None
+    if args["join_deps"]:
+        unknown = [t for t in args["join_deps"] if t not in args["join"]]
+        if unknown:
+            return {"status": "unavailable", "reason": "--join-deps names " + ", ".join(unknown)
+                    + ", not a task of --join", "notes": notes}
+        units = [dict({"id": t, "files": []}, **({"depends_on": args["join_deps"][t]} if t in args["join_deps"] else {}))
+                 for t in args["join"]]
+        sizes = [len(w) for w in _waves.waves(units)]
+        notes.append("join waves " + "-".join(str(n) for n in sizes) + " (declared files not checked)")
+    used = slots(len(args["prelude"]), [len(lane) for lane in lanes], len(args["join"]), at_once, sizes)
     saved = len(layout) - used
     found = None
     if args["project"]:

@@ -33,7 +33,10 @@ and an 'event' of:
   reopened     with 'reason': string (an approval that no longer holds: the
                task counts as not reviewed again)
   started      with 'base': non-empty string (the task base, recorded by
-               start-task --record-start before the implementer writes)
+               start-task --record-start before the implementer writes);
+               a join wave unit (1.6.5) also has 'dir' (its worktree) and
+               'unit_branch' (pl-<run_id>-u-<unit id>), and a unit begun
+               again from the feature tip 'restart': true
   run_ended    with 'status': non-empty string, and 'agents' and 'rulings':
                integers >= 0 (what one launch spent)
   accepted     with 'text': non-empty string and 'head': non-empty string (the
@@ -45,6 +48,17 @@ and an 'event' of:
   carried      task _run only, with 'wf', 'pf' ({"PF-n": ruling id}) and
                'bound' ([{file, line}]); carry-launch writes it last, once per
                launch
+  wave_merged  task _run only, with 'units': non-empty list of unit ids,
+               'head', and exactly one of 'wave' (integer >= 1) and
+               'recovery': true; optional 'overlaps' ([{path, units}]) and
+               'conflict_files' (paths); merge-wave writes it
+  wave_checked task _run only, with 'wave' (integer >= 1), 'head' and 'ok'
+               (true or false); 'unfinished': true when the checks stopped
+               without a result (ok false)
+Appends to a lane file hold the file's own OS lock (_oslock), waiting up to
+5 s for another appender (LEDGER_LOCK_WAIT_S overrides it for tests), else
+exit 3 with nothing written. A reader skips a last line that has no newline
+yet and is not JSON: an append in progress.
 A ruling may carry 'by' (implementer, reviewer, adjudicator, preflight; none:
 a task agent before 1.6.3, read as an implementer), 'scope' (lane, run),
 'overrides' and 'files' (lists of strings), 'pf' (PF-n) and 'wf'. The values
@@ -101,7 +115,16 @@ status reads every DIR/*.jsonl and prints
    "start_points": {...}, "carry": {...}, "ranges": {...}, "legacy": [...],
    "inconsistent": [...], "stale": [...], "unbound": [...], "inputs": {...},
    "spent": {"agents", "rulings"}, "accepted": [{head, text}],
-   "undeclared": {...}}
+   "undeclared": {...}, "join_started": bool, "unit_branches": {...},
+   "wave_merges": [...]}
+join_started: join.jsonl holds a 'started' event (the join began in an
+earlier launch: it then runs serially, 1.6.5). unit_branches: {task: {branch,
+dir}} from each join task's latest 'started' event with a unit_branch, since
+its latest restart. wave_merges: the _run wave_merged events in order, each
+{wave or recovery, units, head, overlaps, conflict_files}. start_bases: {task:
+base} of each task not done, from its latest 'started' event. A 'started' event
+with restart true begins its task afresh: its earlier events (committed,
+reviewed, blocked, settled) no longer count.
 done: tasks with a 'committed' or 'settled' event. reviewed: tasks with a
 'reviewed' or 'settled' event after their last 'committed'. blocked: tasks
 with a 'blocked' event and no 'committed' or 'settled' after it. deferred:
@@ -194,7 +217,14 @@ start_points.join), and head = the last commit of its last event; it is listed
 in derived. Every range is checked against git: base must be an ancestor of
 head, and a committed event's commits must be exactly git rev-list base..head
 of that event. Any failure is listed in errors and the exit is 3: a resume
-must not narrow or guess a review range.
+must not narrow or guess a review range. A list ends at its first task that
+is not done, except the join once it started (join_started): a join that ran
+in waves can have a later unit done beside an earlier one that stopped, so
+its unfinished tasks are skipped. It also prints "join_tip": among the heads
+of the wave_merged and wave_checked events and the backfill heads of join
+tasks that did not run on a unit branch, the one every other is an ancestor
+of (null when there is none); two heads neither of which descends from the
+other are an error.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 or task name, an unreadable ledger, plan or manifest, or a backfill error.
@@ -213,6 +243,7 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _brief  # noqa: E402
+import _oslock  # noqa: E402
 import _owners  # noqa: E402
 import _shell  # noqa: E402
 
@@ -231,6 +262,8 @@ REQUIRED = {
     "accepted": "text",
     "minors": "open",
     "carried": "wf",
+    "wave_merged": "units",
+    "wave_checked": "head",
 }
 RULING_ROLES = ("implementer", "reviewer", "adjudicator", "preflight")
 RULING_SCOPES = ("lane", "run")
@@ -239,6 +272,12 @@ PF_ID = re.compile(r"^PF-[1-9][0-9]*$")
 RUN_ONLY = ("minors", "carried")
 SETTLED_OUTCOMES = ("park", "unblock")
 START_POINTS = {"setup": "prelude", "join": "join"}
+# Join waves (1.6.5): the _run events of a wave's merge and checks, and the
+# branch form of a join unit's own branch (pl-<run_id>-u-<unit id>).
+WAVE_EVENTS = ("wave_merged", "wave_checked")
+UNIT_BRANCH = re.compile(r"^pl-[a-z0-9-]+-u-[A-Za-z0-9_][A-Za-z0-9._-]*$")
+# How long an append waits for another appender's lock on the same lane file.
+LOCK_WAIT_S = 5.0
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
 ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
@@ -306,6 +345,8 @@ def entry_error(entry):
     elif event in ("started", "run_ended"):
         if not is_text(value):
             return f"'{key}' must be a non-empty string"
+        if event == "started":
+            return started_fields_error(entry)
         if event == "run_ended":
             for field in ("agents", "rulings"):
                 v = entry.get(field)
@@ -320,6 +361,8 @@ def entry_error(entry):
         return ruling_fields_error(entry)
     elif event in RUN_ONLY:
         return run_only_error(entry)
+    elif event in WAVE_EVENTS:
+        return wave_error(entry)
     elif not isinstance(value, str):
         return f"'{key}' must be a string"
     return None
@@ -343,6 +386,56 @@ def ruling_fields_error(entry):
         return "'pf' must look like PF-1"
     if "wf" in entry and not is_text(entry["wf"]):
         return "'wf' must be a non-empty string"
+    return None
+
+
+def is_count(v, least):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= least
+
+
+def started_fields_error(entry):
+    """Why a started event's join wave fields (1.6.5) are malformed, or
+    None: dir, the worktree a unit ran in; unit_branch, its own branch;
+    restart (true), a unit begun again from the feature tip."""
+    if "dir" in entry and not is_text(entry["dir"]):
+        return "'dir' must be a non-empty string"
+    if "unit_branch" in entry and not (isinstance(entry["unit_branch"], str)
+                                       and UNIT_BRANCH.fullmatch(entry["unit_branch"])):
+        return "'unit_branch' must be a branch of the form pl-<run_id>-u-<unit id>"
+    if "restart" in entry and entry["restart"] is not True:
+        return "'restart' must be true when present"
+    return None
+
+
+def wave_error(entry):
+    """Why a wave_merged or wave_checked event is malformed, or None."""
+    if entry["task"] != "_run":
+        return f"a {entry['event']} event belongs to task _run"
+    if not is_text(entry.get("head")):
+        return "'head' must be a non-empty string"
+    if entry["event"] == "wave_merged":
+        if not (isinstance(entry.get("units"), list) and entry["units"] and is_text_list(entry["units"])):
+            return "'units' must be a non-empty list of unit ids"
+        has_wave, has_recovery = "wave" in entry, "recovery" in entry
+        if has_wave == has_recovery:
+            return "a wave_merged event has exactly one of 'wave' and 'recovery'"
+        if has_wave and not is_count(entry["wave"], 1):
+            return "'wave' must be an integer >= 1"
+        if has_recovery and entry["recovery"] is not True:
+            return "'recovery' must be true"
+        overlaps = entry.get("overlaps", [])
+        if not (isinstance(overlaps, list) and all(isinstance(o, dict) and is_text(o.get("path"))
+                                                   and is_text_list(o.get("units")) for o in overlaps)):
+            return "'overlaps' must be a list of {path, units}"
+        if not is_text_list(entry.get("conflict_files", [])):
+            return "'conflict_files' must be a list of paths"
+    else:
+        if not is_count(entry.get("wave"), 1):
+            return "'wave' must be an integer >= 1"
+        if not isinstance(entry.get("ok"), bool):
+            return "'ok' must be true or false"
+        if "unfinished" in entry and not (entry["unfinished"] is True and entry["ok"] is False):
+            return "'unfinished' must be true, and only with ok false"
     return None
 
 
@@ -391,11 +484,35 @@ def append_entries(directory, lane, entries):
         os.chmod(directory, 0o700)
     line = "".join(json.dumps(e, ensure_ascii=True, separators=(",", ":")) + "\n" for e in entries)
     path = os.path.join(directory, f"{lane}.jsonl")
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    # Join wave units append to one lane file at once (1.6.5), and an
+    # O_APPEND write is not atomic across processes on Windows: appends to a
+    # lane file take the file's own OS lock (_oslock: on Windows one byte far
+    # past the text, so readers and the append itself are not blocked),
+    # waiting a while for another appender.
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(fd, line.encode("ascii"))
+        wait = lock_wait_s()
+        deadline = time.monotonic() + wait
+        while not _oslock.try_lock(fd):
+            if time.monotonic() >= deadline:
+                fail(3, f"{lane}.jsonl stayed locked for {wait:g} s; nothing written")
+            time.sleep(0.05)
+        try:
+            # O_APPEND writes at the end wherever the lock left the offset.
+            os.write(fd, line.encode("ascii"))
+        finally:
+            _oslock.unlock(fd)
     finally:
         os.close(fd)
+
+
+def lock_wait_s():
+    """LOCK_WAIT_S, or LEDGER_LOCK_WAIT_S when set to a number >= 0 (tests)."""
+    try:
+        v = float(os.environ.get("LEDGER_LOCK_WAIT_S", LOCK_WAIT_S))
+    except ValueError:
+        return LOCK_WAIT_S
+    return v if v >= 0 else LOCK_WAIT_S
 
 
 def append(directory, lane, raw):
@@ -468,15 +585,22 @@ def read_events_at(directory):
         path = os.path.join(directory, name)
         try:
             with open(path, encoding="ascii") as f:
-                lines = f.read().splitlines()
+                text = f.read()
         except (OSError, UnicodeDecodeError) as e:
             fail(3, f"cannot read {path}: {e}")
+        lines = text.splitlines()
+        # An append in progress: a last line with no newline yet that is not
+        # JSON is skipped, not an error (appenders write JSON and newline in
+        # one write, so a complete event always ends with a newline).
+        partial = len(lines) if text and not text.endswith("\n") else None
         for number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                if number == partial:
+                    continue
                 entry = None
             error = "invalid JSON" if entry is None else entry_error(entry)
             if error:
@@ -504,7 +628,14 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
             if task not in history and want is not None and entry["base"] != want:
                 start_mismatch[task] = (f"its first recorded range starts at {entry['base']}, not at the base "
                                         f"{want} it started at")
-        if event == "started":
+        if event == "started" and entry.get("restart") is True:
+            # A join unit begun again from the feature tip (1.6.5): its
+            # earlier attempt on its unit branch no longer counts.
+            for state in (done, reviewed_by, blocked, deferred, unblocked, last_ruling, review_event,
+                          history, start_mismatch):
+                state.pop(task, None)
+            started[task] = entry["base"]
+        elif event == "started":
             evs = history.get(task)
             if evs and "base" in evs[0] and entry["base"] not in (evs[0]["base"], evs[-1].get("head")) \
                     and task not in start_mismatch:
@@ -655,7 +786,61 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
         "spent": spent,
         "accepted": accepted,
         "undeclared": undeclared,
+        # The base each task not done started its latest attempt from (1.6.5):
+        # a join task resumed on the feature checkout keeps its partial
+        # commits in its range.
+        "start_bases": {t: b for t, b in started.items() if not done.get(t)},
     }, history
+
+
+def join_facts(events_at):
+    """What the ledger says about the join's waves (1.6.5), from (file name,
+    line, event) triples: join_started (a started event in join.jsonl),
+    unit_branches ({task: {branch, dir}} from each join task's latest
+    started event with a unit_branch since its latest restart), and
+    wave_merges (the wave_merged events of _run.jsonl in order, as {wave or
+    recovery, units, head, overlaps, conflict_files})."""
+    started, branches, merges = False, {}, []
+    for name, _, entry in events_at:
+        event = entry["event"]
+        if name == "join.jsonl" and event == "started":
+            started = True
+            if entry.get("restart") is True:
+                branches.pop(entry["task"], None)
+            if "unit_branch" in entry:
+                branches[entry["task"]] = {"branch": entry["unit_branch"], "dir": entry.get("dir")}
+        elif name == "_run.jsonl" and event == "wave_merged":
+            item = {"wave": entry["wave"]} if "wave" in entry else {"recovery": True}
+            item.update({"units": entry["units"], "head": entry["head"],
+                         "overlaps": entry.get("overlaps", []), "conflict_files": entry.get("conflict_files", [])})
+            merges.append(item)
+    return {"join_started": started, "unit_branches": branches, "wave_merges": merges}
+
+
+def join_tip(events, ranges, unit_branches, git):
+    """The join's tip: among the heads of wave_merged and wave_checked
+    events and the recorded heads of join tasks that did not run on a unit
+    branch, the one every other is an ancestor of. Returns (tip or None,
+    error or None)."""
+    heads = []
+    for entry in events:
+        if entry["task"] == "_run" and entry["event"] in ("wave_merged", "wave_checked"):
+            heads.append(entry["head"])
+    for task, rng in ranges.items():
+        if task not in unit_branches:
+            heads.append(rng["head"])
+    tip = None
+    for head in heads:
+        if tip is None:
+            tip = head
+            continue
+        if head == tip:
+            continue
+        if git("merge-base", "--is-ancestor", tip, head).returncode == 0:
+            tip = head
+        elif git("merge-base", "--is-ancestor", head, tip).returncode != 0:
+            return None, f"join_tip: heads {tip} and {head} do not descend from one another"
+    return tip, None
 
 
 def ruling_records(directory):
@@ -999,10 +1184,12 @@ def undeclared(directory):
 def status(directory, plan=None, spec=None, manifest_path=None):
     plan_text = read_text(plan, "plan") if plan is not None else None
     manifest = load_manifest(manifest_path) if manifest_path is not None else None
-    events = read_events(directory)
+    events_at = read_events_at(directory)
+    events = [entry for _, _, entry in events_at]
     result, _ = summarize(events, plan_text, plan is not None,
                           file_sha256(spec) if spec is not None else None,
                           file_sha256(plan) if plan is not None else None, manifest)
+    result.update(join_facts(events_at))
     snap = latest_minors(events)
     result["minors"] = {"open": [m.get("id") for m in snap["open"]] if snap else [],
                         "covered": list(snap.get("covered") or []) if snap else []}
@@ -1202,7 +1389,10 @@ def backfill(directory, manifest_path):
     lists = task_lists(m)
     git = repo_git(m)
 
-    summary, history = summarize(read_events(directory))
+    events_at = read_events_at(directory)
+    events = [entry for _, _, entry in events_at]
+    summary, history = summarize(events)
+    facts = join_facts(events_at)
     done = set(summary["done"])
     starts = m.get("start_points") or summary["start_points"]
     out, derived, errors = {}, [], []
@@ -1222,6 +1412,10 @@ def backfill(directory, manifest_path):
         for t in tasks:
             tid = t["id"]
             if tid not in done:
+                # A join that ran in waves (1.6.5) can have a later unit done
+                # beside an earlier one that stopped: each has its own range.
+                if name == "join" and facts["join_started"]:
+                    continue
                 break
             evs = history.get(tid, [])
             if tid in summary["ranges"]:
@@ -1251,7 +1445,12 @@ def backfill(directory, manifest_path):
             prev = rng["head"]
         if name == "prelude":
             prelude_head = prev
-    print(json.dumps({"backfill": out, "derived": derived, "errors": errors}))
+    join_ids = {t["id"] for name, tasks in lists if name == "join" for t in tasks}
+    tip, tip_error = join_tip(events, {t: r for t, r in out.items() if t in join_ids},
+                              facts["unit_branches"], git)
+    if tip_error:
+        errors.append(tip_error)
+    print(json.dumps({"backfill": out, "derived": derived, "errors": errors, "join_tip": tip}))
     if errors:
         sys.exit(3)
 

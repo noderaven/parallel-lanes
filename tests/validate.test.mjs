@@ -569,6 +569,8 @@ test('start_points: optional prelude and join shas', () => {
   m.start_points = {};
   assert.deepEqual(validateManifest(m), []);
   m.start_points = { prelude: 'abc', join: 'def' };
+  // A join start point needs join_started (1.6.5): the session copies both.
+  m.join_started = false;
   assert.deepEqual(validateManifest(m), []);
   m.start_points = { prelude: '' };
   assertError(validateManifest(m), 'start_points.prelude');
@@ -769,4 +771,55 @@ test('inputs_changed says whether the plan and spec changed since the last launc
     assertError(validateManifest({ ...validManifest(), inputs_changed: bad }),
       'inputs_changed: must be {plan: true|false|null, spec: true|false|null}');
   }
+});
+
+test('lane ids may not start with u-, in any letter case (join unit branches use pl-<run_id>-u-<unit>)', () => {
+  for (const id of ['u-x', 'U-x', 'u-']) {
+    const m = validManifest();
+    renameLane(m, 0, id);
+    assertError(validateManifest(m), `lane id ${JSON.stringify(id)}`, 'must not start with u-');
+  }
+  for (const id of ['u', 'ux', 'au-x', 'u_x']) {
+    const m = validManifest();
+    renameLane(m, 0, id);
+    assert.deepEqual(validateManifest(m), [], id);
+  }
+});
+
+test('start_points.join without join_started is invalid', () => {
+  const m = validManifest();
+  m.start_points = { join: 'abc' };
+  assertError(validateManifest(m), 'join_started', 'missing');
+  m.join_started = false;
+  assert.deepEqual(validateManifest(m), []);
+  m.join_started = 'yes';
+  assertError(validateManifest(m), 'join_started', 'must be true or false');
+});
+
+test('unit_branches must name join tasks and unit branches', () => {
+  const joinId = validManifest().join[0].id;
+  const ok = validManifest();
+  ok.unit_branches = { [joinId]: { branch: 'pl-x-u-J', dir: '/work/wt/lane-a' } };
+  assert.deepEqual(validateManifest(ok), []);
+  for (const [bad, what] of [
+    [{ NOPE: { branch: 'pl-x-u-J', dir: '/w' } }, 'not a join task'],
+    [{ [joinId]: { branch: 'pl-x-a', dir: '/w' } }, 'unit branch'],
+    [{ [joinId]: { branch: 'pl-x-u-J' } }, 'dir'],
+    [[], 'must be an object'],
+  ]) {
+    const m = validManifest();
+    m.unit_branches = bad;
+    assertError(validateManifest(m), 'unit_branches', what);
+  }
+});
+
+test('join_tip and wave_merges are checked', () => {
+  const m = validManifest();
+  m.join_tip = '';
+  assertError(validateManifest(m), 'join_tip', 'non-empty string');
+  const w = validManifest();
+  w.wave_merges = [{ wave: 1, units: ['J'], head: 'abc', overlaps: [], conflict_files: [] }];
+  assert.deepEqual(validateManifest(w), []);
+  w.wave_merges = ['x'];
+  assertError(validateManifest(w), 'wave_merges', 'list of objects');
 });

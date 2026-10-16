@@ -525,6 +525,8 @@ async function runAll(manifest, io) {
     stoppedLanes.push({ lane, task: last && last.status !== 'done' ? last.task : null, reason: list.stopped });
   };
   let preflight = null;
+  // Pre-flight's findings between join units, as wave edges (design 4.7).
+  const waveEdges = [];
   let integrate = null;
   let e2e = null;
   let final = null;
@@ -536,6 +538,13 @@ async function runAll(manifest, io) {
   let acceptance = null;
   // Set when a post-integrate fix's re-review returned no result (C2).
   let fixUnreviewed = false;
+  // Join waves (1.6.5): this launch's waves for the report (null for a
+  // serial join), the wave checks fix's re-review findings, whether that
+  // re-review returned no result, and the waves whose checks still fail.
+  let joinWaves = null;
+  const waveFixReview = [];
+  let waveFixUnreviewed = false;
+  const waveChecksOpen = [];
   // The post-integrate check's result and the revision it covered.
   let postCheck = null;
   const report = (status, reason = null) => ({
@@ -545,6 +554,7 @@ async function runAll(manifest, io) {
     stopped_lanes: stoppedLanes,
     preflight,
     integrate,
+    join_waves: joinWaves,
     e2e,
     final,
     verify,
@@ -630,7 +640,9 @@ async function runAll(manifest, io) {
     io.log('parallel-lanes: pre-flight skipped: every task is done and reviewed');
   } else {
     io.phase('Pre-flight');
-    const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m), preflightSchema());
+    const shown = wavePlan(m);
+    const pre = await call('pre-flight', 'Pre-flight', preflightPrompt(m, shown.mode === 'waves' ? shown.waves : null),
+      preflightSchema());
     if (state.refused.length > 0) return budgetReport();
     if (!pre) return report('stopped', 'no result from pre-flight');
     // Undeclared dependencies only add context: they reach the briefs of
@@ -656,6 +668,27 @@ async function runAll(manifest, io) {
     // carry-launch skips it (1.6.3); null when there is none.
     preflight = { conflicts: pre.conflicts, rulings: [...pre.rulings], undeclared: kept, schedule, adjudicated: null };
     if (schedule.length > 0) return report('preflight_conflicts');
+    // Findings between join units whose producer is earlier move the task's
+    // unit to a later wave (design 4.7); preflight.wave_moves reports them.
+    if (shown.mode === 'waves') {
+      const units = joinUnits(m);
+      const unitOf = (id) => units.find((u) => unitTasks(u).some((t) => t.id === id));
+      for (const e of kept) {
+        const u = unitOf(e.task);
+        const p = unitOf(e.producer);
+        if (u && p && u !== p && units.indexOf(p) < units.indexOf(u)) waveEdges.push({ unit: u.id, producer: p.id });
+      }
+      const waveOf = (waves, id) => waves.findIndex((w) => w.includes(id)) + 1;
+      const after = wavePlan(m, waveEdges).waves;
+      preflight.wave_moves = units.filter((u) => waveOf(shown.waves, u.id) !== waveOf(after, u.id)).map((u) => {
+        const edge = waveEdges.find((e) => e.unit === u.id);
+        return { unit: u.id, from: waveOf(shown.waves, u.id), to: waveOf(after, u.id), producer: edge ? edge.producer : null };
+      });
+      for (const mv of preflight.wave_moves) {
+        io.log(`parallel-lanes: pre-flight: ${mv.unit} moves from join wave ${mv.from} to ${mv.to}`
+          + `${mv.producer ? ` (it needs ${mv.producer})` : ''}`);
+      }
+    }
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings).
@@ -679,6 +712,11 @@ async function runAll(manifest, io) {
       m = { ...m, run_rulings: [...m.run_rulings, ruling.text] };
     }
   }
+
+  // How the join runs (design 4.1): waves only in the launch that starts it,
+  // with pre-flight's findings as edges (design 4.7).
+  const joinPlan = wavePlan(m, waveEdges);
+  const wavesOn = joinPlan.mode === 'waves';
 
   io.phase('Prelude');
   const prelude = await runTaskList(m, m.prelude, featureWhere(m, 'prelude'), starts.prelude || tip,
@@ -763,7 +801,8 @@ async function runAll(manifest, io) {
     // cleanup deleted as merged when that commit is already in HEAD.
     const tips = laneTips(m, laneResults);
     let integ = await callM('integrate', 'Integrate',
-      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips }),
+      integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips,
+        keepWorktrees: wavesOn }),
       statusSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
     // Any Sonnet result that is not a finished integration (a done without a
@@ -790,6 +829,7 @@ async function runAll(manifest, io) {
           resolverNotes: resolved ? resolved.notes : null,
           joinStartPoint: joinNoHook,
           laneTips: tips,
+          keepWorktrees: wavesOn,
         }), statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
@@ -810,7 +850,8 @@ async function runAll(manifest, io) {
       if (from === BUDGET) return budgetReport();
       tip = from;
       integ = await callM('integrate', 'Integrate',
-        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips }),
+        integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips,
+          keepWorktrees: wavesOn }),
         statusSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
@@ -849,8 +890,122 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Join');
-  const join = await runTaskList(m, m.join, featureWhere(m, 'join'), joinBase,
-    counted, 'Join', joinFromPhase);
+  let join;
+  const finished = (r) => r.status === 'done' || r.status === 'deferred';
+  // Merge units ([{id, base, head}], plan order) into the feature checkout
+  // through merge-wave (design 4.3), wave null for a relaunch's recovery merge
+  // (design 4.5): each conflict goes to a resolver (autonomous) or stops the
+  // run with the sha to merge by hand (supervised). With checks (the last
+  // multi-unit wave's, design 4.4) the merge agent runs them; a failure gets
+  // one fix, its re-review and a recheck (autonomous) or stops (supervised).
+  // entry is the wave's report entry, filled in. Returns {head} or {stopped}.
+  const mergeUnits = async (wave, units, checks, entry, known = []) => {
+    const name = wave === null ? 'recovery' : `wave ${wave}`;
+    let r = null;
+    for (let attempt = 0; attempt <= units.length; attempt += 1) {
+      r = await callM(`${name} merge`, 'Join', waveMergePrompt(m, wave, units, checks, known), waveMergeSchema(),
+        sonnetHigh);
+      if (state.refused.length > 0) return { stopped: 'an agent was refused' };
+      if (!r || r.status !== 'conflict') break;
+      const unit = units.find((u) => u.id === r.conflict_unit)
+        || units.find((u) => !(Array.isArray(r.merged) ? r.merged : []).includes(u.id)) || units[0];
+      const files = Array.isArray(r.conflict_files) ? r.conflict_files : [];
+      for (const f of files) if (!entry.conflict_files.includes(f)) entry.conflict_files.push(f);
+      if (!autonomous) {
+        const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
+        return { stopped: `join ${name}: ${unit.id} conflicts in ${files.join(', ') || 'files git reported'}; `
+          + `merge it by hand with git -C ${shellQuote(featureDir(m))} merge --no-ff -m ${shellQuote(message)} `
+          + `${unit.head}, resolve and commit, then relaunch` };
+      }
+      const res = await callM(`${name} resolve ${unit.id}`, 'Join', waveResolvePrompt(m, wave, unit, files),
+        statusSchema(), standard);
+      if (state.refused.length > 0) return { stopped: 'an agent was refused' };
+      if (!res || res.status !== 'done' || !isSha(res.head)) {
+        return { stopped: `join ${name}: the resolver could not merge ${unit.id}: `
+          + `${res ? res.notes : `no result from ${name} resolve ${unit.id}`}` };
+      }
+      for (const f of files) if (!entry.resolved_files.includes(f)) entry.resolved_files.push(f);
+    }
+    if (!r || r.status !== 'done' || !isSha(r.head)) {
+      return { stopped: `join ${name}: the merge failed: ${r ? r.notes : `no result from ${name} merge`}` };
+    }
+    let head = r.head;
+    entry.head = head;
+    entry.overlaps = Array.isArray(r.overlaps) ? r.overlaps : [];
+    entry.in_history = Array.isArray(r.in_history) ? r.in_history : [];
+    if (checks.length > 0) {
+      const c = r.checks && typeof r.checks === 'object' ? r.checks
+        : { ok: false, unfinished: true, notes: `${name} merge returned no checks result` };
+      entry.checks = { ok: c.ok === true, unfinished: c.ok !== true && c.unfinished === true, notes: c.notes || '',
+        fixed: false };
+      if (!entry.checks.ok && !entry.checks.unfinished) {
+        if (!autonomous) return { stopped: `wave checks failed: ${entry.checks.notes}` };
+        const fix = await callM('wave checks fix', 'Join', waveChecksFixPrompt(m, entry.checks.notes),
+          statusSchema(), standard);
+        if (state.refused.length > 0) return { stopped: 'an agent was refused' };
+        if (fix && fix.status === 'done' && isSha(fix.head) && fix.head !== head) {
+          const rr = await callM('wave checks re-review', 'Join', waveChecksReReviewPrompt(m, head, fix.head),
+            postIntegrateReReviewSchema(), standard);
+          if (state.refused.length > 0) return { stopped: 'an agent was refused' };
+          if (rr && Array.isArray(rr.findings)) waveFixReview.push(...rr.findings);
+          else waveFixUnreviewed = true;
+          head = fix.head;
+          entry.checks.fixed = true;
+        }
+        const again = await callM('wave checks', 'Join', waveChecksPrompt(m, wave, checks), waveChecksSchema(),
+          sonnetHigh);
+        if (state.refused.length > 0) return { stopped: 'an agent was refused' };
+        entry.checks.ok = Boolean(again && again.ok === true);
+        entry.checks.unfinished = Boolean(again && !entry.checks.ok && again.unfinished === true);
+        entry.checks.notes = again ? again.notes || '' : 'no result from wave checks';
+        if (!entry.checks.ok && !entry.checks.unfinished) waveChecksOpen.push({ wave, notes: entry.checks.notes });
+      }
+      entry.head = head;
+    }
+    return { head };
+  };
+  const newEntry = (wave, units, head) => ({ wave, units, head, conflict_files: [], resolved_files: [], overlaps: [],
+    checks: null });
+  if (wavesOn) {
+    const multi = joinPlan.waves.map((w, i) => (w.length > 1 ? i + 1 : 0)).filter((n) => n > 0);
+    const lastMulti = multi[multi.length - 1];
+    const entries = [];
+    const mergeWave = async (wave, ran, base) => {
+      const units = ran.filter(({ result: r }) => r.status === 'done'
+        || (r.status === 'deferred' && isSha(r.head) && r.head !== r.base))
+        .map(({ unit, result: r }) => ({ id: unit.id, base: r.base, head: r.head }));
+      const entry = newEntry(wave, joinPlan.waves[wave - 1], base);
+      entries.push(entry);
+      if (units.length === 0) return { head: base };
+      const whole = ran.length === joinPlan.waves[wave - 1].length && ran.every((x) => finished(x.result));
+      const checks = wave === lastMulti && whole ? waveChecksOf(m, ran.map((x) => x.unit)) : [];
+      return mergeUnits(wave, units, checks, entry);
+    };
+    join = await runJoinWaves(m, joinPlan.waves, joinBase, waveLaneDirs(m), counted, mergeWave);
+    joinWaves = join.waves.map((w) => entries.find((e) => e.wave === w.wave) || newEntry(w.wave, w.units, w.head));
+    m = { ...m, join_waves_now: joinWaves };
+  } else if (!lite && joinStarted(m) && Object.keys(m.unit_branches || {}).length > 0) {
+    // A relaunch after waves (design 4.5): merge what the waves finished and
+    // had reviewed, then the rest serially from that tip.
+    const units = recoveryUnits(m);
+    // The other units that ran on their own branch: the merge reports which
+    // of them an earlier launch merged (their approval may have gone stale).
+    const known = joinUnits(m).filter((u) => !units.some((x) => x.id === u.id)
+      && unitTasks(u).some((t) => Object.prototype.hasOwnProperty.call(m.unit_branches, t.id)))
+      .map((u) => ({ id: u.id, range: (m.backfill || {})[unitTasks(u)[unitTasks(u).length - 1].id] }))
+      .filter((u) => u.range).map((u) => ({ id: u.id, head: u.range.head }));
+    const entry = { ...newEntry(null, units.map((u) => u.id), joinBase), recovery: true };
+    const rec = await mergeUnits(null, units, [], entry, known);
+    if (units.length > 0) {
+      joinWaves = [entry];
+      m = { ...m, join_waves_now: joinWaves };
+    }
+    join = rec.stopped !== undefined ? { results: [], stopped: rec.stopped, head: joinBase }
+      : await runJoinContinuation(m, m.join, featureWhere(m, 'join'), rec.head, counted, 'Join',
+        new Set(entry.in_history || []));
+  } else {
+    join = await runTaskList(m, m.join, featureWhere(m, 'join'), joinBase, counted, 'Join', joinFromPhase);
+  }
   record(join.results);
   if (join.stopped !== null) stopAt('join', join);
   if (state.refused.length > 0) return budgetReport();
@@ -920,7 +1075,7 @@ async function runAll(manifest, io) {
   }
 
   io.phase('Final review');
-  final = await runFinalReview(m, e2e, tip, counted, integrate ? integrate.fix_review : [],
+  final = await runFinalReview(m, e2e, tip, counted, [...(integrate ? integrate.fix_review : []), ...waveFixReview],
     hasChecks ? verifyAt : null, taskMinors, repair);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
@@ -938,6 +1093,14 @@ async function runAll(manifest, io) {
   if (fixUnreviewed) {
     final.cannot_verify.unshift({ requirement: 'the post-integrate re-review returned no result', source: 'run',
       why: 'the post-integration fix was delivered without a re-review', check_by: 're-review the post-integration fix' });
+  }
+  if (waveFixUnreviewed) {
+    final.cannot_verify.unshift({ requirement: 'the wave checks re-review returned no result', source: 'run',
+      why: 'the wave checks fix was delivered without a re-review', check_by: 're-review the wave checks fix' });
+  }
+  for (const w of waveChecksOpen) {
+    final.cannot_verify.unshift({ requirement: `the join's wave ${w.wave} checks pass`, source: 'run',
+      why: `they still failed after the wave checks fix: ${w.notes}`, check_by: 'rerun them at the delivered revision' });
   }
   // Task minors live only in this launch's task results: the tasks an
   // earlier launch committed and reviewed are not re-run, so their approved

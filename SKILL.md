@@ -77,8 +77,10 @@ manual.
 - Worth-it check, only when the Offer will be shown (not when the user already chose Parallel
   lanes by name, never on Resume): with the layout just built, run
   `<python> <skill_dir>/scripts/worth-it <plan> --max-lanes <cap> --prelude <ids> --lane <ids>
-  [--lane <ids> ...] --join <ids> --project <project folder>` (comma-separated task ids, one
-  `--lane` per lane in lane order; an empty prelude or join is `''`). It prints JSON:
+  [--lane <ids> ...] --join <ids> [--join-deps <id>:<deps> ...] --project <project folder>`
+  (comma-separated task ids, one `--lane` per lane in lane order; an empty prelude or join is
+  `''`; one `--join-deps` per join task, its earlier join ids joined by `+`, so the join counts in
+  waves). It prints JSON:
   `recommend` is `direct` when running in parallel saves 1 task-time or less (always for a
   single-lane plan), else `parallel`; a non-zero exit or any `status` other than `ok` leaves the Offer as it was.
   The rule, its evidence and the output: reference.md "Worth it".
@@ -133,7 +135,9 @@ Fields: reference.md "Manifest fields". In order:
    - Git identity: `git -C <project> var GIT_COMMITTER_IDENT` must print one, or every task
      commit fails partway through the run. If it fails: reference.md "Git identity".
 3. Lanes, prelude, join, hooks, `depends_on`, `overlaps`, `excluded`: reference.md "Building
-   lanes" (`prelude` and `join` are not lane ids).
+   lanes" (`prelude` and `join` are not lane ids; no lane id starts with `u-`). Give every join
+   task `depends_on` (`[]` when it needs no earlier join task): the join then runs in waves, and
+   a join task without it waits for every earlier one (reference.md "Join waves").
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
    for one lane, at most 8 tasks, no security task, and no `hooks.post_integrate`; else
    `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
@@ -163,7 +167,8 @@ and `usage_limit_pause` gives its usage-limit line (reference.md "Usage limit").
 Each check and what it means: reference.md "Doctor" and "Launch conditions".
 
 1. Dry run: call the Workflow tool as in Launch step 1, with `args` = the manifest with
-   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices, checks}` and
+   `dry_run: true`. It returns `{dry_run, errors, agents, lanes_effective, notices, checks,
+   join_waves}` and
    spawns nothing. If `errors` is non-empty, fix the manifest and repeat; never launch a manifest
    with errors. Then set `limits.max_agents` = 2 x `agents.length` and `limits.max_rulings` =
    25 (reference.md "Budgets") so the table shows them.
@@ -251,7 +256,7 @@ earlier snapshot belongs to the earlier launch.
 Relaunch once with the relaunch notice: carry budgets over (reference.md "Transient stops"). Set
 `repairs_spent` to the repairs in the stopped run's `final.repairs` plus the earlier value.
 First recompute `done`, `reviewed`, `deferred`, the `carry` notes, `carried_minors`,
-`inputs_changed` and `backfill` as in Resume
+`inputs_changed`, the join wave fields and `backfill` as in Resume
 steps 2-3, then rerun `scripts/setup --owner <token>` and take `start_points`; if validation
 rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient
 stop is a real stop, unless it is a usage-limit stop (reference.md "Usage limit").
@@ -318,12 +323,15 @@ first, show its plan, and add `--yes` only on the user's yes. Keep the manifest 
    file> [--spec <spec>]`. Set `done`, `reviewed`, and `deferred` from it (taking a deferred
    task up: reference.md "Backfill"), and `repairs_spent` from earlier reports' `final.repairs`;
    put each `carry` entry into `notes`; copy `minors` into `carried_minors`, and `inputs` into
-   `inputs_changed` as `{plan: plan_changed, spec: spec_changed}` (reference.md "Carry-over"). Tasks in `stale`
+   `inputs_changed` as `{plan: plan_changed, spec: spec_changed}` (reference.md "Carry-over").
+   Copy `join_started`, `unit_branches`, `wave_merges` and `start_bases` as they are
+   (reference.md "Join waves"). Tasks in `stale`
    (with their dependents) or `unbound` are left out of `reviewed`, so they are reviewed
    again: tell the user which and why, and say so when `inputs` reports a changed plan or
    spec. `<python> <skill_dir>/scripts/coverage <plan> <manifest file>` must exit 0 again
    (else fix the manifest's tasks or `excluded`).
-3. `backfill`: `<python> <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`.
+3. `backfill`: `<python> <skill_dir>/scripts/ledger backfill <ledger_dir> <manifest file>`,
+   and its `join_tip` when not null.
    Exit 3 lists records git does not confirm: show them and stop (reference.md "Backfill").
 4. Blocked tasks: show each reason; get the user's answer or plan fix before relaunching.
    Record an answer in `notes` as `{"<task id>": "<answer>"}`; a plan fix needs

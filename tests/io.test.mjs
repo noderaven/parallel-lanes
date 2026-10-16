@@ -174,11 +174,13 @@ test('a path that cannot be converted fails with the helper message, not a trace
   writeFileSync(bash, '');
   const env = { ...process.env, CLAUDE_CODE_GIT_BASH_PATH: bash };
   // Standard modules load before the platform changes (some pick their
-  // implementation by platform at import); _shell reads it at call time.
+  // implementation by platform at import), and so does _oslock (fcntl or
+  // msvcrt); _shell reads it at call time.
   const code = [
     'import argparse, glob, hashlib, json, os, posixpath, re, runpy, shutil, subprocess, sys',
     ...helperImports(SCRIPTS),
     'import _shell',
+    'import _oslock',
     'sys.platform = "win32"',
     'sys.argv = sys.argv[1:]',
     'runpy.run_path(sys.argv[0], run_name="__main__")',

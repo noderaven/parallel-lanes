@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Merge a join wave's units into the feature checkout (1.6.5 join waves).
+
+usage: merge-wave DIR LEDGER_DIR (--wave N | --recovery)
+                  [--unit ID BASE HEAD ...] [--known ID HEAD ...]
+
+DIR is the feature checkout, on the feature branch, and must be clean
+(git status --porcelain --untracked-files=all prints nothing), else exit 3
+with nothing changed. Each --unit, in the order given (the engine passes
+plan order), is a unit of the wave: its id, and the recorded base and head
+of its range on its own branch (by sha, never by branch name). A unit whose
+HEAD is already in DIR's history is skipped; any other is merged with
+git merge --no-ff -m "join wave N: merge ID" (with --recovery, "join
+recovery: merge ID": a relaunch bringing in units an earlier launch finished
+but did not merge). A conflict aborts that merge (git merge --abort, so DIR
+is clean again) and ends the loop: the units after it are not tried.
+
+Each --known ID HEAD (a relaunch's recovery merge) is a unit that ran on its
+own branch and is not to be merged: in_history lists, after the merges, every
+--unit then every --known whose HEAD is in DIR's history (a unit an earlier
+launch merged), so the run does not redo merged work.
+
+overlaps: the paths that two or more units of this call changed (each
+git diff --name-only BASE HEAD), among those now in DIR's history, as
+[{path, units}] sorted by path, reported even when the merge was clean.
+
+When some unit is in DIR's history and this call merged one or hit a
+conflict, it appends to LEDGER_DIR/_run.jsonl {"task": "_run", "event":
+"wave_merged", "wave": N (or "recovery": true), "units": [the units in DIR's
+history, in the given order], "head", "overlaps", "conflict_files"}.
+
+Prints one JSON object:
+  {"status": "merged"|"conflict", "head": <DIR's HEAD afterwards>,
+   "merged": [ids merged now], "skipped": [ids already merged],
+   "conflict_unit": id|null, "conflict_files": [paths], "overlaps": [...],
+   "in_history": [ids], "notes": [str]}
+Exit 0 when every unit is merged (or there was none: --recovery may have
+nothing to merge); 1 on a conflict; 2 on a usage error (no --wave or
+--recovery, both, a --wave that is not an integer >= 1, --wave with no
+--unit, an --unit without three values or with an unsafe id); 3 when DIR is
+not a clean git checkout, a BASE or HEAD is not a commit, or a git step
+fails.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+ENV = {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+SAFE_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+USAGE = "usage: merge-wave DIR LEDGER_DIR (--wave N | --recovery) [--unit ID BASE HEAD ...] [--known ID HEAD ...]"
+
+
+def fail(code, message):
+    print(f"merge-wave: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def git(directory, *args):
+    return subprocess.run(["git", "-C", directory, *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="surrogateescape", env=ENV)
+
+
+def parse(argv):
+    if len(argv) < 2 or not argv[0] or not argv[1] or argv[0].startswith("-") or argv[1].startswith("-"):
+        fail(2, USAGE)
+    directory, ledger = _shell.native_path(argv[0]), _shell.native_path(argv[1])
+    wave, recovery, units, known = None, False, [], []
+    rest = argv[2:]
+    while rest:
+        if rest[0] == "--wave" and len(rest) >= 2 and wave is None:
+            if not re.fullmatch(r"[1-9][0-9]*", rest[1]):
+                fail(2, f"--wave {rest[1]!r} is not an integer >= 1")
+            wave, rest = int(rest[1]), rest[2:]
+        elif rest[0] == "--recovery" and not recovery:
+            recovery, rest = True, rest[1:]
+        elif rest[0] == "--unit" and len(rest) >= 4 and all(not v.startswith("--") for v in rest[1:4]):
+            if not SAFE_ID.fullmatch(rest[1]):
+                fail(2, f"unsafe unit id {rest[1]!r}")
+            units.append((rest[1], rest[2], rest[3]))
+            rest = rest[4:]
+        elif rest[0] == "--known" and len(rest) >= 3 and all(not v.startswith("--") for v in rest[1:3]):
+            if not SAFE_ID.fullmatch(rest[1]):
+                fail(2, f"unsafe unit id {rest[1]!r}")
+            known.append((rest[1], rest[2]))
+            rest = rest[3:]
+        else:
+            fail(2, USAGE)
+    if (wave is None) == (not recovery):
+        fail(2, "give exactly one of --wave N and --recovery")
+    if wave is not None and not units:
+        fail(2, "--wave needs at least one --unit")
+    return directory, ledger, wave, units, known
+
+
+def commit_of(directory, ref):
+    res = git(directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}")
+    if res.returncode != 0 or not res.stdout.strip():
+        fail(3, f"{ref!r} is not a commit in {directory!r}; nothing changed")
+    return res.stdout.strip()
+
+
+def head_of(directory):
+    res = git(directory, "rev-parse", "--verify", "HEAD^{commit}")
+    if res.returncode != 0:
+        fail(3, f"cannot read HEAD in {directory!r}: {res.stderr.strip()}")
+    return res.stdout.strip()
+
+
+def changed(directory, base, head):
+    res = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--end-of-options", base, head)
+    if res.returncode != 0:
+        fail(3, f"git diff {base} {head} failed: {res.stderr.strip()}")
+    return [p for p in res.stdout.splitlines() if p]
+
+
+def main(argv):
+    _shell.setup_io()
+    directory, ledger, wave, units, known = parse(argv)
+    top = git(directory, "rev-parse", "--show-toplevel")
+    if top.returncode != 0:
+        fail(3, f"{directory!r} is not a git checkout")
+    dirty = git(directory, "status", "--porcelain", "--untracked-files=all")
+    if dirty.returncode != 0 or dirty.stdout.strip():
+        fail(3, f"{directory!r} has uncommitted changes; nothing merged:\n{dirty.stdout.rstrip()}")
+    # Every sha resolves before the first merge: a bad one changes nothing.
+    units = [(uid, commit_of(directory, base), commit_of(directory, head)) for uid, base, head in units]
+    known = [(uid, commit_of(directory, head)) for uid, head in known]
+
+    merged, skipped, notes = [], [], []
+    conflict_unit, conflict_files = None, []
+    for uid, _, head in units:
+        if git(directory, "merge-base", "--is-ancestor", head, "HEAD").returncode == 0:
+            skipped.append(uid)
+            continue
+        message = f"join recovery: merge {uid}" if wave is None else f"join wave {wave}: merge {uid}"
+        res = git(directory, "merge", "--no-ff", "--no-edit", "-m", message, "--end-of-options", head)
+        if res.returncode == 0:
+            merged.append(uid)
+            continue
+        files = git(directory, "-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=U")
+        conflict_files = sorted(p for p in files.stdout.splitlines() if p)
+        aborted = git(directory, "merge", "--abort")
+        if not conflict_files:
+            # Not a content conflict: git refused the merge for another reason.
+            notes.append(f"git merge of {uid} failed: {(res.stderr or res.stdout).strip()}")
+        if aborted.returncode != 0 and git(directory, "status", "--porcelain").stdout.strip():
+            fail(3, f"git merge --abort failed in {directory!r}: {aborted.stderr.strip()}")
+        conflict_unit = uid
+        break
+
+    head = head_of(directory)
+    inside = [u for u in units if u[0] in merged or u[0] in skipped]
+    in_history = [u[0] for u in inside] + [uid for uid, sha in known
+                                          if git(directory, "merge-base", "--is-ancestor", sha, "HEAD").returncode == 0]
+    by_path = {}
+    for uid, base, unit_head in inside:
+        for path in changed(directory, base, unit_head):
+            by_path.setdefault(path, []).append(uid)
+    overlaps = [{"path": p, "units": ids} for p, ids in sorted(by_path.items()) if len(ids) > 1]
+
+    if inside and (merged or conflict_unit is not None):
+        event = {"task": "_run", "event": "wave_merged"}
+        event.update({"wave": wave} if wave is not None else {"recovery": True})
+        event.update({"units": [u[0] for u in inside], "head": head, "overlaps": overlaps,
+                      "conflict_files": conflict_files})
+        res = subprocess.run([sys.executable, os.path.join(HERE, "ledger"), "append", ledger, "_run",
+                              json.dumps(event)], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", env=ENV)
+        if res.returncode != 0:
+            notes.append(f"recording wave_merged failed: {res.stderr.strip()}")
+
+    print(json.dumps({"status": "conflict" if conflict_unit is not None else "merged", "head": head,
+                      "merged": merged, "skipped": skipped, "conflict_unit": conflict_unit,
+                      "conflict_files": conflict_files, "overlaps": overlaps, "in_history": in_history,
+                      "notes": notes}))
+    sys.exit(1 if conflict_unit is not None else 0)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

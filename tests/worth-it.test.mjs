@@ -223,3 +223,38 @@ test('no history dir is fine', () => {
   const b = run([plan(3), '--max-lanes', '2', '--lane', 'T1', '--lane', 'T2,T3', '--project', '/x/proj', '--history-dir', bad]);
   assert.deepEqual([b.status, b.json.status, b.json.scale], [0, 'ok', null]);
 });
+
+// ---- 1.6.5: the join counted in waves (--join-deps) ----
+
+// T1-T3 one per lane, T4-T10 the join in d1a's shape: waves 1-2-4.
+const D1A_DEPS = ['T4:', 'T5:T4', 'T6:T4+T5', 'T7:T4', 'T8:T4+T7', 'T9:T7', 'T10:T7'];
+const d1aArgs = (p, deps = D1A_DEPS) => [p, '--max-lanes', '3', '--lane', 'T1', '--lane', 'T2', '--lane', 'T3',
+  '--join', 'T4,T5,T6,T7,T8,T9,T10', ...deps.flatMap((d) => ['--join-deps', d]), '--history-dir', NOWHERE];
+
+test('join waves count ceil(size / lanes)', () => {
+  const r = run(d1aArgs(plan(10)));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.json.status, 'ok', JSON.stringify(r.json));
+  // 1 (the lanes) + waves 1, 2, 4 at 3 at once: 1 + 1 + 2.
+  assert.equal(r.json.slots, 5);
+  assert.equal(r.json.saved, 5);
+  assert.ok(r.json.notes.includes('join waves 1-2-4 (declared files not checked)'), JSON.stringify(r.json.notes));
+});
+
+test('no --join-deps keeps a serial join', () => {
+  const r = run(d1aArgs(plan(10), []));
+  assert.equal(r.json.slots, 8);
+  assert.ok(!r.json.notes.some((n) => n.startsWith('join waves')));
+});
+
+test('--join-deps for an unknown id is unavailable', () => {
+  const r = run(d1aArgs(plan(10), ['T4:', 'T99:T4']));
+  assert.equal(r.status, 0);
+  assert.equal(r.json.status, 'unavailable');
+  assert.match(r.json.reason, /T99/);
+});
+
+test('slots takes join wave sizes', () => {
+  assert.deepEqual(module(['print(json.dumps([W.slots(0, [1, 1, 1], 7, 3, [1, 2, 4]), W.slots(0, [1, 1, 1], 7, 3)]))']),
+    [5, 8]);
+});

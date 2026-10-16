@@ -111,20 +111,20 @@ run the setup commands with: the message names CLAUDE_CODE_GIT_BASH_PATH);
 unreadable (nothing changed).
 """
 
-import datetime
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _locks  # noqa: E402
 import _owners  # noqa: E402
 import _shell  # noqa: E402
+import _snapshot  # noqa: E402
+from _snapshot import discard_changes, snapshot  # noqa: E402,F401 (snapshot: tests load it from setup)
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 # Variables that would point git at another repo than the one named.
@@ -136,10 +136,8 @@ RUN_ID = re.compile(r"^[a-z0-9-]+$")
 LANE_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
 
-class Failure(Exception):
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
+# One exception class with _snapshot, whose git steps raise it too.
+Failure = _snapshot.Failure
 
 
 def run_git(args, check=True):
@@ -291,8 +289,10 @@ class Repo:
                 self.git("worktree", "remove", norm)
 
 
-def worktree_state(repo, path, branch):
-    """'missing' (absent or empty dir) or 'reuse'; raises on anything else.
+def worktree_state(repo, path, branch, unit_prefix=None):
+    """'missing' (absent or empty dir), 'reuse', or 'unit' (a lane worktree
+    left on one of the run's join unit branches, whose name starts with
+    unit_prefix, 1.6.5); raises on anything else.
 
     A symlink is always refused, even one to an empty directory: git would
     create the worktree at the link's target, outside worktree_root.
@@ -314,69 +314,11 @@ def worktree_state(repo, path, branch):
             or os.path.realpath(common) != repo.common_dir):
         raise refuse
     head = run_git(["-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
+    if head.returncode == 0 and unit_prefix is not None and head.stdout.strip().startswith(unit_prefix):
+        return "unit"
     if head.returncode != 0 or head.stdout.strip() != branch:
         raise refuse
     return "reuse"
-
-
-def snapshot(path, run_id):
-    """Save the changes of the worktree at path in commits and point a run
-    ref at the last one; the files in the worktree are untouched.
-
-    The staged version first: git write-tree on the worktree's own index.
-    When that tree differs from HEAD's, it is committed on HEAD (the index
-    commit). Then every tracked change and untracked, non-ignored file goes,
-    through a temporary index, into a commit on top of the index commit, or
-    of HEAD when nothing was staged. write-tree can fail (an unmerged index,
-    a held index.lock): index_saved is then false, index_error holds git's
-    message, and the working snapshot is still made on HEAD.
-    Returns {"worktree", "ref", "commit", "index_commit", "index_saved"} and,
-    when index_saved is false, "index_error"."""
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    ref = f"refs/parallel-lanes/{run_id}/abandoned/{os.path.basename(path)}-{stamp}"
-    # Outside the raising helper: a failed write-tree is recorded, never fatal.
-    # It may refresh the index file, which the reset --hard after the snapshot
-    # replaces anyway.
-    staged = subprocess.run(["git", "-C", path, "write-tree"], capture_output=True, text=True,
-                            encoding="utf-8", errors="surrogateescape", env=ENV)
-    index_saved = staged.returncode == 0
-    index_commit = None
-    with tempfile.TemporaryDirectory() as tmp:
-        env = dict(ENV, GIT_INDEX_FILE=os.path.join(tmp, "index"))
-
-        def git(*args):
-            res = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
-                                 encoding="utf-8", errors="surrogateescape", env=env)
-            if res.returncode != 0:
-                raise Failure(1, f"saving the changes in {path} failed: git {args[0]}: {res.stderr.strip()}")
-            return res.stdout.strip()
-
-        identity = ("-c", "user.name=parallel-lanes", "-c", "user.email=parallel-lanes@localhost")
-        if index_saved and staged.stdout.strip() != git("rev-parse", "--verify", "HEAD^{tree}"):
-            index_commit = git(*identity, "commit-tree", staged.stdout.strip(), "-p", "HEAD", "-m",
-                               f"parallel-lanes {run_id}: staged changes in {path} saved before setup discarded them")
-        git("read-tree", "HEAD")
-        git("add", "-A")
-        tree = git("write-tree")
-        commit = git(*identity, "commit-tree", tree, "-p", index_commit or "HEAD", "-m",
-                     f"parallel-lanes {run_id}: uncommitted changes in {path} saved before setup discarded them")
-        git("update-ref", ref, commit)
-    entry = {"worktree": path, "ref": ref, "commit": commit, "index_commit": index_commit,
-             "index_saved": index_saved}
-    if not index_saved:
-        entry["index_error"] = staged.stderr.strip() or f"git write-tree exited {staged.returncode}"
-    return entry
-
-
-def discard_changes(path, run_id, discarded, preserved):
-    status = run_git(["-C", path, "status", "--porcelain"]).stdout
-    for line in status.splitlines():
-        if line:
-            discarded.append(f"{path}: {line}")
-    if status:
-        preserved.append(snapshot(path, run_id))
-        run_git(["-C", path, "reset", "-q", "--hard", "HEAD"])
-        run_git(["-C", path, "clean", "-q", "-fd"])
 
 
 def check_lock(run_id, owner):
@@ -470,7 +412,10 @@ def setup(m, owner=None):
     feature_state = (worktree_state(repo, feature, branch)
                      if repo_cfg["mode"] == "shadow" else None)
     lanes = [] if lite else [(lane, lane_dir(m, lane), lane_branch(m, lane)) for lane in m["lanes"]]
-    lane_states = [worktree_state(repo, path, lb) for _, path, lb in lanes]
+    # A lane worktree a join wave left on a unit branch (1.6.5) goes back to
+    # its lane branch below; a lane with new work then runs as usual.
+    unit_prefix = "pl-" + m["run_id"] + "-u-"
+    lane_states = [worktree_state(repo, path, lb, unit_prefix) for _, path, lb in lanes]
     if any(setup_commands(m, lane_id) for lane_id in [None] + [lane["id"] for lane in m["lanes"]]):
         _shell.find_bash()
 
@@ -478,6 +423,7 @@ def setup(m, owner=None):
 
     discarded = []
     preserved = []
+    returned = []
     # Drops only the records of the run's own worktrees whose directory is gone.
     repo.prune_run_worktrees(repo_cfg["worktree_root"])
     if not repo.has_branch(branch):
@@ -488,7 +434,13 @@ def setup(m, owner=None):
         ensure_worktree(repo, feature, branch, base, feature_state, m["run_id"], discarded, preserved)
     check_branch(feature, branch)
     for (_, path, lb), state in zip(lanes, lane_states):
-        ensure_worktree(repo, path, lb, branch, state, m["run_id"], discarded, preserved)
+        if state == "unit":
+            unit = run_git(["-C", path, "symbolic-ref", "--short", "HEAD"]).stdout.strip()
+            discard_changes(path, m["run_id"], discarded, preserved)
+            run_git(["-C", path, "checkout", "-q", lb])
+            returned.append({"worktree": path, "from": unit})
+        else:
+            ensure_worktree(repo, path, lb, branch, state, m["run_id"], discarded, preserved)
         check_branch(path, lb)
 
     feature_cmds = setup_commands(m, None)
@@ -527,7 +479,7 @@ def setup(m, owner=None):
         raise Failure(1, f"cannot write the owner map {owners_file!r}: {e}")
     worktrees = {lane["id"]: feature if lite else lane_dir(m, lane) for lane in m["lanes"]}
     return {"feature_head": head, "worktrees": worktrees, "discarded": discarded, "preserved": preserved,
-            "setup_skipped": skipped}
+            "setup_skipped": skipped, "returned": returned}
 
 
 def main(argv):

@@ -866,3 +866,45 @@ test('cleanup: the plan alone takes no lock', () => {
   cleanupOk(c);
   assert.ok(!existsSync(c.active) || readdirSync(c.active).length === 0, 'the active dir holds no file');
 });
+
+// ---- 1.6.5: join unit branches (pl-<run>-u-<unit>) ----
+
+test('merged unit branches and their worktrees are removed', () => {
+  const c = newCase();
+  git(c.lanes.a, 'checkout', '-q', '-b', 'pl-r1-u-J1', 'feature/x');
+  commitFile(c.lanes.a, 'j1.txt', 'unit J1\n');
+  git(c.project, 'merge', '-q', '--no-ff', '-m', 'join wave 1: merge J1', 'pl-r1-u-J1');
+  const plan = cleanupOk(c);
+  const wt = plan.worktrees.find((w) => samePath(w.path, c.lanes.a));
+  assert.ok(wt, JSON.stringify(plan.worktrees));
+  assert.equal(wt.branch, 'pl-r1-u-J1');
+  assert.equal(wt.action, 'remove', JSON.stringify(wt));
+  const unit = plan.branches.find((b) => b.branch === 'pl-r1-u-J1');
+  assert.ok(unit, JSON.stringify(plan.branches));
+  assert.equal(unit.action, 'remove', JSON.stringify(unit));
+  assert.equal(plan.foreign.length, 0, JSON.stringify(plan.foreign));
+  cleanupOk(c, ['--yes']);
+  assert.equal(sh('git', ['-C', c.project, 'rev-parse', '--verify', '--quiet', 'refs/heads/pl-r1-u-J1']).code, 1);
+  assert.ok(!existsSync(c.lanes.a));
+});
+
+test('an unmerged unit branch is kept', () => {
+  const c = newCase();
+  git(c.lanes.b, 'checkout', '-q', '-b', 'pl-r1-u-J2', 'feature/x');
+  commitFile(c.lanes.b, 'j2.txt', 'unit J2, blocked\n');
+  git(c.lanes.b, 'checkout', '-q', 'pl-r1-b');
+  const plan = cleanupOk(c);
+  const unit = plan.branches.find((b) => b.branch === 'pl-r1-u-J2');
+  assert.ok(unit, JSON.stringify(plan.branches));
+  assert.equal(unit.action, 'keep');
+  assert.match(unit.reason, /not merged/);
+  cleanupOk(c, ['--yes']);
+  assert.equal(sh('git', ['-C', c.project, 'rev-parse', '--verify', '--quiet', 'refs/heads/pl-r1-u-J2']).code, 0);
+});
+
+test('another run\'s unit branch is not claimed', () => {
+  const c = newCase();
+  git(c.project, 'branch', 'pl-r2-u-J1', 'feature/x');
+  const plan = cleanupOk(c);
+  assert.ok(!plan.branches.some((b) => b.branch === 'pl-r2-u-J1'), JSON.stringify(plan.branches));
+});

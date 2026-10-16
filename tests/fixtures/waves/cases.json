@@ -1,0 +1,891 @@
+[
+ {
+  "name": "m1a",
+  "units": [
+   {
+    "id": "J1",
+    "files": [
+     "f1",
+     "f2",
+     "f3",
+     "f4",
+     "f5",
+     "f6"
+    ],
+    "depends_on": [
+     "I4",
+     "I5",
+     "I6",
+     "I7",
+     "I8",
+     "PL2",
+     "PL3"
+    ]
+   },
+   {
+    "id": "J2",
+    "files": [
+     "f7",
+     "f8",
+     "f9"
+    ],
+    "depends_on": [
+     "J1",
+     "N1"
+    ]
+   },
+   {
+    "id": "J3",
+    "files": [
+     "f10",
+     "f11"
+    ],
+    "depends_on": [
+     "I7",
+     "PL3",
+     "P3"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "J1",
+    "J3"
+   ],
+   [
+    "J2"
+   ]
+  ]
+ },
+ {
+  "name": "sb1",
+  "units": [
+   {
+    "id": "JB1",
+    "files": [
+     "f12",
+     "f13",
+     "f14",
+     "f15"
+    ],
+    "depends_on": [
+     "CR3",
+     "CR4",
+     "AU2",
+     "AU3",
+     "WD1"
+    ]
+   },
+   {
+    "id": "JB2",
+    "files": [
+     "f16",
+     "f17",
+     "f8",
+     "f18",
+     "f19"
+    ],
+    "depends_on": [
+     "AU2",
+     "NW1",
+     "NW2",
+     "NW3",
+     "NW4",
+     "WD2",
+     "JB1"
+    ]
+   },
+   {
+    "id": "JB3",
+    "files": [
+     "f20",
+     "f21",
+     "f22",
+     "f23",
+     "f10"
+    ],
+    "depends_on": [
+     "CR4",
+     "NW1",
+     "PL1",
+     "PL2"
+    ]
+   },
+   {
+    "id": "JB4",
+    "files": [
+     "f24",
+     "f25"
+    ],
+    "depends_on": [
+     "BP1",
+     "JB3"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "JB1",
+    "JB3"
+   ],
+   [
+    "JB2",
+    "JB4"
+   ]
+  ]
+ },
+ {
+  "name": "sc1",
+  "units": [
+   {
+    "id": "CJ1",
+    "files": [
+     "f26",
+     "f27",
+     "f28",
+     "f29",
+     "f30",
+     "f31",
+     "f32",
+     "f33",
+     "f34",
+     "f35",
+     "f12",
+     "f14"
+    ],
+    "depends_on": [
+     "CR2",
+     "CR3",
+     "CR4",
+     "CK1",
+     "CK2",
+     "CA1",
+     "CA4",
+     "CA5",
+     "CV2",
+     "CH3",
+     "CH9",
+     "CH5",
+     "CH6"
+    ]
+   },
+   {
+    "id": "CJ2",
+    "files": [
+     "f3",
+     "f36",
+     "f37",
+     "f7",
+     "f16",
+     "f1",
+     "f8",
+     "f38",
+     "f6",
+     "f9",
+     "f18",
+     "f39",
+     "f40",
+     "f4"
+    ],
+    "depends_on": [
+     "CR5",
+     "CA2",
+     "CA3",
+     "CI1",
+     "CS3",
+     "CS4",
+     "CV3",
+     "CV4",
+     "CV5",
+     "CH5",
+     "CH6",
+     "CH7",
+     "CJ1"
+    ]
+   },
+   {
+    "id": "CJ3",
+    "files": [
+     "f41",
+     "f42",
+     "f8",
+     "f38",
+     "f16",
+     "f43",
+     "f44"
+    ],
+    "depends_on": [
+     "CR5",
+     "CJ1",
+     "CJ2"
+    ]
+   },
+   {
+    "id": "CJ4",
+    "files": [
+     "f45",
+     "f46",
+     "f47",
+     "f48",
+     "f49",
+     "f50",
+     "f51",
+     "f52"
+    ],
+    "depends_on": [
+     "CA3",
+     "CI1",
+     "CV3",
+     "CV2",
+     "CV4",
+     "CV5",
+     "CH5",
+     "CH6"
+    ]
+   },
+   {
+    "id": "CJ5",
+    "files": [
+     "f53",
+     "f54",
+     "f55",
+     "f56",
+     "f57",
+     "f58"
+    ],
+    "depends_on": [
+     "CR5",
+     "CS3",
+     "CJ3"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "CJ1",
+    "CJ4"
+   ],
+   [
+    "CJ2"
+   ],
+   [
+    "CJ3"
+   ],
+   [
+    "CJ5"
+   ]
+  ]
+ },
+ {
+  "name": "d1a",
+  "units": [
+   {
+    "id": "DJ1",
+    "files": [
+     "f59",
+     "f60",
+     "f3",
+     "f12",
+     "f1",
+     "f61",
+     "f62",
+     "f6",
+     "f14",
+     "f4",
+     "f18",
+     "f43",
+     "f9"
+    ],
+    "depends_on": [
+     "DS2",
+     "DU2",
+     "DU4",
+     "DPL2",
+     "DI2",
+     "DI3",
+     "DI4",
+     "DI5",
+     "DI6",
+     "DI7",
+     "DW1",
+     "DW2",
+     "DW4",
+     "DW5",
+     "DC1",
+     "DA1",
+     "DT2"
+    ]
+   },
+   {
+    "id": "DJ2",
+    "files": [
+     "f63",
+     "f64",
+     "f8",
+     "f16",
+     "f65",
+     "f66",
+     "f67",
+     "f36",
+     "f7",
+     "f41",
+     "f68",
+     "f69",
+     "f70",
+     "f71",
+     "f72",
+     "f39",
+     "f18",
+     "f43",
+     "f9"
+    ],
+    "depends_on": [
+     "DS3",
+     "DN1",
+     "DN2",
+     "DN3",
+     "DU1",
+     "DU2",
+     "DU3",
+     "DU5",
+     "DI2",
+     "DI7",
+     "DW3",
+     "DT1",
+     "DJ1"
+    ]
+   },
+   {
+    "id": "DJ3",
+    "files": [
+     "f73",
+     "f74",
+     "f75"
+    ],
+    "depends_on": [
+     "DP2",
+     "DU1",
+     "DU2",
+     "DT1",
+     "DJ1",
+     "DJ2"
+    ]
+   },
+   {
+    "id": "DJ4",
+    "files": [
+     "f76",
+     "f77",
+     "f78",
+     "f79",
+     "f80",
+     "f81"
+    ],
+    "depends_on": [
+     "DS3",
+     "DN1",
+     "DN2",
+     "DN3",
+     "DPL2",
+     "DI2",
+     "DI3",
+     "DI4",
+     "DI7",
+     "DW3",
+     "DW4",
+     "DJ1"
+    ]
+   },
+   {
+    "id": "DJ5",
+    "files": [
+     "f82",
+     "f83"
+    ],
+    "depends_on": [
+     "DW3",
+     "DW5",
+     "DC1",
+     "DJ1",
+     "DJ4"
+    ]
+   },
+   {
+    "id": "DJ6",
+    "files": [
+     "f84",
+     "f85"
+    ],
+    "depends_on": [
+     "DW1",
+     "DW2",
+     "DA1",
+     "DJ4"
+    ]
+   },
+   {
+    "id": "DJ7",
+    "files": [
+     "f86",
+     "f87"
+    ],
+    "depends_on": [
+     "DPL2",
+     "DI5",
+     "DI6",
+     "DW4",
+     "DC1",
+     "DJ4"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "DJ1"
+   ],
+   [
+    "DJ2",
+    "DJ4"
+   ],
+   [
+    "DJ3",
+    "DJ5",
+    "DJ6",
+    "DJ7"
+   ]
+  ]
+ },
+ {
+  "name": "no-field",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ]
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ]
+   },
+   {
+    "id": "c",
+    "files": [
+     "src/c.cs"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ],
+   [
+    "c"
+   ]
+  ]
+ },
+ {
+  "name": "empty-deps",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "c",
+    "files": [
+     "src/c.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a",
+    "b",
+    "c"
+   ]
+  ]
+ },
+ {
+  "name": "outside-ids-ignored",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": [
+     "L1"
+    ]
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ],
+    "depends_on": [
+     "L2",
+     "P1"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a",
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "file-overlap",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/X.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "./SRC//x.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "file-overlap-backslash",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src\\y.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/Y.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "overlap-cascade",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "s.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "s.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "c",
+    "files": [
+     "src/c.cs"
+    ],
+    "depends_on": [
+     "b"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ],
+   [
+    "c"
+   ]
+  ]
+ },
+ {
+  "name": "overlap-moves-past-taken-wave",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "s.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "t.cs"
+    ],
+    "depends_on": [
+     "a"
+    ]
+   },
+   {
+    "id": "c",
+    "files": [
+     "s.cs",
+     "t.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ],
+   [
+    "c"
+   ]
+  ]
+ },
+ {
+  "name": "edge",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [
+   {
+    "unit": "b",
+    "producer": "a"
+   }
+  ],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "forward-edge-ignored",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [
+   {
+    "unit": "a",
+    "producer": "b"
+   }
+  ],
+  "expected": [
+   [
+    "a",
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "forward-dep-ignored",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": [
+     "b"
+    ]
+   },
+   {
+    "id": "b",
+    "files": [
+     "src/b.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a",
+    "b"
+   ]
+  ]
+ },
+ {
+  "name": "batch",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b1-b2",
+    "tasks": [
+     "b1",
+     "b2"
+    ],
+    "files": [
+     "x.cs",
+     "y.cs"
+    ],
+    "depends_on": [
+     "a"
+    ]
+   },
+   {
+    "id": "c",
+    "files": [
+     "src/c.cs"
+    ],
+    "depends_on": [
+     "b2"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ],
+   [
+    "b1-b2"
+   ],
+   [
+    "c"
+   ]
+  ]
+ },
+ {
+  "name": "single",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "src/a.cs"
+    ]
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a"
+   ]
+  ]
+ },
+ {
+  "name": "empty",
+  "units": [],
+  "edges": [],
+  "expected": []
+ },
+ {
+  "name": "batch-ids-independent",
+  "units": [
+   {
+    "id": "a",
+    "files": [
+     "a.cs"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "b1-b2",
+    "tasks": [
+     "b1",
+     "b2"
+    ],
+    "files": [
+     "x.cs"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "a",
+    "b1-b2"
+   ]
+  ]
+ }
+]

@@ -154,7 +154,7 @@ test('lite: the lane works in the feature checkout on the feature branch with le
 });
 
 test('lite: an empty prelude starts the lane at the saved setup start point', async () => {
-  const m = liteManifest({ prelude: [], start_points: { prelude: H('SP0'), join: H('SJ0') } });
+  const m = liteManifest({ prelude: [], start_points: { prelude: H('SP0'), join: H('SJ0') }, join_started: false });
   const script = {
     ...taskScript(['T2', 'T3', 'T4']),
     'final review': [{ findings: [], cannot_verify: [], head: H('T4-h') }],

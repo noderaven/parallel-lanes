@@ -5,7 +5,7 @@
 #
 # Concatenates, in this order: the meta literal of src/main.js (through its
 # first line that is exactly "};"), a generated-file comment, rules,
-# validate, plan, prompts-task, prompts-phase, adjudicator, budget, engine,
+# validate, plan, prompts-task, prompts-phase, adjudicator, budget, waves, engine,
 # phases, and the rest of src/main.js (the script body). Every @VERSION@ in
 # the output becomes the version in VERSION beside src/ (one x.y.z line; the
 # build fails and writes nothing otherwise), so the meta description and the
@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-modules=(rules validate plan prompts-task prompts-phase adjudicator budget engine acceptance phases)
+modules=(rules validate plan prompts-task prompts-phase adjudicator budget waves engine acceptance phases)
 
 for name in main "${modules[@]}"; do
   if [ ! -f "$src/$name.js" ]; then
