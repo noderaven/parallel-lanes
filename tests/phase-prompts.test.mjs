@@ -421,3 +421,94 @@ test('final reviewers run focused checks in their own scratch folder', () => {
     assert.ok(lines.includes(SCRATCH), `${name}: ${p}`);
   }
 });
+
+// ---- 1.6.8: the start check after a failing verify (spec 4.4) ----
+
+const { startCheckPrompt, startCheckSchema } = await loadHelpers(['startCheckPrompt', 'startCheckSchema']);
+
+const START = H('s');
+const failingVerify = () => ({
+  head: H('f1'), ok: false, results: [
+    { group: 'test', command: 'npm test', exit: 1, log: '/work/ledger/checks/verify-f1.1.log', tail: 'FAIL slow test' },
+    { group: 'lint', command: 'npm run lint', exit: 0, log: '/work/ledger/checks/verify-f1.2.log', tail: 'clean' },
+  ],
+});
+// A classified start check (classifyStartCheck's shape) for the verify above.
+const classified = (atStart, head = ['slow test', 'new test'], start = ['slow test']) => ({
+  status: 'checked', start_sha: START, evidence: '/work/ledger/checks/start.1.json', verify_head: H('f1'),
+  commands: [{ verify_command: 'npm test', start_command: 'npm test -- -t slow', narrowed: true, exit_at_start: 1,
+    failed_at_head: head, failed_at_start: start, not_run: [], at_start: atStart }],
+  all_fail: atStart === 'fails', some_fail: atStart === 'fails', notes: '',
+});
+
+test('the start-check prompt names its worktree, the start sha, the start phase and reserve, and the removal', () => {
+  const m = manifest({ start_points: { prelude: START },
+    repo: { ...manifest().repo, worktree_root: '/work/my wt' } });
+  const p = startCheckPrompt(m, failingVerify(), H('f1'));
+  const text = flat(p);
+  const wt = "'/work/my wt/start'";
+  assert.ok(p.includes(`git -C '/work/repo' worktree add --detach ${wt} '${START}'`), p);
+  assert.ok(text.includes(START) && text.includes(H('f1')), p);
+  // The ownership check: a worktree of this repo detached at the start sha is the run's own.
+  assert.ok(text.includes(`detached at ${START}`) && text.includes('worktree list --porcelain'), p);
+  assert.ok(/Anything else at that path.*return status unavailable/.test(text), p);
+  assert.ok(p.includes(`git -C '/work/repo' worktree remove --force ${wt}`), p);
+  assert.ok(p.includes("git -C '/work/repo' worktree prune"), p);
+  assert.ok(text.includes('--force is allowed only on this path'), p);
+  // The setup commands run in the start worktree; the failing command and its log are named.
+  assert.ok(p.includes(`cd ${wt} && npm ci`), p);
+  assert.ok(text.includes('npm test (exit 1, group test)') && text.includes('/work/ledger/checks/verify-f1.1.log'), p);
+  assert.ok(!text.includes('npm run lint (exit 0'), 'a passing command is not listed');
+  // One run-checks call in that worktree, in the start phase, reserved as start.
+  assert.ok(p.includes(`${RESERVE}'start'`), p);
+  const start = p.split('\n').find((l) => l.includes("/scripts/run-checks' ") && l.includes("--phase 'start'"));
+  assert.ok(start && start.includes(`cd ${wt} && `) && start.includes(`/scripts/run-checks' ${wt} --out '<P>'`), p);
+  assert.ok(start.includes("--root '/work/ledger'"), start);
+  assert.ok(p.includes(WAIT), p);
+  // It never touches the feature checkout and keeps its own checkout rule.
+  assert.ok(text.includes("do not change, stage or commit anything in the feature checkout '/work/repo'"), p);
+  assert.ok(text.includes(`every shell command starts with cd ${wt} &&`), p);
+  assert.ok(!text.includes("every shell command starts with cd '/work/repo' &&"), p);
+  assert.ok(text.includes('is not failing or passing: list it in not_run'), p);
+  // Shadow mode administers worktrees through the shadow git dir.
+  const shadow = manifest({ start_points: { prelude: START },
+    repo: { ...manifest().repo, mode: 'shadow', git_dir: '/work/shadow.git' } });
+  assert.ok(startCheckPrompt(shadow, failingVerify(), H('f1'))
+    .includes(`git --git-dir='/work/shadow.git' worktree add --detach '/work/wt/start' '${START}'`));
+  const s = startCheckSchema();
+  assert.deepEqual(s.properties.status.enum, ['checked', 'unavailable']);
+  assert.deepEqual(s.required, ['status', 'start_sha', 'evidence', 'results', 'notes']);
+  assert.deepEqual(s.properties.results.items.required, ['verify_command', 'start_command', 'narrowed', 'exit_at_start',
+    'failed_at_head', 'failed_at_start', 'not_run']);
+});
+
+test('the repair prompt forbids worktrees outside the feature dir and carries the start check', () => {
+  const m = manifest({ start_points: { prelude: START } });
+  const plain = flat(verifyRepairPrompt(m, failingVerify(), H('f1'), 1));
+  assert.ok(plain.includes('Never create a worktree or checkout outside /work/repo.'), plain);
+  assert.ok(!plain.includes('start point'), plain);
+  const partly = flat(verifyRepairPrompt(m, failingVerify(), H('f1'), 1, classified('partly')));
+  assert.ok(partly.includes(`npm test: partly: slow test fail at the start point ${START} too`), partly);
+  assert.ok(partly.includes('new test'), partly);
+  assert.ok(partly.includes('/work/ledger/checks/start.1.json'), partly);
+  const passes = flat(verifyRepairPrompt(m, failingVerify(), H('f1'), 1, classified('passes', ['slow test'], [])));
+  assert.ok(passes.includes(`npm test: passes at the start point ${START}: this run broke it`), passes);
+  const unknown = flat(verifyRepairPrompt(m, failingVerify(), H('f1'), 1, classified('unknown')));
+  assert.ok(unknown.includes('npm test: unknown: no conclusion'), unknown);
+  const none = flat(verifyRepairPrompt(m, failingVerify(), H('f1'), 1, { status: 'unavailable', why: 'budget',
+    start_sha: START, evidence: null, verify_head: H('f1'), commands: [], all_fail: false, some_fail: false, notes: '' }));
+  assert.ok(none.includes('The start check did not run (budget): no conclusion'), none);
+});
+
+test('the final re-review gets the start check beside the failing verify', () => {
+  const m = manifest({ start_points: { prelude: START } });
+  const f = [{ id: 'F1', severity: 'important', file: 'src/a.js', line: 1, issue: 'x', fix: 'y', dispositions: [] }];
+  const p = flat(finalReReviewPrompt(m, H('tip'), H('f1'), f, failingVerify(), [], classified('fails', ['slow test'],
+    ['slow test'])));
+  const verifyAt = p.indexOf(`The project checks already ran at ${H('f1')}`);
+  const startAt = p.indexOf(`npm test: fails at the start point ${START} too: slow test`);
+  assert.ok(verifyAt >= 0 && startAt > verifyAt, p);
+  assert.ok(p.includes('predates this run: do not hold a finding open over that failure alone'), p);
+  const without = flat(finalReReviewPrompt(m, H('tip'), H('f1'), f, failingVerify(), []));
+  assert.ok(!without.includes('start point'), without);
+});

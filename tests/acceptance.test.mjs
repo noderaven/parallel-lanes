@@ -192,6 +192,59 @@ test('a check that exits 75 (busy) or 124 (timed out) at the delivered head stil
   }
 });
 
+// ---- 1.6.8: the start check (spec 4.4 "Acceptance") ----
+
+// Two failing commands at SHA, and a start check made for SHA whose
+// classification of each is given.
+function startChecked(testAt, lintAt, head = SHA) {
+  const input = passing();
+  input.m.commands = { test: ['npm test'], lint: ['npm run lint'], build: [] };
+  input.verify = {
+    ...input.verify, ok: false, results: [
+      { group: 'test', command: 'npm test', exit: 1 },
+      { group: 'lint', command: 'npm run lint', exit: 2 },
+    ],
+  };
+  const cmd = (command, exit, tests, at) => ({
+    verify_command: command, start_command: command, narrowed: false, exit_at_start: exit,
+    failed_at_head: tests, failed_at_start: tests, not_run: [], at_start: at,
+  });
+  input.start_check = {
+    status: 'checked', start_sha: 's0', evidence: '/work/ledger/checks/start.1.json', verify_head: head,
+    commands: [cmd('npm test', 1, ['slow test', 'other test'], testAt), cmd('npm run lint', 2, ['rule x'], lintAt)],
+    all_fail: testAt === 'fails' && lintAt === 'fails', some_fail: testAt === 'fails' || lintAt === 'fails', notes: '',
+  };
+  return input;
+}
+
+test('every failing command failing at the start is checks_failed_at_start, still rejected', () => {
+  const a = acceptanceOf(startChecked('fails', 'fails'));
+  assert.equal(a.status, 'rejected');
+  assert.deepEqual(kinds(a), [['checks_failed_at_start', 'failed']]);
+  assert.equal(a.reasons[0].detail, 'failing at d1 and at the start point s0: npm test (exit 1): slow test, other test; '
+    + 'npm run lint (exit 2): rule x; evidence /work/ledger/checks/start.1.json');
+  assert.deepEqual(a.warnings, []);
+});
+
+test('some commands failing at the start: checks_failed plus the warning', () => {
+  const a = acceptanceOf(startChecked('fails', 'partly'));
+  assert.equal(a.status, 'rejected');
+  assert.deepEqual(kinds(a), [['checks_failed', 'failed']]);
+  assert.equal(a.reasons[0].detail, 'failing at d1: npm test (exit 1), npm run lint (exit 2)');
+  assert.deepEqual(a.warnings, ['fails at the start point s0 too: npm test']);
+});
+
+test('a start check for another head changes nothing', () => {
+  const plain = acceptanceOf({ ...startChecked('fails', 'fails'), start_check: null });
+  for (const input of [startChecked('fails', 'fails', 'other'), startChecked('passes', 'unknown'),
+    { ...startChecked('fails', 'fails'), start_check: { status: 'unavailable', why: 'budget', commands: [],
+      verify_head: SHA, all_fail: false, some_fail: false } }]) {
+    const a = acceptanceOf(input);
+    assert.deepEqual([a.status, a.reasons, a.warnings], [plain.status, plain.reasons, plain.warnings]);
+  }
+  assert.deepEqual(kinds(plain), [['checks_failed', 'failed']]);
+});
+
 test('untracked build output stays a warning', () => {
   const input = passing();
   input.verify = { ...input.verify, clean: false, tracked_before: [], tracked_after: [] };
