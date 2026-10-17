@@ -1593,6 +1593,12 @@ test('an implement retry uses the fix message only when review findings are behi
   assert.ok(later(reviewed).includes(`${TASK_FIX_MESSAGE} T2`), reviewed);
   assert.ok(reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1')).includes('chore: continue Task <id>'),
     'reviewers are told the continuation message');
+  // The engine's own commits: the join merges (both forms) and the wave checks fix.
+  const review = reviewPrompt(m, task('T2'), WHERE, H('b0'), H('h1'));
+  for (const part of ['`chore: join wave <n>: merge <unit>`', '`chore: join recovery: merge <unit>`',
+    '`fix: make the wave checks pass`']) {
+    assert.ok(review.includes(part), `${part}: ${review}`);
+  }
 });
 
 test('the final fix and the post-integrate fix use their own messages', async () => {

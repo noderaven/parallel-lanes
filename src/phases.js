@@ -898,6 +898,8 @@ async function runAll(manifest, io) {
   // run with the sha to merge by hand (supervised). With checks (the last
   // multi-unit wave's, design 4.4) the merge agent runs them; a failure gets
   // one fix, its re-review and a recheck (autonomous) or stops (supervised).
+  // A merge git refused (status failed, or a conflict with no files: 1.6.7
+  // design 4.3) stops the run in both autonomies with no resolver.
   // entry is the wave's report entry, filled in. Returns {head} or {stopped}.
   const mergeUnits = async (wave, units, checks, entry, known = []) => {
     const name = wave === null ? 'recovery' : `wave ${wave}`;
@@ -906,13 +908,24 @@ async function runAll(manifest, io) {
       r = await callM(`${name} merge`, 'Join', waveMergePrompt(m, wave, units, checks, known), waveMergeSchema(),
         sonnetHigh);
       if (state.refused.length > 0) return { stopped: 'an agent was refused' };
-      if (!r || r.status !== 'conflict') break;
+      // Worded so the transient rule relaunches it (reference.md).
+      if (!r) return { stopped: `no result from ${name} merge` };
+      const noFiles = !Array.isArray(r.conflict_files) || r.conflict_files.length === 0;
+      if (r.status === 'failed' || (r.status === 'conflict' && noFiles)) {
+        if (isSha(r.head)) entry.head = r.head;
+        if (Array.isArray(r.in_history)) entry.in_history = r.in_history;
+        const what = r.failed_unit && r.error ? `the merge of ${r.failed_unit} failed: ${r.error}`
+          : `the merge failed: ${r.notes}`;
+        return { stopped: `join ${name}: ${what}` };
+      }
+      if (r.status !== 'conflict') break;
       const unit = units.find((u) => u.id === r.conflict_unit)
         || units.find((u) => !(Array.isArray(r.merged) ? r.merged : []).includes(u.id)) || units[0];
       const files = Array.isArray(r.conflict_files) ? r.conflict_files : [];
       for (const f of files) if (!entry.conflict_files.includes(f)) entry.conflict_files.push(f);
       if (!autonomous) {
-        const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
+        const message = wave === null ? `chore: join recovery: merge ${unit.id}`
+          : `chore: join wave ${wave}: merge ${unit.id}`;
         const git = `git -C ${shellQuote(featureDir(m))} ${gitIdentityArgs(m)}`;
         return { stopped: `join ${name}: ${unit.id} conflicts in ${files.join(', ') || 'files git reported'}; `
           + `merge it by hand with ${git}merge --no-ff -m ${shellQuote(message)} `
@@ -927,9 +940,11 @@ async function runAll(manifest, io) {
       }
       for (const f of files) if (!entry.resolved_files.includes(f)) entry.resolved_files.push(f);
     }
-    if (!r || r.status !== 'done' || !isSha(r.head)) {
-      return { stopped: `join ${name}: the merge failed: ${r ? r.notes : `no result from ${name} merge`}` };
-    }
+    if (r.status !== 'done' || !isSha(r.head)) return { stopped: `join ${name}: the merge failed: ${r.notes}` };
+    // Every unit asked for must now be in the history (1.6.7 design 4.3).
+    const landed = [...(Array.isArray(r.merged) ? r.merged : []), ...(Array.isArray(r.in_history) ? r.in_history : [])];
+    const left = units.filter((u) => !landed.includes(u.id)).map((u) => u.id);
+    if (left.length > 0) return { stopped: `join ${name}: the merge left out ${left.join(', ')}` };
     let head = r.head;
     entry.head = head;
     entry.overlaps = Array.isArray(r.overlaps) ? r.overlaps : [];

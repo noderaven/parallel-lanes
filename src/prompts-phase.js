@@ -466,9 +466,9 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   may list only merges (two parents) of the lane branches above, integration or post-integration fix',
     '   commits (yours, or from an earlier attempt in this run), and commits an earlier attempt at a join task',
     `   made (join tasks: ${joinIds}; their recorded commits are in ${m.repo.ledger_dir}/join.jsonl).`,
-    "   A join that ran in waves also merged its units' heads ('join wave <n>: merge <unit>' and",
-    "   'join recovery: merge <unit>', a resolver's included) and may have a wave checks fix",
-    '   (`fix: make the wave checks pass`).',
+    "   A join that ran in waves also merged its units' heads ('chore: join wave <n>: merge <unit>' and",
+    "   'chore: join recovery: merge <unit>', or the same without 'chore: ' from before 1.6.7, a resolver's",
+    '   included) and may have a wave checks fix (`fix: make the wave checks pass`).',
     ...finalFixes,
     "   Any other commit landed on the feature branch outside the run's steps: fail listing it (do not",
     '   rewrite history).',
@@ -572,7 +572,10 @@ function waveMergePrompt(m, wave, units, checks = [], known = []) {
     '   conflicts and stops there, records the wave in the ledger, and prints one JSON line. Do not merge',
     '   anything yourself, resolve a conflict, or change any file.',
     '2. If it printed status conflict, stop: return status conflict with its head, merged, conflict_unit,',
-    '   conflict_files and overlaps. If it exited 2 or 3, stop: return status failed with its message.',
+    '   conflict_files and overlaps. If it exited 4 (status failed: git refused a merge), stop: return status',
+    '   failed with its failed_unit, error, merged, in_history and head; run no checks;',
+    '   do not change git config, set an identity, or retry the merge.',
+    '   If it exited 2 or 3, stop: return status failed with its message.',
     ...(run === null ? [] : [
       `3. It merged every unit: run the wave's checks on the merged tip (the last wave with more than one unit,`,
       "   whose merge no later task's checks cover). One run-checks call:",
@@ -591,7 +594,8 @@ function waveMergePrompt(m, wave, units, checks = [], known = []) {
     phaseRules(m),
     '',
     'Return status done (every unit merged), conflict or failed; head = the head merge-wave printed; merged,',
-    'conflict_unit (empty when none), conflict_files, overlaps and in_history copied from its JSON;',
+    'conflict_unit (empty when none), conflict_files, overlaps, in_history, failed_unit and error (empty when',
+    'none) copied from its JSON;',
     ...(run === null ? [] : ['checks = {ok, unfinished, notes} for the checks of step 3 (notes: the failing commands);']),
     'notes.',
   ].join('\n');
@@ -607,6 +611,8 @@ function waveMergeSchema() {
       conflict_unit: { type: 'string' },
       conflict_files: { type: 'array', items: { type: 'string' } },
       in_history: { type: 'array', items: { type: 'string' } },
+      failed_unit: { type: 'string' },
+      error: { type: 'string' },
       overlaps: {
         type: 'array',
         items: {
@@ -635,7 +641,12 @@ function waveResolvePrompt(m, wave, unit, conflictFiles) {
   const dir = q(featureDir(m));
   const id = gitIdentityArgs(m);
   const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
-  const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
+  const message = wave === null ? `chore: join recovery: merge ${unit.id}` : `chore: join wave ${wave}: merge ${unit.id}`;
+  // The resolver records its own merge (1.6.7 design 4.5).
+  const record = ledgerCommand(m, '_run', {
+    task: '_run', event: 'wave_merged', ...(wave === null ? { recovery: true } : { wave }), units: [unit.id],
+    merged: [unit.id], head: '<head>', conflict_files: conflictFiles || [], resolved: true,
+  }, featureDir(m));
   return [
     `You are the wave resolver for parallel-lanes run ${m.run_id}, ${wave === null ? 'the recovery merge' : `join wave ${wave}`}.`,
     `Work in ${featureDir(m)} on the feature branch ${m.repo.branch}; do not switch branches.`,
@@ -650,6 +661,8 @@ function waveResolvePrompt(m, wave, unit, conflictFiles) {
     '   no worktree or branch.',
     `3. If you cannot resolve it, run git -C ${dir} merge --abort so the checkout is clean, and return status`,
     '   failed saying why.',
+    `4. After committing the merge, record it, with <head> the full sha of git -C ${dir} rev-parse HEAD:`,
+    `   ${record}`,
     '',
     `Plan: ${m.plan}`,
     keepFilesRule(),
@@ -741,17 +754,33 @@ function waveChecksSchema() {
 // wave's paths two units changed, and the conflicts the resolver settled,
 // from earlier launches (m.wave_merges, ledger status) and this one
 // (m.join_waves_now, the run result's join_waves).
+// 1.6.7 (design 4.5): lines appear once each. A ledger event's conflict files
+// are the resolver's when the event is the resolver's own (resolved) or was
+// written before 1.6.7 (no merged field); a conflict no later resolved event
+// of the same wave (or recovery) merged the unit of was settled outside the
+// run's resolver. This launch's report entries keep the resolver text.
 function waveLines(m) {
   const lines = [];
-  const all = [...(Array.isArray(m.wave_merges) ? m.wave_merges : []),
-    ...(Array.isArray(m.join_waves_now) ? m.join_waves_now : [])];
-  for (const w of all) {
+  const add = (line) => { if (!lines.includes(line)) lines.push(line); };
+  const events = Array.isArray(m.wave_merges) ? m.wave_merges : [];
+  const now = Array.isArray(m.join_waves_now) ? m.join_waves_now : [];
+  const sameMerge = (a, b) => (a.recovery ? b.recovery === true : !b.recovery && a.wave === b.wave);
+  const settledLater = (w, i) => events.slice(i + 1).some((e) => e.resolved === true && sameMerge(w, e)
+    && Array.isArray(e.merged) && e.merged.includes(w.conflict_unit));
+  [...events, ...now].forEach((w, i) => {
     const name = w.recovery ? 'the recovery merge' : `wave ${w.wave}`;
-    for (const o of Array.isArray(w.overlaps) ? w.overlaps : []) lines.push(`- ${name}: ${o.path} (${o.units.join(', ')})`);
-    const resolved = Array.isArray(w.resolved_files) && w.resolved_files.length > 0 ? w.resolved_files
+    for (const o of Array.isArray(w.overlaps) ? w.overlaps : []) add(`- ${name}: ${o.path} (${o.units.join(', ')})`);
+    const fromLedger = i < events.length;
+    const files = !fromLedger && Array.isArray(w.resolved_files) && w.resolved_files.length > 0 ? w.resolved_files
       : (Array.isArray(w.conflict_files) ? w.conflict_files : []);
-    if (resolved.length > 0) lines.push(`- ${name}: merge conflicts the wave resolver settled in ${resolved.join(', ')}`);
-  }
+    if (files.length === 0) return;
+    if (!fromLedger || w.resolved === true || !('merged' in w)) {
+      add(`- ${name}: merge conflicts the wave resolver settled in ${files.join(', ')}`);
+    } else if (!settledLater(w, i)) {
+      add(`- ${name}: merge conflicts in ${files.join(', ')}, settled outside the run's resolver `
+        + '(by hand or in a later launch)');
+    }
+  });
   if (lines.length === 0) return [];
   return [
     'Join waves: units of a wave ran side by side on their own branches and were merged. Review these paths',

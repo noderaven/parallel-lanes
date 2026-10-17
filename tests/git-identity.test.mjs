@@ -98,9 +98,9 @@ test('the resolving prompts spell out the commit with the identity', () => {
 test('the wave resolver merges with the identity', () => {
   const p = prompts(manifest(IDENTITY));
   assert.ok(p['wave resolver'].includes(
-    `git -C ${DIR} ${ARGS}merge --no-ff -m 'join wave 1: merge J2' '${H('J2')}'`), p['wave resolver']);
+    `git -C ${DIR} ${ARGS}merge --no-ff -m 'chore: join wave 1: merge J2' '${H('J2')}'`), p['wave resolver']);
   assert.ok(p['recovery resolver'].includes(
-    `git -C ${DIR} ${ARGS}merge --no-ff -m 'join recovery: merge J2' '${H('J2')}'`), p['recovery resolver']);
+    `git -C ${DIR} ${ARGS}merge --no-ff -m 'chore: join recovery: merge J2' '${H('J2')}'`), p['recovery resolver']);
 });
 
 test('the wave merge passes each pair to merge-wave as --git-config', () => {
