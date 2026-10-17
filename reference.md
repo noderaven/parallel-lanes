@@ -2071,7 +2071,7 @@ Hard failures:
 |---|---|
 | `git_identity` | `git var GIT_COMMITTER_IDENT` or (from 1.6.7) `git var GIT_AUTHOR_IDENT` fails, after any `-c user.name=... -c user.email=...` pair `commit_rules` passes |
 | `base_not_current` | the local `base_ref` does not contain its upstream tip (details below) |
-| `python` | the manifest's `python` does not run Python 3.8 or newer |
+| `python` | the manifest's `python` does not run Python 3.8 or newer, run as one path the way the run uses it (a path with spaces is fine), or it is wrapped in quotes (from 1.6.10; doctor used to split it into shell words) |
 | `dirty_checkout` | git mode: the checkout has uncommitted changes or untracked, non-ignored files; its fix says to commit any file a check needs and gitignore only known generated output, and never to ignore source a check needs |
 | `shadow_repo` | shadow mode: the shadow repo is missing or broken |
 

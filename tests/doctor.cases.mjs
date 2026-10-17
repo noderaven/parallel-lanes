@@ -5,10 +5,10 @@ import { after } from 'node:test';
 import { test } from './shard.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { SKILL_DIR } from './harness.mjs';
+import { SKILL_DIR, loadHelpers } from './harness.mjs';
 import { BASH, IS_WINDOWS, tempDir } from './platform.mjs';
 
 const SCRIPT = join(SKILL_DIR, 'scripts', 'doctor');
@@ -37,7 +37,8 @@ writeFileSync(IDENTITY, [
 const ENV = cleanEnv({ GIT_CONFIG_GLOBAL: IDENTITY, GIT_CONFIG_SYSTEM: EMPTY, GIT_CONFIG_NOSYSTEM: '1' });
 const NO_IDENTITY = cleanEnv({ GIT_CONFIG_GLOBAL: EMPTY, GIT_CONFIG_SYSTEM: EMPTY, GIT_CONFIG_NOSYSTEM: '1' });
 
-// The manifest's python: this Python, shell-quoted, with '/' separators.
+// The manifest's python: this Python's path as scripts/find-python prints it
+// (bare, not quoted), with '/' separators.
 const PYTHON = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' })
   .stdout.trim().replace(/\\/g, '/');
 
@@ -86,7 +87,7 @@ function fixture() {
           mode: 'git', root, git_dir: null, base_ref: 'main', branch: 'pl-feature',
           worktree_root: join(dir, 'wt'), ledger_dir: join(dir, 'ledger'), ...repo,
         },
-        python: `'${PYTHON}'`,
+        python: PYTHON,
         commit_rules: 'Follow the repository style.',
         commands: {},
         lanes: [{ id: 'a' }],
@@ -238,14 +239,42 @@ test('an unreachable remote or no upstream does not block', () => {
 test('a python that is not 3.8+ fails', () => {
   const f = fixture();
   const missing = join(f.dir, 'no-such-python').replace(/\\/g, '/');
-  const r = doctor(f.manifest({}, { python: `'${missing}'` }));
+  const r = doctor(f.manifest({}, { python: missing }));
   assert.equal(r.code, 3, r.stderr);
   assert.ok(named(r.out.failures, 'python'), JSON.stringify(r.out));
 
-  // A Python that runs but reports an old version.
-  const old = doctor(f.manifest({}, { python: `'${PYTHON}' -c "print('3.7.9')" --` }));
+  // An interpreter that runs but reports an old version: a file that prints 3.7.9.
+  const fake = join(f.dir, IS_WINDOWS ? 'old-python.bat' : 'old-python').replace(/\\/g, '/');
+  writeFileSync(fake, IS_WINDOWS ? '@echo 3.7.9\r\n' : '#!/bin/sh\necho 3.7.9\n');
+  if (!IS_WINDOWS) chmodSync(fake, 0o755);
+  const old = doctor(f.manifest({}, { python: fake }));
   assert.equal(old.code, 3, old.stderr);
   assert.match(named(old.out.failures, 'python').detail, /3\.7/);
+});
+
+// External review F4 (2026-10-17): doctor split python with shlex, so a
+// bare path with a space (a Windows user folder such as C:/Users/John
+// Smith) failed doctor, while the engine shell-quotes the whole path.
+test('a python path with a space and an apostrophe passes doctor and runs a helper command', async () => {
+  const f = fixture();
+  const link = join(f.dir, "it's my python");
+  symlinkSync(dirname(PYTHON), link, IS_WINDOWS ? 'junction' : 'dir');
+  const python = `${link.replace(/\\/g, '/')}/${basename(PYTHON)}`;
+  const r = doctor(f.manifest({}, { python }));
+  assert.equal(named(r.out.failures, 'python'), undefined, JSON.stringify(r.out));
+  const { pythonCommand } = await loadHelpers(['pythonCommand']);
+  const ran = spawnSync(BASH, ['-c', `${pythonCommand({ python })} -c 'print(6 * 7)'`], { encoding: 'utf8' });
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(ran.stdout.trim(), '42');
+});
+
+test('a quoted python fails with the reason: the engine runs the value as one path', () => {
+  const f = fixture();
+  for (const python of [`'${PYTHON}'`, `"${PYTHON}"`]) {
+    const r = doctor(f.manifest({}, { python }));
+    assert.equal(r.code, 3, r.stderr);
+    assert.match(named(r.out.failures, 'python').detail, /quoted/, JSON.stringify(r.out));
+  }
 });
 
 test('a dirty checkout fails and the fix never says to ignore everything', () => {
@@ -694,10 +723,10 @@ test('Windows-only checks are not_applicable elsewhere', () => {
 test('the WindowsApps python warns', () => {
   const f = fixture();
   const alias = 'C:/Users/u/AppData/Local/Microsoft/WindowsApps/python3.exe';
-  const r = fakeDoctor(f.manifest({}, { python: `'${alias}'` }), { platform: 'win32' });
+  const r = fakeDoctor(f.manifest({}, { python: alias }), { platform: 'win32' });
   assert.match(named(r.warnings, 'python_alias').detail, /WindowsApps/);
 
-  const plain = fakeDoctor(f.manifest({}, { python: "'C:/Python312/python.exe'" }), { platform: 'win32' });
+  const plain = fakeDoctor(f.manifest({}, { python: 'C:/Python312/python.exe' }), { platform: 'win32' });
   assert.equal(named(plain.warnings, 'python_alias'), undefined, JSON.stringify(plain));
   assert.equal(named(plain.skipped, 'python_alias'), undefined, JSON.stringify(plain));
 });

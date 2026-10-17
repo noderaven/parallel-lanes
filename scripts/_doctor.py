@@ -93,7 +93,6 @@ import base64
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -636,24 +635,26 @@ def check_base_not_current(manifest, probes, prefix, report):
 
 
 def _python_argv(manifest):
-    """(text, argv): the manifest's python command (python3 when unset or
-    blank) and its shell words ([] when its quoting does not parse)."""
+    """(text, argv): the manifest's python (python3 when unset or blank)
+    and the argv that runs it: the value as one path, as the engine runs it
+    (pythonCommand shell-quotes the whole value), so a path with a space
+    works; [] when the value is wrapped in quotes, which the engine would
+    take as part of the path."""
     python = manifest.get("python")
     python = python if isinstance(python, str) and python.strip() else "python3"
-    try:
-        argv = shlex.split(python)
-    except ValueError:
-        argv = []
-    return python, argv
+    if len(python) >= 2 and python[0] == python[-1] and python[0] in "'\"":
+        return python, []
+    return python, [python]
 
 
 def check_python(manifest, probes, report):
     check = "python"
-    fix = ("set the manifest's python to a Python 3.8 or newer (scripts/find-python "
-           "prints one), shell-quoted.")
+    fix = ("set the manifest's python to the path of a Python 3.8 or newer as "
+           "scripts/find-python prints it, not quoted.")
     python, argv = _python_argv(manifest)
     if not argv:
-        report.fail(check, "python is not a shell-quoted command", fix)
+        report.fail(check, "python is quoted: the run uses the value as one path, quotes "
+                    "included: " + python, fix)
         return
     if probes.platform == "win32":
         argv[0] = _shell._drive_form(argv[0]) or argv[0]
@@ -823,7 +824,6 @@ def check_python_alias(manifest, probes, report):
     program = argv[0] if argv else python
     if "/" not in program and "\\" not in program:
         program = _read(probes.which, program) or program
-    # The unsplit text too: shlex drops the backslashes of an unquoted C:\... path.
     for candidate in (program, python):
         if isinstance(candidate, str) and _WINDOWS_APPS.search(candidate):
             report.warn(check, "the manifest's python is the WindowsApps alias, which is "
