@@ -210,7 +210,7 @@ test('a join wave merges with the identity only in the commit rules', async () =
   assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
   const labels = s.calls.map((x) => x.label);
   assert.equal(labels.filter((l) => l === 'wave 1 merge').length, 1, labels.join('\n'));
-  assert.ok(!labels.some((l) => / resolve /.test(l)), labels.join('\n'));
+  assert.ok(!labels.some((l) => l.includes('resolve')), labels.join('\n'));
   const who = git(c.repo, 'log', '--format=%an <%ae>|%cn <%ce>', '-1', '--grep', 'chore: join wave 1: merge J2');
   assert.equal(who, 'Lane Bot <lane@x.invalid>|Lane Bot <lane@x.invalid>');
   const events = readFileSync(`${c.m.repo.ledger_dir}/_run.jsonl`, 'utf8').trim().split('\n').map((l) => JSON.parse(l));

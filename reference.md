@@ -152,12 +152,12 @@ pairs as `setup_result.git_identity`: a list of at most two strings, `user.name=
 then `user.email=<value>`, keys lower case, the last pair given for a key winning (as with git's
 own `-c`), `[]` when the commit rules name none. It is recorded whether or not a global identity
 exists, so the run's merges commit as the agents' own commits do. The run passes the pairs to
-every merge and every commit it spells out itself: the integrate prompt's lane merges, the
-resolved-merge commits (`git -C <dir> -c ... commit --no-edit`) of the integrate prompt, the
-lane resolver and the wave resolver, the wave resolver's merge, the supervised conflict stop's
-by-hand commands, and the wave merge (merge-wave's `--git-config`, one per pair). Each pair is
-shell-quoted in a prompt and one argv item in merge-wave. With none, these use the user's git
-config, as before 1.6.7. Agents' own commits keep following `commit_rules`. Only name and email
+every merge and every commit it spells out itself: the integrate prompt's and the lane
+resolver's lane merges, the resolved-merge commits (`git -C <dir> -c ... commit --no-edit`) of
+the integrate prompt, the lane resolver and the wave resolver, the wave resolver's merge, the
+supervised conflict stop's by-hand commands, and the wave merge (merge-wave's `--git-config`,
+one per pair). Each pair is shell-quoted in a prompt and one argv item in merge-wave. With
+none, these use the user's git config, as before 1.6.7. Agents' own commits keep following `commit_rules`. Only name and email
 are carried: other `-c` options in the commit rules (a signing key, an editor) do not reach the
 scripted merges. A manifest whose setup ran under 1.6.6 has no `git_identity` (read as `[]`);
 setup reruns on a resume or relaunch and adds it.
@@ -207,9 +207,9 @@ SKILL.md gives the rule; this is how it reads the causes. Not transient, so neve
 unit or error; `<name>` is `wave <n>` or `recovery`) or a merge that reported done but left a
 unit out (`join <name>: the merge left out <ids>`). A refused merge needs the user (an identity,
 a hook, a held lock), then Resume. A missing wave or recovery merge result reads exactly `no
-result from <name> merge`, so it is transient like any other missing result. The causes are every `stopped_lanes[].reason` when `reason` is `prelude
-stopped`, `lanes stopped`, `join stopped`, or `agents_unavailable`, else `reason` itself. A
-cause is transient only if it starts with `no result from`, `error:`, or `setup failed`, or
+result from <name> merge`, so it is transient like any other missing result. The causes are
+every `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, `join
+stopped`, or `agents_unavailable`, else `reason` itself. A cause is transient only if it starts with `no result from`, `error:`, or `setup failed`, or
 reads `integration failed: no result from ...` or `post-integrate failed: no result from ...`,
 and, under `agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
 agent the latch refused). So `agents_unavailable` is transient only when every other cause is
@@ -404,12 +404,12 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   supervised one stops. Checks that did not finish get no fix.
 - A relaunch with `join_started` and `unit_branches`: setup puts each lane worktree left on one of
   the run's unit branches back on its lane branch (output `returned`), saving its changes; a
-  recovery merge (`merge-wave --recovery`, `chore: join recovery: merge <unit>`) brings in every unit that
-  ran on its own branch and is done and reviewed or deferred, and reports (`--known`,
-  `in_history`) which of the other such units an earlier launch already merged; the rest of the
-  join runs serially on the feature checkout from that tip. A merged unit whose approval went
-  stale is reviewed again over its recorded range without moving the tip. A unit that ran on its
-  own branch, is not done and reviewed, and is not in the history starts again from the tip
+  recovery merge (`merge-wave --recovery`, `chore: join recovery: merge <unit>`) brings in
+  every unit that ran on its own branch and is done and reviewed or deferred, and reports
+  (`--known`, `in_history`) which of the other such units an earlier launch already merged; the
+  rest of the join runs serially on the feature checkout from that tip. A merged unit whose
+  approval went stale is reviewed again over its recorded range without moving the tip. A unit
+  that ran on its own branch, is not done and reviewed, and is not in the history starts again from the tip
   (`start-task --restart`: the ledger drops its earlier attempt), told its branch and abandoned
   refs to reuse. Any other unit starts from its latest `started` base (`start_bases`), else the
   tip. A unit branch an earlier launch left that is not built on the wave's base is saved under
