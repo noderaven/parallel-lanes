@@ -173,8 +173,13 @@ def annotate(owners, unit_ids, path):
 
 
 def first_owner(owners, unit_ids, path):
-    """(owner, relation) of the first other task listing path, or (None, None)."""
-    others = [t for t in owners["files"].get(path_key(path), []) if t not in unit_ids]
-    if not others:
-        return None, None
-    return others[0], relation(owners, unit_ids, others[0])
+    """(owner, relation) of the first other task listing path, or else a
+    folder holding it, nearest folder first (a folder entry covers the paths
+    under it, as in task-checks); (None, None) when no other task does."""
+    key = path_key(path)
+    while key and key != ".":
+        others = [t for t in owners["files"].get(key, []) if t not in unit_ids]
+        if others:
+            return others[0], relation(owners, unit_ids, others[0])
+        key = posixpath.dirname(key)
+    return None, None

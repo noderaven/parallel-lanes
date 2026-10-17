@@ -45,7 +45,7 @@ function install(configDir, args = [], env = {}) {
 }
 
 // The tools install.sh and find-python start, found on the real PATH.
-const TOOLS = ['bash', 'cat', 'chmod', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
+const TOOLS = ['bash', 'cat', 'chmod', 'cmp', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
   'mktemp', 'mv', 'rm', 'sed', 'tar', 'tr', 'uname'];
 const which = (name) => spawnSync(BASH, ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
 
@@ -252,6 +252,68 @@ test('install.sh with invalid settings keeps the old install on an update', { sk
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /not a single JSON object \(or not valid JSON\)/);
   assert.ok(existsSync(marker), 'the old skill directory is untouched');
+});
+
+// 1.6.10 (external review, Installation): the installer removed the old
+// skill before copying, so a failed copy left none, and it copied untracked
+// files (a review's notes and logs) into the installed skill.
+
+// A git checkout of the working tree's tracked files (this install.sh
+// included, edits and all), plus the named untracked files.
+function checkoutWith(untracked) {
+  counter += 1;
+  const dir = join(TMP, `checkout ${counter}`);
+  const ls = spawnSync('git', ['-C', SKILL_DIR, 'ls-files', '-z'], { encoding: 'utf8' });
+  assert.equal(ls.status, 0, ls.stderr);
+  for (const rel of ls.stdout.split('\0').filter(Boolean)) {
+    if (!existsSync(join(SKILL_DIR, rel))) continue;
+    mkdirSync(join(dir, rel, '..'), { recursive: true });
+    writeFileSync(join(dir, rel), readFileSync(join(SKILL_DIR, rel)));
+  }
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git('init', '-q');
+  git('add', '-A');
+  for (const [rel, text] of Object.entries(untracked)) {
+    mkdirSync(join(dir, rel, '..'), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  }
+  return dir;
+}
+
+test('install.sh from a git checkout installs only tracked files', { skip: SKIP }, () => {
+  const src = checkoutWith({ 'notes.md': 'mine\n', 'reports/review/tests.log': 'log\n' });
+  const dir = freshConfig();
+  const res = spawnSync(BASH, [join(src, 'install.sh')], {
+    cwd: src, encoding: 'utf8', env: mergeEnv(process.env, { CLAUDE_CONFIG_DIR: dir }),
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(existsSync(join(skillDir(dir), 'SKILL.md')));
+  assert.ok(existsSync(join(skillDir(dir), 'scripts', 'setup')));
+  assert.ok(!existsSync(join(skillDir(dir), 'notes.md')), 'an untracked file was installed');
+  assert.ok(!existsSync(join(skillDir(dir), 'reports')), 'an untracked folder was installed');
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith('.parallel-lanes-')), []);
+});
+
+test('install.sh keeps the old install when the new copy fails', { skip: SKIP }, () => {
+  const dir = freshConfig();
+  install(dir);
+  const marker = join(skillDir(dir), 'marker.txt');
+  writeFileSync(marker, 'old install\n');
+  // A copy that comes out incomplete: a tracked file the check needs is gone.
+  const src = checkoutWith({});
+  rmSync(join(src, 'run.workflow.js'));
+  const res = spawnSync(BASH, [join(src, 'install.sh')], {
+    cwd: src, encoding: 'utf8', env: mergeEnv(process.env, { CLAUDE_CONFIG_DIR: dir }),
+  });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /unchanged/);
+  assert.ok(existsSync(marker), 'the old skill directory is untouched');
+  assert.ok(existsSync(join(skillDir(dir), 'SKILL.md')));
+  assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith('.parallel-lanes-')), []);
+  assert.deepEqual(readdirSync(join(dir, 'skills')), ['parallel-lanes']);
 });
 
 // A stock Windows Python install has python but no python3.

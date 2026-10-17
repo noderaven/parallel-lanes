@@ -51,6 +51,15 @@ def file_key(path):
     return key.lower()
 
 
+def overlap(a, b):
+    """Whether two declared paths (file_key) can name one file: equal, or
+    one is a folder holding the other (a file holds no paths, so the shorter
+    is a folder, named with or without a trailing '/'), as filesOverlap in
+    src/waves.js."""
+    x, y = a.rstrip("/"), b.rstrip("/")
+    return x == y or x == "" or y == "" or y.startswith(x + "/") or x.startswith(y + "/")
+
+
 def waves(units, edges=()):
     """The waves of units in plan order, as lists of unit ids. edges:
     (unit_id, producer_id) pairs; a producer that is not earlier is
@@ -71,10 +80,10 @@ def waves(units, edges=()):
                 if e["id"] == producer:
                     on.add(j)
         w = 1 + max([wave[j] for j in on] or [0])
-        files = set(file_key(f) for f in unit.get("files") or [])
+        files = [file_key(f) for f in unit.get("files") or []]
 
         def clash(n):
-            return any(wave[j] == n and any(file_key(f) in files for f in e.get("files") or [])
+            return any(wave[j] == n and any(overlap(file_key(f), k) for f in e.get("files") or [] for k in files)
                        for j, e in enumerate(earlier))
 
         while clash(w):

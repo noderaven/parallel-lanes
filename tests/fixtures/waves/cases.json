@@ -887,5 +887,115 @@
     "b1-b2"
    ]
   ]
+ },
+ {
+  "name": "folder-and-file-under-it",
+  "units": [
+   {
+    "id": "J1",
+    "files": [
+     "src/"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "J2",
+    "files": [
+     "src/x.js"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "J1"
+   ],
+   [
+    "J2"
+   ]
+  ]
+ },
+ {
+  "name": "folder-named-without-slash",
+  "units": [
+   {
+    "id": "J1",
+    "files": [
+     "src/x.js"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "J2",
+    "files": [
+     "src"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "J1"
+   ],
+   [
+    "J2"
+   ]
+  ]
+ },
+ {
+  "name": "folder-with-dot-case-and-backslash",
+  "units": [
+   {
+    "id": "J1",
+    "files": [
+     "./SRC/"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "J2",
+    "files": [
+     "src\\deep\\x.js"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "J1"
+   ],
+   [
+    "J2"
+   ]
+  ]
+ },
+ {
+  "name": "folder-sibling-with-same-prefix",
+  "units": [
+   {
+    "id": "J1",
+    "files": [
+     "src/"
+    ],
+    "depends_on": []
+   },
+   {
+    "id": "J2",
+    "files": [
+     "src2/x.js"
+    ],
+    "depends_on": []
+   }
+  ],
+  "edges": [],
+  "expected": [
+   [
+    "J1",
+    "J2"
+   ]
+  ]
  }
 ]

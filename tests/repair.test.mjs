@@ -820,6 +820,49 @@ test('one agent left after a final fix: the re-review gets it, not the start che
   assert.deepEqual(kinds(result), ['checks_failed']);
 });
 
+// External review F5 (2026-10-17): the start check took the last free agent,
+// returned nothing, its retry was refused, and the refusal latch turned the
+// run into a budget stop with no acceptance. The start check is advisory: one
+// call, no retry, no availability probe, and a refusal never sets the latch.
+test('the last free agent: a start check with no result is unavailable and the run still completes', async () => {
+  // 13 agents up to the lenses, then verify (counted, past the cap): one left.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 15 } });
+  const { result, calls } = await run(m, {
+    ...noFindings({ verify: [verified(TIP, 1)] }), 'start check': [null], ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.deepEqual(labels(calls).filter((l) => l.startsWith('start check')), ['start check']);
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.deepEqual(kinds(result), ['checks_failed']);
+});
+
+test('the start check gets no retry and no availability probe when it returns nothing', async () => {
+  // Supervised: no repairs follow, but the start check still runs.
+  const m = started({ autonomy: 'supervised' });
+  const { result, calls } = await run(m, {
+    ...noFindings({ verify: [verified(TIP, 1)] }), 'start check': [null], ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(!labels(calls).includes('start check retry'), `${labels(calls)}`);
+  assert.ok(!labels(calls).includes('availability probe'), `${labels(calls)}`);
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.equal(result.final.start_check.why, 'no result');
+});
+
+test('two agents left after a final fix: a start check with no result leaves the re-review its agent', async () => {
+  // 13 agents up to the lenses, the final fix and its verify: two left.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 17 } });
+  const { result, calls } = await run(m, {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    'start check': [null], ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(labels(calls).includes('start check'), `${labels(calls)}`);
+  assert.ok(labels(calls).includes('final re-review'), `${labels(calls)}`);
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.deepEqual(kinds(result), ['checks_failed']);
+});
+
 // The engine's guards (spec 4.4 "The engine classifies").
 test('classifyStartCheck: each guard gives the expected at_start', () => {
   const m = started();

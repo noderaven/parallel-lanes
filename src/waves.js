@@ -39,6 +39,16 @@ function waveFileKey(path) {
   return String(path).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
 }
 
+// Whether two declared paths (waveFileKey) can name one file: they are equal,
+// or one is a folder holding the other (a file holds no paths, so the
+// shorter one is a folder, named with or without a trailing '/'). task-checks
+// reads a folder entry as covering the paths under it (external review F2).
+function filesOverlap(a, b) {
+  const x = a.replace(/\/+$/, '');
+  const y = b.replace(/\/+$/, '');
+  return x === y || x === '' || y === '' || y.startsWith(`${x}/`) || x.startsWith(`${y}/`);
+}
+
 // The waves of the join's units, in plan order: [[unit id, ...], ...].
 // units: [{id, tasks?, depends_on?, files}] (a batch unit lists its tasks;
 // its tasks' ids, plain or as objects, are what other units name). edges:
@@ -47,7 +57,8 @@ function waveFileKey(path) {
 // it names, and on each edge's producer that is earlier (later producers and
 // later ids are ignored: validation refuses a code dependency on a later join
 // task). Its wave is 1 + the highest wave it depends on; then, while an
-// earlier unit of that wave declares one of its files (waveFileKey), the next.
+// earlier unit of that wave declares a path that overlaps one of its own
+// (filesOverlap on waveFileKey), the next.
 function joinWaves(units, edges = []) {
   const ids = (u) => (Array.isArray(u.tasks) ? u.tasks.map((t) => (typeof t === 'string' ? t : t.id)) : [u.id]);
   const wave = [];
@@ -64,8 +75,9 @@ function joinWaves(units, edges = []) {
       if (j >= 0) on.add(j);
     }
     let w = 1 + Math.max(0, ...[...on].map((j) => wave[j]));
-    const mine = new Set((u.files || []).map(waveFileKey));
-    const clash = (n) => earlier.some((e, j) => wave[j] === n && (e.files || []).some((f) => mine.has(waveFileKey(f))));
+    const mine = (u.files || []).map(waveFileKey);
+    const clash = (n) => earlier.some((e, j) => wave[j] === n
+      && (e.files || []).some((f) => mine.some((k) => filesOverlap(k, waveFileKey(f)))));
     while (clash(w)) w += 1;
     wave.push(w);
   });

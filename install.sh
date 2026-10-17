@@ -5,7 +5,9 @@
 #
 # Run it from a clone of this repo (or an unzipped copy that holds
 # parallel-lanes/). Copies the skill to ~/.claude/skills/parallel-lanes
-# (without .git), copies its parallel-lanes-worker agent type to
+# (from a git checkout its tracked files only, else everything but .git),
+# staged and checked first so a failed copy keeps the old install; copies its
+# parallel-lanes-worker agent type to
 # ~/.claude/agents/parallel-lanes-worker.md, and registers its two hooks in
 # ~/.claude/settings.json (backed up first):
 #   SessionStart (startup|clear|compact) -> hooks/session-start.sh
@@ -123,13 +125,48 @@ mkdir -p "$claude_dir/skills"
 if [ "$src" = "$(cd "$dest" 2>/dev/null && pwd)" ]; then
   echo "Skill already at $dest; installing the agent type and registering hooks only"
 else
+  # Stage the new copy, check it, then swap it in, so a failed copy never
+  # leaves the skill missing (1.6.10). The staged and old copies sit outside
+  # skills/, where Claude Code would see a second SKILL.md. From a git
+  # checkout only tracked files are copied (untracked notes and logs stay
+  # out); from an unzipped copy, everything but .git and tests/tmp.
+  stage="$claude_dir/.parallel-lanes-install.$$"
+  old="$claude_dir/.parallel-lanes-old.$$"
+  rm -rf "$stage" "$old"
+  mkdir -p "$stage"
+  copied=1
+  if git -C "$src" ls-files --error-unmatch SKILL.md >/dev/null 2>&1; then
+    list="$(mktemp)"
+    git -C "$src" ls-files -z | while IFS= read -r -d '' f; do
+      # A tracked file deleted in the work tree is not copied.
+      [ -e "$src/$f" ] && printf '%s\0' "$f"
+    done > "$list"
+    tar -C "$src" --null -T "$list" -cf - | tar -C "$stage" -xf - || copied=0
+    rm -f "$list"
+  else
+    tar -C "$src" --exclude=.git --exclude=tests/tmp -cf - . | tar -C "$stage" -xf - || copied=0
+  fi
+  for f in SKILL.md VERSION run.workflow.js agents/parallel-lanes-worker.md; do
+    [ "$copied" = 1 ] && cmp -s "$src/$f" "$stage/$f" && continue
+    rm -rf "$stage"
+    die "the new copy is incomplete ($f did not copy); the installed skill is unchanged"
+  done
+  chmod +x "$stage"/hooks/*.sh "$stage"/scripts/*
   if [ -e "$dest" ]; then
     echo "Updating existing $dest"
-    rm -rf "$dest"
+    if ! mv "$dest" "$old"; then
+      rm -rf "$stage"
+      die "cannot move the installed skill aside (is a file in it open?); it is unchanged"
+    fi
+    if ! mv "$stage" "$dest"; then
+      mv "$old" "$dest"
+      rm -rf "$stage"
+      die "cannot put the new copy in place; the installed skill is unchanged"
+    fi
+    rm -rf "$old"
+  else
+    mv "$stage" "$dest"
   fi
-  mkdir -p "$dest"
-  tar -C "$src" --exclude=.git --exclude=tests/tmp -cf - . | tar -C "$dest" -xf -
-  chmod +x "$dest"/hooks/*.sh "$dest"/scripts/*
   echo "Installed skill to $dest"
 fi
 

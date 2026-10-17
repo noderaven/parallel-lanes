@@ -478,6 +478,32 @@ test('batch: a non-empty string on a light task is valid', () => {
   assert.deepEqual(validateManifest(m), []);
 });
 
+// External review F1 (2026-10-17): batch A, B runs as the unit A-B, which
+// a task named A-B also is; the units then share agent labels, briefs,
+// reports and branches, and the join wave map keeps one of them. A resume
+// can run part of a batch (B-C of A, B, C), so every first-last stretch of a
+// batch is a possible unit id.
+test('a batch unit id that equals a task id or another batch unit id is reported', () => {
+  const light = (id, file, batch) => task(id, [file], { tier: 'light', batch });
+  const cases = [
+    ['a task named like the batch', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), task('A-B', ['c.js'])], 'A-B'],
+    ['in another letter case', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), task('a-b', ['c.js'])], 'a-b'],
+    ['part of a batch', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), light('C', 'c.md', 'x'), task('B-C', ['d.js'])], 'B-C'],
+    ['two batches', [light('A', 'a.md', 'x'), light('B-C', 'b.md', 'x'), light('A-B', 'c.md', 'y'), light('C', 'd.md', 'y')], 'A-B-C'],
+  ];
+  for (const [name, tasks, id] of cases) {
+    const m = validManifest();
+    m.lanes[0].tasks = tasks;
+    assertError(validateManifest(m), id, 'batch');
+    assert.ok(validateManifest(m).length >= 1, name);
+  }
+  // Across groups: the lane's batch T2-T6 and a prelude task T2-T6.
+  const m = validManifest();
+  m.lanes[0].tasks = [light('T2', 'src/a.js', 'docs'), light('T6', 'src/a2.js', 'docs')];
+  m.prelude = [task('T2-T6', ['src/p.js'])];
+  assertError(validateManifest(m), 'T2-T6', 'batch');
+});
+
 test('batch on a standard or sonnet task is reported', () => {
   for (const tier of ['standard', 'sonnet']) {
     const m = validManifest();
@@ -727,9 +753,56 @@ test('startCommand ignores inherited consumes_extra entries', async () => {
 
 // ---- 1.6.0 check policy fields (spec 4.1, 4.5, 4.8) ----
 
+// External review F2 (2026-10-17): task-checks treats a folder entry as
+// covering the paths under it, so two lanes claiming src/ and src/x.js may
+// both change src/x.js; validation compared exact strings.
+test('a folder in one lane and a path under it in another is a claim by two lanes', () => {
+  for (const [folder, file] of [['src/', 'src/a/x.js'], ['src', 'src/x.js'], ['./SRC/', 'src/x.js'], ['src/x.js', 'src/']]) {
+    const m = validManifest();
+    m.lanes[0].tasks = [task('T2', [folder])];
+    m.lanes[1].tasks = [task('T3', [file])];
+    assertError(validateManifest(m), 'claimed by lanes alpha and beta', `${folder} and ${file}`);
+  }
+  // A sibling that only shares a prefix, and a folder and file in one lane, are fine.
+  const sibling = validManifest();
+  sibling.lanes[0].tasks = [task('T2', ['src/'])];
+  sibling.lanes[1].tasks = [task('T3', ['src2/x.js'])];
+  assert.deepEqual(validateManifest(sibling), []);
+  const one = validManifest();
+  one.lanes[0].tasks = [task('T2', ['src/']), task('T5', ['src/x.js'])];
+  one.lanes[1].tasks = [task('T3', ['lib/y.js'])];
+  assert.deepEqual(validateManifest(one), []);
+  // A deliberate overlap on the file covers the pair.
+  const declared = validManifest();
+  declared.lanes[0].tasks = [task('T2', ['src/'])];
+  declared.lanes[1].tasks = [task('T3', ['src/x.js'])];
+  declared.overlaps = [{ file: 'src/x.js', tasks: ['T2', 'T3'], reason: 'both edit it', merge_owner: 'T3' }];
+  assert.deepEqual(validateManifest(declared), []);
+});
+
 test('task_checks accepts task ids with test and inherits lint and build', () => {
   const m = { ...validManifest(), task_checks: { T2: { test: ['node --test tests/a.test.mjs'] } } };
   assert.deepEqual(validateManifest(m), []);
+});
+
+// External review F3 (2026-10-17): with no test, lint or build command for
+// the task's lane, the run builds no task-checks command, so the entry was
+// silently never run.
+test('a task_checks entry whose lane has no test, lint or build command is reported', () => {
+  const none = { setup: [], test: [], lint: [], build: [] };
+  for (const [id, extra] of [
+    ['T2', { commands: none }],
+    ['T1', { commands: none }],
+    ['T4', { commands: none }],
+    ['T2', { lane_commands: { alpha: { test: [], lint: [], build: [] } } }],
+  ]) {
+    const m = { ...validManifest(), ...extra, task_checks: { [id]: { test: ['npm test -- one'] } } };
+    assertError(validateManifest(m), `task_checks.${id}`, 'no test, lint or build command');
+  }
+  // Another lane's empty override does not matter.
+  const ok = { ...validManifest(), lane_commands: { beta: { test: [], lint: [], build: [] } },
+    task_checks: { T2: { test: ['npm test -- one'] } } };
+  assert.deepEqual(validateManifest(ok), []);
 });
 
 test('task_checks rejects lane ids, prelude and join as keys', () => {

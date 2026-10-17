@@ -38,8 +38,9 @@ Per task:
 
 Prints JSON on stdout:
   tasks             [{id, title, files, deps}] in plan order
-  groups            connected components over shared files, each in plan
-                    order, sorted by first task position
+  groups            connected components over shared files (a folder links
+                    the paths under it), each in plan order, sorted by
+                    first task position
   bridge_files      [{file, splits_into}] for each file whose edges alone hold
                     its group together: without them the group falls into the
                     listed parts (each in plan order)
@@ -275,12 +276,24 @@ class UnionFind:
 
 
 def components(ids, file_tasks, skip=None):
-    """Connected components of ids over shared files, in plan order."""
+    """Connected components of ids over shared files, in plan order. A path
+    also links the tasks listing a folder above it: a folder entry covers
+    the paths under it, and validation refuses a folder in one lane and a
+    path under it in another (1.6.10). skip leaves one path's links out."""
     uf = UnionFind(ids)
+    folders = {}
+    for path in file_tasks:
+        folders.setdefault(path.lower(), []).append(path)
     for path, touching in file_tasks.items():
         if path == skip:
             continue
         members = [t for t in touching if t in uf.parent]
+        up = posixpath.dirname(path)
+        while up:
+            for folder in folders.get(up.lower(), []):
+                if folder != skip:
+                    members += [t for t in file_tasks[folder] if t in uf.parent]
+            up = posixpath.dirname(up)
         for other in members[1:]:
             uf.union(members[0], other)
     parts = {}

@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.9: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.10: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -432,19 +432,22 @@ function validateManifest(m) {
           if (isText(t.id)) laneOfTask.set(t.id, lane.id);
           if (isTextList(t.files)) t.files.forEach((f) => files.set(fileKey(f), { f, task: t.id }));
         }
+        // A folder entry covers the paths under it (task-checks reads it so),
+        // so a folder in one lane and a path under it in another are a claim
+        // by both lanes too (external review F2): keys are equal, or one is a
+        // folder holding the other.
+        const holds = (a, b) => a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`);
         for (const [key, { f, task }] of files) {
-          const owner = fileOwner.get(key);
-          if (owner === undefined) {
-            fileOwner.set(key, { lane: lane.id, task, f });
-            continue;
+          const others = [...fileOwner].filter(([k, o]) => o.lane !== lane.id && holds(k, key));
+          for (const [ownerKey, owner] of others) {
+            const o = overlapFor.get(key) || overlapFor.get(ownerKey);
+            if (!o || !o.tasks.includes(task) || !o.tasks.includes(owner.task)) {
+              err(`file ${f}: claimed by lanes ${owner.lane} and ${lane.id}` +
+                (owner.f !== f ? ` (as ${owner.f} and ${f})` : '') +
+                '; record a deliberate overlap in overlaps or keep it in one lane');
+            }
           }
-          if (owner.lane === lane.id) continue;
-          const o = overlapFor.get(key);
-          if (!o || !o.tasks.includes(task) || !o.tasks.includes(owner.task)) {
-            err(`file ${f}: claimed by lanes ${owner.lane} and ${lane.id}` +
-              (owner.f !== f ? ` (as ${owner.f} and ${f})` : '') +
-              '; record a deliberate overlap in overlaps or keep it in one lane');
-          }
+          if (!fileOwner.has(key)) fileOwner.set(key, { lane: lane.id, task, f });
         }
       });
     }
@@ -452,15 +455,55 @@ function validateManifest(m) {
 
   if ('join' in m) checkTaskList('join', m.join);
 
-  // Every overlaps entry names known tasks that list its file.
+  // Batch unit ids (batchUnit: '<first>-<last>') name agent labels, briefs,
+  // reports and branches as task ids do, so none may equal a task id or
+  // another batch's, in any letter case (external review F1, 2026-10-17). A
+  // resume can run part of a batch (batchGroup), so every first-last stretch
+  // of consecutive tasks with one batch key counts.
+  {
+    const taskOf = new Map();
+    for (const t of allTasks) if (isObject(t) && isText(t.id)) taskOf.set(t.id.toLowerCase(), t.id);
+    const unitOf = new Map();
+    const lists = [m.prelude, ...(Array.isArray(m.lanes) ? m.lanes.map((l) => (isObject(l) ? l.tasks : null)) : []), m.join];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (let i = 0; i < list.length;) {
+        const t = list[i];
+        let j = i + 1;
+        if (isObject(t) && isText(t.batch)) {
+          while (j < list.length && isObject(list[j]) && list[j].batch === t.batch) j += 1;
+        }
+        const run = list.slice(i, j).filter((x) => isObject(x) && isText(x.id));
+        for (let a = 0; a < run.length; a += 1) {
+          for (let b = a + 1; b < run.length; b += 1) {
+            const id = `${run[a].id}-${run[b].id}`;
+            const key = id.toLowerCase();
+            const what = `batch ${run[a].id}..${run[b].id}`;
+            if (taskOf.has(key)) {
+              err(`${what}: runs as unit ${id}, which task ${taskOf.get(key)} also names (ids name files); rename one`);
+            } else if (unitOf.has(key)) {
+              err(`${what}: runs as unit ${id}, as ${unitOf.get(key)} does (ids name files); rename a task`);
+            } else {
+              unitOf.set(key, what);
+            }
+          }
+        }
+        i = j;
+      }
+    }
+  }
+
+  // Every overlaps entry names known tasks that list its file, or a folder
+  // holding it (a folder entry covers the paths under it).
   if (Array.isArray(m.overlaps)) {
     const files = new Map();
     for (const t of allTasks) if (isObject(t) && isText(t.id) && isTextList(t.files)) files.set(t.id, t.files.map(fileKey));
     m.overlaps.forEach((o, i) => {
       if (!isObject(o) || !isTextList(o.tasks)) return;
       for (const id of o.tasks) {
+        const key = isText(o.file) ? fileKey(o.file) : null;
         if (!files.has(id)) err(`overlaps[${i}]: unknown task id ${id}`);
-        else if (isText(o.file) && !files.get(id).includes(fileKey(o.file))) {
+        else if (key !== null && !files.get(id).some((k) => k === key || key.startsWith(`${k}/`))) {
           err(`overlaps[${i}]: task ${id} does not list ${o.file} in its files`);
         }
       }
@@ -563,6 +606,22 @@ function validateManifest(m) {
         }
         if (!('test' in entry)) err(`${where}.test: missing`);
         else if (Array.isArray(entry.test) && entry.test.length === 0) err(`${where}.test: must name at least one command`);
+        // The run builds the task-checks command only when the task's lane
+        // has checks (taskChecksCommand), so an entry there would never run
+        // (external review F3). Malformed commands are reported above.
+        if (taskIds.has(id) && isObject(m.commands)) {
+          const lane = laneOfTask.has(id) ? laneOfTask.get(id) : null;
+          let none = false;
+          try {
+            none = laneChecks(m, lane).length === 0;
+          } catch (e) {
+            none = false;
+          }
+          if (none) {
+            err(`${where}: ${lane === null ? 'the project' : `the task's lane ${lane}`} has no test, lint or build command, `
+              + 'so the run would never run these task checks; add those commands, or remove the entry');
+          }
+        }
       }
     }
   }
@@ -4257,9 +4316,28 @@ function makeIo(m, baseIo, state) {
     }
     return again;
   };
+  // An advisory call (opts.advisory: the start check) runs once: no retry and
+  // no availability probe, and with no agent free it is not run and sets no
+  // refusal latch, so it can never change how the run ends (external review
+  // F5). Its answer, a refusal sentinel, or null on an error, goes back.
+  const advisoryCall = async (prompt, opts) => {
+    const { advisory, ...rest } = opts;
+    if (state.unavailable || state.refused.length > 0 || state.agents >= limits.max_agents) {
+      baseIo.log(`parallel-lanes: ${rest.label} was not run: no agent free (it is advisory; the run goes on)`);
+      return state.unavailable ? { __budget: true, __unavailable: true } : { __budget: true };
+    }
+    const agentType = state.untyped ? null : agentTypeFor(m, rest.label);
+    try {
+      return await spawn(prompt, agentType === null ? rest : { ...rest, agentType });
+    } catch (e) {
+      baseIo.log(`parallel-lanes: ${rest.label} failed (${e && e.message ? e.message : String(e)}); it is advisory`);
+      return null;
+    }
+  };
   return {
     ...baseIo,
     agent: async (prompt, opts) => {
+      if (opts && opts.advisory) return advisoryCall(prompt, opts);
       // Every null result has been retried once: a null here is a dead pair.
       const r = await call(prompt, opts);
       if (r !== null && r !== undefined) return r;
@@ -4333,6 +4411,16 @@ function waveFileKey(path) {
   return String(path).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
 }
 
+// Whether two declared paths (waveFileKey) can name one file: they are equal,
+// or one is a folder holding the other (a file holds no paths, so the
+// shorter one is a folder, named with or without a trailing '/'). task-checks
+// reads a folder entry as covering the paths under it (external review F2).
+function filesOverlap(a, b) {
+  const x = a.replace(/\/+$/, '');
+  const y = b.replace(/\/+$/, '');
+  return x === y || x === '' || y === '' || y.startsWith(`${x}/`) || x.startsWith(`${y}/`);
+}
+
 // The waves of the join's units, in plan order: [[unit id, ...], ...].
 // units: [{id, tasks?, depends_on?, files}] (a batch unit lists its tasks;
 // its tasks' ids, plain or as objects, are what other units name). edges:
@@ -4341,7 +4429,8 @@ function waveFileKey(path) {
 // it names, and on each edge's producer that is earlier (later producers and
 // later ids are ignored: validation refuses a code dependency on a later join
 // task). Its wave is 1 + the highest wave it depends on; then, while an
-// earlier unit of that wave declares one of its files (waveFileKey), the next.
+// earlier unit of that wave declares a path that overlaps one of its own
+// (filesOverlap on waveFileKey), the next.
 function joinWaves(units, edges = []) {
   const ids = (u) => (Array.isArray(u.tasks) ? u.tasks.map((t) => (typeof t === 'string' ? t : t.id)) : [u.id]);
   const wave = [];
@@ -4358,8 +4447,9 @@ function joinWaves(units, edges = []) {
       if (j >= 0) on.add(j);
     }
     let w = 1 + Math.max(0, ...[...on].map((j) => wave[j]));
-    const mine = new Set((u.files || []).map(waveFileKey));
-    const clash = (n) => earlier.some((e, j) => wave[j] === n && (e.files || []).some((f) => mine.has(waveFileKey(f))));
+    const mine = (u.files || []).map(waveFileKey);
+    const clash = (n) => earlier.some((e, j) => wave[j] === n
+      && (e.files || []).some((f) => mine.some((k) => filesOverlap(k, waveFileKey(f)))));
     while (clash(w)) w += 1;
     wave.push(w);
   });
@@ -6652,7 +6742,8 @@ async function runAll(manifest, io) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
     const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
-      { model: 'haiku', effort: 'high' });
+      { model: 'haiku', effort: 'high', advisory: true });
+    if (r && r.__budget) return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     return classifyStartCheck(m, v, sha, r);
   };
   // A budget stop once every task is in: the checks still run at the
@@ -6806,7 +6897,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.9';
+const VERSION = '1.6.10';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {
