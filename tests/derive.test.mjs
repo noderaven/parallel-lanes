@@ -208,6 +208,33 @@ test('derive-lanes warns about tasks without a Files block', () => {
 
 // --- other plan shapes ------------------------------------------------------
 
+// 1.6.10 (external review F2): a folder in a task's Files covers the paths
+// under it, and validation refuses a folder in one lane and a path under it
+// in another, so derive-lanes groups those tasks together.
+test('derive-lanes groups a task listing a folder with the tasks listing paths under it', () => {
+  const plan = planFile(
+    [
+      '# Plan',
+      '',
+      '### Task 1: Folder',
+      '**Files:**',
+      '- Modify: `src/`',
+      '',
+      '### Task 2: Deep file',
+      '**Files:**',
+      '- Modify: `src/a/x.js`',
+      '',
+      '### Task 3: Sibling',
+      '**Files:**',
+      '- Modify: `src2/y.js`',
+      '',
+    ].join('\n'),
+  );
+  const { out } = deriveJson(plan);
+  assert.deepEqual(out.tasks.map((t) => t.files), [['src'], ['src/a/x.js'], ['src2/y.js']]);
+  assert.deepEqual(out.groups, [['1', '2'], ['3']]);
+});
+
 test('derive-lanes gives one group per task and a warning when no task has Files', () => {
   const plan = planFile(
     [
