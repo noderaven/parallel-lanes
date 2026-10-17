@@ -90,6 +90,21 @@ function preflightSchema() {
       rulings: { type: 'array', items: { type: 'string' } },
       undeclared: dependencies(),
       code_deps: dependencies(),
+      // Optional (spec 4.6): files a ruling lets a task change outside its
+      // Files list; ruling is the 0-based index in rulings. The run reads a
+      // result without it as [].
+      permits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' } },
+            ruling: { type: 'integer' },
+          },
+          required: ['task', 'files', 'ruling'],
+        },
+      },
     },
     required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
@@ -260,6 +275,7 @@ function relaunchPreflightLines(m) {
     `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Permits an earlier launch recorded are carried; they need no new ruling.',
     'Check only the tasks still to run and their dependence on built work.',
     'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
     `since that ruling; then report it as a conflict. ${changed}`,
@@ -303,6 +319,10 @@ function preflightPrompt(m, waves = null) {
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
+    'When a ruling has a task change a file outside its Files list, also return it in permits as',
+    '{task, files, ruling}: the task id, the project-relative files (files, not folders) and the ruling\'s',
+    '0-based index in rulings. A permitted file does not widen that task\'s checks. The run drops a permit',
+    'for a file that a task able to run at the same time declares or is also permitted.',
     '',
     phaseRules(m),
   ].join('\n');

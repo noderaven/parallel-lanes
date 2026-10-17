@@ -1531,7 +1531,9 @@ function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
 // null when the ledger lane has no test, lint or build command. 1.6.6 (spec
 // 4.5): the Files list goes as its fingerprint (task-checks reads the list
 // from owners.json), and a wide list equal to the lane list as --wide-as-lane,
-// so the command does not grow with the Files list.
+// so the command does not grow with the Files list. 1.6.8 (spec 4.6): one
+// --permit '<file>=PF-<n>' per file of a kept pre-flight permit of the unit's
+// tasks.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
   if (lane.length === 0) return null;
@@ -1540,12 +1542,20 @@ function taskChecksCommand(m, task, where, base) {
   const entry = taskChecksEntry(m, task, where.lane);
   const declared = declaredFiles(task);
   const wide = wideChecks(m, where.lane);
+  const permits = [];
+  for (const p of unitPermits(m, task)) {
+    for (const f of p.files) {
+      const value = `${f}=PF-${p.ruling + 1}`;
+      if (!permits.includes(value)) permits.push(value);
+    }
+  }
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
     '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...(declared.length === 0 ? [] : ['--declared-from-owners', q(declaredFingerprint(declared))]),
+    ...permits.flatMap((v) => ['--permit', q(v)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
     ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
     ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
@@ -1675,6 +1685,20 @@ function runRulingsLines(m) {
   return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
+// The pre-flight permits the run kept for the unit's tasks (m.run_permits,
+// set only by the workflow, spec 4.6): [{task, files, ruling}], ruling the
+// 0-based index of a run ruling, so its id is PF-<ruling + 1>.
+function unitPermits(m, task) {
+  const ids = unitTasks(task).map((t) => t.id);
+  return (Array.isArray(m.run_permits) ? m.run_permits : []).filter((p) => ids.includes(p.task));
+}
+
+// One prompt line per kept permit of the unit's tasks; [] when there is none.
+function runPermitsLines(m, task) {
+  return unitPermits(m, task).map((p) =>
+    `PF-${p.ruling + 1} permits ${p.task} to change ${p.files.join(', ')}: changing them does not widen your checks.`);
+}
+
 // The message a task fix round commits with: 'fix: address review findings
 // for Task <id>', or for a batch 'for Batch <first>-<last>'.
 function fixCommitMessage(task) {
@@ -1748,6 +1772,7 @@ function taskContext(m, task, where, guidance = null, by = 'implementer') {
     checkoutRules(where.dir, where.branch),
     ...briefs,
     ...runRulingsLines(m),
+    ...runPermitsLines(m, task),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -2420,6 +2445,21 @@ function preflightSchema() {
       rulings: { type: 'array', items: { type: 'string' } },
       undeclared: dependencies(),
       code_deps: dependencies(),
+      // Optional (spec 4.6): files a ruling lets a task change outside its
+      // Files list; ruling is the 0-based index in rulings. The run reads a
+      // result without it as [].
+      permits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' } },
+            ruling: { type: 'integer' },
+          },
+          required: ['task', 'files', 'ruling'],
+        },
+      },
     },
     required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
@@ -2590,6 +2630,7 @@ function relaunchPreflightLines(m) {
     `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Permits an earlier launch recorded are carried; they need no new ruling.',
     'Check only the tasks still to run and their dependence on built work.',
     'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
     `since that ruling; then report it as a conflict. ${changed}`,
@@ -2633,6 +2674,10 @@ function preflightPrompt(m, waves = null) {
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
+    'When a ruling has a task change a file outside its Files list, also return it in permits as',
+    '{task, files, ruling}: the task id, the project-relative files (files, not folders) and the ruling\'s',
+    '0-based index in rulings. A permitted file does not widen that task\'s checks. The run drops a permit',
+    'for a file that a task able to run at the same time declares or is also permitted.',
     '',
     phaseRules(m),
   ].join('\n');
@@ -5494,6 +5539,89 @@ function preflightUndeclared(m, entries) {
   return { kept, dropped };
 }
 
+// Pre-flight's permits (spec 4.6), judged file by file: {kept: [{task, files,
+// ruling}], dropped: [{task, file, why}]}. A permit lets a task change files
+// outside its Files list under rulings[ruling] (0-based). A file is kept when
+// the task is a task of this launch (not done and reviewed), ruling indexes
+// rulings, the file is project-relative (no '..', no trailing '/'), no task
+// that can run at the same time declares it (the file or a folder holding
+// it, compared without case), and no permit kept before it in pre-flight's
+// order gives it to such a task. Two tasks can run at the same time when they
+// are in different lanes, or are join tasks of different units of one wave of
+// waves (the join's waves after wave_moves; null when the join runs one unit
+// at a time). Prelude tasks never run beside another task.
+function preflightPermits(m, permits, rulings, waves) {
+  const all = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join];
+  const runnable = new Set(all.filter((t) => taskState(m, t.id) !== 'skip').map((t) => t.id));
+  const laneOf = new Map();
+  for (const l of m.lanes) for (const t of l.tasks) laneOf.set(t.id, l.id);
+  const waveOf = new Map();
+  if (Array.isArray(waves)) {
+    for (const u of joinUnits(m)) {
+      const wave = waves.findIndex((ids) => ids.includes(u.id));
+      if (wave >= 0) for (const t of unitTasks(u)) waveOf.set(t.id, { wave, unit: u.id });
+    }
+  }
+  const alongside = (a, b) => {
+    if (laneOf.has(a) && laneOf.has(b)) return laneOf.get(a) !== laneOf.get(b);
+    const wa = waveOf.get(a);
+    const wb = waveOf.get(b);
+    return Boolean(wa && wb && wa.wave === wb.wave && wa.unit !== wb.unit);
+  };
+  const relative = (f) => typeof f === 'string' && normalizePath(f) !== null && !f.split('/').includes('..')
+    && !f.endsWith('/');
+  const key = (f) => normalizePath(f).toLowerCase();
+  const covers = (declared, k) => {
+    const d = normalizePath(declared);
+    return d !== null && (k === d.toLowerCase() || k.startsWith(`${d.toLowerCase()}/`));
+  };
+  const kept = [];
+  const dropped = [];
+  const given = [];
+  for (const p of Array.isArray(permits) ? permits : []) {
+    const shaped = p !== null && typeof p === 'object' && !Array.isArray(p);
+    const taskId = shaped && typeof p.task === 'string' ? p.task : null;
+    const listed = shaped && Array.isArray(p.files);
+    const files = listed ? p.files : [shaped && p.files !== undefined ? p.files : null];
+    const drop = (file, why) => dropped.push({ task: taskId, file, why });
+    if (taskId === null || !runnable.has(taskId)) {
+      for (const f of files) drop(f, 'not a task of this launch');
+      continue;
+    }
+    if (!Number.isInteger(p.ruling) || p.ruling < 0 || p.ruling >= rulings.length) {
+      for (const f of files) drop(f, 'no such ruling');
+      continue;
+    }
+    if (!listed) {
+      drop(files[0], 'not a project-relative file');
+      continue;
+    }
+    const mine = [];
+    for (const f of files) {
+      if (!relative(f)) {
+        drop(f, 'not a project-relative file');
+        continue;
+      }
+      const k = key(f);
+      if (mine.some((x) => key(x) === k)) continue;
+      const owner = all.find((t) => alongside(taskId, t.id) && (t.files || []).some((d) => covers(d, k)));
+      if (owner) {
+        drop(f, `declared by ${owner.id}, which can run at the same time`);
+        continue;
+      }
+      const other = given.find((g) => g.key === k && alongside(taskId, g.task));
+      if (other) {
+        drop(f, `also permitted to ${other.task}, which can run at the same time`);
+        continue;
+      }
+      given.push({ task: taskId, key: k });
+      mine.push(f);
+    }
+    if (mine.length > 0) kept.push({ task: taskId, files: mine, ruling: p.ruling });
+  }
+  return { kept, dropped };
+}
+
 // A copy of the manifest with consumes_extra: {<task>: [<producer>, ...]}
 // from the kept undeclared entries, producers in entry order without
 // duplicates. startCommand and the adjudicator's task-brief command pass
@@ -5580,9 +5708,9 @@ async function runAll(manifest, io) {
   const autonomous = effectiveAutonomy(m) === 'autonomous';
   const hasChecks = finalChecks(m).length > 0;
 
-  // Run rulings come from this run's pre-flight only, never from the
-  // manifest file.
-  m = { ...m, run_rulings: [] };
+  // Run rulings and permits come from this run's pre-flight only, never from
+  // the manifest file.
+  m = { ...m, run_rulings: [], run_permits: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -5791,10 +5919,21 @@ async function runAll(manifest, io) {
           + `${mv.producer ? ` (it needs ${mv.producer})` : ''}`);
       }
     }
+    // Permits (spec 4.6) are judged against the waves after the moves; a
+    // result without permits has none.
+    const permits = preflightPermits(m, pre.permits, pre.rulings,
+      shown.mode === 'waves' ? wavePlan(m, waveEdges).waves : null);
+    preflight.permits = permits.kept;
+    preflight.permits_dropped = permits.dropped;
+    for (const d of permits.dropped) {
+      io.log(`parallel-lanes: pre-flight: dropped the permit of ${d.task} for ${d.file} (${d.why})`);
+    }
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
-    // (taskContext and the final review prompts show m.run_rulings).
-    m = { ...m, run_rulings: [...pre.rulings] };
+    // (taskContext and the final review prompts show m.run_rulings); its
+    // kept permits reach the task-checks call and the prompt of their tasks
+    // (m.run_permits).
+    m = { ...m, run_rulings: [...pre.rulings], run_permits: permits.kept };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
