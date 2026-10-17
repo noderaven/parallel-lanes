@@ -80,7 +80,8 @@ function tierSettings(tier) {
 // once, whenever a project or lane test, lint or build command exists
 // (finalChecks): after the final fix and before the final re-review (which
 // gets its result), or after the lenses when they found nothing; it is
-// listed in that place; e2e_recheck and
+// listed in that place. The start check (Sonnet) is listed beside it as the
+// upper bound: it runs only after a failing verify. e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -136,7 +137,10 @@ function planAgents(m) {
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
-  if (finalChecks(m).length > 0) add('Verify', null, null, 'verify', sonnetHigh);
+  if (finalChecks(m).length > 0) {
+    add('Verify', null, null, 'verify', sonnetHigh);
+    add('Verify', null, null, 'start_check', sonnetHigh);
+  }
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
@@ -329,13 +333,46 @@ function longCommandWarnings(lengths) {
     + " shorten the project's check commands, for example with a wrapper script"];
 }
 
+// The widen paths that make a unit's task checks wider (1.6.8 spec 4.5):
+// [{file, widen_path}], one per declared file in declared order, with the
+// first widen path that covers it. A widen path ending in '/' covers the paths
+// under it; any other covers the equal path and the paths under it (the dry
+// run cannot tell whether it names a directory). A declared entry ending in
+// '/' counts when it contains a widen path. Paths compare after turning '\'
+// into '/'; the declared and widen strings are reported as written.
+function unitWidening(files, widen) {
+  const slash = (p) => p.split('\\').join('/');
+  const covers = (w, f) => (w.endsWith('/') ? f.startsWith(w) : f === w || f.startsWith(`${w}/`))
+    || (f.endsWith('/') && w.startsWith(f));
+  const out = [];
+  const seen = new Set();
+  for (const file of files) {
+    const f = slash(file);
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const hit = widen.find((w) => covers(slash(w), f));
+    if (hit !== undefined) out.push({ file, widen_path: hit });
+  }
+  return out;
+}
+
 // The dry run's checks summary (spec 4.9). Units are the units with work,
-// built as planAgents builds them.
+// built as planAgents builds them. widening lists each unit with a
+// task_checks entry whose declared files a widen path covers (a unit without
+// one checks its lane commands whatever it changes), in unit order.
 function checksSummary(m) {
+  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
   const withEntry = [];
   const withoutEntry = [];
+  const widening = [];
   for (const { unit, laneId } of unitsWithWork(m)) {
-    (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+    if (taskChecksEntry(m, unit, laneId) === null) {
+      withoutEntry.push(unit.id);
+      continue;
+    }
+    withEntry.push(unit.id);
+    const paths = unitWidening(unit.files, widen);
+    if (paths.length > 0) widening.push({ unit: unit.id, paths });
   }
   const project = (group, command) => commandGroup(m, null, group).includes(command);
   const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
@@ -343,7 +380,6 @@ function checksSummary(m) {
     group: c.group,
     command: c.command,
   }));
-  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
   const hasEntries = Boolean(m.task_checks) && Object.keys(m.task_checks).length > 0;
   return {
     final_count: finalChecks(m).length,
@@ -357,5 +393,6 @@ function checksSummary(m) {
       ...(hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : []),
       ...longCommandWarnings(checkCommandLengths(m)),
     ],
+    widening,
   };
 }

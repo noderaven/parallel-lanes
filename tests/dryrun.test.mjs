@@ -121,6 +121,7 @@ test('full plan lists every role in run order with phase, lane and task', () => 
     ['Final review', null, null, 'final_review_correctness'],
     ['Final review', null, null, 'final_fix'],
     ['Verify', null, null, 'verify'],
+    ['Verify', null, null, 'start_check'],
     ['Final review', null, null, 'final_re_review'],
     ['Verify', null, null, 'e2e_recheck'],
     ['Verify', null, null, 'post_integrate_recheck'],
@@ -169,7 +170,7 @@ test('a sonnet task implementer runs at sonnet/high and its reviewer at opus/hig
 test('integrate and e2e run at sonnet/high; every other agent but a light implementer at opus/high', () => {
   const m = manifest({ hooks: { post_integrate: 'check', e2e: 'run' } });
   m.join[0].tier = 'light';
-  const sonnet = new Set(['integrate', 'e2e', 'verify', 'e2e_recheck']);
+  const sonnet = new Set(['integrate', 'e2e', 'verify', 'start_check', 'e2e_recheck']);
   for (const a of planAgents(m)) {
     const want = sonnet.has(a.role) || (a.task === 'T5' && a.role === 'implement')
       ? ['sonnet', 'high'] : ['opus', 'high'];
@@ -188,6 +189,17 @@ test('the plan never lists a setup agent: scripts/setup runs before the launch',
 test('no verify agent when the project has no test, lint or build command', () => {
   const m = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
   assert.deepEqual(planAgents(m).filter((a) => a.phase === 'Verify'), []);
+});
+
+test('the planned agents list a start check after verify', () => {
+  const agents = planAgents(manifest());
+  const at = agents.findIndex((a) => a.role === 'verify');
+  assert.deepEqual(agents[at + 1], {
+    phase: 'Verify', lane: null, task: null, role: 'start_check', model: 'sonnet', effort: 'high',
+  });
+  assert.equal(agents.filter((a) => a.role === 'start_check').length, 1);
+  const none = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
+  assert.deepEqual(planAgents(none).filter((a) => a.role === 'start_check'), []);
 });
 
 test('a lite manifest whose only check is a lane override lists a verify agent', async () => {
@@ -216,6 +228,7 @@ test('lite plan: no pre-flight, integrate or post-integrate; one combined final 
     ['Final review', null, null, 'final_review_combined', 'opus'],
     ['Final review', null, null, 'final_fix', 'opus'],
     ['Verify', null, null, 'verify', 'sonnet'],
+    ['Verify', null, null, 'start_check', 'sonnet'],
     ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'e2e_recheck', 'sonnet'],
   ]);
@@ -342,8 +355,9 @@ async function parityRun(m) {
 
 const settings = (list) => list.map((a) => `${a.model}/${a.effort}`).sort();
 
+// The start check runs only after a failing verify; these runs pass verify.
 async function assertParity(m) {
-  const planned = planAgents(m);
+  const planned = planAgents(m).filter((a) => a.role !== 'start_check');
   const { result, calls } = await parityRun(m);
   assert.equal(result.status, 'complete', JSON.stringify(result));
   assert.deepEqual(result.final.fixed.map((f) => f.issue), ['one issue']);
@@ -385,17 +399,19 @@ test('the dry run lists verify before the final re-review', async () => {
   const m = manifest({ hooks: { post_integrate: 'check contracts', e2e: 'run e2e' } });
   const { result } = await dryRun(m);
   const roles = result.agents.map((a) => a.role);
-  assert.deepEqual(roles.slice(-5), ['final_fix', 'verify', 'final_re_review', 'e2e_recheck', 'post_integrate_recheck']);
+  assert.deepEqual(roles.slice(-6),
+    ['final_fix', 'verify', 'start_check', 'final_re_review', 'e2e_recheck', 'post_integrate_recheck']);
   assert.equal(result.agents.length, planAgents(m).length);
-  assert.equal(result.agents.length, 22, 'the count is unchanged');
+  assert.equal(result.agents.length, 23, 'the count adds the start check');
 });
 
 // ---- 1.6.0 check policy (spec 4.1, 4.9) ----
 
 const {
-  taskChecksEntry, finalChecks, finalSetup, expectedChecks, repairLimit, repairReserve, repairFixMessage,
+  taskChecksEntry, finalChecks, finalSetup, expectedChecks, repairLimit, repairReserve, repairFixMessage, checksSummary,
 } = await loadHelpers([
   'taskChecksEntry', 'finalChecks', 'finalSetup', 'expectedChecks', 'repairLimit', 'repairReserve', 'repairFixMessage',
+  'checksSummary',
 ]);
 
 function policyManifest(overrides = {}) {
@@ -419,7 +435,46 @@ test('the dry run reports a checks summary', async () => {
     repair_limit: 2,
     repairs_spent: 0,
     warnings: [],
+    widening: [],
   });
+});
+
+test('the summary lists units that widen', async () => {
+  const m = manifest({
+    prelude: [task('T1', ['tools/a.py'])],
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2', ['src/x.js', 'shared/b.py']), task('T3', ['shared'])] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T4', ['pkg/']), task('T6', ['src/none.js'])] },
+    ],
+    join: [task('T5', ['tools/c.py'])],
+    task_checks: {
+      T1: { test: ['node --test t1'] },
+      T2: { test: ['node --test t2'] },
+      T3: { test: ['node --test t3'] },
+      T4: { test: ['node --test t4'] },
+      T6: { test: ['node --test t6'] },
+    },
+    widen_paths: ['tools/', 'shared', 'pkg/sub/'],
+  });
+  const { result } = await dryRun(m);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.checks.widening, [
+    { unit: 'T1', paths: [{ file: 'tools/a.py', widen_path: 'tools/' }] },
+    { unit: 'T2', paths: [{ file: 'shared/b.py', widen_path: 'shared' }] },
+    { unit: 'T3', paths: [{ file: 'shared', widen_path: 'shared' }] },
+    { unit: 'T4', paths: [{ file: 'pkg/', widen_path: 'pkg/sub/' }] },
+  ]);
+});
+
+test('widening matches a batch unit by every task file, after turning backslashes into slashes', () => {
+  const m = batchedManifest({
+    task_checks: { T3: { test: ['node --test t3'] } },
+    widen_paths: ['src\\a2.js', 'src/a.js/', 'sr'],
+  });
+  m.lanes[0].tasks[1].files = ['src/a2.js', 'docs/'];
+  assert.deepEqual(checksSummary(m).widening, [
+    { unit: 'T2-T3', paths: [{ file: 'src/a2.js', widen_path: 'src\\a2.js' }] },
+  ]);
 });
 
 test('the summary warns when task_checks has entries and widen_paths is empty', async () => {

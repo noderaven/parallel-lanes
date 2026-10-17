@@ -230,7 +230,8 @@ test('happy path: complete, phases in order, report filled in', async () => {
   assert.equal(result.e2e.checked_sha, H('f1'));
   assert.deepEqual(result.acceptance, { status: 'accepted', delivered_sha: H('f1'), reasons: [], warnings: [] });
   assert.equal(result.agents_spawned, calls.length);
-  assert.equal(result.agents_spawned, planAgents(m).length, 'no fix rounds: matches the dry-run plan');
+  // The start check runs only after a failing verify.
+  assert.equal(result.agents_spawned, planAgents(m).filter((a) => a.role !== 'start_check').length, 'no fix rounds: matches the dry-run plan without the start check');
   assert.ok(logs.includes(`parallel-lanes: launching run run-1: 2 lanes, ${planAgents(m).length} agents`), JSON.stringify(logs));
   assert.ok(!logs.some((l) => l.includes('resuming')));
 
