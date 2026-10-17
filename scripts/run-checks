@@ -2,13 +2,24 @@
 """Run a checkout's project commands one by one and keep every exit status.
 
 usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA]
-                  [--lock-held] [--phase NAME] --cmd GROUP COMMAND [--cmd ...]
+                  [--lock-held] [--phase NAME] [--record-setup COMMAND ...]
+                  --cmd GROUP COMMAND [--cmd ...]
 
---phase NAME (prelude, lane, join, integrate, post-integrate, final-fix or
-verify, else a usage error) sets PL_PHASE=NAME for every command, the busy
-retry included, so a project's check script can tell the run's phases apart
-(a join unit runs in a lane worktree from 1.6.5); without --phase an inherited
-PL_PHASE is removed. The JSON gains "phase": NAME, or null without it.
+--phase NAME (prelude, lane, join, integrate, post-integrate, final-fix,
+verify or start, else a usage error) sets PL_PHASE=NAME for every command, the
+busy retry included, so a project's check script can tell the run's phases
+apart (a join unit runs in a lane worktree from 1.6.5); without --phase an
+inherited PL_PHASE is removed. The start phase is the start check's (the
+failing verify commands rerun at the run's start point, in its own
+worktree): it sets PL_PHASE=verify, since it reproduces verify's
+environment. The JSON gains "phase": NAME (start for the start phase), or
+null without it.
+
+--record-setup COMMAND (repeatable, a non-empty COMMAND, else a usage error)
+records the setup commands the caller ran before this call: the JSON gains
+"setup_commands": [COMMAND, ...] in the order given; without the flag the key
+is absent. They are recorded only, never run. reuse-checks compares them, so
+a passing check is reused only after the same setup.
 
 Each COMMAND runs with bash -c in DIR (the bash _shell.find_bash resolves:
 Git Bash on Windows, never the WSL launcher), in the given order, and every
@@ -151,9 +162,12 @@ BUSY_EXIT = 75  # sysexits EX_TEMPFAIL: busy or temporary, retried once
 BUSY_WAIT_S = 60
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] [--lock-held] "
-         "[--phase NAME] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+         "[--phase NAME] [--record-setup COMMAND ...] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
 # The run phases a check can belong to (--phase, PL_PHASE).
-PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify")
+PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify", "start")
+# The PL_PHASE a phase sets when it is not the phase's own name: the start
+# check reproduces verify's environment.
+PHASE_ENV = {"start": "verify"}
 
 # Where fail writes its error record: FILE once it is validated, unless
 # --lock-held says the caller writes FILE's records; None before that.
@@ -187,11 +201,14 @@ def parse(argv):
     directory, rest = _shell.native_path(argv[0]), argv[1:]
     out = root = descends = phase = None
     lock_held = False
-    cmds = []
+    cmds, setup = [], None
     while rest:
         if rest[0] == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
             cmds.append((rest[1], rest[2]))
             rest = rest[3:]
+        elif rest[0] == "--record-setup" and len(rest) >= 2 and rest[1]:
+            setup = (setup or []) + [rest[1]]
+            rest = rest[2:]
         elif rest[0] == "--lock-held":
             lock_held = True
             rest = rest[1:]
@@ -209,7 +226,7 @@ def parse(argv):
             rest = rest[2:]
         else:
             fail(2, USAGE)
-    return directory, out, root, cmds, descends, lock_held, phase
+    return directory, out, root, cmds, descends, lock_held, phase, setup
 
 
 def head_of(directory):
@@ -388,11 +405,11 @@ def busy_wait_s():
 
 
 def command_env(phase):
-    """The commands' environment: ENV with PL_PHASE=phase, or without
-    PL_PHASE when phase is None."""
+    """The commands' environment: ENV with PL_PHASE=phase (verify for the
+    start phase, PHASE_ENV), or without PL_PHASE when phase is None."""
     env = {k: v for k, v in ENV.items() if k != "PL_PHASE"}
     if phase is not None:
-        env["PL_PHASE"] = phase
+        env["PL_PHASE"] = PHASE_ENV.get(phase, phase)
     return env
 
 
@@ -407,7 +424,7 @@ def run_command(command, directory, f, env=None):
 def main(argv):
     global _record
     _shell.setup_io()
-    directory, out, root, cmds, descends, lock_held, phase = parse(argv)
+    directory, out, root, cmds, descends, lock_held, phase, setup = parse(argv)
     if out is not None and root is not None and (os.path.islink(out) or not _shell.contained(out, root)):
         fail(3, f"output path {out!r} is outside {root!r}")
     with contextlib.ExitStack() as stack:
@@ -426,7 +443,7 @@ def main(argv):
             except OSError as e:
                 fail(3, f"cannot lock {out!r}: {e}")
         try:
-            run(directory, out, root, cmds, descends, phase)
+            run(directory, out, root, cmds, descends, phase, setup)
         except _shell.BashNotFound as e:
             fail(3, str(e))
         except Exception as e:
@@ -434,8 +451,9 @@ def main(argv):
             raise
 
 
-def run(directory, out, root, cmds, descends=None, phase=None):
-    """The checks themselves; main has validated out against root."""
+def run(directory, out, root, cmds, descends=None, phase=None, setup=None):
+    """The checks themselves; main has validated out against root. setup, the
+    --record-setup commands (None without the flag), is recorded, never run."""
     env = command_env(phase)
     if cmds:
         # Found before anything runs: a missing bash fails no check halfway.
@@ -460,6 +478,8 @@ def run(directory, out, root, cmds, descends=None, phase=None):
                       "tracked_before": tracked_before, "tracked_after": tracked_before,
                       "untracked_before": untracked_lines(before), "untracked_after": untracked_lines(before),
                       "tree_changed": False, "descends_from": lineage, "phase": phase}
+            if setup is not None:
+                report["setup_commands"] = setup
             emit(report, out)
     fingerprint_before = fingerprint(directory)
     results = []
@@ -499,6 +519,8 @@ def run(directory, out, root, cmds, descends=None, phase=None):
         report["head_after"] = after
     if lineage is not None:
         report["descends_from"] = lineage
+    if setup is not None:
+        report["setup_commands"] = setup
     emit(report, out)
 
 

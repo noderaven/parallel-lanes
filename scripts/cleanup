@@ -33,12 +33,19 @@ Preconditions (otherwise it refuses, exit 3, and changes nothing):
 Run-owned items:
 - <worktree_root>/lane-<id> for each manifest lane, on branch pl-<run_id>-<id>;
 - in shadow mode, <worktree_root>/feature on repo.branch;
-- the branches pl-<run_id>-<id> and repo.branch.
+- the branches pl-<run_id>-<id> and repo.branch;
+- <worktree_root>/start, the start check's worktree (it holds no commits),
+  when git worktree list --porcelain shows it detached, its common dir is
+  the repo's, and its HEAD is the run's start sha: manifest
+  start_points.prelude when it has one, else the head of the first setup
+  run_started event in <repo.ledger_dir>/_run.jsonl. Its plan item has
+  branch null.
 A worktree path counts only when git worktree list --porcelain shows it with
 that branch and its git rev-parse --git-common-dir resolves to the repo's.
-Anything else directly under worktree_root is listed in foreign with reason
-"not owned by this run" and left in place. refs/parallel-lanes/<run_id>/ refs
-are always kept.
+Anything else directly under worktree_root (the start path on another sha or
+on a branch, or with no start sha known, included) is listed in foreign with
+reason "not owned by this run" and left in place. refs/parallel-lanes/<run_id>/
+refs are always kept.
 
 The restore point is a new folder <run folder>/cleanup/<YYYYMMDDTHHMMSSZ>/,
 made with os.mkdir; when it exists, -2, -3, ... are tried, so an existing
@@ -48,7 +55,8 @@ replaces the UTC timestamp (for tests). It holds, written in this order:
   under refs/parallel-lanes/<run_id>/ that exists;
 - run.bundle: git bundle create of those refs, checked with git bundle verify;
 - restore.md: for each ref, git fetch <bundle> <ref>:<ref> (the bundle's
-  absolute path), and a git worktree add line for each worktree to be removed.
+  absolute path), and a git worktree add line for each worktree to be removed
+  (git worktree add --detach <path> <sha> for the start worktree).
   It is written last, so a folder without it is not a usable restore point.
 In shadow mode every repo command uses --git-dir=<repo.git_dir>; in git mode
 -C <repo.root>.
@@ -68,7 +76,12 @@ cannot be removed safely is kept and named with the reason:
    worktree list: it is still a run-owned worktree on its branch, it is
    not locked, its HEAD is still the planned head, and it is still clean.
    Otherwise it is kept with "changed after the plan (<what changed>); run
-   cleanup again", and so is its planned branch;
+   cleanup again", and so is its planned branch.
+   The start worktree is the exception: it is removed even with uncommitted
+   or untracked files, with git worktree remove --force (it holds no
+   commits, and a failed start check can leave its files behind). It is
+   kept when locked, and right before its removal it is checked again:
+   still detached, of this repo, unlocked and at the start sha;
 2. lane branches the plan marks remove, with git branch -d (git mode only),
    each only while its tip is still the planned sha; otherwise it is kept
    with "moved after the plan; run cleanup again", or named with "deleted
@@ -93,7 +106,8 @@ cannot be removed safely is kept and named with the reason:
 Shadow mode removes the lane worktrees and <worktree_root>/feature, and
 keeps every branch and the shadow repo. Foreign items under worktree_root
 and refs/parallel-lanes/<run_id>/ refs are always kept. It never uses
---force or branch -D, never deletes a remote branch, never makes a merge
+--force (except git worktree remove --force for the start worktree) or
+branch -D, never deletes a remote branch, never makes a merge
 commit, resets or rebases, and never touches the manifest, the ledger or
 the history folder (other than writing the restore point).
 
@@ -104,7 +118,8 @@ Output: the plan, as text or (--json) one JSON object:
    "feature_steps": [...], "refs": [{"ref", "sha", "action", "reason"}],
    "foreign": [{"path", "reason"}], "restore_point": <path or null>}
 A worktree's head is its git rev-parse HEAD when the plan was made (null
-when it cannot be read; the worktree is then kept).
+when it cannot be read; the worktree is then kept); its branch is null for
+the start worktree.
 With --yes the object also has "removed" and "kept": lists of
   {"kind", ..., "reason"}, where kind is worktree (with path, branch),
   branch (branch, sha), ref (ref, sha), path (a foreign item under
@@ -212,6 +227,7 @@ class Repo:
         try:
             self.root = _shell.native_path(repo["root"])
             self.worktree_root = _shell.native_path(repo["worktree_root"]).rstrip("/\\")
+            self.ledger_dir = _shell.native_path(repo["ledger_dir"])
             self.git_dir = _shell.native_path(repo["git_dir"]) if self.mode == "shadow" else None
         except _shell.BashNotFound as e:
             raise Failure(2, str(e))
@@ -235,16 +251,19 @@ class Repo:
         return res.stdout.strip() if res.returncode == 0 else None
 
     def worktrees(self):
-        """git worktree list --porcelain as [{"path", "branch", "locked"}]."""
+        """git worktree list --porcelain as [{"path", "branch", "detached",
+        "locked"}]."""
         found = []
         for block in self.out("worktree", "list", "--porcelain").split("\n\n"):
             lines = block.splitlines()
             if not lines or not lines[0].startswith("worktree "):
                 continue
-            entry = {"path": lines[0][len("worktree "):], "branch": None, "locked": False}
+            entry = {"path": lines[0][len("worktree "):], "branch": None, "detached": False, "locked": False}
             for line in lines[1:]:
                 if line.startswith("branch refs/heads/"):
                     entry["branch"] = line[len("branch refs/heads/"):]
+                elif line == "detached":
+                    entry["detached"] = True
                 elif line == "locked" or line.startswith("locked "):
                     entry["locked"] = True
             found.append(entry)
@@ -363,6 +382,55 @@ def owned_worktree(repo, listing, path, branch):
     return entry
 
 
+def start_sha(repo, m):
+    """The run's start sha: manifest start_points.prelude, else the head of
+    the first setup run_started event in the ledger's _run.jsonl; None when
+    neither is known."""
+    points = m.get("start_points")
+    prelude = points.get("prelude") if isinstance(points, dict) else None
+    if isinstance(prelude, str) and prelude:
+        return prelude
+    try:
+        with open(os.path.join(repo.ledger_dir, "_run.jsonl"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(event, dict) and event.get("event") == "run_started" and event.get("phase") == "setup"
+                and isinstance(event.get("head"), str) and event["head"]):
+            return event["head"]
+    return None
+
+
+def owned_start_worktree(repo, listing, path, sha):
+    """The worktree list entry when path is a worktree of this repo detached
+    at sha (the run's start worktree), else None."""
+    if sha is None or os.path.islink(path) or not os.path.isdir(path):
+        return None
+    entry = next((e for e in listing if same_place(e["path"], path)), None)
+    if entry is None or not entry["detached"] or entry["branch"] is not None:
+        return None
+    res = run_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], ["-C", path])
+    if res.returncode != 0 or not same_place(res.stdout.strip(), repo.common_dir):
+        return None
+    head, _ = worktree_head(path)
+    return entry if head == sha else None
+
+
+def start_item(entry, path, sha):
+    """The plan item of the run's start worktree: removed with --force, even
+    with uncommitted or untracked files, unless it is locked."""
+    item = {"path": path, "branch": None, "head": sha}
+    if entry["locked"]:
+        return dict(item, action="keep", reason="the worktree is locked")
+    return dict(item, action="remove", reason="the run's start worktree, detached at the start sha "
+                + sha[:12] + "; removed with git worktree remove --force")
+
+
 def worktree_head(path):
     """(sha, None) for the worktree's HEAD, or (None, the git error)."""
     res = run_git(["rev-parse", "--verify", "HEAD"], ["-C", path])
@@ -397,6 +465,12 @@ def recheck_worktree(repo, w):
         listing = repo.worktrees()
     except Failure as e:
         return changed(str(e))
+    if w["branch"] is None:
+        # The start worktree: removed with --force, so no clean check.
+        entry = owned_start_worktree(repo, listing, w["path"], w["head"])
+        if entry is None:
+            return changed("it is no longer a worktree of this repo detached at " + w["head"][:12])
+        return changed("it is locked now") if entry["locked"] else None
     entry = owned_worktree(repo, listing, w["path"], w["branch"])
     if entry is None:
         return changed("it is no longer a worktree of this repo on " + w["branch"])
@@ -496,6 +570,12 @@ def make_plan(repo, m, run_folder):
         if entry is not None:
             worktrees.append(worktree_item(repo, entry, slash(path), branch))
             owned_paths.append(path)
+    # The start check's worktree, detached at the run's start sha.
+    start, start_at = repo.worktree_root + "/start", start_sha(repo, m)
+    entry = owned_start_worktree(repo, listing, start, start_at)
+    if entry is not None:
+        worktrees.append(start_item(entry, slash(start), start_at))
+        owned_paths.append(start)
     foreign = []
     if os.path.isdir(repo.worktree_root):
         for name in sorted(os.listdir(repo.worktree_root)):
@@ -596,7 +676,10 @@ def write_restore_point(repo, plan, run_folder):
         lines.append("# no run refs existed, so there is nothing to restore")
     lines += ["```", "", "## Worktrees", "", "Recreate a removed worktree once its branch is back:", "", "```bash"]
     removed = [w for w in plan["worktrees"] if w["action"] == "remove"]
-    lines += [git + " worktree add " + shlex.quote(w["path"]) + " " + shlex.quote(w["branch"]) for w in removed]
+    lines += [git + " worktree add " + shlex.quote(w["path"]) + " " + shlex.quote(w["branch"])
+              if w["branch"] is not None else
+              git + " worktree add --detach " + shlex.quote(w["path"]) + " " + shlex.quote(w["head"])
+              for w in removed]
     if not removed:
         lines.append("# no worktree is removed")
     lines += ["```", ""]
@@ -715,10 +798,15 @@ def remove_owned(repo, m, plan):
             note(False, entry, reason)
             still_out[w["branch"]] = "its worktree " + w["path"] + " " + reason
             continue
-        res = repo.git("-c", "status.showUntrackedFiles=all", "worktree", "remove", w["path"])
+        if w["branch"] is None:
+            # The start worktree holds no commits: the one forced removal.
+            res = repo.git("worktree", "remove", "--force", w["path"])
+        else:
+            res = repo.git("-c", "status.showUntrackedFiles=all", "worktree", "remove", w["path"])
         if res.returncode != 0:
             note(False, entry, "git worktree remove refused: " + git_error(res))
-            still_out[w["branch"]] = "it is checked out in the kept worktree " + w["path"]
+            if w["branch"] is not None:
+                still_out[w["branch"]] = "it is checked out in the kept worktree " + w["path"]
         else:
             note(True, entry, w["reason"])
     for f in plan["foreign"]:
@@ -773,7 +861,7 @@ def remove_owned(repo, m, plan):
 
 def item_name(item):
     if item["kind"] == "worktree":
-        return item["path"] + " (" + item["branch"] + ")"
+        return item["path"] + " (" + (item["branch"] or "detached") + ")"
     if item["kind"] in ("branch", "ref"):
         return item[item["kind"]] + " " + item["sha"][:12]
     return item["path"]
@@ -793,7 +881,7 @@ def render_done(plan):
 def render(plan):
     out = ["cleanup plan for run " + plan["run_id"] + " (" + plan["mode"] + " mode)",
            "run folder: " + plan["run_folder"], "", "worktrees:"]
-    out += ["  " + w["action"] + "  " + w["path"] + " (" + w["branch"] + "): " + w["reason"]
+    out += ["  " + w["action"] + "  " + w["path"] + " (" + (w["branch"] or "detached") + "): " + w["reason"]
             for w in plan["worktrees"]] or ["  (no run-owned worktree)"]
     out += ["", "branches:"]
     out += ["  " + b["action"] + "  " + b["branch"] + " " + b["sha"][:12] + ": " + b["reason"]
