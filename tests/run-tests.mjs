@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Runs every *.test.mjs in this directory with node --test, naming each file,
-// so each runs in its own process and a few run at once. The default is 4 at
-// a time; PL_TEST_CONCURRENCY or --concurrency N changes it. Other arguments
-// go to node --test unchanged (e.g. --test-name-pattern=...). Exits with
-// node's exit code; 2 on a usage error.
+// so each runs in its own process and several run at once. The default is the
+// CPU count less 4, between 4 and 12; inside a parallel-lanes lane check
+// (PL_PHASE=lane), where several lanes may run the suite at once, it is 4.
+// PL_TEST_CONCURRENCY or --concurrency N changes it. Other arguments go to
+// node --test unchanged (e.g. --test-name-pattern=...). Exits with node's
+// exit code; 2 on a usage error.
 //
 //   node tests/run-tests.mjs [--concurrency N] [node --test options...]
 //
@@ -12,12 +14,14 @@
 // on Windows, 2026-10-09).
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TESTS = dirname(fileURLToPath(import.meta.url));
 const ROOT = dirname(TESTS);
-const DEFAULT_CONCURRENCY = '4';
+const DEFAULT_CONCURRENCY = String(process.env.PL_PHASE === 'lane'
+  ? 4 : Math.min(12, Math.max(4, availableParallelism() - 4)));
 
 function usage(message) {
   console.error(`run-tests: ${message}`);

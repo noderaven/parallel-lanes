@@ -372,7 +372,7 @@ Other things to know:
 | `scripts/` | derive-lanes, worth-it, setup, ledger, shadow, run-report, active-run, task-checks, run-checks, await-checks, audit, tool-outcomes, stop-cause, and other helpers |
 | `hooks/` | The SessionStart and notice hooks |
 | `agents/` | The `parallel-lanes-worker` agent definition |
-| `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, four files at a time (`--concurrency N` or `PL_TEST_CONCURRENCY` to change) |
+| `tests/` | `node tests/run-tests.mjs` runs every `tests/*.test.mjs`, the CPU count less 4 files at a time (4 to 12; 4 inside a lane check), `--concurrency N` or `PL_TEST_CONCURRENCY` to change. The slowest files keep their tests in `<name>.cases.mjs`, split across `<name>.shard<k>.test.mjs` by `tests/shard.mjs`; run a cases file directly to run all of its tests |
 
 ## License
 

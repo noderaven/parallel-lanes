@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.8: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.9: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -71,6 +71,8 @@ function agentRules() {
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
       'an Edit or Write on a file not read first, or changed since, fails and costs a retry. ' +
       'Read it with the Read tool: output of grep, sed or cat through Bash does not count.',
+    'Put any scratch file or copy (redirected test output, helper scripts) in your own folder made with mktemp -d,' +
+      " outside the checkout, the project and the session's scratchpad, and remove it when done: agents running at the same time share that scratchpad.",
   ].join('\n');
 }
 
@@ -3429,8 +3431,6 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     ...fixMessagesLines(),
     'Run only the focused checks a finding needs; do not run the full project commands.'
       + (finalChecks(m).length > 0 ? ' Verify runs every check at the delivered revision after the review.' : ''),
-    'Put any scratch copy or file in your own folder made with mktemp -d, outside the checkout,'
-      + " the project and the session's scratchpad, and remove it when done.",
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
@@ -6806,7 +6806,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.8';
+const VERSION = '1.6.9';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

@@ -1,7 +1,8 @@
 // doctor: the checks that block a launch (hard failures), run against temp
 // git repos with a local bare repo as origin (no network).
 
-import { test, after } from 'node:test';
+import { after } from 'node:test';
+import { test } from './shard.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
