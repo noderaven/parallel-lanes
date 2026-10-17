@@ -2,8 +2,13 @@
 """Copy a run into the run history and record it in index.json.
 
 usage:
-  python3 archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]
+  python3 archive-run MANIFEST [TRANSCRIPT_DIR...] [--ledger DIR]
+                      [--notes FILE...] [--history-dir DIR]
   python3 archive-run --reindex [--history-dir DIR]
+
+A call needs at least one TRANSCRIPT_DIR, or --notes for a run already in
+index.json (a notes-only call). --notes takes every following argument up to
+the next -- option.
 
 The history dir is _history.history_dir(DIR): --history-dir, else
 PL_HISTORY_DIR, else <CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/history.
@@ -12,15 +17,36 @@ project folder in shadow mode) is refused, and nothing is written.
 
 The run goes to <history dir>/<folder>/, which holds:
   <manifest file>                  the manifest;
-  <plan-name>.<run_id>.ledger/     repo.ledger_dir, copied whole (checks/ too);
+  <plan-name>.<run_id>.ledger/     the ledger, copied whole (checks/ too):
+                                   --ledger DIR when given, else
+                                   repo.ledger_dir;
   <plan-name>.<run_id>.report.json from beside the manifest, when present;
   the plan and spec files          by their own names, pinned (below);
+  derive.json and setup.json       from the manifest's directory, when present
+                                   and that directory is the run-owned
+                                   <CLAUDE_CONFIG_DIR or ~/.claude>/
+                                   parallel-lanes/runs/<run_id> (compared
+                                   after realpath and normcase); a plans
+                                   folder is shared between runs, so nothing
+                                   generic is taken from it;
+  notes/<name>                     each --notes FILE under its basename;
   wf_<id>/ and wf_<id>.json        each TRANSCRIPT_DIR and its workflow result
                                    file (found as run-report finds it,
                                    _shell.result_paths), when present.
 Two different files that would get one name (the plan and spec with one
-file name, or one named like the manifest or the report; compared without
-case) are refused with exit 2 before anything is written.
+file name, or one named like the manifest, the report, derive.json or
+setup.json; two notes with one basename; compared without case) are refused
+with exit 2 before anything is written.
+
+--ledger DIR reads the ledger from DIR instead of repo.ledger_dir, for a run
+whose live ledger is gone: archive-run <archived manifest> <transcript
+dir>... --ledger <archived ledger>. DIR must hold _run.jsonl (else exit 2).
+The run is still found in the index by its key, so it keeps its folder, and
+a ledger copied onto itself is left as it is. Without --ledger a call with
+transcript dirs needs repo.ledger_dir to be a directory. A notes-only call
+copies the ledger only when its source exists. The ledger the call reads
+(for pinning and for counting launches) is --ledger, else repo.ledger_dir
+when it exists, else the folder's archived ledger.
 <plan-name> is the manifest file name minus .lanes.json (minus its extension
 when it does not end in .lanes.json). Every TRANSCRIPT_DIR must be a
 directory named wf_<id>, as the Workflow tool names them.
@@ -38,8 +64,8 @@ already in the archive is never deleted, even when its source is gone.
 
 The plan and spec (manifest.plan and manifest.spec; a spec of null is
 skipped) are pinned instead (_pin.pin, spec 4.1): an archived copy is only
-ever the version the latest setup run_started event of the ledger
-(repo.ledger_dir) recorded in plan_sha256 / spec_sha256. An archived copy
+ever the version the latest setup run_started event of the ledger the call
+reads (above) recorded in plan_sha256 / spec_sha256. An archived copy
 with that sha is kept, even when the live file differs. Otherwise the first
 source with that sha is written: the live file, then the file's blob at each
 recorded setup head from the latest back, as git stores it and with the
@@ -54,6 +80,12 @@ live file is copied.
 The index entry (_history.ENTRY_KEYS) is rebuilt from the folder after
 copying:
   launches      the number of wf_<id> dirs in the folder;
+  launches_recorded
+                the launches the ledger the call reads recorded
+                (_launches.recorded_launches: the larger of its run_ended
+                count and the number of distinct wf ids its carried events
+                and doctor-<id>.json files name); "unavailable" without a
+                ledger;
   first_launch, last_launch
                 the earliest and latest launch time (ISO 8601 UTC). A
                 launch's time is the startTime of its wf_<id>.json, else the
@@ -81,18 +113,25 @@ with paths relative to the folder, '/'-separated. pinned names a plan or
 spec newly archived with its recorded sha, kept one whose archived copy
 already had it, replaced one whose archived copy lacked it and was replaced
 by one that has it; a file with no recorded sha, or none that matched, is in
-none of the three. warnings holds plan_unpinned and spec_unpinned.
+none of the three. warnings holds plan_unpinned and spec_unpinned, and
+launches_missing when the folder holds fewer wf_<id> dirs than
+launches_recorded (spec 4.2): its detail gives both counts and the wf ids
+the ledger names that have no dir ("unknown" when none are named).
 
 Exit 0 on success; 2 on a usage error, an unreadable manifest, transcript
-dir, ledger dir or index, a failed copy, or the lock not acquired; 3 when
-the history dir is inside the project (nothing written).
+dir, note, ledger dir (a --ledger DIR without _run.jsonl included) or index,
+two notes with one basename, a notes-only call for a run not in the index, a
+failed copy, or the lock not acquired; 3 when the history dir is inside the
+project (nothing written).
 
 --reindex rebuilds index.json from the folders already in the history dir
 (runs archived by hand, imported, or by an older release), under
 _history.index_lock. Every folder that holds a *.lanes.json is one run, read
 as archive-run reads its own folders: the report is the first of
 *.report.json, *.run-report.json and report.json; launches and dates come
-from the wf_<id> dirs and their wf_<id>.json startTime values. A value that
+from the wf_<id> dirs and their wf_<id>.json startTime values;
+launches_recorded from the folder's archived ledger,
+<plan-name>.<run_id>.ledger, else its one *.ledger dir. A value that
 cannot be read is "unavailable". When no launch has a time, first_launch and
 last_launch are the old index entry's, else "unavailable" (the date is never
 made up). A folder keeps its name; an old index entry of the folder lends its
@@ -123,12 +162,17 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _history  # noqa: E402
+import _launches  # noqa: E402
 import _pin  # noqa: E402
 import _shell  # noqa: E402
 
 UNAVAILABLE = "unavailable"
-USAGE = ("usage: archive-run MANIFEST TRANSCRIPT_DIR... [--history-dir DIR]\n"
+USAGE = ("usage: archive-run MANIFEST [TRANSCRIPT_DIR...] [--ledger DIR] [--notes FILE...]"
+         " [--history-dir DIR]\n"
          "       archive-run --reindex [--history-dir DIR]")
+# The files a run-owned manifest directory also holds, archived by name.
+_RUN_OWNED = ("derive.json", "setup.json")
+NOTES = "notes"
 # The report names a run folder may hold, in the order reindex tries them.
 _REPORT_PATTERNS = ("*.report.json", "*.run-report.json", "report.json")
 # A run_id names the run folder, so it must be one plain file name.
@@ -377,10 +421,46 @@ def stored(p):
     return _history.norm_path(p) if isinstance(p, str) and p else UNAVAILABLE
 
 
-def build_entry(old, folder, name, manifest, report_name, reindex=False):
+def archived_ledger(folder, manifest_name, run_id):
+    """The archived ledger dir in folder: <plan-name>.<run_id>.ledger, else
+    the folder's one *.ledger dir; None."""
+    path = os.path.join(folder, plan_name(manifest_name) + "." + run_id + ".ledger")
+    if os.path.isdir(path):
+        return path
+    found = [p for p in glob.glob(os.path.join(glob.escape(folder), "*.ledger")) if os.path.isdir(p)]
+    return found[0] if len(found) == 1 else None
+
+
+def recorded_in(ledger_dir):
+    """_launches.recorded_launches of ledger_dir; None without a ledger."""
+    if not ledger_dir or not os.path.isdir(ledger_dir):
+        return None
+    return _launches.recorded_launches(ledger_dir)
+
+
+def launches_warning(recorded, folder):
+    """The launches_missing warning when folder holds fewer wf_<id> dirs than
+    the ledger recorded; None."""
+    if recorded is None:
+        return None
+    archived = [n for _t, n in launches_in(folder)]
+    if len(archived) >= recorded["count"]:
+        return None
+    missing = [wf for wf in recorded["named"] if wf not in set(archived)]
+    unknown = recorded["count"] - len(archived) - len(missing)
+    parts = list(missing)
+    if unknown > 0 and missing:
+        parts.append(str(unknown) + " unknown")
+    detail = (str(len(archived)) + " archived, " + str(recorded["count"]) + " recorded in the ledger; missing: "
+              + (", ".join(parts) if parts else "unknown"))
+    return {"code": "launches_missing", "detail": detail}
+
+
+def build_entry(old, folder, name, manifest, report_name, reindex=False, recorded=None):
     """The index entry of the run in folder. archive-run dates a run without
     any launch time now; reindex keeps the old entry's first_launch and
-    last_launch then, and says "unavailable" when it has none."""
+    last_launch then, and says "unavailable" when it has none. recorded is
+    what recorded_in gave for the run's ledger (None: "unavailable")."""
     run_id, ledger_dir = _history.run_key(manifest)
     launches = launches_in(folder)
     times = [t for t, _ in launches if t is not None]
@@ -418,6 +498,7 @@ def build_entry(old, folder, name, manifest, report_name, reindex=False):
         "first_launch": first,
         "last_launch": last,
         "launches": len(launches),
+        "launches_recorded": recorded["count"] if recorded is not None else UNAVAILABLE,
         "status": status,
         "acceptance": acceptance,
     })
@@ -425,31 +506,46 @@ def build_entry(old, folder, name, manifest, report_name, reindex=False):
 
 
 def parse_args(args):
-    """(positional args, --history-dir value or None, --reindex given)."""
-    pos, hdir, reindex = [], None, False
+    """{"pos": positional args, "history_dir": --history-dir or None,
+    "reindex": --reindex given, "ledger": --ledger or None, "notes": the
+    --notes files ([] without --notes)}. --notes takes every following
+    argument up to the next -- option."""
+    opts = {"pos": [], "history_dir": None, "reindex": False, "ledger": None, "notes": []}
+    notes_given = False
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--reindex":
-            reindex = True
+            opts["reindex"] = True
             i += 1
             continue
-        if a == "--history-dir":
-            if i + 1 >= len(args) or not args[i + 1]:
-                raise ArchiveError("--history-dir needs a directory")
-            hdir = args[i + 1]
+        if a in ("--history-dir", "--ledger"):
+            if i + 1 >= len(args) or not args[i + 1] or args[i + 1].startswith("--"):
+                raise ArchiveError(a + " needs a directory")
+            opts["history_dir" if a == "--history-dir" else "ledger"] = args[i + 1]
             i += 2
+            continue
+        if a == "--notes":
+            notes_given = True
+            i += 1
+            start = i
+            while i < len(args) and not args[i].startswith("--"):
+                i += 1
+            if i == start:
+                raise ArchiveError("--notes needs at least one file")
+            opts["notes"].extend(args[start:i])
             continue
         if a.startswith("--"):
             raise ArchiveError("unknown option " + a)
-        pos.append(a)
+        opts["pos"].append(a)
         i += 1
-    if reindex:
-        if pos:
-            raise ArchiveError("--reindex takes no manifest or transcript dir")
-    elif len(pos) < 2:
-        raise ArchiveError("a manifest and at least one transcript dir are needed")
-    return pos, hdir, reindex
+    if opts["reindex"]:
+        if opts["pos"] or opts["ledger"] is not None or notes_given:
+            raise ArchiveError("--reindex takes no manifest, transcript dir, --ledger or --notes")
+    elif not opts["pos"] or (len(opts["pos"]) < 2 and not notes_given):
+        raise ArchiveError("a manifest and at least one transcript dir are needed,"
+                           " or --notes for a run already archived")
+    return opts
 
 
 def load_manifest(path):
@@ -486,15 +582,62 @@ def transcript_dirs(paths):
     return dirs
 
 
-def archive(manifest_path, manifest, dirs, hdir):
-    """Copy the run into hdir and update index.json; the output object."""
+def note_files(paths):
+    """[(abs path, basename)] for the --notes files; the same file given
+    twice is one note, two files with one basename (compared without case)
+    are refused."""
+    out = []
+    for p in paths:
+        f = os.path.abspath(p)
+        if not os.path.isfile(f):
+            raise ArchiveError("not a file: " + p + " (given with --notes)")
+        name = os.path.basename(f)
+        other = next((o for o, n in out if n.lower() == name.lower()), None)
+        if other is None:
+            out.append((f, name))
+        elif not same_source(other, f):
+            raise ArchiveError("two notes would be archived as " + NOTES + "/" + name + ": " + other
+                               + " and " + f + "; give them names that differ")
+    return out
+
+
+def ledger_arg(path):
+    """The --ledger dir as an absolute path; it must hold _run.jsonl."""
+    d = os.path.abspath(path)
+    if not os.path.isfile(os.path.join(d, "_run.jsonl")):
+        raise ArchiveError("--ledger " + path + " is not a ledger (it has no _run.jsonl)")
+    return d
+
+
+def run_owned_dir(run_id):
+    """<CLAUDE_CONFIG_DIR or ~/.claude>/parallel-lanes/runs/<run_id>."""
+    config = _shell._getenv(os.environ, "CLAUDE_CONFIG_DIR") or os.path.join(_history._home(os.environ), ".claude")
+    return os.path.join(_shell.native_path(config), "parallel-lanes", "runs", run_id)
+
+
+def same_dir(a, b):
+    """Whether two paths name one directory (after realpath and normcase)."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def archive(manifest_path, manifest, dirs, hdir, ledger=None, notes=()):
+    """Copy the run into hdir and update index.json; the output object.
+    ledger is the --ledger dir or None; notes what note_files gave. With no
+    dirs the run must already be in the index."""
     run_id, ledger_key = _history.run_key(manifest)
     repo = manifest["repo"]
-    ledger_src = _shell.native_path(repo["ledger_dir"])
-    if not os.path.isdir(ledger_src):
-        raise ArchiveError("the ledger dir is not a directory: " + ledger_src)
+    if ledger is not None:
+        ledger_src = ledger
+    else:
+        ledger_src = _shell.native_path(repo["ledger_dir"])
+        if not os.path.isdir(ledger_src):
+            if dirs:
+                raise ArchiveError("the ledger dir is not a directory: " + ledger_src
+                                   + " (pass --ledger DIR for a run whose live ledger is gone)")
+            # A notes-only call copies the ledger only when its source exists.
+            ledger_src = None
     # A copy into a folder under its own source would copy itself again.
-    for src in [ledger_src] + dirs:
+    for src in ([ledger_src] if ledger_src else []) + dirs:
         if _history.inside(hdir, src):
             raise ArchiveError("the history dir " + hdir + " is inside " + src + ", which it would copy")
     pname = plan_name(manifest_path)
@@ -504,6 +647,14 @@ def archive(manifest_path, manifest, dirs, hdir):
     report = os.path.join(os.path.dirname(manifest_path), report_name)
     if os.path.isfile(report):
         sources.append((report, report_name))
+    # A plans folder is shared between runs: only a run-owned one lends its
+    # derive.json and setup.json.
+    manifest_dir = os.path.dirname(manifest_path)
+    if same_dir(manifest_dir, run_owned_dir(run_id)):
+        for fname in _RUN_OWNED:
+            path = os.path.join(manifest_dir, fname)
+            if os.path.isfile(path):
+                sources.append((path, fname))
     pins = []  # (kind, live path, name in the folder): pinned, not copied
     for key in _pin.KINDS:
         p = manifest.get(key)
@@ -525,8 +676,6 @@ def archive(manifest_path, manifest, dirs, hdir):
     pins = [(kind, p, rel) for i, (kind, p, rel) in enumerate(pins)
             if all(r.lower() != rel.lower() for _s, r in sources)
             and all(r.lower() != rel.lower() for _k, _p, r in pins[:i])]
-    # The recorded versions come from the ledger being archived.
-    recorded = _pin.recorded_inputs(ledger_src)
     git_cmd = git_command(repo)
     root = _shell.native_path(repo["root"])
     results = [result_file(d) for d in dirs]
@@ -538,15 +687,28 @@ def archive(manifest_path, manifest, dirs, hdir):
             name = old.get("folder")
             if not isinstance(name, str) or not _SAFE_NAME.match(name):
                 raise ArchiveError("the index entry of " + run_id + " has a bad folder: " + json.dumps(name))
+        elif not dirs:
+            raise ArchiveError("the run " + run_id + " is not in the index of " + hdir
+                               + "; a call without transcript dirs only adds notes to a run already archived")
         else:
             times = [launch_time(d, r) for d, r in zip(dirs, results)]
             times = [t for t in times if t is not None]
             name = choose_folder(hdir, index, run_id, ledger_key, min(times) if times else time.time())
         folder = os.path.join(hdir, name)
+        ledger_name = pname + "." + run_id + ".ledger"
+        # The ledger this call reads: the one being archived, else (a
+        # notes-only call whose source is gone) the folder's archived one.
+        ledger_read = ledger_src if ledger_src is not None \
+            else archived_ledger(folder, os.path.basename(manifest_path), run_id)
+        # The recorded versions come from the ledger being archived.
+        recorded = _pin.recorded_inputs(ledger_read) if ledger_read else []
         added, updated = [], []
         os.makedirs(folder, exist_ok=True)
         for src, rel in sources:
             copy_file(src, os.path.join(folder, rel), rel, added, updated)
+        for src, note in notes:
+            rel = NOTES + "/" + note
+            copy_file(src, os.path.join(folder, NOTES, note), rel, added, updated)
         states = {"pinned": [], "kept": [], "replaced": []}
         warnings = []
         for kind, live, rel in pins:
@@ -558,14 +720,20 @@ def archive(manifest_path, manifest, dirs, hdir):
                 states[decision["state"]].append(rel)
             if decision["warning"]:
                 warnings.append(decision["warning"])
-        ledger_name = pname + "." + run_id + ".ledger"
-        copy_tree(ledger_src, os.path.join(folder, ledger_name), ledger_name, added, updated)
+        ledger_dst = os.path.join(folder, ledger_name)
+        # A ledger copied onto itself (--ledger at the archived one) is a no-op.
+        if ledger_src is not None and not (os.path.isdir(ledger_dst) and same_dir(ledger_src, ledger_dst)):
+            copy_tree(ledger_src, ledger_dst, ledger_name, added, updated)
         for d, r in zip(dirs, results):
             wf = os.path.basename(d)
             copy_tree(d, os.path.join(folder, wf), wf, added, updated)
             if r:
                 copy_file(r, os.path.join(folder, wf + ".json"), wf + ".json", added, updated)
-        entry = build_entry(old or {}, folder, name, manifest, report_name)
+        launches = recorded_in(ledger_read)
+        warning = launches_warning(launches, folder)
+        if warning:
+            warnings.append(warning)
+        entry = build_entry(old or {}, folder, name, manifest, report_name, recorded=launches)
         runs = [e for e in index.get("runs", []) if e is not old]
         runs.append(entry)
         index = dict(index)
@@ -609,7 +777,10 @@ def reindex_folder(hdir, name, old_index):
         if entry.get("folder") == name and _history.find_run({"runs": [entry]}, run_id, ledger_dir) is not None:
             old = entry
             break
-    entry = build_entry(old, folder, name, manifest, first_match(folder, _REPORT_PATTERNS), reindex=True)
+    recorded = recorded_in(archived_ledger(folder, manifests[0], run_id)) \
+        if _SAFE_NAME.match(run_id) else None
+    entry = build_entry(old, folder, name, manifest, first_match(folder, _REPORT_PATTERNS), reindex=True,
+                        recorded=recorded)
     # The machine running reindex is not the one that ran the run.
     for key in ("machine", "platform"):
         entry[key] = old[key] if isinstance(old.get(key), str) and old[key] else UNAVAILABLE
@@ -650,12 +821,13 @@ def reindex(hdir):
 def main(argv):
     _shell.setup_io()
     try:
-        pos, override, do_reindex = parse_args(argv[1:])
+        opts = parse_args(argv[1:])
     except ArchiveError as e:
         print("archive-run: " + str(e), file=sys.stderr)
         print(USAGE, file=sys.stderr)
         return 2
-    if do_reindex:
+    pos, override = opts["pos"], opts["history_dir"]
+    if opts["reindex"]:
         try:
             out = reindex(_history.history_dir(override))
         except (ArchiveError, _history.HistoryError, _shell.BashNotFound) as e:
@@ -669,6 +841,8 @@ def main(argv):
     try:
         manifest_path = os.path.abspath(_shell.native_path(pos[0]))
         dirs = transcript_dirs([_shell.native_path(p) for p in pos[1:]])
+        notes = note_files([_shell.native_path(p) for p in opts["notes"]])
+        ledger = ledger_arg(_shell.native_path(opts["ledger"])) if opts["ledger"] is not None else None
         manifest = load_manifest(manifest_path)
         hdir = _history.history_dir(override)
         root = _shell.native_path(manifest["repo"]["root"])
@@ -680,7 +854,7 @@ def main(argv):
               + root + " (set PL_HISTORY_DIR or pass --history-dir)", file=sys.stderr)
         return 3
     try:
-        out = archive(manifest_path, manifest, dirs, hdir)
+        out = archive(manifest_path, manifest, dirs, hdir, ledger=ledger, notes=notes)
     except (ArchiveError, _history.HistoryError, _shell.BashNotFound) as e:
         print("archive-run: " + str(e), file=sys.stderr)
         return 2
