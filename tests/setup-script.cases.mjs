@@ -261,8 +261,15 @@ test('setup: a dirty main checkout exits 3 and creates nothing', () => {
 });
 
 test('setup: a SHA-256 repository exits 3 with a clear message and creates nothing', () => {
-  const c = newCase();
-  rmSync(join(c.project, '.git'), { recursive: true, force: true });
+  // The SHA-256 repository goes in a fresh folder: deleting the case's .git
+  // and initializing again raced, on Linux CI, with a git process the case's
+  // own commit had left running ("attempt to reinitialize repository with
+  // different hash", 2026-10-17).
+  const c = { ...newCase() };
+  c.project = join(c.root, 'sha256 project');
+  mkdirSync(c.project, { recursive: true });
+  write(c.project, 'README.md', 'hello\n');
+  write(c.project, '.gitignore', 'scratch/\n');
   git(c.project, 'init', '-q', '-b', 'main', '--object-format=sha256');
   git(c.project, 'add', '-A');
   git(c.project, 'commit', '-q', '-m', 'init');
