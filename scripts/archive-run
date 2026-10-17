@@ -14,7 +14,7 @@ The run goes to <history dir>/<folder>/, which holds:
   <manifest file>                  the manifest;
   <plan-name>.<run_id>.ledger/     repo.ledger_dir, copied whole (checks/ too);
   <plan-name>.<run_id>.report.json from beside the manifest, when present;
-  the plan and spec files          when present, by their own names;
+  the plan and spec files          by their own names, pinned (below);
   wf_<id>/ and wf_<id>.json        each TRANSCRIPT_DIR and its workflow result
                                    file (found as run-report finds it,
                                    _shell.result_paths), when present.
@@ -35,6 +35,21 @@ index entry of another run, or a folder whose manifest is another run's).
 Copying is idempotent: a file missing from the folder is added, a file whose
 bytes differ is replaced (each through a temp file and a rename), and a file
 already in the archive is never deleted, even when its source is gone.
+
+The plan and spec (manifest.plan and manifest.spec; a spec of null is
+skipped) are pinned instead (_pin.pin, spec 4.1): an archived copy is only
+ever the version the latest setup run_started event of the ledger
+(repo.ledger_dir) recorded in plan_sha256 / spec_sha256. An archived copy
+with that sha is kept, even when the live file differs. Otherwise the first
+source with that sha is written: the live file, then the file's blob at each
+recorded setup head from the latest back, as git stores it and with the
+checkout filters (git cat-file --filters, so a CRLF checkout matches), the
+path looked up in git without case. Git runs as git -C repo.root, or with
+--git-dir repo.git_dir in shadow mode. When no source has the sha, an
+archived copy is kept and, without one, the live file is copied, with a
+<kind>_unpinned warning naming the recorded sha. A ledger with no recorded
+sha (before plan_sha256) never replaces an archived copy; without one the
+live file is copied.
 
 The index entry (_history.ENTRY_KEYS) is rebuilt from the folder after
 copying:
@@ -59,8 +74,14 @@ The whole read index, choose folder, copy and write index step runs inside
 _history.index_lock, so archive-runs at the same time lose no entry.
 
 Prints one JSON line:
-  {"folder": "<abs folder>", "added": [rel paths], "updated": [rel paths]}
-with paths relative to the folder, '/'-separated.
+  {"folder": "<abs folder>", "added": [rel paths], "updated": [rel paths],
+   "pinned": [names], "kept": [names], "replaced": [names],
+   "warnings": [{"code": "<code>", "detail": "<why>"}]}
+with paths relative to the folder, '/'-separated. pinned names a plan or
+spec newly archived with its recorded sha, kept one whose archived copy
+already had it, replaced one whose archived copy lacked it and was replaced
+by one that has it; a file with no recorded sha, or none that matched, is in
+none of the three. warnings holds plan_unpinned and spec_unpinned.
 
 Exit 0 on success; 2 on a usage error, an unreadable manifest, transcript
 dir, ledger dir or index, a failed copy, or the lock not acquired; 3 when
@@ -102,6 +123,7 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _history  # noqa: E402
+import _pin  # noqa: E402
 import _shell  # noqa: E402
 
 UNAVAILABLE = "unavailable"
@@ -265,6 +287,46 @@ def copy_file(src, dst, rel, added, updated):
         except OSError:
             pass
         raise
+
+
+def write_bytes(dst, data, rel, added, updated):
+    """Write data to dst unless dst already holds the same bytes."""
+    if os.path.lexists(dst):
+        if os.path.isfile(dst):
+            with open(dst, "rb") as f:
+                if f.read() == data:
+                    return
+        updated.append(rel)
+    else:
+        added.append(rel)
+    folder = os.path.dirname(dst)
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(dst) + ".", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def same_source(a, b):
+    """Whether two source paths are one file (by path when one is missing)."""
+    if os.path.exists(a) and os.path.exists(b):
+        return os.path.samefile(a, b)
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def git_command(repo):
+    """The git command for the run's repo: the shadow git dir in shadow
+    mode, else the repo root."""
+    if repo.get("mode") == "shadow" and isinstance(repo.get("git_dir"), str) and repo["git_dir"]:
+        return ["git", "--git-dir", _shell.native_path(repo["git_dir"])]
+    return ["git", "-C", _shell.native_path(repo["root"])]
 
 
 def copy_tree(src, dst, rel, added, updated):
@@ -442,24 +504,31 @@ def archive(manifest_path, manifest, dirs, hdir):
     report = os.path.join(os.path.dirname(manifest_path), report_name)
     if os.path.isfile(report):
         sources.append((report, report_name))
-    for key in ("plan", "spec"):
+    pins = []  # (kind, live path, name in the folder): pinned, not copied
+    for key in _pin.KINDS:
         p = manifest.get(key)
         if isinstance(p, str) and p:
             p = _shell.native_path(p)
-            if os.path.isfile(p):
-                sources.append((p, os.path.basename(p)))
+            pins.append((key, p, os.path.basename(p)))
     # Two sources with one name would leave only the second in the folder.
     names = {}
-    for src, rel in sources:
+    for src, rel in sources + [(p, rel) for _k, p, rel in pins]:
         other = names.get(rel.lower())
         if other is None:
             names[rel.lower()] = src
-        elif not os.path.samefile(other, src):
+        elif not same_source(other, src):
             raise ArchiveError("two files would be archived as " + rel + ": " + other + " and " + src
                                + "; give the plan and spec names that differ from each other and from"
                                " the manifest and report")
     sources = [(src, rel) for i, (src, rel) in enumerate(sources)
                if all(r.lower() != rel.lower() for _s, r in sources[:i])]
+    pins = [(kind, p, rel) for i, (kind, p, rel) in enumerate(pins)
+            if all(r.lower() != rel.lower() for _s, r in sources)
+            and all(r.lower() != rel.lower() for _k, _p, r in pins[:i])]
+    # The recorded versions come from the ledger being archived.
+    recorded = _pin.recorded_inputs(ledger_src)
+    git_cmd = git_command(repo)
+    root = _shell.native_path(repo["root"])
     results = [result_file(d) for d in dirs]
 
     with _history.index_lock(hdir):
@@ -478,6 +547,17 @@ def archive(manifest_path, manifest, dirs, hdir):
         os.makedirs(folder, exist_ok=True)
         for src, rel in sources:
             copy_file(src, os.path.join(folder, rel), rel, added, updated)
+        states = {"pinned": [], "kept": [], "replaced": []}
+        warnings = []
+        for kind, live, rel in pins:
+            dst = os.path.join(folder, rel)
+            decision = _pin.pin(kind, live, dst, recorded, git_cmd, root)
+            if decision["action"] == "write":
+                write_bytes(dst, decision["source"], rel, added, updated)
+            if decision["state"]:
+                states[decision["state"]].append(rel)
+            if decision["warning"]:
+                warnings.append(decision["warning"])
         ledger_name = pname + "." + run_id + ".ledger"
         copy_tree(ledger_src, os.path.join(folder, ledger_name), ledger_name, added, updated)
         for d, r in zip(dirs, results):
@@ -491,7 +571,10 @@ def archive(manifest_path, manifest, dirs, hdir):
         index = dict(index)
         index["runs"] = runs
         _history.write_index(hdir, index)
-    return {"folder": hdir.rstrip("/\\") + "/" + name, "added": added, "updated": updated}
+    out = {"folder": hdir.rstrip("/\\") + "/" + name, "added": added, "updated": updated}
+    out.update(states)
+    out["warnings"] = warnings
+    return out
 
 
 def first_match(folder, patterns):
