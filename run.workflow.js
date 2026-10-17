@@ -601,6 +601,22 @@ function validateManifest(m) {
         }
         if (!('test' in entry)) err(`${where}.test: missing`);
         else if (Array.isArray(entry.test) && entry.test.length === 0) err(`${where}.test: must name at least one command`);
+        // The run builds the task-checks command only when the task's lane
+        // has checks (taskChecksCommand), so an entry there would never run
+        // (external review F3). Malformed commands are reported above.
+        if (taskIds.has(id) && isObject(m.commands)) {
+          const lane = laneOfTask.has(id) ? laneOfTask.get(id) : null;
+          let none = false;
+          try {
+            none = laneChecks(m, lane).length === 0;
+          } catch (e) {
+            none = false;
+          }
+          if (none) {
+            err(`${where}: the task's ${lane === null ? 'project' : `lane ${lane}`} has no test, lint or build command, `
+              + 'so the run would never run these task checks; add those commands, or remove the entry');
+          }
+        }
       }
     }
   }

@@ -758,6 +758,26 @@ test('task_checks accepts task ids with test and inherits lint and build', () =>
   assert.deepEqual(validateManifest(m), []);
 });
 
+// External review F3 (2026-10-17): with no test, lint or build command for
+// the task's lane, the run builds no task-checks command, so the entry was
+// silently never run.
+test('a task_checks entry whose lane has no test, lint or build command is reported', () => {
+  const none = { setup: [], test: [], lint: [], build: [] };
+  for (const [id, extra] of [
+    ['T2', { commands: none }],
+    ['T1', { commands: none }],
+    ['T4', { commands: none }],
+    ['T2', { lane_commands: { alpha: { test: [], lint: [], build: [] } } }],
+  ]) {
+    const m = { ...validManifest(), ...extra, task_checks: { [id]: { test: ['npm test -- one'] } } };
+    assertError(validateManifest(m), `task_checks.${id}`, 'no test, lint or build command');
+  }
+  // Another lane's empty override does not matter.
+  const ok = { ...validManifest(), lane_commands: { beta: { test: [], lint: [], build: [] } },
+    task_checks: { T2: { test: ['npm test -- one'] } } };
+  assert.deepEqual(validateManifest(ok), []);
+});
+
 test('task_checks rejects lane ids, prelude and join as keys', () => {
   for (const key of ['alpha', 'prelude', 'join']) {
     const errors = validateManifest({ ...validManifest(), task_checks: { [key]: { test: ['t'] } } });
