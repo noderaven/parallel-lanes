@@ -573,6 +573,20 @@ test('legacy layouts get a view', () => {
   }
 });
 
+test('the summary counts recorded launches the archive is missing', () => {
+  const ended = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
+  const result = { tasks: { A1: { status: 'done', commits: [S('a')] } } };
+  const one = { wf: 'wf_aaaaaa', startTime: START, durationMs: DURATION, result };
+  const { json, md, stdout } = view(makeRun({ ledger: { '_run.jsonl': [ended, ended] }, launches: [one] }));
+  assert.ok(stdout.split('\n').includes('launches: 1 archived, 2 recorded, latest wf_aaaaaa'), stdout);
+  assert.ok(md.includes('- launches: 1 archived, 2 recorded, latest wf_aaaaaa\n'), md);
+  assert.ok(md.includes('- missing launch: unknown [missing] - the ledger records this launch; its transcripts are not archived'), md);
+  assert.equal(json.gaps.filter((g) => g.where.startsWith('#/run/launches/missing')).length, 1);
+  // Equal counts keep the old line.
+  const same = view(makeRun({ ledger: { '_run.jsonl': [ended] }, launches: [one] }));
+  assert.ok(same.stdout.split('\n').includes('launches: 1, latest wf_aaaaaa'), same.stdout);
+});
+
 test('a Linux-origin manifest needs no cygpath', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r));

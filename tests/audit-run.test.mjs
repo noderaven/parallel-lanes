@@ -417,6 +417,48 @@ test('launches list layout gaps; no launch is unavailable', () => {
   assert.equal(none.facts.verdict, 'unavailable');
 });
 
+const ENDED = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
+const MISSING_NOTE = 'the ledger records this launch; its transcripts are not archived';
+const LEDGER_SRC = [{ path: LEDGER, at: null }];
+const auditGaps = (folder) => pythonJSON(['import _audit', 'print(json.dumps(_audit.build(sys.argv[1])["gaps"]))'], [folder]);
+
+test('two recorded launches and one archived give one missing gap', () => {
+  const folder = makeRun({ ledger: { '_run.jsonl': [ENDED, ENDED] }, launches: [launch(accepted(D))] });
+  const s = sections(folder);
+  assert.deepEqual(s.launches.recorded,
+    { value: { recorded: 2, archived: 1, named: [] }, state: 'present', sources: LEDGER_SRC });
+  assert.deepEqual(s.launches.missing, [{ value: null, state: 'missing', sources: LEDGER_SRC, note: MISSING_NOTE }]);
+  const gaps = auditGaps(folder).filter((g) => g.where.startsWith('#/run/launches/missing'));
+  assert.deepEqual(gaps, [{ where: '#/run/launches/missing/0', state: 'missing', value: null, note: MISSING_NOTE }]);
+  // Equal counts add no gap.
+  const equal = makeRun({ ledger: { '_run.jsonl': [ENDED] }, launches: [launch(accepted(D))] });
+  const e = sections(equal);
+  assert.deepEqual(e.launches.recorded.value, { recorded: 1, archived: 1, named: [] });
+  assert.deepEqual(e.launches.missing, []);
+  assert.deepEqual(auditGaps(equal).filter((g) => g.where.startsWith('#/run/launches/missing')), []);
+  // Without a ledger the recorded count is unavailable and nothing is missing.
+  const none = sections(makeRun({ ledger: null, launches: [launch(accepted(D))] }));
+  assert.deepEqual([none.launches.recorded.state, none.launches.recorded.note], ['unavailable', 'no ledger in the archive']);
+  assert.deepEqual(none.launches.missing, []);
+});
+
+test('named missing launches are listed by wf id', () => {
+  const carried = (wf) => ({ task: '_run', event: 'carried', wf, rulings: 0 });
+  const folder = makeRun({
+    ledger: { '_run.jsonl': [ENDED, carried('wf_aaaaaa'), ENDED, carried('wf_bbbbbb'), ENDED, ENDED] },
+    launches: [launch(accepted(D))],
+    files: { [`${LEDGER}/doctor-wf_cccccc.json`]: '{}\n' },
+  });
+  const s = sections(folder);
+  assert.deepEqual(s.launches.recorded.value,
+    { recorded: 4, archived: 1, named: ['wf_aaaaaa', 'wf_bbbbbb', 'wf_cccccc'] });
+  // Named ones first, then one unnamed launch.
+  assert.deepEqual(s.launches.missing.map((g) => [g.value, g.state, g.note]),
+    [['wf_bbbbbb', 'missing', MISSING_NOTE], ['wf_cccccc', 'missing', MISSING_NOTE], [null, 'missing', MISSING_NOTE]]);
+  assert.deepEqual(auditGaps(folder).filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
+    ['#/run/launches/missing/0', '#/run/launches/missing/1', '#/run/launches/missing/2']);
+});
+
 test('an override at another head is stale and changes nothing', () => {
   const rejected = accepted(D, {
     acceptance: { status: 'rejected', delivered_sha: D, reasons: [{ kind: 'checks_failed', class: 'failed', detail: `failing at ${D}: npm test zqcmd (exit 1)` }], warnings: ['w npm test zqcmd'] },
