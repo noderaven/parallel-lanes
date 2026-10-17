@@ -340,6 +340,60 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
   assert.match(p, /Cleanup never fails the integration/);
 });
 
+// 1.6.8 (spec 4.7): a resumed integration whose merges made no commit may
+// reuse a passing check; the report keeps the evidence file it reused.
+test('an integrate result with checks_reused reaches the report', async () => {
+  const file = '/work/ledger/checks/integrate.3.json';
+  const reused = { status: 'done', head: H('I1'), notes: 'checks reused from integrate.3.json', tests_failed: false,
+    checks_reused: file };
+  const first = await run(manifest(), { ...phaseScript({ integrate: [reused] }), ...taskScript(ALL) });
+  assert.equal(first.result.status, 'complete');
+  assert.equal(first.result.integrate.checks_reused, file);
+  // The escalated rerun (the second integrate call) and the heal rerun (the
+  // third) report it the same way, from the result that ran last.
+  const healed = await run(manifest(), {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'reused', checks_reused: file },
+      ],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(healed.result.status, 'complete');
+  assert.equal(healed.result.integrate.checks_reused, file);
+  const escalated = await run(manifest(), {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'reused', checks_reused: file },
+      ],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(escalated.result.integrate.checks_reused, file);
+  // Every integrate call offers the field.
+  const integ = healed.calls.filter((c) => c.label === 'integrate');
+  assert.equal(integ.length, 3);
+  for (const c of integ) assert.deepEqual(c.schema.properties.checks_reused, { type: ['string', 'null'] });
+});
+
+test('a missing checks_reused is null', async () => {
+  const { result } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete');
+  assert.ok('checks_reused' in result.integrate, JSON.stringify(result.integrate));
+  assert.equal(result.integrate.checks_reused, null);
+  const failed = await run(manifest({ autonomy: 'supervised' }), {
+    ...phaseScript({ integrate: [{ status: 'failed', head: '', notes: 'x' }, null], 'integrate retry': [null] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(failed.result.integrate.status, 'failed');
+  assert.equal(failed.result.integrate.checks_reused, null);
+});
+
 test('pre-flight conflicts stop before any implement (supervised)', async () => {
   const m = manifest({ autonomy: 'supervised' });
   const script = phaseScript({ 'pre-flight': [{ conflicts: ['plan contradicts spec on X'], rulings: [], undeclared: [], code_deps: [] }] });

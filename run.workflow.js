@@ -1355,14 +1355,17 @@ function checksPhase(laneId) {
 // (optional) is the evidence file it writes under the ledger dir:
 // resultPath() goes in as given (already quoted), for the path the agent's
 // reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
-// with PL_PHASE set to it. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null, phase = null) {
+// with PL_PHASE set to it. recordSetup (1.6.8, spec 4.7) lists setup
+// commands run-checks records in its evidence (--record-setup, in order)
+// and never runs. null for an empty list.
+function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = []) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
+  const setup = recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
-    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...parts].join(' ');
+    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...setup, ...parts].join(' ');
 }
 
 // Every test, lint and build command of a ledger lane, as [{group, command}]
@@ -2424,6 +2427,15 @@ function statusSchema() {
   };
 }
 
+// The integrate agent's result (1.6.8, spec 4.7): statusSchema plus the
+// optional checks_reused, the integrate evidence file reuse-checks printed
+// when the agent reused a passing check instead of running the checks
+// (else null).
+function integrateSchema() {
+  const s = statusSchema();
+  return { ...s, properties: { ...s.properties, checks_reused: { type: ['string', 'null'] } } };
+}
+
 function preflightSchema() {
   // undeclared and code_deps share the item shape {task, producer, what}.
   const dependencies = () => ({
@@ -2736,8 +2748,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lanes' distinct ones, then every distinct check of the project
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
+  // The run-checks call records the setup commands (1.6.8, spec 4.7), so a
+  // resumed integration whose merges made no commit can reuse that evidence
+  // through reuse-checks, given the same setup and check commands.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate', setup);
+  const reuse = checks === null ? null : [
+    `${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/reuse-checks`)} ${q(m.repo.ledger_dir)} --name integrate`,
+    `--head <HEAD> --checkout ${dir}`,
+    ...setup.map((s) => `--setup ${q(s)}`),
+    ...finalChecks(m).map((c) => `--cmd ${q(c.group)} ${q(c.command)}`),
+  ].join(' ');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -2747,8 +2768,20 @@ function integratePrompt(m, preludeTip, opts = {}) {
     'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
     'is a real failure: checks_unfinished false.',
   ] : null;
+  // Only heal mode returns tests_failed, so only its reuse names it.
+  const reuseLines = reuse === null ? [] : [
+    '   Always run the setup commands first: later phases rely on them in this checkout.',
+    '   Only when no merge in step 2 made a commit (every lane branch was already merged, so HEAD did not move),',
+    `   run this read-only call, with <HEAD> the full sha git -C ${dir} rev-parse HEAD prints:`,
+    `   ${reuse}`,
+    `   When it exits 0, skip the run-checks call below: return checks_reused = the file it printed${
+      testFailure === 'heal' ? ' and tests_failed false' : ''},`,
+    '   and say in notes that the checks were reused from that file. When it exits 1 or 2, or a merge in step 2',
+    '   made a commit, run the checks below.',
+  ];
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    ...reuseLines,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
@@ -2872,7 +2905,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
-    `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
+    `notes (merges, conflicts resolved, command results, cleanup)${reuse === null ? '' : ', checks_reused (the file'
+      + ' reuse-checks printed when you reused its checks, else null)'}${returnTail}`,
   ].join('\n');
 }
 
@@ -5920,7 +5954,8 @@ function scheduleFix(m, entry) {
 //    minor_findings (the approving review's, taskMinorFindings; [] unless done
 //    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
-//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
+//  integrate:{status, notes, checks_reused (the evidence file a resumed
+//    integration reused, else null: 1.6.8 spec 4.7), post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
 //    review_problem?, task_minors_open, start_check? (classifyStartCheck's
 //    result, only when a start check was due: 1.6.8 spec 4.4)},
@@ -6281,7 +6316,10 @@ async function runAll(manifest, io) {
     // Post-integrate re-review findings (C2): reported under
     // integrate.fix_review and carried into the final fix wave.
     const fixReview = [];
-    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'), post_integrate: null, fix_review: fixReview });
+    // checks_reused (1.6.8, spec 4.7): the integrate evidence file the agent
+    // reused instead of running the checks, else null.
+    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'),
+      checks_reused: r && present(r.checks_reused) ? r.checks_reused : null, post_integrate: null, fix_review: fixReview });
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
@@ -6311,7 +6349,7 @@ async function runAll(manifest, io) {
     let integ = await callM('integrate', 'Integrate',
       integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips,
         keepWorktrees: wavesOn }),
-      statusSchema(), sonnetHigh);
+      integrateSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
     // Any Sonnet result that is not a finished integration (a done without a
     // head included) escalates.
@@ -6338,7 +6376,7 @@ async function runAll(manifest, io) {
           joinStartPoint: joinNoHook,
           laneTips: tips,
           keepWorktrees: wavesOn,
-        }), statusSchema(), standard);
+        }), integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
     integrate = integrateReport(integ);
@@ -6360,7 +6398,7 @@ async function runAll(manifest, io) {
       integ = await callM('integrate', 'Integrate',
         integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips,
           keepWorktrees: wavesOn }),
-        statusSchema(), standard);
+        integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {

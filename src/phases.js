@@ -602,7 +602,8 @@ function scheduleFix(m, entry) {
 //    minor_findings (the approving review's, taskMinorFindings; [] unless done
 //    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
-//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
+//  integrate:{status, notes, checks_reused (the evidence file a resumed
+//    integration reused, else null: 1.6.8 spec 4.7), post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
 //    review_problem?, task_minors_open, start_check? (classifyStartCheck's
 //    result, only when a start check was due: 1.6.8 spec 4.4)},
@@ -963,7 +964,10 @@ async function runAll(manifest, io) {
     // Post-integrate re-review findings (C2): reported under
     // integrate.fix_review and carried into the final fix wave.
     const fixReview = [];
-    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'), post_integrate: null, fix_review: fixReview });
+    // checks_reused (1.6.8, spec 4.7): the integrate evidence file the agent
+    // reused instead of running the checks, else null.
+    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'),
+      checks_reused: r && present(r.checks_reused) ? r.checks_reused : null, post_integrate: null, fix_review: fixReview });
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
@@ -993,7 +997,7 @@ async function runAll(manifest, io) {
     let integ = await callM('integrate', 'Integrate',
       integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips,
         keepWorktrees: wavesOn }),
-      statusSchema(), sonnetHigh);
+      integrateSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
     // Any Sonnet result that is not a finished integration (a done without a
     // head included) escalates.
@@ -1020,7 +1024,7 @@ async function runAll(manifest, io) {
           joinStartPoint: joinNoHook,
           laneTips: tips,
           keepWorktrees: wavesOn,
-        }), statusSchema(), standard);
+        }), integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
     integrate = integrateReport(integ);
@@ -1042,7 +1046,7 @@ async function runAll(manifest, io) {
       integ = await callM('integrate', 'Integrate',
         integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips,
           keepWorktrees: wavesOn }),
-        statusSchema(), standard);
+        integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {

@@ -69,6 +69,15 @@ function statusSchema() {
   };
 }
 
+// The integrate agent's result (1.6.8, spec 4.7): statusSchema plus the
+// optional checks_reused, the integrate evidence file reuse-checks printed
+// when the agent reused a passing check instead of running the checks
+// (else null).
+function integrateSchema() {
+  const s = statusSchema();
+  return { ...s, properties: { ...s.properties, checks_reused: { type: ['string', 'null'] } } };
+}
+
 function preflightSchema() {
   // undeclared and code_deps share the item shape {task, producer, what}.
   const dependencies = () => ({
@@ -381,8 +390,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lanes' distinct ones, then every distinct check of the project
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
+  // The run-checks call records the setup commands (1.6.8, spec 4.7), so a
+  // resumed integration whose merges made no commit can reuse that evidence
+  // through reuse-checks, given the same setup and check commands.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate', setup);
+  const reuse = checks === null ? null : [
+    `${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/reuse-checks`)} ${q(m.repo.ledger_dir)} --name integrate`,
+    `--head <HEAD> --checkout ${dir}`,
+    ...setup.map((s) => `--setup ${q(s)}`),
+    ...finalChecks(m).map((c) => `--cmd ${q(c.group)} ${q(c.command)}`),
+  ].join(' ');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -392,8 +410,20 @@ function integratePrompt(m, preludeTip, opts = {}) {
     'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
     'is a real failure: checks_unfinished false.',
   ] : null;
+  // Only heal mode returns tests_failed, so only its reuse names it.
+  const reuseLines = reuse === null ? [] : [
+    '   Always run the setup commands first: later phases rely on them in this checkout.',
+    '   Only when no merge in step 2 made a commit (every lane branch was already merged, so HEAD did not move),',
+    `   run this read-only call, with <HEAD> the full sha git -C ${dir} rev-parse HEAD prints:`,
+    `   ${reuse}`,
+    `   When it exits 0, skip the run-checks call below: return checks_reused = the file it printed${
+      testFailure === 'heal' ? ' and tests_failed false' : ''},`,
+    '   and say in notes that the checks were reused from that file. When it exits 1 or 2, or a merge in step 2',
+    '   made a commit, run the checks below.',
+  ];
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    ...reuseLines,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
@@ -517,7 +547,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
-    `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
+    `notes (merges, conflicts resolved, command results, cleanup)${reuse === null ? '' : ', checks_reused (the file'
+      + ' reuse-checks printed when you reused its checks, else null)'}${returnTail}`,
   ].join('\n');
 }
 

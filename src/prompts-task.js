@@ -124,14 +124,17 @@ function checksPhase(laneId) {
 // (optional) is the evidence file it writes under the ledger dir:
 // resultPath() goes in as given (already quoted), for the path the agent's
 // reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
-// with PL_PHASE set to it. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null, phase = null) {
+// with PL_PHASE set to it. recordSetup (1.6.8, spec 4.7) lists setup
+// commands run-checks records in its evidence (--record-setup, in order)
+// and never runs. null for an empty list.
+function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = []) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
+  const setup = recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
-    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...parts].join(' ');
+    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...setup, ...parts].join(' ');
 }
 
 // Every test, lint and build command of a ledger lane, as [{group, command}]

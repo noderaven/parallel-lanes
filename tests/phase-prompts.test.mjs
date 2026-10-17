@@ -11,10 +11,11 @@ import { loadHelpers, H } from './harness.mjs';
 const {
   integratePrompt, postIntegrateFixPrompt, finalFixPrompt, verifyPrompt, verifySchema, verifyRepairPrompt,
   repairSchema, finalReReviewPrompt, finalChecks, finalSetup, repairFixMessage, postIntegratePrompt, statusSchema,
+  integrateSchema,
 } = await loadHelpers([
   'integratePrompt', 'postIntegrateFixPrompt', 'finalFixPrompt', 'verifyPrompt', 'verifySchema', 'verifyRepairPrompt',
   'repairSchema', 'finalReReviewPrompt', 'finalChecks', 'finalSetup', 'repairFixMessage', 'postIntegratePrompt',
-  'statusSchema',
+  'statusSchema', 'integrateSchema',
 ]);
 
 function task(id) {
@@ -183,6 +184,59 @@ test('statusSchema has an optional checks_unfinished for integrate (spec 4.3)', 
   assert.deepEqual(s.properties.checks_unfinished, { type: 'boolean' });
   assert.ok(!s.required.includes('checks_unfinished'));
   assert.deepEqual(s.required, ['status', 'head', 'notes']);
+});
+
+// ---- 1.6.8: a resumed integration reuses a passing check (spec 4.7)
+
+test('the integrate prompt runs setup, then reuse-checks only when its merges made no commit', () => {
+  const m = manifest({
+    lane_commands: { alpha: { test: ['npm test -- alpha'], setup: ['npm ci -w alpha'] }, beta: { lint: [] } },
+  });
+  for (const opts of [{ conflictMode: 'abort' }, { testFailure: 'heal' }, {}]) {
+    const p = integratePrompt(m, H('pre'), opts);
+    const text = flat(p);
+    const reuse = p.split('\n').find((l) => l.includes("/scripts/reuse-checks' "));
+    assert.ok(reuse, p);
+    assert.ok(reuse.includes("'python3' '/skills/parallel-lanes/scripts/reuse-checks' '/work/ledger' --name integrate "
+      + "--head <HEAD> --checkout '/work/repo'"), reuse);
+    // The same setup and check commands as the run-checks call, in order.
+    for (const s of finalSetup(m)) assert.ok(reuse.includes(`--setup '${s}'`), s);
+    assert.ok(reuse.indexOf("--setup 'npm ci'") < reuse.indexOf("--setup 'npm ci -w alpha'"), reuse);
+    assert.deepEqual(cmdPairs(reuse), finalChecks(m));
+    assert.ok(reuse.lastIndexOf('--setup') < reuse.indexOf('--cmd'), reuse);
+    // The run-checks call records each setup command, never running it.
+    const line = runChecksLines(p)[0];
+    assert.ok(line.includes("--record-setup 'npm ci' --record-setup 'npm ci -w alpha'"), line);
+    assert.deepEqual(cmdPairs(line), cmdPairs(reuse));
+    // Setup always runs first; reuse only when the merges made no commit.
+    assert.ok(text.indexOf('setup: npm ci && npm ci -w alpha') < text.indexOf(flat(reuse)), text);
+    assert.ok(text.includes('Always run the setup commands first'), text);
+    assert.ok(text.includes('Only when no merge in step 2 made a commit'), text);
+    assert.ok(text.includes('When it exits 0, skip the run-checks call below: return checks_reused'), text);
+    // Only heal mode returns tests_failed.
+    assert.equal(text.includes('the file it printed and tests_failed false'), opts.testFailure === 'heal', text);
+    assert.ok(text.includes('say in notes that the checks were reused'), text);
+    assert.ok(text.indexOf(flat(reuse)) < text.indexOf(flat(line)), 'reuse is tried before the run-checks call');
+    assert.ok(text.includes('checks_reused (the file reuse-checks printed when you reused its checks, else null)'), text);
+  }
+  // No setup commands: no --setup and no --record-setup.
+  const bare = manifest({ commands: { setup: [], test: ['npm test'], lint: [], build: [] } });
+  const p = integratePrompt(bare, H('pre'));
+  const reuse = p.split('\n').find((l) => l.includes("/scripts/reuse-checks' "));
+  assert.ok(!reuse.includes('--setup'), reuse);
+  assert.ok(!runChecksLines(p)[0].includes('--record-setup'), p);
+  // No checks at all: nothing to reuse.
+  const none = integratePrompt(manifest({ commands: { setup: ['npm ci'], test: [], lint: [], build: [] } }), H('pre'));
+  assert.ok(!none.includes('reuse-checks'), none);
+});
+
+test('integrateSchema extends statusSchema with an optional checks_reused', () => {
+  const s = integrateSchema();
+  const base = statusSchema();
+  assert.deepEqual(s.required, base.required);
+  assert.deepEqual(s.properties.checks_reused, { type: ['string', 'null'] });
+  for (const [k, v] of Object.entries(base.properties)) assert.deepEqual(s.properties[k], v, k);
+  assert.ok(!('checks_reused' in base.properties));
 });
 
 // ---- 1.6.1: the long-check procedure in phase prompts (spec 4.1, 4.4)
