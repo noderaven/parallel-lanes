@@ -113,14 +113,14 @@ const minor = (id, task, issue = `issue ${id}`) => ({ id, severity: 'minor', fil
 
 // A Claude config dir holding one session's workflow result file, as the
 // Workflow tool writes it; returns {config, transcripts} (the transcript dir).
-function launchFile(config, wf, { rulings = [], adjudicated = null, tasks = {}, final = null, args = {} } = {}) {
+function launchFile(config, wf, { rulings = [], adjudicated = null, tasks = {}, final = null, args = {}, permits } = {}) {
   const session = join(config, 'projects', 'C--work', 'sess-1');
   mkdirSync(join(session, 'workflows'), { recursive: true });
   const transcripts = join(session, 'subagents', 'workflows', wf);
   mkdirSync(transcripts, { recursive: true });
   const result = {
     status: 'complete', run_id: 'run-1', tasks,
-    preflight: { conflicts: [], rulings, undeclared: [], schedule: [], adjudicated },
+    preflight: { conflicts: [], rulings, undeclared: [], schedule: [], adjudicated, ...(permits ? { permits } : {}) },
     final,
   };
   writeFileSync(join(session, 'workflows', `${wf}.json`), JSON.stringify({ runId: wf, args, result }));
@@ -459,4 +459,87 @@ test("a batch's minors are carried once, under the batch's first task", () => {
   carry(dir, launchFile(config, 'wf_batch1-001', { tasks: { T2: { ...done(unit), batch: 'T2-T3' }, T3: { ...done(unit), batch: 'T2-T3' } } }));
   assert.deepEqual(statusOf(dir).minors, { open: ['T2-T3-1', 'T2-T3-2'], covered: ['T2', 'T3'] });
   assert.ok(ledger('minors', dir).stdout.includes('[T2-T3-1] T2 '), 'listed under the first task');
+});
+
+// ---- 1.6.8 (spec 4.6): pre-flight permits carried through the ledger ----
+
+const runEvents = (dir) => readFileSync(join(dir, '_run.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+test('carry-launch records permits on the pre-flight ruling', () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  const t = launchFile(config, 'wf_permit-001', {
+    rulings: ['a', 'b'], permits: [{ task: 'T1', files: ['x.py'], ruling: 1 }],
+  });
+  const out = carry(dir, t);
+  assert.equal(out.code, 0, out.stderr);
+  const rulings = runEvents(dir).filter((e) => e.event === 'ruling');
+  const byPf = Object.fromEntries(rulings.map((e) => [e.pf, e]));
+  assert.deepEqual(byPf['PF-2'].permits, [{ task: 'T1', files: ['x.py'] }]);
+  assert.ok(!('permits' in byPf['PF-1']), JSON.stringify(byPf['PF-1']));
+  // The ledger reads the carried permit back for T1 only.
+  const res = withLedgerModule('import json\nprint(json.dumps([L.preflight_permits(sys.argv[2], ["T1"]), '
+    + 'L.preflight_permits(sys.argv[2], ["T2"])]))\n', [dir]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout), [[['x.py', '_run-R2']], []]);
+});
+
+test('carry-launch drops malformed permits and those of the adjudication or no ruling', () => {
+  const dir = freshDir();
+  const config = freshDir('config');
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'Ruling: ADJ - w - c' });
+  const t = launchFile(config, 'wf_permit-002', {
+    rulings: ['a', 'ADJ', 'c'], adjudicated: 1,
+    permits: [
+      { task: 'T1', files: ['x.py'], ruling: 0 }, { task: 'T2', files: ['y.py', 'z.py'], ruling: 0 },
+      { task: 'T3', files: ['adj.py'], ruling: 1 }, { task: 'T4', files: ['far.py'], ruling: 7 },
+      { task: '', files: ['a.py'], ruling: 2 }, { task: 'T5', files: 'a.py', ruling: 2 },
+      { task: 'T6', files: [], ruling: 2 }, { task: 'T7', files: ['a.py'], ruling: true },
+      { task: 'T8', files: ['a.py'], ruling: '2' }, 'junk',
+    ],
+  });
+  const out = carry(dir, t);
+  assert.equal(out.code, 0, out.stderr);
+  const rulings = runEvents(dir).filter((e) => e.by === 'preflight');
+  assert.deepEqual(rulings.map((e) => [e.pf, e.permits]), [
+    ['PF-1', [{ task: 'T1', files: ['x.py'] }, { task: 'T2', files: ['y.py', 'z.py'] }]],
+    ['PF-3', undefined],
+  ]);
+});
+
+test('adjudicator_permits still ignores pre-flight rulings', () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'preflight', pf: 'PF-1', text: 'P',
+    files: ['x.py'], permits: [{ task: 'T1', files: ['x.py'] }] });
+  appendOk(dir, 'alpha', { task: 'T1', event: 'ruling', by: 'preflight', text: 'Q', files: ['y.py'] });
+  const res = withLedgerModule('import json\nprint(json.dumps([L.adjudicator_permits(sys.argv[2], ["T1"], ["x.py"]), '
+    + 'L.preflight_permits(sys.argv[2], ["T1"])]))\n', [dir]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout), [[], [['x.py', '_run-R1']]]);
+});
+
+test('preflight_permits skips an overridden ruling and directory entries', () => {
+  const dir = freshDir();
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'preflight', pf: 'PF-1', text: 'P',
+    permits: [{ task: 'T1', files: ['a.py', 'src/', 'src\\', '.', '../up.py', '/abs.py'] }] });
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'preflight', pf: 'PF-2', text: 'Q',
+    permits: [{ task: 'T1', files: ['b.py'] }] });
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'adjudicator', text: 'NO', overrides: ['_run-R2'] });
+  const res = withLedgerModule('import json\nprint(json.dumps(L.preflight_permits(sys.argv[2], ["T1"])))\n', [dir]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(JSON.parse(res.stdout), [['a.py', '_run-R1']]);
+});
+
+test('a malformed permits field is refused', () => {
+  const dir = freshDir();
+  for (const bad of ['x.py', ['x.py'], [{ task: 'T1' }], [{ files: ['x.py'] }], [{ task: '', files: ['x.py'] }],
+    [{ task: 'T1', files: 'x.py' }], [{ task: 'T1', files: [''] }], [{ task: 7, files: ['x.py'] }],
+    [{ task: 'T1', files: ['x.py'], ruling: 0 }], {}]) {
+    const res = ledger('append', dir, '_run', JSON.stringify({ task: '_run', event: 'ruling', by: 'preflight', text: 'P', permits: bad }));
+    assert.notEqual(res.code, 0, JSON.stringify(bad));
+    assert.ok(res.stderr.includes("'permits' must be a list of {task, files}"), `${JSON.stringify(bad)}: ${res.stderr}`);
+  }
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'preflight', text: 'P', permits: [] });
+  appendOk(dir, '_run', { task: '_run', event: 'ruling', by: 'preflight', text: 'P',
+    permits: [{ task: 'T1', files: ['x.py', 'y.py'] }, { task: 'T2', files: ['z.py'] }] });
 });

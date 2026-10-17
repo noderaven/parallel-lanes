@@ -4,7 +4,7 @@
 usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE
                    --task ID [--task ID ...]
                    [--declared PATH ... | --declared-from-owners N:HHHHHHHH]
-                   [--widen PATH ...] [--project-test CMD ...]
+                   [--widen PATH ...] [--permit PATH=PF-N ...] [--project-test CMD ...]
                    [--entry TASK_ID --targeted GROUP CMD [--targeted GROUP CMD ...]]
                    --lane-cmd GROUP CMD [...] (--wide-cmd GROUP CMD [...] | --wide-as-lane)
                    [--force-full REASON] [--evidence PATH] [--phase NAME]
@@ -62,16 +62,29 @@ case-insensitive filesystem a case mismatch only widens. A --declared or
 --widen value that is absolute or leaves the project after normalizing is a
 usage error.
 
-Permitted paths: a changed path outside the Files list that an adjudicator
-ruling in force permits this unit (its 'files', file paths only: an entry
-naming a directory permits nothing; filed under one of the --task ids, or
-under _run for a path that neither it nor a folder above it is named by a
-task's Files list in LEDGER_DIR/owners.json, in the folder of a --declared
-file or in a declared directory itself, folders compared by case) counts as declared and is listed in policy.permitted as
-{path, ruling}. Implementer, reviewer and pre-flight rulings permit nothing.
-The ledger script's adjudicator_permits finds them. When the ledger cannot
-be read none are permitted; when the owner map cannot be read, none of
-_run's are.
+Permitted paths: a changed path outside the Files list counts as declared
+and is listed in policy.permitted as {path, ruling} when it is permitted
+this unit by, in this order:
+  - a --permit PATH=PF-N (1.6.8, repeatable): this launch's pre-flight ruling
+    PF-N (N from 1, no leading zero) permits PATH, a file, to one of the
+    unit's tasks; the engine passes one per kept file. PATH goes through the
+    --declared rules ('\\' becomes '/', normalized); a directory (ending in
+    '/', or the project root), an absolute path, one that leaves the project,
+    or a value without '=PF-N' is a usage error. ruling is 'PF-N';
+  - an adjudicator ruling in force (its 'files', file paths only: an entry
+    naming a directory permits nothing; filed under one of the --task ids,
+    or under _run for a path that neither it nor a folder above it is named
+    by a task's Files list in LEDGER_DIR/owners.json, in the folder of a
+    --declared file or in a declared directory itself, folders compared by
+    case), found by the ledger script's adjudicator_permits;
+  - an earlier launch's pre-flight ruling in force whose 'permits' (written
+    by ledger carry-launch) names the file for one of the --task ids, found
+    by the ledger script's preflight_permits.
+ruling is the ledger's ruling id for the last two. Implementer and reviewer
+rulings permit nothing; a pre-flight ruling permits what its `permits` names
+for its task. When the ledger cannot be read only --permit paths are
+permitted; when the owner map cannot be read, none of _run's adjudicator
+rulings are.
 
 The chosen list runs through run-checks (DIR --out FILE --root LEDGER_DIR
 --lock-held). FILE, the result file, is:
@@ -159,7 +172,7 @@ PRINT_PATHS = 50
 PRINT_DETAIL = 2000
 USAGE = ("usage: task-checks DIR --base SHA --ledger LEDGER_DIR --unit UNIT_ID --lane LANE "
          "--task ID [...] [--declared PATH ... | --declared-from-owners N:HHHHHHHH] "
-         "[--widen PATH ...] [--project-test CMD ...] "
+         "[--widen PATH ...] [--permit PATH=PF-N ...] [--project-test CMD ...] "
          "[--entry TASK_ID --targeted GROUP CMD ...] --lane-cmd GROUP CMD [...] "
          "(--wide-cmd GROUP CMD [...] | --wide-as-lane) [--force-full REASON] [--evidence PATH] "
          "[--phase NAME]")
@@ -169,7 +182,9 @@ SINGLE = {"--base": "base", "--ledger": "ledger", "--unit": "unit", "--lane": "l
           "--entry": "entry", "--force-full": "forced", "--evidence": "evidence", "--phase": "phase",
           "--declared-from-owners": "owners_fp"}
 REPEATED = {"--task": "tasks", "--declared": "declared", "--widen": "widen",
-            "--project-test": "project_tests"}
+            "--permit": "permit", "--project-test": "project_tests"}
+# A --permit's ruling: this launch's pre-flight ruling, numbered from 1.
+PF_ID = re.compile(r"PF-[1-9][0-9]*")
 PAIRS = {"--targeted": "targeted", "--lane-cmd": "lane_cmds", "--wide-cmd": "wide_cmds"}
 # Options that take no value.
 FLAGS = {"--wide-as-lane": "wide_as_lane"}
@@ -216,7 +231,7 @@ def parse(argv):
     that is not an option is skipped."""
     args = {"dir": None, "base": None, "ledger": None, "unit": None, "lane": None, "entry": None,
             "forced": None, "evidence": None, "phase": None, "owners_fp": None, "wide_as_lane": False,
-            "tasks": [], "declared": [], "widen": [], "project_tests": [],
+            "tasks": [], "declared": [], "widen": [], "permit": [], "project_tests": [],
             "targeted": [], "lane_cmds": [], "wide_cmds": []}
     errors = []
     rest = argv
@@ -311,6 +326,17 @@ def validate(args):
                 fail(2, f"{flag} {value!r} is not a project-relative path")
             keys.append(k)
         args[key] = keys
+    permits = []
+    for value in args["permit"]:
+        path, eq, ruling = value.rpartition("=")
+        if not eq or not PF_ID.fullmatch(ruling):
+            fail(2, f"--permit {value!r} is not PATH=PF-N")
+        k = entry_key(path)
+        # A permit names a file: a directory would cover every path under it.
+        if k is None or k[1] or k[0] == ".":
+            fail(2, f"--permit {value!r} does not name a project-relative file")
+        permits.append((k, ruling))
+    args["permit"] = permits
     args["dir"] = _shell.native_path(args["dir"])
     args["ledger"] = _shell.native_path(args["ledger"])
     # A --widen entry naming an existing directory covers it without the '/':
@@ -377,9 +403,13 @@ def covered(path, entries):
 
 
 def permits(args):
-    """[((path, is_dir), ruling id)]: the paths the adjudicator rulings in
-    force permit this unit (ledger's adjudicator_permits, one helper for both
-    scripts); [] when the ledger cannot be read, so the strict rule holds."""
+    """[((path, is_dir), ruling id)]: the --permit paths, then the paths the
+    adjudicator rulings and the carried pre-flight permits in force permit
+    this unit (ledger's adjudicator_permits and preflight_permits, one helper
+    for both scripts, from one load of the ledger script); only the --permit
+    paths when the ledger cannot be read, so the strict rule holds for the
+    rest."""
+    out = list(args["permit"])
     try:
         loader = importlib.machinery.SourceFileLoader("_pl_ledger", os.path.join(HERE, "ledger"))
         spec = importlib.util.spec_from_loader("_pl_ledger", loader)
@@ -387,9 +417,9 @@ def permits(args):
         with contextlib.redirect_stderr(io.StringIO()):
             loader.exec_module(ledger)
             found = ledger.adjudicator_permits(args["ledger"], args["tasks"], args["declared_raw"])
+            found += ledger.preflight_permits(args["ledger"], args["tasks"])
     except (Exception, SystemExit):  # noqa: BLE001 - any failure keeps the strict rule
-        return []
-    out = []
+        return out
     for path, ruling in found:
         key = entry_key(path) if isinstance(path, str) else None
         # A permit covers its own path only, never a directory's contents.
