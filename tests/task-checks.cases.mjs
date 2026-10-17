@@ -5,7 +5,8 @@
 // check; the three offered lists differ only in t.mjs's argument, so the
 // recorded results show which list ran.
 
-import { test, after } from 'node:test';
+import { after } from 'node:test';
+import { test } from './shard.mjs';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';

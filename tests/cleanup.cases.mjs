@@ -4,7 +4,8 @@
 // finished git-mode run, with a run folder and an index.json written with
 // _history.write_index.
 
-import { test, after } from 'node:test';
+import { after } from 'node:test';
+import { test } from './shard.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

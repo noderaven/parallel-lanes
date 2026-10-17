@@ -7,6 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { SKILL_DIR } from './harness.mjs';
 import { tempDir } from './platform.mjs';
@@ -47,7 +48,7 @@ function project(files, extra = {}) {
 
 function runner(p, args = [], env = {}) {
   const res = spawnSync(process.execPath, [join(p.tests, 'run-tests.mjs'), ...args], {
-    cwd: p.root, encoding: 'utf8', env: { ...process.env, PL_TEST_CONCURRENCY: '', ...env },
+    cwd: p.root, encoding: 'utf8', env: { ...process.env, PL_TEST_CONCURRENCY: '', PL_PHASE: '', ...env },
   });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
@@ -74,11 +75,28 @@ test('run-tests runs every *.test.mjs beside it, each in its own process, and no
   assert.equal(existsSync(join(TMP, 'helper-ran')), false, 'a file not named *.test.mjs was run');
 });
 
-test('run-tests runs four test files at a time by default', () => {
+test('inside a lane check (PL_PHASE=lane) run-tests runs four test files at a time by default', () => {
   const p = project({ a: { ms: 1500 }, b: { ms: 1500 }, c: { ms: 1500 }, d: { ms: 1500 }, e: { ms: 1500 } });
-  const res = runner(p);
+  const res = runner(p, [], { PL_PHASE: 'lane' });
   assert.equal(res.code, 0, res.stdout + res.stderr);
   assert.equal(maxOverlap(records(p)), 4, JSON.stringify(records(p)));
+});
+
+// Several lanes may run the whole suite at once, so a lane check keeps 4;
+// anywhere else the suite runs alone and takes CPUs - 4, between 4 and 12 (more than 12 was no faster
+// on a 20-core Windows machine, 2026-10-17: 428 s at 8, 405 s at 12, 418 s at 16).
+test('run alone, run-tests runs min(12, max(4, CPUs - 4)) test files at a time by default', () => {
+  const names = 'abcdefghijklmn'.split('');
+  const p = project(Object.fromEntries(names.map((n) => [n, { ms: 2000 }])));
+  const res = runner(p);
+  assert.equal(res.code, 0, res.stdout + res.stderr);
+  const want = Math.min(names.length, Math.min(12, Math.max(4, availableParallelism() - 4)));
+  assert.equal(maxOverlap(records(p)), want, JSON.stringify(records(p)));
+  for (const phase of ['integrate', 'verify']) {
+    const q = project(Object.fromEntries(names.map((n) => [n, { ms: 2000 }])));
+    assert.equal(runner(q, [], { PL_PHASE: phase }).code, 0);
+    assert.equal(maxOverlap(records(q)), want, `${phase}: ${JSON.stringify(records(q))}`);
+  }
 });
 
 test('PL_TEST_CONCURRENCY sets how many files run at once, and --concurrency overrides it', () => {
