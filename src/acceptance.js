@@ -122,7 +122,10 @@ function afterChecksWarning(verify, sha) {
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
 // verify (run-checks JSON|null), post ({status, checked_sha}|null),
-// delivered_sha, fix_unreviewed}. Returns {status 'accepted'|'unverified'|
+// delivered_sha, fix_unreviewed, start_check (classifyStartCheck's result,
+// optional: when it was made for the delivered head and every failing
+// command fails at the start point, the reason is checks_failed_at_start;
+// when only some do, checks_failed and a warning naming them)}. Returns {status 'accepted'|'unverified'|
 // 'rejected', delivered_sha, reasons: [{kind, class 'failed'|'missing',
 // detail}], warnings: [string]}. rejected: something failed or is open or
 // deferred; unverified: nothing failed, but required evidence is missing or
@@ -154,8 +157,23 @@ function acceptanceOf(input) {
     || want.some((w, i) => verify.results[i].group !== w.group || verify.results[i].command !== w.command)) {
     add('checks_incomplete', 'missing', 'the verify step did not run exactly the configured test, lint and build commands');
   } else if (verify.ok !== true || verify.results.some((r) => r.exit !== 0)) {
-    const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-    add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
+    const failing = verify.results.filter((r) => r.exit !== 0);
+    const failed = failing.map((r) => `${r.command} (exit ${r.exit})`);
+    // The start check (1.6.8 spec 4.4), when it was made for the delivered
+    // head: each failing command's entry when the engine classified it fails.
+    const sc = input.start_check;
+    const here = sc && sc.status === 'checked' && sc.verify_head === sha && Array.isArray(sc.commands) ? sc : null;
+    const atStart = here === null ? [] : failing.map((r) => here.commands
+      .find((c) => c && c.verify_command === r.command && c.at_start === 'fails') || null);
+    if (failing.length > 0 && atStart.length === failing.length && atStart.every((c) => c !== null)) {
+      const each = failing.map((r, i) => `${r.command} (exit ${r.exit}): ${(atStart[i].failed_at_head || []).join(', ')}`);
+      add('checks_failed_at_start', 'failed', `failing at ${sha} and at the start point ${here.start_sha}: `
+        + `${each.join('; ')}; evidence ${here.evidence}`);
+    } else {
+      add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
+      const too = failing.filter((r, i) => atStart[i]).map((r) => r.command);
+      if (too.length > 0) warnings.push(`fails at the start point ${here.start_sha} too: ${too.join(', ')}`);
+    }
   }
   // Checks that ran on uncommitted tracked or staged changes or with an
   // untracked file present, or changed a tracked file, tested something
