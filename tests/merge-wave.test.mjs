@@ -331,11 +331,18 @@ test('a held index.lock is retried once', async () => {
   const a = unit(c, 'A', { 'a.txt': 'a\n' });
   const lock = join(c.repo, '.git', 'index.lock');
   writeFileSync(lock, '');
+  // Held for 1.5 s, less than the 2 s retry wait: only a merge retried after
+  // that wait succeeds, so a passing call took at least 2 s. Without the
+  // retry the call fails while the lock is held, or (with a slow start)
+  // merges at once in under 2 s; either fails this test.
+  const started = Date.now();
   const run = mergeWaveAsync(c, ['--wave', '1', ...a]);
-  setTimeout(() => rmSync(lock, { force: true }), 500);
+  setTimeout(() => rmSync(lock, { force: true }), 1500);
   const r = await run.done;
+  const elapsed = Date.now() - started;
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(r.out.merged, ['A']);
+  assert.ok(elapsed >= 2000, `the merge was retried after the 2 s wait (took ${elapsed} ms)`);
 
   const held = newCase();
   const h = unit(held, 'A', { 'a.txt': 'a\n' });
