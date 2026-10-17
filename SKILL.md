@@ -140,9 +140,9 @@ Fields: reference.md "Manifest fields". In order:
    a join task without it waits for every earlier one (reference.md "Join waves").
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
    for one lane, at most 8 tasks, no security task, and no `hooks.post_integrate`; else
-   `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
-   keys for consecutive tiny light tasks. The user's model preference wins when it is stricter
-   (e.g. "Opus for everything" means all `standard`).
+   `full`. Tiers `standard` (Opus), `sonnet` (Sonnet), `light` (Haiku); security tasks always
+   `standard`; `batch` keys for consecutive tiny light tasks. The user's model preference wins
+   when it is stricter (e.g. "Opus for everything" means all `standard`).
 5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md, the
    plan's conventions, CONTRIBUTING; reference.md). Every agent prompt carries it.
 6. `commands`, `task_checks` and `widen_paths` (from the plan's tests and shared files), paths,

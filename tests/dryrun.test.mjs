@@ -151,11 +151,11 @@ test('a task in done but not reviewed produces a review agent only', () => {
   assert.deepEqual(roles(forTask(agents, 'T2')), ['review']);
 });
 
-test('a light task implementer runs at sonnet/high and its reviewer at opus/high', () => {
+test('a light task implementer runs at haiku/high and its reviewer at opus/high', () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
   const [implement, review] = forTask(planAgents(m), 'T4');
-  assert.deepEqual([implement.role, implement.model, implement.effort], ['implement', 'sonnet', 'high']);
+  assert.deepEqual([implement.role, implement.model, implement.effort], ['implement', 'haiku', 'high']);
   assert.deepEqual([review.role, review.model, review.effort], ['review', 'opus', 'high']);
 });
 
@@ -167,13 +167,13 @@ test('a sonnet task implementer runs at sonnet/high and its reviewer at opus/hig
   assert.deepEqual([review.role, review.model, review.effort], ['review', 'opus', 'high']);
 });
 
-test('integrate and e2e run at sonnet/high; every other agent but a light implementer at opus/high', () => {
+test('integrate and e2e run at sonnet/high, the start check and a light implementer at haiku/high, the rest at opus/high', () => {
   const m = manifest({ hooks: { post_integrate: 'check', e2e: 'run' } });
   m.join[0].tier = 'light';
-  const sonnet = new Set(['integrate', 'e2e', 'verify', 'start_check', 'e2e_recheck']);
+  const sonnet = new Set(['integrate', 'e2e', 'verify', 'e2e_recheck']);
   for (const a of planAgents(m)) {
-    const want = sonnet.has(a.role) || (a.task === 'T5' && a.role === 'implement')
-      ? ['sonnet', 'high'] : ['opus', 'high'];
+    const haiku = a.role === 'start_check' || (a.task === 'T5' && a.role === 'implement');
+    const want = haiku ? ['haiku', 'high'] : sonnet.has(a.role) ? ['sonnet', 'high'] : ['opus', 'high'];
     assert.deepEqual([a.model, a.effort], want, `${a.role} ${a.task}`);
   }
 });
@@ -195,7 +195,7 @@ test('the planned agents list a start check after verify', () => {
   const agents = planAgents(manifest());
   const at = agents.findIndex((a) => a.role === 'verify');
   assert.deepEqual(agents[at + 1], {
-    phase: 'Verify', lane: null, task: null, role: 'start_check', model: 'sonnet', effort: 'high',
+    phase: 'Verify', lane: null, task: null, role: 'start_check', model: 'haiku', effort: 'high',
   });
   assert.equal(agents.filter((a) => a.role === 'start_check').length, 1);
   const none = manifest({ commands: { setup: [], test: [], lint: [], build: [] } });
@@ -228,7 +228,7 @@ test('lite plan: no pre-flight, integrate or post-integrate; one combined final 
     ['Final review', null, null, 'final_review_combined', 'opus'],
     ['Final review', null, null, 'final_fix', 'opus'],
     ['Verify', null, null, 'verify', 'sonnet'],
-    ['Verify', null, null, 'start_check', 'sonnet'],
+    ['Verify', null, null, 'start_check', 'haiku'],
     ['Final review', null, null, 'final_re_review', 'opus'],
     ['Verify', null, null, 'e2e_recheck', 'sonnet'],
   ]);
@@ -238,7 +238,7 @@ test('batched light tasks plan one implement and one review for the batch', () =
   const m = batchedManifest();
   const lane = planAgents(m).filter((a) => a.lane === 'alpha');
   assert.deepEqual(lane.map((a) => [a.task, a.role, a.model, a.effort]), [
-    ['T2-T3', 'implement', 'sonnet', 'high'],
+    ['T2-T3', 'implement', 'haiku', 'high'],
     ['T2-T3', 'review', 'opus', 'high'],
   ]);
 });

@@ -883,12 +883,14 @@ function withDefaultHooks(m) {
   return { ...m, hooks: {} };
 }
 
-// Model settings. The sonnet and light tiers apply to implementers of
-// sonnet and light tasks only; reviewers always run standard. Integrate,
-// e2e, and minor-only or docs-only final fixes start on Sonnet with settings
-// of their own (phases.js).
+// Model settings. The sonnet tier runs Sonnet and the light tier Haiku,
+// for implementers of those tasks only; reviewers always run standard.
+// Integrate, e2e and minor-only final fixes start on Sonnet, docs-only
+// final fixes and the start check on Haiku, with settings of their own
+// (phases.js).
 function tierSettings(tier) {
-  return tier === 'sonnet' || tier === 'light'
+  if (tier === 'light') return { model: 'haiku', effort: 'high' };
+  return tier === 'sonnet'
     ? { model: 'sonnet', effort: 'high' }
     : { model: 'opus', effort: 'high' };
 }
@@ -912,7 +914,7 @@ function tierSettings(tier) {
 // once, whenever a project or lane test, lint or build command exists
 // (finalChecks): after the final fix and before the final re-review (which
 // gets its result), or after the lenses when they found nothing; it is
-// listed in that place. The start check (Sonnet) is listed beside it as the
+// listed in that place. The start check (Haiku) is listed beside it as the
 // upper bound: it runs only after a failing verify. e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
@@ -971,7 +973,7 @@ function planAgents(m) {
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
   if (finalChecks(m).length > 0) {
     add('Verify', null, null, 'verify', sonnetHigh);
-    add('Verify', null, null, 'start_check', sonnetHigh);
+    add('Verify', null, null, 'start_check', { model: 'haiku', effort: 'high' });
   }
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
@@ -5451,26 +5453,28 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   };
 
-  // Final fix tier (spec decision 5): Sonnet when every finding is minor or
-  // every finding is in documentation; otherwise Opus. A Sonnet fix that does
-  // not finish reruns once on Opus (same label); still one fix wave.
+  // Final fix tier (spec decision 5): Haiku when every finding is in
+  // documentation, else Sonnet when every finding is minor, otherwise Opus. A
+  // Haiku or Sonnet fix that does not finish reruns once on Opus (same
+  // label); still one fix wave.
   const docsOnly = findings.every((f) => typeof f.file === 'string' && f.file.endsWith('.md'));
   const minorOnly = findings.every((f) => f.severity === 'minor');
-  const fixSettings = minorOnly || docsOnly ? { model: 'sonnet', effort: 'high' } : standard;
+  const fixSettings = docsOnly ? { model: 'haiku', effort: 'high' }
+    : minorOnly ? { model: 'sonnet', effort: 'high' } : standard;
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
   // A refused first call spawned no fix agent: no code changed, so the
   // caller's budget stop runs the checks.
   const fixRan = !(fix && fix.__budget);
-  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
-  // fix's head stands unless its Opus rerun reports a head of its own.
-  // A head that is not a commit sha names no commit, so the run cannot say
-  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
-  // leaves every finding open.
+  // Whatever a fix agent did, commits it reports are delivered code: a Haiku
+  // or Sonnet fix's head stands unless its Opus rerun reports a head of its
+  // own. A head that is not a commit sha names no commit, so the run cannot
+  // say what the fix delivered: a Haiku or Sonnet fix reruns on Opus, and an
+  // Opus one leaves every finding open.
   const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
   if (fix && isSha(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fixSettings !== standard && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
   if (fix && isSha(fix.head)) final.head = fix.head;
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
@@ -6647,7 +6651,8 @@ async function runAll(manifest, io) {
     if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < room) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
-    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(), sonnetHigh);
+    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
+      { model: 'haiku', effort: 'high' });
     return classifyStartCheck(m, v, sha, r);
   };
   // A budget stop once every task is in: the checks still run at the

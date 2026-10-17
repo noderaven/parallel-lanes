@@ -93,26 +93,28 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   };
 
-  // Final fix tier (spec decision 5): Sonnet when every finding is minor or
-  // every finding is in documentation; otherwise Opus. A Sonnet fix that does
-  // not finish reruns once on Opus (same label); still one fix wave.
+  // Final fix tier (spec decision 5): Haiku when every finding is in
+  // documentation, else Sonnet when every finding is minor, otherwise Opus. A
+  // Haiku or Sonnet fix that does not finish reruns once on Opus (same
+  // label); still one fix wave.
   const docsOnly = findings.every((f) => typeof f.file === 'string' && f.file.endsWith('.md'));
   const minorOnly = findings.every((f) => f.severity === 'minor');
-  const fixSettings = minorOnly || docsOnly ? { model: 'sonnet', effort: 'high' } : standard;
+  const fixSettings = docsOnly ? { model: 'haiku', effort: 'high' }
+    : minorOnly ? { model: 'sonnet', effort: 'high' } : standard;
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
   // A refused first call spawned no fix agent: no code changed, so the
   // caller's budget stop runs the checks.
   const fixRan = !(fix && fix.__budget);
-  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
-  // fix's head stands unless its Opus rerun reports a head of its own.
-  // A head that is not a commit sha names no commit, so the run cannot say
-  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
-  // leaves every finding open.
+  // Whatever a fix agent did, commits it reports are delivered code: a Haiku
+  // or Sonnet fix's head stands unless its Opus rerun reports a head of its
+  // own. A head that is not a commit sha names no commit, so the run cannot
+  // say what the fix delivered: a Haiku or Sonnet fix reruns on Opus, and an
+  // Opus one leaves every finding open.
   const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
   if (fix && isSha(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fixSettings !== standard && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
   if (fix && isSha(fix.head)) final.head = fix.head;
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
@@ -1289,7 +1291,8 @@ async function runAll(manifest, io) {
     if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < room) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
-    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(), sonnetHigh);
+    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
+      { model: 'haiku', effort: 'high' });
     return classifyStartCheck(m, v, sha, r);
   };
   // A budget stop once every task is in: the checks still run at the

@@ -275,17 +275,18 @@ test('the review approval command passes the spec', async () => {
   assert.ok(!noSpec.includes(`${head} '`), 'no spec path without a spec');
 });
 
-test('mechanical phases start on sonnet high; everything else runs opus high and all carry the commit rules', async () => {
+test('mechanical phases start on sonnet high, a light implementer on haiku high; the rest run opus high and all carry the commit rules', async () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
   const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
-  // Integrate and e2e start on Sonnet (D5); the light T4 implementer too. On a
-  // clean run they succeed first try, so no Opus rerun follows.
-  const sonnet = new Set(['T4 implement', 'integrate', 'e2e', 'verify', 'e2e recheck']);
+  // Integrate and e2e start on Sonnet (D5), the light T4 implementer on
+  // Haiku. On a clean run they succeed first try, so no Opus rerun follows.
+  const sonnet = new Set(['integrate', 'e2e', 'verify', 'e2e recheck']);
   for (const c of calls) {
     assert.ok(c.prompt.includes('COMMIT-RULES: plain ASCII, no trailers'), c.label);
     assert.ok(/^[\x00-\x7f]*$/.test(c.prompt), `${c.label}: plain ASCII`);
-    const want = sonnet.has(c.label) ? ['sonnet', 'high'] : ['opus', 'high'];
+    const want = c.label === 'T4 implement' ? ['haiku', 'high']
+      : sonnet.has(c.label) ? ['sonnet', 'high'] : ['opus', 'high'];
     assert.deepEqual([c.model, c.effort], want, c.label);
   }
 });
@@ -2248,7 +2249,7 @@ test('e2e all PASS on sonnet does not rerun on opus', async () => {
   assert.deepEqual(e2e.map((c) => c.model), ['sonnet']);
 });
 
-test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwise, sonnet null reruns on opus', async () => {
+test('final fix tier: haiku for docs-only findings, sonnet for other minor-only ones, opus otherwise; a null reruns on opus', async () => {
   const minorF = (file = 'src/a.js') => ({ severity: 'minor', file, line: 1, issue: 'nit', fix: 'tidy' });
   const okFix = { status: 'done', head: H('f1'), tests: 'pass', notes: '', declined: [] };
   const oneLens = (findings) => ({
@@ -2266,7 +2267,12 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   const docs = await run(manifest(), {
     ...phaseScript({ ...oneLens([finding('typo', 'README.md', 2)]), 'final fix': [okFix] }), ...taskScript(ALL),
   });
-  assert.equal(docs.calls.find((c) => c.label === 'final fix').model, 'sonnet');
+  assert.equal(docs.calls.find((c) => c.label === 'final fix').model, 'haiku');
+
+  const docsMinor = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF('README.md')]), 'final fix': [okFix] }), ...taskScript(ALL),
+  });
+  assert.equal(docsMinor.calls.find((c) => c.label === 'final fix').model, 'haiku');
 
   const mixed = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(mixed.calls.find((c) => c.label === 'final fix').model, 'opus');
@@ -2278,6 +2284,13 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   const fixes = nul.calls.filter((c) => c.label === 'final fix');
   assert.deepEqual(fixes.map((c) => c.model), ['sonnet', 'opus']);
   assert.equal(nul.result.status, 'complete');
+
+  const docsNul = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF('README.md')]), 'final fix': [null, okFix], 'final fix retry': [null] }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(docsNul.calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['haiku', 'opus']);
+  assert.equal(docsNul.result.status, 'complete');
 });
 
 // Reviewer of 1.2.1: commits a Sonnet final fix made stay delivered when its

@@ -477,9 +477,9 @@ worktrees, when no wave has two units, and when the join started in an earlier l
 
 | Tier | Model | Use for |
 |---|---|---|
-| standard | Opus (current), effort high | Default. Every task with logic or tests of logic. Always Opus: pre-flight, adjudicator, resolver, and final review agents, and reviewers (medium for small non-security diffs, see below). Integrate, e2e, and minor-only or docs-only final fixes start on Sonnet high and escalate to Opus. |
+| standard | Opus (current), effort high | Default. Every task with logic or tests of logic. Always Opus: pre-flight, adjudicator, resolver, and final review agents, and reviewers (medium for small non-security diffs, see below). Integrate, e2e and minor-only final fixes start on Sonnet high, docs-only final fixes on Haiku high; each escalates to Opus. The start check runs on Haiku high. |
 | sonnet | Sonnet (current), effort high | Implementers of well-specified tasks with some logic. After the first `changes` verdict the task escalates to Opus. |
-| light | Sonnet (current), effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates to Opus after the second `changes` verdict. |
+| light | Haiku (current), effort high | Implementers of mechanical tasks only: docs-only, example or config files without tests, version bumps, pure renames, fixture data. Escalates to Opus after the second `changes` verdict. |
 
 - `security: true` for tasks touching authentication, authorization, tokens, crypto,
   untrusted input (uploads, parsing external files, request bodies), file paths from users,
@@ -490,8 +490,9 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   everything else runs Opus at `high`. Mechanical run steps (clean merge plus commands, E2E
   execution) start on Sonnet and escalate to Opus on any conflict or failure.
 - The user's preference wins when stricter: "Opus for everything" means every task is
-  `standard`. There is no Haiku tier and reviewers are never lighter than Opus; if the user
-  asks for that, say so.
+  `standard`, and "no Haiku" means `sonnet` instead of `light` (a docs-only final fix and
+  the start check still run on Haiku). Haiku runs only those three; reviewers are never
+  lighter than Opus, and if the user asks for that, say so.
 
 ## Batching
 
@@ -703,8 +704,8 @@ raised it).
 - `limits.max_agents`: set to 2 x the dry-run estimate (which lists the Verify agents as an
   upper bound: `verify` runs whenever a check command exists, the rechecks only when later
   commits made earlier evidence stale). The `model` and `effort` of each dry-run agent are a
-  worst case for its first attempt (`final_fix` is listed on Opus, though a fix of only minor
-  or docs-only findings starts on Sonnet); escalations, retries, and fix rounds are extra
+  worst case for its first attempt (`final_fix` is listed on Opus, though a fix of only docs
+  findings starts on Haiku and one of only minor findings on Sonnet); escalations, retries, and fix rounds are extra
   agents the list does not show. A refused agent ends its task or phase without work;
   the run stops with reason `budget`, resumable, never accepted.
 - `limits.max_rulings`: 25 adjudicator rulings per run.
@@ -726,7 +727,7 @@ raised it).
   returned nothing is retried.
 - The `start check` agent (1.6.8, see Check ownership) is an ordinary agent under `max_agents`,
   not exempt like `verify`: it judges logs and may run long. The dry run lists one `start check`
-  row (Verify, Sonnet high) beside `verify` whenever verify is planned, as an upper bound (it runs
+  row (Verify, Haiku high) beside `verify` whenever verify is planned, as an upper bound (it runs
   only after a failing verify, at most once per launch), so the table's agent count and the
   `max_agents` it suggests grow by one. With no agent free (after a final fix: fewer than two,
   since the final re-review must follow it), or the agents unavailable, the run makes no call
@@ -878,7 +879,7 @@ for example with a wrapper script. The warning is advice and never refuses.
   run that changed nothing, gets none), and at most once per launch (a later launch may run its
   own). Both verify sites call it: the verify after a final fix and the main verify after the
   final review. The verify of a budget stop never does. Its agent's budget is in "Budgets".
-- **The agent:** `start check`, phase Verify, Sonnet high, with its own checkout rule. It adds a
+- **The agent:** `start check`, phase Verify, Haiku high, with its own checkout rule. It adds a
   detached worktree at `<worktree_root>/start` on the start sha (`git worktree add --detach`,
   from `repo.git_dir` in shadow mode); a worktree of this repo already there and detached at the
   start sha is the run's own, left by an earlier start check, and is removed first (`git

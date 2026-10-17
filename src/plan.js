@@ -51,12 +51,14 @@ function withDefaultHooks(m) {
   return { ...m, hooks: {} };
 }
 
-// Model settings. The sonnet and light tiers apply to implementers of
-// sonnet and light tasks only; reviewers always run standard. Integrate,
-// e2e, and minor-only or docs-only final fixes start on Sonnet with settings
-// of their own (phases.js).
+// Model settings. The sonnet tier runs Sonnet and the light tier Haiku,
+// for implementers of those tasks only; reviewers always run standard.
+// Integrate, e2e and minor-only final fixes start on Sonnet, docs-only
+// final fixes and the start check on Haiku, with settings of their own
+// (phases.js).
 function tierSettings(tier) {
-  return tier === 'sonnet' || tier === 'light'
+  if (tier === 'light') return { model: 'haiku', effort: 'high' };
+  return tier === 'sonnet'
     ? { model: 'sonnet', effort: 'high' }
     : { model: 'opus', effort: 'high' };
 }
@@ -80,7 +82,7 @@ function tierSettings(tier) {
 // once, whenever a project or lane test, lint or build command exists
 // (finalChecks): after the final fix and before the final re-review (which
 // gets its result), or after the lenses when they found nothing; it is
-// listed in that place. The start check (Sonnet) is listed beside it as the
+// listed in that place. The start check (Haiku) is listed beside it as the
 // upper bound: it runs only after a failing verify. e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
@@ -139,7 +141,7 @@ function planAgents(m) {
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
   if (finalChecks(m).length > 0) {
     add('Verify', null, null, 'verify', sonnetHigh);
-    add('Verify', null, null, 'start_check', sonnetHigh);
+    add('Verify', null, null, 'start_check', { model: 'haiku', effort: 'high' });
   }
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);

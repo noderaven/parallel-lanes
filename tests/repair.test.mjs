@@ -641,7 +641,7 @@ test('a failing verify starts one start check before the first repair', async ()
   assert.deepEqual(order, ['verify', 'start check', 'verify repair 1', 'verify']);
   const sc = calls.find((c) => c.label === 'start check');
   assert.equal(sc.phase, 'Verify');
-  assert.equal(sc.model, 'sonnet');
+  assert.equal(sc.model, 'haiku');
   assert.equal(sc.effort, 'high');
   assert.equal(result.final.start_check.status, 'checked');
   assert.equal(result.final.start_check.verify_head, H('f1'));

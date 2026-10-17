@@ -463,9 +463,9 @@ test('a sonnet task with security set is reported', () => {
   assertError(validateManifest(m), 'T2', 'sonnet', 'security');
 });
 
-test('sonnet and light tiers run Sonnet at high effort; standard runs Opus at high', () => {
+test('the sonnet tier runs Sonnet, the light tier Haiku, standard Opus, all at high effort', () => {
   assert.deepEqual(tierSettings('sonnet'), { model: 'sonnet', effort: 'high' });
-  assert.deepEqual(tierSettings('light'), { model: 'sonnet', effort: 'high' });
+  assert.deepEqual(tierSettings('light'), { model: 'haiku', effort: 'high' });
   assert.deepEqual(tierSettings('standard'), { model: 'opus', effort: 'high' });
 });
 

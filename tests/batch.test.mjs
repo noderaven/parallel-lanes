@@ -82,7 +82,7 @@ test('two batched tasks run as one implementer and one review, with a result for
   const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2-T3 implement', 'T2-T3 review']);
   const [impl, rev] = s.calls;
-  assert.deepEqual([impl.model, impl.effort], ['sonnet', 'high']);
+  assert.deepEqual([impl.model, impl.effort], ['haiku', 'high']);
   assert.deepEqual([rev.model, rev.effort], ['opus', 'medium'], 'review effort from the batch changed_lines');
   for (const id of ['T2', 'T3']) {
     assert.ok(impl.prompt.includes(`/work/ledger/briefs/${id}.md`), `${id} brief file`);
@@ -117,7 +117,7 @@ test('a batch fix round and re-review cover every task of the batch', async () =
   const r = await runLane(m, m.lanes[0], H('b0'), s.io);
   assert.deepEqual(labels(s.calls), ['T2-T3 implement', 'T2-T3 review', 'T2-T3 fix 1', 'T2-T3 re-review 1']);
   const [, , fix, rr] = s.calls;
-  assert.deepEqual([fix.model, fix.effort], ['sonnet', 'high']);
+  assert.deepEqual([fix.model, fix.effort], ['haiku', 'high']);
   assert.ok(fix.prompt.includes('FIX-ME'));
   for (const id of ['T2', 'T3']) {
     assert.ok(fix.prompt.includes(finishTasks), `${id} committed via finish-task in the fix`);
