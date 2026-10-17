@@ -101,9 +101,20 @@ function run1(command) {
   return r.stdout;
 }
 
+// The environment of a shell with no identity of its own: no GIT_AUTHOR_* or
+// GIT_COMMITTER_* keys, an empty global config and no system config.
+function bareGitEnv(c) {
+  const empty = `${c.root}/empty-gitconfig`;
+  writeFileSync(empty, '');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_(AUTHOR|COMMITTER)_/i.test(k)));
+  return mergeEnv(env, { GIT_CONFIG_GLOBAL: empty, GIT_CONFIG_NOSYSTEM: '1' });
+}
+
 // Scripted agents. stopAfterCommit: unit ids whose implementer commits,
 // records it, and then reports blocked (with an uncommitted change left).
-function agents(c, { stopAfterCommit = [] } = {}) {
+// mergeEnv: the environment the wave merge stub runs merge-wave in (default:
+// sh's, with GIT_ENV's identity).
+function agents(c, { stopAfterCommit = [], mergeEnv: waveEnv = null } = {}) {
   const calls = [];
   const featureHead = () => git(c.repo, 'rev-parse', 'HEAD');
   const agent = async (prompt, opts) => {
@@ -119,10 +130,15 @@ function agents(c, { stopAfterCommit = [] } = {}) {
       return { status: 'done', head: featureHead(), notes: 'merged' };
     }
     if (/^(wave \d+|recovery) merge$/.test(label)) {
-      const r = sh(lineAfter(prompt, /^1\. Run, as one call:/));
-      assert.ok(r.code === 0 || r.code === 1, r.stderr);
+      const command = lineAfter(prompt, /^1\. Run, as one call:/);
+      const r = waveEnv === null ? sh(command)
+        : (({ status, stdout, stderr }) => ({ code: status, stdout, stderr }))(
+          spawnSync(BASH, ['-c', command], { encoding: 'utf8', env: waveEnv }));
+      assert.ok(r.code === 0 || r.code === 1 || r.code === 4, `exit ${r.code}: ${r.stderr}`);
       const out = JSON.parse(r.stdout);
-      return { ...out, status: out.status === 'merged' ? 'done' : 'conflict', conflict_unit: out.conflict_unit || '' };
+      const status = { merged: 'done', conflict: 'conflict', failed: 'failed' }[out.status];
+      assert.ok(status, `merge-wave status ${out.status}`);
+      return { ...out, status, conflict_unit: out.conflict_unit || '', failed_unit: out.failed_unit || '', error: out.error || '' };
     }
     if (label.startsWith('final review')) return { findings: [], cannot_verify: [], head: featureHead() };
     if (role === 'implement') {
@@ -173,11 +189,34 @@ test('a join wave runs on unit branches in lane worktrees and is merged', async 
     assert.ok(/cd '[^']*\/wt\/lane-[ab]'/.test(lineAfter(p, /^Run this first/)), `${id} runs in a lane worktree`);
   }
   const subs = subjects(c, 'main..feature/w');
-  assert.ok(subs.includes('join wave 1: merge J1') && subs.includes('join wave 1: merge J2'), subs.join('\n'));
+  assert.ok(subs.includes('chore: join wave 1: merge J1') && subs.includes('chore: join wave 1: merge J2'), subs.join('\n'));
   assert.ok(existsSync(join(c.repo, 'J1.txt')) && existsSync(join(c.repo, 'J2.txt')));
   const events = readFileSync(`${c.m.repo.ledger_dir}/_run.jsonl`, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(events.some((e) => e.event === 'wave_merged' && e.wave === 1 && e.units.join() === 'J1,J2'));
   assert.deepEqual(result.join_waves.map((w) => w.units), [['J1', 'J2']]);
+});
+
+test('a join wave merges with the identity only in the commit rules', async () => {
+  const c = newCase();
+  c.m.commit_rules = 'plain ASCII. Commit with git -c "user.name=Lane Bot" -c user.email=lane@x.invalid commit.';
+  // Git may not guess an identity; setup and the scripted implement, review
+  // and integrate agents keep GIT_ENV's, standing in for agents that commit
+  // per the commit rules. The wave merge runs with no identity of its own.
+  git(c.repo, 'config', 'user.useConfigOnly', 'true');
+  const setupResult = setup(c, c.m);
+  assert.deepEqual(setupResult.git_identity, ['user.name=Lane Bot', 'user.email=lane@x.invalid']);
+  const s = agents(c, { mergeEnv: bareGitEnv(c) });
+  const result = await runAll({ ...c.m, setup_result: setupResult }, s);
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  const labels = s.calls.map((x) => x.label);
+  assert.equal(labels.filter((l) => l === 'wave 1 merge').length, 1, labels.join('\n'));
+  assert.ok(!labels.some((l) => l.includes('resolve')), labels.join('\n'));
+  const who = git(c.repo, 'log', '--format=%an <%ae>|%cn <%ce>', '-1', '--grep', 'chore: join wave 1: merge J2');
+  assert.equal(who, 'Lane Bot <lane@x.invalid>|Lane Bot <lane@x.invalid>');
+  const events = readFileSync(`${c.m.repo.ledger_dir}/_run.jsonl`, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const merges = events.filter((e) => e.event === 'wave_merged' && e.wave === 1);
+  assert.equal(merges.length, 1, JSON.stringify(merges));
+  assert.deepEqual(merges[0].merged, ['J1', 'J2']);
 });
 
 test('a stop mid-wave relaunches through setup, recovery and the serial continuation', async () => {
@@ -186,8 +225,8 @@ test('a stop mid-wave relaunches through setup, recovery and the serial continua
   assert.equal(first.status, 'stopped');
   assert.equal(first.tasks.J1.status, 'done');
   assert.equal(first.tasks.J2.status, 'blocked');
-  assert.ok(subjects(c, 'main..feature/w').includes('join wave 1: merge J1'), 'the finished unit was merged');
-  assert.ok(!subjects(c, 'main..feature/w').includes('join wave 1: merge J2'), 'the stopped unit was not');
+  assert.ok(subjects(c, 'main..feature/w').includes('chore: join wave 1: merge J1'), 'the finished unit was merged');
+  assert.ok(!subjects(c, 'main..feature/w').includes('chore: join wave 1: merge J2'), 'the stopped unit was not');
   const j2Head = git(c.repo, 'rev-parse', 'pl-w1-u-J2');
 
   // The relaunch, as SKILL.md's resume builds it: setup returns both lane

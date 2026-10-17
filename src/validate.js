@@ -616,6 +616,21 @@ function validateManifest(m) {
           }
         }
       }
+      // git_identity (1.6.7): the -c user.name=/user.email= pairs the commit
+      // rules name, as setup resolved them; the engine's merges and the
+      // commits it spells out carry them. Absent before 1.6.7.
+      if ('git_identity' in r) {
+        const pairs = r.git_identity;
+        const keys = Array.isArray(pairs)
+          ? pairs.map((p) => (typeof p === 'string' ? /^(user\.(?:name|email))=.+$/.exec(p) : null)) : null;
+        const ok = keys !== null && keys.length <= 2 && keys.every((k) => k !== null)
+          && new Set(keys.map((k) => k[1])).size === keys.length
+          && (keys.length < 2 || keys[0][1] === 'user.name');
+        if (!ok) {
+          err('setup_result.git_identity: must be a list of at most two strings, '
+            + 'user.name=VALUE then user.email=VALUE, each key once');
+        }
+      }
       if (!isObject(r.worktrees)) {
         err('setup_result.worktrees: must be an object mapping lane ids to absolute paths');
       } else {

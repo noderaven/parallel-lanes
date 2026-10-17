@@ -93,7 +93,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `limits` | `review_rounds: 5`, `max_parallel_lanes: min(5, CPU count + 2)` (the count from `os.cpu_count()`), `max_agents` (2 x the dry-run `agents` length), `max_rulings` (25); see Budgets. |
 | `autonomy` | `autonomous` (default: the adjudicator settles blocked tasks, questions, review caps, pre-flight conflicts) or `supervised` (they stop the run and wait for the user). The user may override it in the table. |
 | `profile` | `full` (default) or `lite` (see Profiles). |
-| `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved, setup_skipped}` (`setup_skipped`: the lanes whose setup commands were skipped because every task is done and reviewed; validation rejects a listed lane with pending work, and then setup reruns). Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
+| `setup_result` | The output of `scripts/setup <manifest> --owner <token>`: `{feature_head, worktrees, discarded, preserved, setup_skipped, returned, git_identity}` (`git_identity`, from 1.6.7: the commit rules' name and email pairs, see "Git identity"; optional, absent means `[]`; `setup_skipped`: the lanes whose setup commands were skipped because every task is done and reviewed; validation rejects a listed lane with pending work, and then setup reruns). Added after the yes to the table; required for a launch (there is no setup agent; a dry run does without it). `preserved` lists the commits under `refs/parallel-lanes/<run_id>/abandoned/` that hold changes setup discarded (see Cleanup). |
 | `carried_minors` | Optional (1.6.3), set on a resume: `{open, covered}` from `ledger status`'s `minors`, copied as printed: the ids of the task minors earlier launches left open, and the tasks the snapshot covers ("Carry-over"). |
 | `inputs_changed` | Optional (1.6.3), set on a resume: `{plan, spec}` from `ledger status --plan --spec`'s `inputs` (`plan` is `plan_changed`, `spec` is `spec_changed`; each `true`, `false` or `null`), read before setup, so a relaunch's pre-flight knows what changed since the last launch. |
 | `start_points` | The feature heads `ledger status` prints after setup, copied exactly as it prints them: `prelude` from setup, `join` only once a launch got past integration (a new run has no `join` key). |
@@ -143,7 +143,24 @@ resume lines filled in (`notices`); the script logs the same line; you still pri
 a commit without an identity fails partway through the run. If it fails, ask the user to set
 one (`git config --global user.name` and `user.email`) or to name one that `commit_rules`
 passes with `-c` (`git -c user.name=... -c user.email=... commit`). `scripts/setup` does not
-check this, since a `-c` identity is legitimate.
+check this, since a `-c` identity is legitimate. Doctor's `git_identity` check runs both `git var
+GIT_COMMITTER_IDENT` and `git var GIT_AUTHOR_IDENT` with the commit rules' pairs, and both must
+pass (from 1.6.7).
+
+From 1.6.7 `scripts/setup` records the commit rules' `-c user.name=...` and `-c user.email=...`
+pairs as `setup_result.git_identity`: a list of at most two strings, `user.name=<value>` first,
+then `user.email=<value>`, keys lower case, the last pair given for a key winning (as with git's
+own `-c`), `[]` when the commit rules name none. It is recorded whether or not a global identity
+exists, so the run's merges commit as the agents' own commits do. The run passes the pairs to
+every merge and every commit it spells out itself: the integrate prompt's and the lane
+resolver's lane merges, the resolved-merge commits (`git -C <dir> -c ... commit --no-edit`) of
+the integrate prompt, the lane resolver and the wave resolver, the wave resolver's merge, the
+supervised conflict stop's by-hand commands, and the wave merge (merge-wave's `--git-config`,
+one per pair). Each pair is shell-quoted in a prompt and one argv item in merge-wave. With
+none, these use the user's git config, as before 1.6.7. Agents' own commits keep following
+`commit_rules`. Only name and email are carried: other `-c` options in the commit rules (a
+signing key, an editor) do not reach the scripted merges. A manifest whose setup ran under
+1.6.6 has no `git_identity` (read as `[]`); setup reruns on a resume or relaunch and adds it.
 
 A repository with SHA-256 object names (`git rev-parse --show-object-format` prints `sha256`) is
 not supported: the run names commits by 40-hex SHA-1 ids. `scripts/setup` refuses it (exit 3,
@@ -184,12 +201,18 @@ Code. Change nothing yourself.
 SKILL.md gives the rule; this is how it reads the causes. Not transient, so never relaunched
 (stop and notify): `review_rounds`, a supervised blocked or question task, `adjudication_cap`,
 `adjudicator_stop`, `budget`, a failed integration or post-integrate on real failures,
-`integration checks did not finish: ...` (see "Exit codes"), and status `invalid` or
-`preflight_conflicts`. The causes are every `stopped_lanes[].reason` when `reason` is `prelude
-stopped`, `lanes stopped`, `join stopped`, or `agents_unavailable`, else `reason` itself. A
-cause is transient only if it starts with `no result from`, `error:`, or `setup failed`, or
-reads `integration failed: no result from ...` or `post-integrate failed: no result from ...`,
-and, under `agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
+`integration checks did not finish: ...` (see "Exit codes"), status `invalid` or
+`preflight_conflicts`, and a refused merge in the join (from 1.6.7: `join <name>: the merge of
+<unit> failed: <error>`, or `join <name>: the merge failed: <notes>` when the result names no
+unit or error; `<name>` is `wave <n>` or `recovery`) or a merge that reported done but left a
+unit out (`join <name>: the merge left out <ids>`). A refused merge needs the user (an identity,
+a hook, a held lock), then Resume. A missing wave or recovery merge result reads exactly `no
+result from <name> merge`, so it is transient like any other missing result. The causes are
+every `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, `join
+stopped`, or `agents_unavailable`, else `reason` itself. A cause is transient only if it
+starts with `no result from`, `error:`, or `setup failed`, or reads `integration failed: no
+result from ...` or `post-integrate failed: no result from ...`, and, under
+`agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
 agent the latch refused). So `agents_unavailable` is transient only when every other cause is
 transient too: a lane already stopped at `review_rounds`, a supervised question and the like
 keep their own cause, the stop is real, and Resume step 4 applies. A stop with
@@ -320,12 +343,61 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   NAME: a retry), checks NAME out and runs the project's setup there. Its ledger lane, checks and
   phase stay `join`. Once a unit of a wave stops, no further unit of it starts.
 - Integration keeps the lane worktrees. After each multi-unit wave a wave merge agent (Sonnet)
-  runs `scripts/merge-wave DIR LEDGER_DIR --wave N --unit ID BASE HEAD ...`: it merges each
-  finished unit's recorded head with `join wave N: merge ID` (skipping one already merged),
-  aborts and reports a conflict, lists `overlaps` (paths two units changed), and records
-  `wave_merged`. A conflict goes to a wave resolver (Opus, one per conflict; on failure it aborts
-  the merge) in an autonomous run; a supervised run stops with the sha to merge by hand. A unit
-  that stopped is not merged, and the join stops after the merge.
+  runs `scripts/merge-wave DIR LEDGER_DIR --git-config PAIR ... --wave N --unit ID BASE HEAD
+  ...`: it merges each finished unit's recorded head with `chore: join wave <n>: merge <unit>`
+  (skipping one already merged), aborts and reports a conflict, lists `overlaps` (paths two units
+  changed), and records `wave_merged`. A conflict goes to a wave resolver (Opus, one per
+  conflict; on failure it aborts the merge) in an autonomous run; a supervised run stops with the
+  sha to merge by hand. A unit that stopped is not merged, and the join stops after the merge.
+- merge-wave (from 1.6.7). `--git-config KEY=VALUE`, repeatable, in any position among the
+  options, is one pair of `setup_result.git_identity` (see "Git identity"): KEY `user.name` or
+  `user.email` in any case (passed lower case), VALUE non-empty; each goes to every `git merge`
+  as one `-c KEY=VALUE` argv item. Any other key or an empty value is a usage error (exit 2:
+  `--git-config takes user.name=VALUE or user.email=VALUE`). Its JSON `status` is `merged`,
+  `conflict` (a merge with unmerged paths, aborted; `conflict_unit`, `conflict_files`) or
+  `failed`: git refused a merge with no unmerged paths (no identity, a failing hook, a held
+  `index.lock`). On a refusal merge-wave runs `git merge --abort` only when a merge is in
+  progress (`MERGE_HEAD` exists), checks the checkout is clean, and stops the loop; units merged
+  earlier in the same call stay merged (`merged`). When git's message names `index.lock` and the
+  checkout is clean, it waits 2 s and tries that unit's merge once more (one retry only); a
+  second refusal is the failure. Every output carries `failed_unit` and `error` (null when
+  none): on a refusal the unit and git's message (stderr, else stdout, stripped, at most 2,000
+  characters, or `git merge exited <code>` when both are empty). Exits: 0 every unit merged (or
+  nothing to merge), 1 a conflict, 2 a usage error, 3 the checkout is not clean, a BASE or HEAD
+  is not a commit, or a git step failed (a refusal whose abort fails or leaves the checkout not
+  clean is recorded with `failed` first), 4 git refused a merge. The wave merge agent maps exit 4
+  to status `failed` with `failed_unit`, `error`, `merged`, `in_history` and `head`, runs no
+  checks, and does not change git config, set an identity or retry the merge.
+- The engine stops on a refused merge in both autonomies, with no resolver: `join <name>: the
+  merge of <unit> failed: <error>` (`<name>` is `wave <n>` or `recovery`; `join <name>: the merge
+  failed: <notes>` when the result lacks the unit or error), with the report entry's `head` and
+  `in_history` filled from the result. A `conflict` with no `conflict_files` counts as refused. A
+  `done` result that has some unit it was asked for in neither `merged` nor `in_history` stops
+  with `join <name>: the merge left out <ids>` (ids joined by `, `). A missing result stops with
+  `no result from <name> merge`, which is transient ("Transient stops"); the other two are not.
+- Merge messages. From 1.6.7 the join's merges are `chore: join wave <n>: merge <unit>` and
+  `chore: join recovery: merge <unit>` (merge-wave, the wave resolver, the supervised stop's
+  by-hand command); before 1.6.7 they were `join wave <n>: merge <unit>` and `join recovery:
+  merge <unit>`, and the integrate prompt's history check accepts both forms, since a relaunch
+  after an upgrade can meet merges an earlier launch made. Every reviewer and final lens is told
+  these and the wave checks fix `fix: make the wave checks pass` are the engine's own commits,
+  not commit-rule findings.
+- `wave_merged` (from 1.6.7). merge-wave appends it on every call that merged a unit, ended in a
+  conflict or was refused; a call that only skipped units already in the history and ended clean
+  records nothing. Fields: `wave` (or `recovery: true`), `units` (the units in the history after
+  the call, merged or skipped; empty only with non-empty `conflict_files` or a `failed`),
+  `merged` (the units this event's merges added, possibly empty), `head`, `overlaps`,
+  `conflict_files`, and when they apply `conflict_unit`, `failed` (`{unit, error}`, both
+  non-empty) and `resolved: true`; absent fields are left out, not null. The wave resolver records
+  its own merge: after committing it appends `wave_merged` with the wave (or `recovery`), `units`
+  and `merged` both `[<unit>]`, `head` (its merge commit), `conflict_files` and `resolved: true`,
+  through the ledger command its prompt gives. `join_tip` follows only events that merged: an
+  event's head counts when its `merged` is non-empty, or when it has no `merged` field (an event
+  from before 1.6.7), so a conflict or refusal event never moves the tip. `ledger status` copies
+  `merged`, `conflict_unit`, `failed` and `resolved` into `wave_merges` when recorded. The final
+  lenses read the conflict files of a `resolved` event (or one from before 1.6.7) as settled by
+  the wave resolver, and those of a conflict no later `resolved` event of the same wave settled
+  as settled outside the run's resolver (by hand or in a later launch).
 - After the last multi-unit wave, its units' targeted checks (`task_checks`) run once on the
   merged tip, with `--phase join`, and `wave_checked` is recorded. A failure gets one Opus fix
   (`fix: make the wave checks pass`), its re-review and a recheck; still failing, an autonomous
@@ -333,17 +405,18 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   supervised one stops. Checks that did not finish get no fix.
 - A relaunch with `join_started` and `unit_branches`: setup puts each lane worktree left on one of
   the run's unit branches back on its lane branch (output `returned`), saving its changes; a
-  recovery merge (`merge-wave --recovery`, `join recovery: merge ID`) brings in every unit that
-  ran on its own branch and is done and reviewed or deferred, and reports (`--known`,
-  `in_history`) which of the other such units an earlier launch already merged; the rest of the
-  join runs serially on the feature checkout from that tip. A merged unit whose approval went
-  stale is reviewed again over its recorded range without moving the tip. A unit that ran on its
-  own branch, is not done and reviewed, and is not in the history starts again from the tip
-  (`start-task --restart`: the ledger drops its earlier attempt), told its branch and abandoned
-  refs to reuse. Any other unit starts from its latest `started` base (`start_bases`), else the
-  tip. A unit branch an earlier launch left that is not built on the wave's base is saved under
-  the abandoned refs and made again (`start-task` prints `recreated`). Integration's history audit allows the
-  merge, resolver and wave checks fix commits, and final-fix commits after `join_tip`.
+  recovery merge (`merge-wave --recovery`, `chore: join recovery: merge <unit>`) brings in
+  every unit that ran on its own branch and is done and reviewed or deferred, and reports
+  (`--known`, `in_history`) which of the other such units an earlier launch already merged; the
+  rest of the join runs serially on the feature checkout from that tip. A merged unit whose
+  approval went stale is reviewed again over its recorded range without moving the tip. A unit
+  that ran on its own branch, is not done and reviewed, and is not in the history starts again
+  from the tip (`start-task --restart`: the ledger drops its earlier attempt), told its branch
+  and abandoned refs to reuse. Any other unit starts from its latest `started` base
+  (`start_bases`), else the tip. A unit branch an earlier launch left that is not built on the
+  wave's base is saved under the abandoned refs and made again (`start-task` prints
+  `recreated`). Integration's history audit allows the merge, resolver and wave checks fix
+  commits, and final-fix commits after `join_tip`.
 - `run-checks --phase NAME` (and `task-checks --phase`) sets `PL_PHASE=NAME` (prelude, lane,
   join, integrate, post-integrate, final-fix, verify) for every check; without it `PL_PHASE` is
   removed. A project's check script may read it: a join unit runs in a lane worktree. Task prompts
@@ -364,8 +437,10 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   run's unit branches and removes merged unit branches; an unmerged one stays. autopsy reads the
   wave labels (`wave N merge`, `wave N resolve ID`, `wave checks fix`, `wave checks re-review`,
   `wave checks`, `recovery merge`, `recovery resolve ID`) as Join phase agents. A supervised
-  conflict stop gives the exact `git merge --no-ff -m 'join wave N: merge ID' <sha>` to run by
-  hand, so integration's history audit accepts it on the relaunch.
+  conflict stop gives the exact `git -C <dir> <identity>merge --no-ff -m 'chore: join wave N:
+  merge ID' <sha>` and `git -C <dir> <identity>commit --no-edit` to run by hand (`<identity>` the
+  `-c` options of `git_identity`, empty with none), so integration's history audit accepts it on
+  the relaunch.
 - `worth-it --join-deps ID:DEPS` (one per join task) counts the join as the sum over its waves of
   ceil(size / lanes at once), declared files not checked; without it, one slot per join task.
   `tools/worth-it-backtest.py --waves` counts the archived joins in waves.
@@ -1757,7 +1832,7 @@ Hard failures:
 
 | Check | Fails when |
 |---|---|
-| `git_identity` | `git var GIT_COMMITTER_IDENT` fails, after any `-c user.name=... -c user.email=...` pair `commit_rules` passes |
+| `git_identity` | `git var GIT_COMMITTER_IDENT` or (from 1.6.7) `git var GIT_AUTHOR_IDENT` fails, after any `-c user.name=... -c user.email=...` pair `commit_rules` passes |
 | `base_not_current` | the local `base_ref` does not contain its upstream tip (details below) |
 | `python` | the manifest's `python` does not run Python 3.8 or newer |
 | `dirty_checkout` | git mode: the checkout has uncommitted changes or untracked, non-ignored files; its fix says to commit any file a check needs and gitignore only known generated output, and never to ignore source a check needs |

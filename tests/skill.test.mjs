@@ -299,6 +299,26 @@ test('SKILL.md records the spend and releases the lock in one step, and prints t
   assert.ok(launch.includes('notices'), launch);
 });
 
+// 1.6.7: the run carries the commit rules' identity to its merges, a refused
+// wave merge stops the run for good, and a missing merge result relaunches.
+test("reference.md documents the run's git identity and refused merges", () => {
+  const raw = read(REFERENCE_MD).toString('utf8');
+  const text = raw.replace(/\s+/g, ' ');
+  for (const word of ['git_identity', '--git-config', 'exit 4', 'chore: join wave <n>: merge <unit>', 'index.lock']) {
+    assert.ok(text.includes(word), `reference.md lacks ${word}`);
+  }
+  const start = raw.indexOf('\n### Transient stops\n');
+  assert.ok(start >= 0, 'reference.md lacks a Transient stops heading');
+  const end = raw.indexOf('\n#', start + 1);
+  const transient = raw.slice(start, end === -1 ? undefined : end).replace(/\s+/g, ' ');
+  for (const word of ['a refused merge', 'no result from <name> merge']) {
+    assert.ok(transient.includes(word), `Transient stops lacks ${word}`);
+  }
+  const skill = read(SKILL_MD).toString('utf8').replace(/\s+/g, ' ');
+  const relaunch = skill.slice(skill.indexOf('Relaunch once with the relaunch notice'), skill.indexOf('Launch again.'));
+  assert.ok(relaunch.includes('setup_result'), relaunch);
+});
+
 test('reference.md documents the Workflow concurrency cap', () => {
   const text = read(REFERENCE_MD).toString('utf8');
   assert.ok(text.includes('CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS'), 'reference.md lacks the concurrency cap');

@@ -48,10 +48,15 @@ and an 'event' of:
   carried      task _run only, with 'wf', 'pf' ({"PF-n": ruling id}) and
                'bound' ([{file, line}]); carry-launch writes it last, once per
                launch
-  wave_merged  task _run only, with 'units': non-empty list of unit ids,
-               'head', and exactly one of 'wave' (integer >= 1) and
-               'recovery': true; optional 'overlaps' ([{path, units}]) and
-               'conflict_files' (paths); merge-wave writes it
+  wave_merged  task _run only, with 'units': list of unit ids (in the
+               history after the merge; empty only with non-empty
+               'conflict_files' or a 'failed'), 'head', and exactly one of
+               'wave' (integer >= 1) and 'recovery': true; optional
+               'overlaps' ([{path, units}]), 'conflict_files' (paths), and
+               (1.6.7) 'merged' (ids within 'units' this event merged),
+               'conflict_unit' (id), 'failed' ({unit, error}, both
+               non-empty) and 'resolved' (true); merge-wave writes it, and
+               the wave resolver with 'resolved'
   wave_checked task _run only, with 'wave' (integer >= 1), 'head' and 'ok'
                (true or false); 'unfinished': true when the checks stopped
                without a result (ok false)
@@ -121,7 +126,8 @@ join_started: join.jsonl holds a 'started' event (the join began in an
 earlier launch: it then runs serially, 1.6.5). unit_branches: {task: {branch,
 dir}} from each join task's latest 'started' event with a unit_branch, since
 its latest restart. wave_merges: the _run wave_merged events in order, each
-{wave or recovery, units, head, overlaps, conflict_files}. start_bases: {task:
+{wave or recovery, units, head, overlaps, conflict_files}, plus merged,
+conflict_unit, failed and resolved when recorded (1.6.7). start_bases: {task:
 base} of each task not done, from its latest 'started' event. A 'started' event
 with restart true begins its task afresh: its earlier events (committed,
 reviewed, blocked, settled) no longer count.
@@ -224,7 +230,8 @@ its unfinished tasks are skipped. It also prints "join_tip": among the heads
 of the wave_merged and wave_checked events and the backfill heads of join
 tasks that did not run on a unit branch, the one every other is an ancestor
 of (null when there is none); two heads neither of which descends from the
-other are an error.
+other are an error. A wave_merged event with an empty 'merged' (a conflict or
+refusal before any merge) adds no head.
 
 Exit 0 on success; 2 on usage error or a malformed entry; 3 on an unsafe lane
 or task name, an unreadable ledger, plan or manifest, or a backfill error.
@@ -414,8 +421,19 @@ def wave_error(entry):
     if not is_text(entry.get("head")):
         return "'head' must be a non-empty string"
     if entry["event"] == "wave_merged":
-        if not (isinstance(entry.get("units"), list) and entry["units"] and is_text_list(entry["units"])):
-            return "'units' must be a non-empty list of unit ids"
+        if not is_text_list(entry.get("units")):
+            return "'units' must be a list of unit ids"
+        if "merged" in entry and not (is_text_list(entry["merged"])
+                                      and all(u in entry["units"] for u in entry["merged"])):
+            return "'merged' must be a list of ids within 'units'"
+        if "conflict_unit" in entry and not is_text(entry["conflict_unit"]):
+            return "'conflict_unit' must be a non-empty string"
+        failed = entry.get("failed")
+        if "failed" in entry and not (isinstance(failed, dict) and is_text(failed.get("unit"))
+                                      and is_text(failed.get("error"))):
+            return "'failed' must be {unit, error}, both non-empty strings"
+        if "resolved" in entry and entry["resolved"] is not True:
+            return "'resolved' must be true when present"
         has_wave, has_recovery = "wave" in entry, "recovery" in entry
         if has_wave == has_recovery:
             return "a wave_merged event has exactly one of 'wave' and 'recovery'"
@@ -429,6 +447,9 @@ def wave_error(entry):
             return "'overlaps' must be a list of {path, units}"
         if not is_text_list(entry.get("conflict_files", [])):
             return "'conflict_files' must be a list of paths"
+        # Empty units (1.6.7): a conflict or refusal before any unit merged.
+        if not entry["units"] and not (entry.get("conflict_files") or "failed" in entry):
+            return "'units' may be empty only with non-empty 'conflict_files' or a 'failed'"
     else:
         if not is_count(entry.get("wave"), 1):
             return "'wave' must be an integer >= 1"
@@ -799,7 +820,8 @@ def join_facts(events_at):
     unit_branches ({task: {branch, dir}} from each join task's latest
     started event with a unit_branch since its latest restart), and
     wave_merges (the wave_merged events of _run.jsonl in order, as {wave or
-    recovery, units, head, overlaps, conflict_files})."""
+    recovery, units, head, overlaps, conflict_files}, plus merged,
+    conflict_unit, failed and resolved when the event has them)."""
     started, branches, merges = False, {}, []
     for name, _, entry in events_at:
         event = entry["event"]
@@ -813,6 +835,7 @@ def join_facts(events_at):
             item = {"wave": entry["wave"]} if "wave" in entry else {"recovery": True}
             item.update({"units": entry["units"], "head": entry["head"],
                          "overlaps": entry.get("overlaps", []), "conflict_files": entry.get("conflict_files", [])})
+            item.update({k: entry[k] for k in ("merged", "conflict_unit", "failed", "resolved") if k in entry})
             merges.append(item)
     return {"join_started": started, "unit_branches": branches, "wave_merges": merges}
 
@@ -820,11 +843,16 @@ def join_facts(events_at):
 def join_tip(events, ranges, unit_branches, git):
     """The join's tip: among the heads of wave_merged and wave_checked
     events and the recorded heads of join tasks that did not run on a unit
-    branch, the one every other is an ancestor of. Returns (tip or None,
-    error or None)."""
+    branch, the one every other is an ancestor of. A wave_merged event whose
+    merged is present and empty (a conflict or refusal before any merge,
+    1.6.7) records the checkout's head, not a join merge, and is skipped; one
+    with no merged field (before 1.6.7) counts. Returns (tip or None, error
+    or None)."""
     heads = []
     for entry in events:
         if entry["task"] == "_run" and entry["event"] in ("wave_merged", "wave_checked"):
+            if entry["event"] == "wave_merged" and entry.get("merged") == []:
+                continue
             heads.append(entry["head"])
     for task, rng in ranges.items():
         if task not in unit_branches:

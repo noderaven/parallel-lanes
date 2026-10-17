@@ -564,6 +564,31 @@ test('setup_result shape errors are reported', () => {
   assertError(validateManifest(m), 'setup_result');
 });
 
+test('setup_result.git_identity is optional and checked', () => {
+  const message = 'setup_result.git_identity: must be a list of at most two strings, '
+    + 'user.name=VALUE then user.email=VALUE, each key once';
+  const withIdentity = (identity) => {
+    const m = validManifest();
+    m.setup_result = setupResult(m);
+    if (identity !== undefined) m.setup_result.git_identity = identity;
+    return validateManifest(m);
+  };
+  for (const identity of [undefined, [], ['user.name=n', 'user.email=e'], ['user.email=e']]) {
+    assert.deepEqual(withIdentity(identity), [], JSON.stringify(identity));
+  }
+  const bad = [
+    'x',
+    ['user.name=n', 'user.email=e', 'user.name=m'],
+    ['user.signingkey=k'],
+    ['user.name='],
+    ['user.name=a', 'user.name=b'],
+    ['User.Name=a'],
+  ];
+  for (const identity of bad) {
+    assert.deepEqual(withIdentity(identity), [message], JSON.stringify(identity));
+  }
+});
+
 test('start_points: optional prelude and join shas', () => {
   const m = validManifest();
   m.start_points = {};

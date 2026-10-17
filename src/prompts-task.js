@@ -471,6 +471,9 @@ function fixMessagesLines() {
     'with `chore: continue Task <id>`.',
     "The plan's message applies to a task's first commit; a fix commit carries its fix message, and a",
     'continuation commit its continuation message; none of them is a commit-rule finding.',
+    "The engine's own commits: join merges `chore: join wave <n>: merge <unit>` and",
+    '`chore: join recovery: merge <unit>` (before 1.6.7 without `chore: `) and the wave checks fix',
+    `\`${waveChecksFixMessage()}\`; none of them is a commit-rule finding.`,
   ];
 }
 

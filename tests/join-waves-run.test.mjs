@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadHelpers, loadScript, H } from './harness.mjs';
 
-const { waveResolvePrompt, waveChecksFixPrompt, waveChecksPrompt } = await loadHelpers([
-  'waveResolvePrompt', 'waveChecksFixPrompt', 'waveChecksPrompt',
+const { waveResolvePrompt, waveChecksFixPrompt, waveChecksPrompt, finalReviewPrompt } = await loadHelpers([
+  'waveResolvePrompt', 'waveChecksFixPrompt', 'waveChecksPrompt', 'finalReviewPrompt',
 ]);
 
 function task(id, deps, extra = {}) {
@@ -141,12 +141,95 @@ test('a failed resolver stops the run', async () => {
 
 test('a supervised conflict stops with the sha to merge by hand', async () => {
   const conflict = merged(H('I1'), { status: 'conflict', merged: ['J1'], conflict_unit: 'J2', conflict_files: ['src/x.js'] });
-  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script(H('J3'), { 'wave 1 merge': [conflict] }));
+  const m = manifest({ autonomy: 'supervised' });
+  m.setup_result.git_identity = ["user.name=Riley O'Q", 'user.email=r@x.invalid'];
+  const { result, calls } = await run(m, script(H('J3'), { 'wave 1 merge': [conflict] }));
   assert.equal(result.status, 'stopped');
   assert.ok(!labels(calls).some((l) => l.includes('resolve')));
   const why = result.stopped_lanes.find((s) => s.lane === 'join').reason;
   assert.ok(why.includes(H('J2')) && /by hand/.test(why) && why.includes('src/x.js'), why);
-  assert.ok(why.includes(`merge --no-ff -m 'join wave 1: merge J2' ${H('J2')}`), `the exact command: ${why}`);
+  const args = "-c 'user.name=Riley O'\\''Q' -c 'user.email=r@x.invalid' ";
+  assert.ok(why.includes(`git -C '/work/repo' ${args}merge --no-ff -m 'chore: join wave 1: merge J2' ${H('J2')}`),
+    `the exact command: ${why}`);
+  assert.ok(why.includes(`git -C '/work/repo' ${args}commit --no-edit`), `the commit: ${why}`);
+});
+
+// ---- 1.6.7: a refused merge, a merge that left a unit out, a missing result ----
+
+const refused = () => merged(H('I1'), { status: 'failed', merged: ['J1'], in_history: ['J1'], failed_unit: 'J2',
+  error: 'Committer identity unknown' });
+const joinReason = (result) => result.stopped_lanes.find((s) => s.lane === 'join').reason;
+
+test('a refused wave merge stops without a resolver', async () => {
+  const { result, calls } = await run(manifest(), script(H('J3'), { 'wave 1 merge': [refused()] }));
+  assert.equal(result.status, 'stopped');
+  assert.ok(!labels(calls).some((l) => l.includes('resolve')), JSON.stringify(labels(calls)));
+  assert.ok(!labels(calls).includes('J3 implement'));
+  assert.equal(joinReason(result), 'join wave 1: the merge of J2 failed: Committer identity unknown');
+  assert.equal(result.join_waves[0].head, H('I1'));
+  assert.deepEqual(result.join_waves[0].in_history, ['J1']);
+});
+
+test('a supervised refused wave merge stops the same way', async () => {
+  const { result, calls } = await run(manifest({ autonomy: 'supervised' }), script(H('J3'), { 'wave 1 merge': [refused()] }));
+  assert.equal(result.status, 'stopped');
+  assert.ok(!labels(calls).some((l) => l.includes('resolve')));
+  const why = joinReason(result);
+  assert.equal(why, 'join wave 1: the merge of J2 failed: Committer identity unknown');
+  assert.ok(!why.includes('by hand'), why);
+});
+
+test('a refused merge without failed_unit or error stops with its notes', async () => {
+  const bare = merged(H('I1'), { status: 'failed', merged: ['J1'], notes: 'merge-wave exited 4' });
+  const { result } = await run(manifest(), script(H('J3'), { 'wave 1 merge': [bare] }));
+  assert.equal(joinReason(result), 'join wave 1: the merge failed: merge-wave exited 4');
+});
+
+test('a conflict with no files is a refusal', async () => {
+  const conflict = merged(H('I1'), { status: 'conflict', merged: ['J1'], conflict_unit: 'J2', conflict_files: [],
+    notes: 'git said no' });
+  const { result, calls } = await run(manifest(), script(H('J3'), { 'wave 1 merge': [conflict] }));
+  assert.equal(result.status, 'stopped');
+  assert.ok(!labels(calls).some((l) => l.includes('resolve')));
+  assert.match(joinReason(result), /the merge (of J2 )?failed/);
+  const missing = merged(H('I1'), { status: 'conflict', merged: ['J1'], conflict_unit: 'J2', conflict_files: undefined,
+    notes: 'git said no' });
+  const again = await run(manifest(), script(H('J3'), { 'wave 1 merge': [missing] }));
+  assert.ok(!labels(again.calls).some((l) => l.includes('resolve')));
+  assert.match(joinReason(again.result), /the merge (of J2 )?failed/);
+});
+
+test('a done merge that left a unit out stops', async () => {
+  const { result, calls } = await run(manifest(), script(H('J3'), { 'wave 1 merge': [merged(H('M1'), { merged: ['J1'] })] }));
+  assert.equal(result.status, 'stopped');
+  assert.ok(!labels(calls).includes('J3 implement'));
+  assert.equal(joinReason(result), 'join wave 1: the merge left out J2');
+});
+
+test('a missing merge result reads as transient', async () => {
+  const { result } = await run(manifest(), script(H('J3'), { 'wave 1 merge': [null], 'wave 1 merge retry': [null] }));
+  assert.equal(result.status, 'stopped');
+  assert.equal(joinReason(result), 'no result from wave 1 merge');
+});
+
+test('the wave merge prompt maps exit 4', async () => {
+  const { calls } = await run(manifest(), script(H('J3')));
+  const p = callOf(calls, 'wave 1 merge').prompt;
+  assert.ok(/exit(ed)? 4/.test(p), p);
+  assert.ok(p.includes('failed_unit'), p);
+  assert.ok(p.includes('do not change git config'), p);
+});
+
+test('the wave resolver records its merge', () => {
+  const p = waveResolvePrompt(manifest(), 1, { id: 'J2', head: H('J2') }, ['src/x.js']);
+  assert.ok(p.includes("'chore: join wave 1: merge J2'"), p);
+  for (const part of ['"event":"wave_merged"', '"wave":1', '"units":["J2"]', '"merged":["J2"]',
+    '"conflict_files":["src/x.js"]', '"resolved":true']) {
+    assert.ok(p.includes(part), `${part}: ${p}`);
+  }
+  const rec = waveResolvePrompt(manifest(), null, { id: 'J2', head: H('J2') }, ['src/x.js']);
+  assert.ok(rec.includes("'chore: join recovery: merge J2'"), rec);
+  assert.ok(rec.includes('"recovery":true') && !rec.includes('"wave":'), rec);
 });
 
 const withChecks = (extra = {}) => manifest({
@@ -255,10 +338,31 @@ test('lenses are told overlaps and resolved conflicts', async () => {
   }
 });
 
+test('lenses tell resolved from unresolved conflicts', () => {
+  const overlapped = { wave: 1, units: ['J1'], merged: ['J1'], head: 'h2', overlaps: [{ path: 'src/s.js', units: ['J1', 'J2'] }],
+    conflict_files: [] };
+  const events = [{ wave: 1, units: [], merged: [], head: 'h', overlaps: [], conflict_unit: 'J2', conflict_files: ['src/c.js'] },
+    overlapped, { ...overlapped }];
+  const count = (text, part) => text.split(part).length - 1;
+  const open = finalReviewPrompt(manifest({ wave_merges: events }), 'correctness', null);
+  assert.equal(count(open, "src/c.js, settled outside the run's resolver"), 1, open);
+  assert.equal(count(open, 'src/s.js (J1, J2)'), 1, open);
+  assert.ok(!open.includes('the wave resolver settled'), open);
+  const resolved = { wave: 1, units: ['J1', 'J2'], merged: ['J2'], head: 'h3', overlaps: [], conflict_files: ['src/c.js'],
+    resolved: true };
+  const settled = finalReviewPrompt(manifest({ wave_merges: [...events, resolved] }), 'correctness', null);
+  assert.equal(count(settled, 'merge conflicts the wave resolver settled in src/c.js'), 1, settled);
+  assert.ok(!settled.includes('settled outside'), settled);
+  // An event written before 1.6.7 (no merged field) keeps the resolver text.
+  const old = finalReviewPrompt(manifest({ wave_merges: [{ wave: 1, units: ['J1', 'J2'], head: 'h', overlaps: [],
+    conflict_files: ['src/c.js'] }] }), 'correctness', null);
+  assert.ok(old.includes('merge conflicts the wave resolver settled in src/c.js') && !old.includes('settled outside'), old);
+});
+
 test('waveResolvePrompt aborts on failure', () => {
   const p = waveResolvePrompt(manifest(), 1, { id: 'J2', head: H('J2') }, ['src/x.js']);
   assert.ok(p.includes("git -C '/work/repo' merge --abort"), p);
-  assert.ok(p.includes("'join wave 1: merge J2'"), p);
+  assert.ok(p.includes("'chore: join wave 1: merge J2'"), p);
   assert.ok(p.includes(H('J2')) && p.includes('src/x.js'));
 });
 
@@ -373,12 +477,13 @@ test('an autonomous recovery conflict goes to a resolver', async () => {
   const { result, calls } = await run(relaunch(), relaunchScript(H('J3'), {
     'recovery merge': [
       { status: 'conflict', head: H('I1'), merged: [], conflict_unit: 'J2', conflict_files: ['src/x.js'], overlaps: [], notes: '' },
-      { status: 'done', head: H('R1'), merged: [], conflict_unit: '', conflict_files: [], overlaps: [], notes: '' },
+      { status: 'done', head: H('R1'), merged: [], in_history: ['J2'], conflict_unit: '', conflict_files: [], overlaps: [],
+        notes: '' },
     ],
     'recovery resolve J2': [{ status: 'done', head: H('R1'), notes: 'kept both' }],
   }));
   assert.equal(result.status, 'complete', JSON.stringify(result.reason));
-  assert.ok(callOf(calls, 'recovery resolve J2').prompt.includes("'join recovery: merge J2'"));
+  assert.ok(callOf(calls, 'recovery resolve J2').prompt.includes("'chore: join recovery: merge J2'"));
 });
 
 test('a relaunch of a serial join keeps the serial path', async () => {
@@ -408,8 +513,9 @@ test('the audit allowance uses join_tip', () => {
     backfill: { ...relaunch().backfill, J3: { base: H('R1'), head: H('J3') } }, join_tip: H('W9') });
   const p = integratePrompt(m, H('pre'), {});
   assert.ok(p.includes(`may follow the last join commit ${H('W9')}`), p);
-  assert.ok(p.includes("'join wave <n>: merge <unit>'") && p.includes("'join recovery: merge <unit>'"), p);
+  assert.ok(p.includes("'chore: join wave <n>: merge <unit>'") && p.includes("'chore: join recovery: merge <unit>'"), p);
   assert.ok(p.includes('fix: make the wave checks pass'), p);
+  assert.ok(p.includes("or the same without 'chore: ' from before 1.6.7"), p);
 });
 
 // ---- Task 11: pre-flight sees the waves ----
