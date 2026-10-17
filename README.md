@@ -273,7 +273,8 @@ session lists it, and you can resume with one word. Finished tasks are skipped.
    parallel saves; when that is 1 or less (always for a single lane), a direct build is
    recommended first, and you can still pick parallel lanes.
 2. **Manifest.** Claude writes a JSON manifest covering lanes, model tier per task
-   (`standard`, `sonnet`, or `light`; security-sensitive tasks are always `standard`),
+   (`standard` on Opus, `sonnet` on Sonnet, or `light` on Haiku; security-sensitive tasks are
+   always `standard`),
    project commands, commit rules taken from your CLAUDE.md, and budgets.
 3. **Dry run and consent.** The workflow validates the manifest without spawning anything,
    and Claude shows the table. "Just run it" and auto mode do not skip it.

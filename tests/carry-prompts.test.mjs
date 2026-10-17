@@ -122,6 +122,13 @@ test("a relaunch's pre-flight checks only the tasks still to run, bound by the e
   assert.ok(unknown.includes('Whether the plan or the spec changed since the last launch is not known.'), unknown);
 });
 
+test("a relaunch's pre-flight is told the earlier permits are carried", () => {
+  const carried = 'Permits an earlier launch recorded are carried; they need no new ruling.';
+  assert.ok(!preflightPrompt(manifest()).includes(carried));
+  const p = preflightPrompt(manifest({ done: ['T1'], reviewed: ['T1'] }));
+  assert.ok(p.includes(`${RULINGS_CMD}\n${carried}\n`), p);
+});
+
 test("a relaunch with carried minors but no task done still gets the earlier rulings in pre-flight", () => {
   const m = manifest({ carried_minors: { open: [], covered: [] } });
   const p = preflightPrompt(m);

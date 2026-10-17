@@ -69,6 +69,15 @@ function statusSchema() {
   };
 }
 
+// The integrate agent's result (1.6.8, spec 4.7): statusSchema plus the
+// optional checks_reused, the integrate evidence file reuse-checks printed
+// when the agent reused a passing check instead of running the checks
+// (else null).
+function integrateSchema() {
+  const s = statusSchema();
+  return { ...s, properties: { ...s.properties, checks_reused: { type: ['string', 'null'] } } };
+}
+
 function preflightSchema() {
   // undeclared and code_deps share the item shape {task, producer, what}.
   const dependencies = () => ({
@@ -90,6 +99,21 @@ function preflightSchema() {
       rulings: { type: 'array', items: { type: 'string' } },
       undeclared: dependencies(),
       code_deps: dependencies(),
+      // Optional (spec 4.6): files a ruling lets a task change outside its
+      // Files list; ruling is the 0-based index in rulings. The run reads a
+      // result without it as [].
+      permits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' } },
+            ruling: { type: 'integer' },
+          },
+          required: ['task', 'files', 'ruling'],
+        },
+      },
     },
     required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
@@ -260,6 +284,7 @@ function relaunchPreflightLines(m) {
     `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Permits an earlier launch recorded are carried; they need no new ruling.',
     'Check only the tasks still to run and their dependence on built work.',
     'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
     `since that ruling; then report it as a conflict. ${changed}`,
@@ -303,6 +328,10 @@ function preflightPrompt(m, waves = null) {
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
+    'When a ruling has a task change a file outside its Files list, also return it in permits as',
+    '{task, files, ruling}: the task id, the project-relative files (files, not folders) and the ruling\'s',
+    '0-based index in rulings. A permitted file does not widen that task\'s checks. The run drops a permit',
+    'for a file that a task able to run at the same time declares or is also permitted.',
     '',
     phaseRules(m),
   ].join('\n');
@@ -361,8 +390,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lanes' distinct ones, then every distinct check of the project
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
+  // The run-checks call records the setup commands (1.6.8, spec 4.7), so a
+  // resumed integration whose merges made no commit can reuse that evidence
+  // through reuse-checks, given the same setup and check commands.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate', setup);
+  const reuse = checks === null ? null : [
+    `${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/reuse-checks`)} ${q(m.repo.ledger_dir)} --name integrate`,
+    `--head <HEAD> --checkout ${dir}`,
+    ...setup.map((s) => `--setup ${q(s)}`),
+    ...finalChecks(m).map((c) => `--cmd ${q(c.group)} ${q(c.command)}`),
+  ].join(' ');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -372,8 +410,20 @@ function integratePrompt(m, preludeTip, opts = {}) {
     'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
     'is a real failure: checks_unfinished false.',
   ] : null;
+  // Only heal mode returns tests_failed, so only its reuse names it.
+  const reuseLines = reuse === null ? [] : [
+    '   Always run the setup commands first: later phases rely on them in this checkout.',
+    '   Only when no merge in step 2 made a commit (every lane branch was already merged, so HEAD did not move),',
+    `   run this read-only call, with <HEAD> the full sha git -C ${dir} rev-parse HEAD prints:`,
+    `   ${reuse}`,
+    `   When it exits 0, skip the run-checks call below: return checks_reused = the file it printed${
+      testFailure === 'heal' ? ' and tests_failed false' : ''},`,
+    '   and say in notes that the checks were reused from that file. When it exits 1 or 2, or a merge in step 2',
+    '   made a commit, run the checks below.',
+  ];
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    ...reuseLines,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
@@ -497,7 +547,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
-    `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
+    `notes (merges, conflicts resolved, command results, cleanup)${reuse === null ? '' : ', checks_reused (the file'
+      + ' reuse-checks printed when you reused its checks, else null)'}${returnTail}`,
   ].join('\n');
 }
 
@@ -1092,8 +1143,9 @@ function finalFixPrompt(m, findings, base) {
 // the project checks' result at head (run before the re-review), or null.
 // repairs: the repairs after a failing verify inside the range
 // ([{attempt, from, head, failed}], spec 4.5); with no findings the
-// re-review judges only those.
-function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = []) {
+// re-review judges only those. startCheck (1.6.8 spec 4.4): the classified
+// start check, shown beside the failing verify, or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [], startCheck = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -1124,6 +1176,11 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
     '',
     ...(verify ? [
       checksResultText(verify),
+      ...(startCheck ? [
+        ...startCheckLines(startCheck),
+        'A failure that fails at the start point too predates this run: do not hold a finding open over that failure'
+          + ' alone.',
+      ] : []),
       findings.length > 0 ? 'Still judge every finding yourself; a failing check is evidence, not a verdict.'
         : 'A failing check is evidence, not a verdict.',
       '',
@@ -1197,10 +1254,154 @@ function verifyPrompt(m, sha, from = null) {
   ].join('\n');
 }
 
+// The start check after a failing verify (1.6.8 spec 4.4): in a detached
+// worktree at <worktree_root>/start on the run's start point
+// (m.start_points.prelude), with verify's setup and environment (run-checks
+// --phase start sets PL_PHASE=verify), run each failing command of verify
+// (the failing run-checks JSON at sha), narrowed to its failing tests when the
+// project can select them, and report which tests ran and failed. The agent
+// reports what the logs show; the engine classifies it (classifyStartCheck).
+// Its own checkout rule replaces checkoutRules, which would confine it to the
+// feature checkout it must not touch.
+function startCheckPrompt(m, verify, sha) {
+  const q = shellQuote;
+  const start = m.start_points.prelude;
+  const wt = `${m.repo.worktree_root}/start`;
+  const admin = gitAdmin(m);
+  const feature = featureDir(m);
+  const setup = finalSetup(m);
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
+  const evidence = `${m.repo.ledger_dir}/checks/verify-${sha}.json`;
+  const lines = failing.map((r) => [
+    `   - ${r.command} (exit ${r.exit}, group ${r.group})`,
+    present(r.log) ? `     log: ${r.log}` : `     log: beside ${evidence} (its results name each log)`,
+  ].join('\n'));
+  const run = `cd ${q(wt)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/run-checks`)} ${q(wt)} `
+    + `--out ${resultPath()} --root ${q(m.repo.ledger_dir)} --phase 'start' --cmd 'GROUP' 'COMMAND'`;
+  const remove = `${admin} worktree remove --force ${q(wt)}`;
+  const prune = `${admin} worktree prune`;
+  const add = `${admin} worktree add --detach ${q(wt)} ${q(start)}`;
+  const own = [
+    'Your shell may start in another checkout of this repo, so never rely on the current directory:',
+    `- every shell command starts with cd ${q(wt)} && or uses git -C ${q(wt)}, except the worktree commands above,`,
+    `  which run as given (${admin} ...);`,
+    `- every file you write is under ${wt}, except what run-checks and await-checks write under the ledger;`,
+    `- never commit, in ${wt} or anywhere else; do not change, stage or commit anything in the feature checkout`,
+    `  ${q(feature)}, and do not switch its branch.`,
+  ].join('\n');
+  return [
+    `You are the start check for parallel-lanes run ${m.run_id}: the delivery checks failed at ${sha}. Find out`,
+    `whether the failing tests fail at the run's start point ${start} too. Report what the logs show; the run`,
+    'classifies it.',
+    `Work only in the start worktree ${wt}. Do not change, stage or commit anything in the feature checkout`,
+    `${q(feature)}.`,
+    `1. Drop stale worktree entries, then list the worktrees: ${prune} && ${admin} worktree list --porcelain`,
+    `   - Nothing at ${wt} (no worktree listed there and no folder): add it with ${add}`,
+    `   - A worktree of this repo listed at ${wt}, detached at ${start}: it is the run's own, left by an earlier start`,
+    `     check. Remove it first (${remove}, then ${prune}), then add it as above.`,
+    `   - Anything else at that path (a worktree on a branch or at another commit, or a folder git does not list):`,
+    '     return status unavailable with results [] and notes saying what is there, and touch nothing.',
+    `   Once it is added, record the output of git -C ${q(wt)} rev-parse HEAD: you return it as start_sha, and step 5`,
+    '   removes the worktree before you return.',
+    `2. Run the setup commands there, in order: ${setup.length > 0 ? `cd ${q(wt)} && ${setup.join(' && ')}` : '(none)'}`,
+    `3. The failing commands at ${sha}:`,
+    ...lines,
+    '   Read each log for the names of the tests that failed. If the command can select just those tests through',
+    "   the project's own filter (a test-name or test-file argument it supports), run that narrower command;",
+    '   otherwise run the same command unchanged. Run them all in one run-checks call in the start worktree, one',
+    "   --cmd pair per failing command (its group, then the command you run there, each single-quoted, writing any",
+    "   single quote inside as '\\'').",
+    ...procedureLines(m, {
+      name: 'start', start: run,
+      stop: 'return status unavailable with results [] and notes naming both outcomes the wait printed.',
+      exits: ['These are results like any other: report each exit as the wait printed it; the run decides what it means.'],
+    }).map((l) => `   ${l}`),
+    '4. Read each start log and name the tests that ran and failed there. A test the log does not show running',
+    '   (filtered out, skipped, or the command found nothing) is not failing or passing: list it in not_run.',
+    `5. Remove the worktree: ${remove}, then ${prune}. --force is allowed only on this path. If the removal fails`,
+    '   (a process holding files), say so in notes; cleanup or the next start check removes it.',
+    '6. Never change, stage or commit anything in the feature checkout.',
+    '',
+    phaseRules(m, own),
+    '',
+    `Return status checked, start_sha = the output of git -C ${q(wt)} rev-parse HEAD you recorded in step 1`,
+    `(it must be ${start}), evidence = the path reserve printed (the run-checks result file), results = one entry per failing command`,
+    'above: {verify_command (the command as listed above), start_command (the command you ran), narrowed (true when',
+    'you ran a narrower command), exit_at_start (its exit in the run-checks result; null when it did not run),',
+    'failed_at_head (the tests its verify log shows failing), failed_at_start (the tests its start log shows',
+    'failing), not_run (the tests of failed_at_head its start log does not show running)}, and notes. Return status',
+    'unavailable with results [] when you could not check, and say why in notes.',
+  ].join('\n');
+}
+
+// The start check's result (spec 4.4): what the logs show, per failing
+// command; the engine classifies it (classifyStartCheck).
+function startCheckSchema() {
+  const tests = { type: 'array', items: { type: 'string' } };
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['checked', 'unavailable'] },
+      start_sha: { type: 'string' },
+      evidence: { type: 'string' },
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            verify_command: { type: 'string' },
+            start_command: { type: 'string' },
+            narrowed: { type: 'boolean' },
+            exit_at_start: { type: ['integer', 'null'] },
+            failed_at_head: tests,
+            failed_at_start: tests,
+            not_run: tests,
+          },
+          required: ['verify_command', 'start_command', 'narrowed', 'exit_at_start', 'failed_at_head', 'failed_at_start',
+            'not_run'],
+        },
+      },
+      notes: { type: 'string' },
+    },
+    required: ['status', 'start_sha', 'evidence', 'results', 'notes'],
+  };
+}
+
+// What a classified start check (classifyStartCheck) says, for the repair
+// and final re-review prompts: one line per failing command with its
+// at_start and tests; [] for null.
+function startCheckLines(sc) {
+  if (!sc || typeof sc !== 'object') return [];
+  if (sc.status !== 'checked') {
+    return [`The start check did not run (${sc.why || 'no result'}): no conclusion about the start point.`];
+  }
+  const start = sc.start_sha;
+  const list = (tests) => (tests.length > 0 ? tests.join(', ') : '(no tests named)');
+  const line = (c) => {
+    const head = Array.isArray(c.failed_at_head) ? c.failed_at_head : [];
+    const atStart = Array.isArray(c.failed_at_start) ? c.failed_at_start : [];
+    if (c.at_start === 'fails') return `- ${c.verify_command}: fails at the start point ${start} too: ${list(head)}`;
+    if (c.at_start === 'passes') return `- ${c.verify_command}: passes at the start point ${start}: this run broke it`;
+    if (c.at_start === 'partly') {
+      const both = head.filter((t) => atStart.includes(t));
+      const rest = head.filter((t) => !atStart.includes(t));
+      return `- ${c.verify_command}: partly: ${list(both)} fail at the start point ${start} too (they predate this run);`
+        + ` ${list(rest)} do not`;
+    }
+    return `- ${c.verify_command}: unknown: no conclusion from the start point`;
+  };
+  return [
+    `The start check ran the failing checks at the run's start point ${start} (evidence ${sc.evidence}), for the`
+      + ` failures at ${sc.verify_head}:`,
+    ...(Array.isArray(sc.commands) ? sc.commands : []).map(line),
+  ];
+}
+
 // The repair agent after a failing verify (spec 4.5, 4.6). verify is the
 // failing run-checks JSON at from, the head the repair starts at; attempt is
-// its number.
-function verifyRepairPrompt(m, verify, from, attempt) {
+// its number. startCheck (1.6.8 spec 4.4): the classified start check, whose
+// lines say which failures predate the run, or null.
+function verifyRepairPrompt(m, verify, from, attempt, startCheck = null) {
   const evidence = `${m.repo.ledger_dir}/checks/verify-${from}.json`;
   const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
   const lines = failing.map((r) => [
@@ -1214,8 +1415,13 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     'Failing checks:',
     ...lines,
     `The full evidence is ${evidence}.`,
+    ...(startCheck ? [
+      ...startCheckLines(startCheck),
+      "A failure that fails at the start point too predates this run: it lies outside this run's scope.",
+    ] : []),
     '',
     'Find the cause and fix it with the smallest change that is correct, so the checks pass for the right reason.',
+    `Never create a worktree or checkout outside ${featureDir(m)}.`,
     'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
     'commands, lane_commands or task_checks, or the test runner configuration, to make them pass. Fixing a wrong',
     'test is allowed when the test, not the code, is wrong: say why in notes. If the failure is a flaky, timeout,',

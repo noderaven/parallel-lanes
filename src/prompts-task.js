@@ -124,14 +124,21 @@ function checksPhase(laneId) {
 // (optional) is the evidence file it writes under the ledger dir:
 // resultPath() goes in as given (already quoted), for the path the agent's
 // reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
-// with PL_PHASE set to it. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null, phase = null) {
+// with PL_PHASE set to it. recordSetup (1.6.8, spec 4.7) lists setup
+// commands run-checks records in its evidence (--record-setup, in order)
+// and never runs: an empty list records that there were none
+// (--record-setup-none), null (the default) records nothing. null for an
+// empty checks list.
+function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
+  const setup = recordSetup === null ? []
+    : recordSetup.length === 0 ? ['--record-setup-none']
+      : recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
-    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...parts].join(' ');
+    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...setup, ...parts].join(' ');
 }
 
 // Every test, lint and build command of a ledger lane, as [{group, command}]
@@ -300,7 +307,9 @@ function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
 // null when the ledger lane has no test, lint or build command. 1.6.6 (spec
 // 4.5): the Files list goes as its fingerprint (task-checks reads the list
 // from owners.json), and a wide list equal to the lane list as --wide-as-lane,
-// so the command does not grow with the Files list.
+// so the command does not grow with the Files list. 1.6.8 (spec 4.6): one
+// --permit '<file>=PF-<n>' per file of a kept pre-flight permit of the unit's
+// tasks.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
   if (lane.length === 0) return null;
@@ -309,12 +318,20 @@ function taskChecksCommand(m, task, where, base) {
   const entry = taskChecksEntry(m, task, where.lane);
   const declared = declaredFiles(task);
   const wide = wideChecks(m, where.lane);
+  const permits = [];
+  for (const p of unitPermits(m, task)) {
+    for (const f of p.files) {
+      const value = `${f}=PF-${p.ruling + 1}`;
+      if (!permits.includes(value)) permits.push(value);
+    }
+  }
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
     '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...(declared.length === 0 ? [] : ['--declared-from-owners', q(declaredFingerprint(declared))]),
+    ...permits.flatMap((v) => ['--permit', q(v)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
     ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
     ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
@@ -444,6 +461,20 @@ function runRulingsLines(m) {
   return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
+// The pre-flight permits the run kept for the unit's tasks (m.run_permits,
+// set only by the workflow, spec 4.6): [{task, files, ruling}], ruling the
+// 0-based index of a run ruling, so its id is PF-<ruling + 1>.
+function unitPermits(m, task) {
+  const ids = unitTasks(task).map((t) => t.id);
+  return (Array.isArray(m.run_permits) ? m.run_permits : []).filter((p) => ids.includes(p.task));
+}
+
+// One prompt line per kept permit of the unit's tasks; [] when there is none.
+function runPermitsLines(m, task) {
+  return unitPermits(m, task).map((p) =>
+    `PF-${p.ruling + 1} permits ${p.task} to change ${p.files.join(', ')}: changing them does not widen your checks.`);
+}
+
 // The message a task fix round commits with: 'fix: address review findings
 // for Task <id>', or for a batch 'for Batch <first>-<last>'.
 function fixCommitMessage(task) {
@@ -517,6 +548,7 @@ function taskContext(m, task, where, guidance = null, by = 'implementer') {
     checkoutRules(where.dir, where.branch),
     ...briefs,
     ...runRulingsLines(m),
+    ...runPermitsLines(m, task),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)

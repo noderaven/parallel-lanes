@@ -247,6 +247,23 @@ test('totals say unavailable when an agent\'s output count is incomplete', () =>
   assert.equal(out.tiers.sonnet.output_tokens_min, 12);
 });
 
+test('Haiku agents get a haiku tier, and a rerun on Opus counts as a haiku escalation', () => {
+  const dir = join(TMP, 'haiku');
+  mkdirSync(dir, { recursive: true });
+  writeAgent(dir, 'h1', 'T1 implement', 'haiku',
+    [usageLine('m1', 'claude-haiku-5-5', 7, 'end_turn', '2026-10-02T10:00:00.000Z')]);
+  writeAgent(dir, 'h2', 'T1 implement', 'opus',
+    [usageLine('m2', 'claude-opus-5-5', 9, 'end_turn', '2026-10-02T10:05:00.000Z')]);
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.tiers.haiku.agents, 1);
+  assert.equal(out.tiers.haiku.output_tokens, 7);
+  assert.equal(out.tiers.haiku.escalations, 1);
+  assert.equal(out.tiers.opus.agents, 1);
+  assert.equal(out.models['claude-haiku-5-5'], 1);
+});
+
 test('effort comes from the result file where the Workflow tool writes it', () => {
   // Transcripts in <session>/subagents/workflows/wf_<id>/, result in
   // <session>/workflows/wf_<id>.json; nothing beside the transcript dir.

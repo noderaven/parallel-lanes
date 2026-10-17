@@ -103,7 +103,7 @@ function newCase({ archived = true } = {}) {
   const runFolder = join(history, folder);
   mkdirSync(runFolder, { recursive: true });
   writeIndex(history, manifest, archived ? folder : null);
-  return { root, project, origin, worktreeRoot, history, active, manifest, runFolder, lanes, abandoned };
+  return { root, project, origin, worktreeRoot, ledgerDir, history, active, manifest, runFolder, lanes, abandoned };
 }
 
 // index.json in history: one entry for the manifest's run (keyed with
@@ -907,4 +907,95 @@ test('another run\'s unit branch is not claimed', () => {
   git(c.project, 'branch', 'pl-r2-u-J1', 'feature/x');
   const plan = cleanupOk(c);
   assert.ok(!plan.branches.some((b) => b.branch === 'pl-r2-u-J1'), JSON.stringify(plan.branches));
+});
+
+// ---- 1.6.8: the start check's worktree (<worktree_root>/start) ----
+
+// Record the run's start sha as setup does: a setup run_started event in
+// the ledger's _run.jsonl. Returns the sha (main, where the run started).
+function recordStart(c) {
+  const start = sha(c, 'main');
+  const event = { task: '_run', event: 'run_started', phase: 'setup', head: start, ts: '2026-10-10T10:00:00Z' };
+  writeFileSync(join(c.ledgerDir, '_run.jsonl'), JSON.stringify(event) + '\n');
+  return start;
+}
+
+// A detached worktree at <worktree_root>/start on ref, as the start check adds it.
+function addStart(c, ref) {
+  const dir = join(c.worktreeRoot, 'start');
+  git(c.project, 'worktree', 'add', '-q', '--detach', dir, ref);
+  return dir;
+}
+
+test('cleanup: a detached start worktree at the start sha is removed even with untracked files', () => {
+  const c = newCase();
+  const start = recordStart(c);
+  const dir = addStart(c, start);
+  writeFileSync(join(dir, 'left-behind.log'), 'a start check left this\n');
+  writeFileSync(join(dir, 'README.md'), 'changed by a setup command\n');
+  const plan = cleanupOk(c);
+  const wt = plan.worktrees.find((w) => samePath(w.path, dir));
+  assert.ok(wt, JSON.stringify(plan.worktrees));
+  assert.equal(wt.branch, null);
+  assert.equal(wt.head, start);
+  assert.equal(wt.action, 'remove', JSON.stringify(wt));
+  assert.match(wt.reason, /--force/);
+  assert.equal(plan.foreign.length, 0, JSON.stringify(plan.foreign));
+  const text = sh('python3', [CLEANUP, c.manifest, '--history-dir', c.history], { env: { PL_ACTIVE_DIR: c.active } });
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /remove {2}.*start \(detached\)/, text.stdout);
+
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(!existsSync(dir), 'the start worktree is gone');
+  assert.ok(!hasWorktree(c.project, dir), 'the start path is not a worktree any more');
+  assert.ok(findItem(out.removed, 'worktree', (i) => samePath(i.path, dir)), JSON.stringify(out.removed));
+  // Nothing else was left, so the worktree root goes too.
+  assert.ok(!existsSync(c.worktreeRoot));
+});
+
+test('cleanup: a start worktree on another sha stays foreign', () => {
+  const c = newCase();
+  recordStart(c);
+  const dir = addStart(c, 'feature/x');
+  const plan = cleanupOk(c);
+  assert.ok(!plan.worktrees.some((w) => samePath(w.path, dir)), JSON.stringify(plan.worktrees));
+  const foreign = plan.foreign.find((f) => samePath(f.path, dir));
+  assert.ok(foreign, JSON.stringify(plan.foreign));
+  assert.equal(foreign.reason, 'not owned by this run');
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(existsSync(dir));
+  assert.ok(hasWorktree(c.project, dir));
+  assert.ok(findItem(out.kept, 'path', (i) => samePath(i.path, dir)), JSON.stringify(out.kept));
+});
+
+test('cleanup: a start worktree on a branch at the start sha stays foreign', () => {
+  const c = newCase();
+  const start = recordStart(c);
+  const dir = join(c.worktreeRoot, 'start');
+  git(c.project, 'worktree', 'add', '-q', '-b', 'mine', dir, start);
+  const plan = cleanupOk(c);
+  assert.ok(!plan.worktrees.some((w) => samePath(w.path, dir)), JSON.stringify(plan.worktrees));
+  assert.ok(plan.foreign.some((f) => samePath(f.path, dir)), JSON.stringify(plan.foreign));
+});
+
+test('cleanup: restore.md names the start worktree', () => {
+  const c = newCase();
+  // The manifest's start_points.prelude wins over the ledger.
+  const start = sha(c, 'main');
+  const m = JSON.parse(readFileSync(c.manifest, 'utf8'));
+  m.start_points = { prelude: start };
+  writeFileSync(c.manifest, JSON.stringify(m, null, 2));
+  const dir = addStart(c, start);
+  const out = cleanupOk(c, ['--yes']);
+  assert.ok(!existsSync(dir));
+  const restore = readFileSync(join(restorePoint(c, out), 'restore.md'), 'utf8');
+  const line = restore.split('\n').find((l) => /^git .* worktree add --detach /.test(l));
+  assert.ok(line, restore);
+  assert.ok(line.endsWith(` ${start}`), line);
+  assert.ok(line.includes('start'), line);
+  // The line brings the worktree back, detached at the start sha.
+  const res = sh(BASH, ['-c', line], { cwd: c.root });
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(hasWorktree(c.project, dir));
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), start);
 });

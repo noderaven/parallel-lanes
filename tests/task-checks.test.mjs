@@ -287,6 +287,83 @@ test('a malformed owner map, and a backslash or mixed-case permit of an owned fi
   }
 });
 
+// 1.6.8 (spec 4.6): a pre-flight permit, passed by the engine as --permit or carried in the ledger.
+test('a --permit path counts as declared', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  mkdirSync(join(r.dir, 'tools'));
+  writeFileSync(join(r.dir, 'tools/x.py'), 'new\n');
+  const { status, json } = run(r, { args: ['--declared', 'src/a.js', '--permit', 'tools/x.py=PF-2'] });
+  assert.equal(status, 0);
+  assert.equal(json.policy.selected, 'targeted');
+  assert.deepEqual(json.policy.reasons, []);
+  assert.deepEqual(json.policy.permitted, [{ path: 'tools/x.py', ruling: 'PF-2' }]);
+  // A permit for another file leaves this one outside the Files list.
+  const other = run(r, { args: ['--declared', 'src/a.js', '--permit', 'tools/y.py=PF-2'] });
+  assert.deepEqual(codes(other.json), ['outside_files']);
+  assert.deepEqual(other.json.policy.permitted, []);
+});
+
+test('a --permit with backslashes is normalised', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  mkdirSync(join(r.dir, 'tools'));
+  writeFileSync(join(r.dir, 'tools/x.py'), 'new\n');
+  const { json } = run(r, { args: ['--declared', 'src/a.js', '--permit', 'tools\\x.py=PF-1'] });
+  assert.equal(json.policy.selected, 'targeted');
+  assert.deepEqual(json.policy.permitted, [{ path: 'tools/x.py', ruling: 'PF-1' }]);
+});
+
+test('--permit naming a directory, an absolute path or .. exits 2', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  for (const bad of ['tools/=PF-1', 'tools\\=PF-1', '.=PF-1', './=PF-1', '/abs/x.py=PF-1', 'C:/x.py=PF-1',
+    '../x.py=PF-1', 'a/../../x.py=PF-1', '..=PF-1']) {
+    const res = run(r, { args: ['--declared', 'src/a.js', '--permit', bad] });
+    assert.equal(res.status, 2, `${bad}: ${res.stderr}`);
+    assert.equal(res.json, null, bad);
+  }
+});
+
+test('--permit without =PF-n exits 2', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  for (const bad of ['tools/x.py', 'tools/x.py=', 'tools/x.py=PF-0', 'tools/x.py=PF-01', 'tools/x.py=pf-1',
+    'tools/x.py=_run-R1', '=PF-1', 'tools/x.py=PF-1 ']) {
+    const res = run(r, { args: ['--declared', 'src/a.js', '--permit', bad] });
+    assert.equal(res.status, 2, `${bad}: ${res.stderr}`);
+    assert.equal(res.json, null, bad);
+  }
+});
+
+test('a carried pre-flight permit counts as declared', () => {
+  const r = repo({ 'src/a.js': '1\n' });
+  writeFileSync(join(r.dir, 'src/a.js'), '2\n');
+  mkdirSync(join(r.dir, 'tools'));
+  writeFileSync(join(r.dir, 'tools/x.py'), 'new\n');
+  const pre = (permits, extra = {}) => ({ event: 'ruling', task: '_run', by: 'preflight', pf: 'PF-1', scope: 'run',
+    text: 'Ruling: T1 may change tools/x.py - w - c', permits, ...extra });
+  const opts = { tasks: ['T1'], args: ['--declared', 'src/a.js'] };
+  ledgerFile(r, '_run', [pre([{ task: 'T1', files: ['tools/x.py'] }])]);
+  const { status, json } = run(r, opts);
+  assert.equal(status, 0);
+  assert.equal(json.policy.selected, 'targeted');
+  assert.deepEqual(json.policy.permitted, [{ path: 'tools/x.py', ruling: '_run-R1' }]);
+  const widens = (why) => {
+    const res = run(r, opts);
+    assert.deepEqual(codes(res.json), ['outside_files'], why);
+    assert.deepEqual(res.json.policy.permitted, [], why);
+  };
+  // A permit for another task, a directory, a ruling an adjudicator overrode, or one not by pre-flight: none.
+  ledgerFile(r, '_run', [pre([{ task: 'T2', files: ['tools/x.py'] }])]);
+  widens('another task');
+  ledgerFile(r, '_run', [pre([{ task: 'T1', files: ['tools/'] }])]);
+  widens('a directory');
+  ledgerFile(r, '_run', [pre([{ task: 'T1', files: ['tools/x.py'] }]),
+    { event: 'ruling', task: '_run', by: 'adjudicator', text: 'Ruling: no - w - c', overrides: ['_run-R1'] }]);
+  widens('overridden');
+  ledgerFile(r, '_run', [pre([{ task: 'T1', files: ['tools/x.py'] }], { by: 'implementer' })]);
+  widens('an implementer ruling');
+});
+
 test('an untracked file outside the Files list widens', () => {
   const r = repo({ 'src/a.js': '1\n' });
   writeFileSync(join(r.dir, 'new.js'), 'x\n');

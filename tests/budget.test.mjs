@@ -179,6 +179,14 @@ test('labelTasks maps an agent label to its tasks: one id, a batch range, or non
   assert.deepEqual(labelTasks(m, 'T1-T3 review'), ['T1', 'T2', 'T3']);
   assert.deepEqual(labelTasks(m, 'final review sp'), []);
   assert.deepEqual(labelTasks(m, 'run adjudicate'), []);
+  assert.deepEqual(labelTasks(m, 'start check'), []);
+  assert.deepEqual(labelTasks(m, 'start check retry'), []);
+});
+
+test('the default max_agents estimate counts the start check once, right after verify', () => {
+  const roles = planAgents(manifest()).map((a) => a.role);
+  assert.equal(roles.filter((r) => r === 'start_check').length, 1);
+  assert.equal(roles.indexOf('start_check'), roles.indexOf('verify') + 1);
 });
 
 // ---- Agent type ----
@@ -192,6 +200,8 @@ test('agentTypeFor leaves the e2e and post-integrate rechecks on the default age
     assert.equal(agentTypeFor(m, label), null, label);
   }
   assert.equal(agentTypeFor(m, 'verify'), 'parallel-lanes-worker');
+  assert.equal(agentTypeFor(m, 'start check'), 'parallel-lanes-worker');
+  assert.equal(agentTypeFor(m, 'start check retry'), 'parallel-lanes-worker');
 });
 
 test('agentTypeFor names the agent type for every label but the hook agents', () => {

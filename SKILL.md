@@ -140,9 +140,9 @@ Fields: reference.md "Manifest fields". In order:
    a join task without it waits for every earlier one (reference.md "Join waves").
 4. `profile` and tiers: reference.md "Profiles", "Tiers", "Batching". `profile: "lite"` only
    for one lane, at most 8 tasks, no security task, and no `hooks.post_integrate`; else
-   `full`. Tiers `standard`, `sonnet`, `light` (security tasks always `standard`); `batch`
-   keys for consecutive tiny light tasks. The user's model preference wins when it is stricter
-   (e.g. "Opus for everything" means all `standard`).
+   `full`. Tiers `standard` (Opus), `sonnet` (Sonnet), `light` (Haiku); security tasks always
+   `standard`; `batch` keys for consecutive tiny light tasks. The user's model preference wins
+   when it is stricter (e.g. "Opus for everything" means all `standard`).
 5. `commit_rules`: one string from the user's and project's rules (memory, CLAUDE.md, the
    plan's conventions, CONTRIBUTING; reference.md). Every agent prompt carries it.
 6. `commands`, `task_checks` and `widen_paths` (from the plan's tests and shared files), paths,
@@ -282,9 +282,15 @@ The run returns `status`:
   "check-verify error" with the exit code and stderr, keep the marker, and recover as reference.md "Verify
   evidence" says. Lead with `acceptance` (reference.md "Report"). Only `accepted` is delivered work.
   `rejected` or `unverified`: show every reason, notify, keep the marker; never call it done.
+  `checks_failed_at_start` (the failures fail at the run's start point too) is shown like any
+  rejection: show its detail, which names the evidence, and suggest the `ledger accept` text
+  for it (reference.md "Report").
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
   with `<python> <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
   "<what>"`. Then rerun archive-run, audit and tool-outcomes, so the override reaches the archive.
+  Once the accepts cover every reason (and the warnings the user named) and those reruns are
+  done, remove the marker with `bash <skill_dir>/scripts/active-run remove <run_id>`, so a later
+  session does not resume the run.
 
 Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` (Launch step 4's transcript dir) and append

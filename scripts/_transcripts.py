@@ -99,7 +99,7 @@ def parse_label(label, ids):
 def model_tier(model):
     if isinstance(model, str):
         low = model.lower()
-        for tier in ("opus", "sonnet"):
+        for tier in ("opus", "sonnet", "haiku"):
             if tier in low:
                 return tier
     return None

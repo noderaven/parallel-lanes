@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Decide whether a resumed integration can reuse a passing check.
+
+usage: reuse-checks LEDGER_DIR --name NAME --head SHA --checkout DIR
+                    [--setup COMMAND ...] --cmd GROUP COMMAND [--cmd ...]
+
+It reads the run-checks evidence files <LEDGER_DIR>/checks/<NAME>.<n>.json
+(n a decimal number; other files, logs and lock sidecars included, are not
+read), newest first: highest n, compared as a number, so integrate.10.json
+comes before integrate.9.json. The first file that passes every rule below
+is reused:
+  - phase is "integrate";
+  - head is SHA, and there is no head_after (no command moved HEAD);
+  - checkout is DIR, both compared after os.path.normcase(os.path.realpath())
+    (DIR may be given in any form _shell.native_path takes: C:\\x, /c/x);
+  - ok and clean are true, and every result's exit is 0;
+  - tracked_before and untracked_before are empty lists (the checkout was
+    clean when the check began);
+  - tree_changed is false (null, a fingerprint that could not be taken, is
+    not reused);
+  - the results' (group, command) pairs equal the --cmd list, in order;
+  - setup_commands (run-checks --record-setup) equals the --setup list, in
+    order. Evidence without setup_commands (written before 1.6.8, or without
+    --record-setup) is never reused, even with no --setup.
+A file that cannot be read, is not UTF-8 JSON, is not a JSON object, or is an
+error record (it has an "error" key) is skipped.
+
+Prints one JSON line:
+  {"reuse": true, "file": <the reused file's absolute path>}   exit 0
+  {"reuse": false, "why": <reason>}                            exit 1
+The why names the newest file and the first rule it fails (for a skipped
+file, why it was skipped), or says there is no <NAME>.<n>.json at all. NAME
+is a safe file name, as await-checks reserve takes it
+(^[A-Za-z0-9_][A-Za-z0-9._-]*$); SHA is 7 to 64 lowercase hex digits, and
+must equal the evidence head exactly.
+
+Exit 2 on a usage error (an unknown or repeated flag, a missing --name,
+--head, --checkout or --cmd, an empty value, an unsafe NAME, a SHA that is not
+hex, or a LEDGER_DIR that is not a directory); it prints the message on
+stderr and nothing on stdout. Nothing is written.
+"""
+
+import json
+import os
+import re
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _shell  # noqa: E402
+
+USAGE = ("usage: reuse-checks LEDGER_DIR --name NAME --head SHA --checkout DIR "
+         "[--setup COMMAND ...] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+SHA = re.compile(r"[0-9a-f]{7,64}")
+PHASE = "integrate"
+
+
+def fail(code, message):
+    print(f"reuse-checks: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def parse(argv):
+    """{ledger, name, head, checkout, setup, cmds} from argv; a usage error
+    exits 2."""
+    if not argv or not argv[0] or argv[0].startswith("-"):
+        fail(2, USAGE)
+    args = {"ledger": _shell.native_path(argv[0]), "name": None, "head": None, "checkout": None,
+            "setup": [], "cmds": []}
+    rest = argv[1:]
+    while rest:
+        flag = rest[0]
+        if flag == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
+            args["cmds"].append((rest[1], rest[2]))
+            rest = rest[3:]
+        elif flag == "--setup" and len(rest) >= 2 and rest[1]:
+            args["setup"].append(rest[1])
+            rest = rest[2:]
+        elif flag in ("--name", "--head", "--checkout") and len(rest) >= 2 and rest[1] \
+                and args[flag[2:]] is None:
+            args[flag[2:]] = rest[1]
+            rest = rest[2:]
+        else:
+            fail(2, USAGE)
+    if args["name"] is None or args["head"] is None or args["checkout"] is None or not args["cmds"]:
+        fail(2, USAGE)
+    if not NAME.fullmatch(args["name"]):
+        fail(2, f"unsafe name {args['name']!r}: use letters, digits, '.', '_' and '-', not first '.' or '-'")
+    if not SHA.fullmatch(args["head"]):
+        fail(2, f"--head {args['head']!r} is not a sha (7 to 64 lowercase hex digits)")
+    if not os.path.isdir(args["ledger"]):
+        fail(2, f"{args['ledger']!r} is not a directory")
+    args["checkout"] = same_path_key(args["checkout"])
+    return args
+
+
+def same_path_key(path):
+    """path in the form two spellings of one directory share."""
+    return os.path.normcase(os.path.realpath(_shell.native_path(path)))
+
+
+def candidates(ledger, name):
+    """[(n, path)] of checks/<name>.<n>.json, highest n first."""
+    checks = os.path.join(ledger, "checks")
+    pattern = re.compile(re.escape(name) + r"\.([0-9]+)\.json")
+    try:
+        entries = os.listdir(checks)
+    except OSError:
+        return []
+    found = []
+    for entry in entries:
+        match = pattern.fullmatch(entry)
+        if match and os.path.isfile(os.path.join(checks, entry)):
+            found.append((int(match.group(1)), os.path.join(checks, entry)))
+    return sorted(found, key=lambda item: item[0], reverse=True)
+
+
+def load(path):
+    """(evidence, None) for a usable evidence object, else (None, why)."""
+    try:
+        with open(path, "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except OSError as e:
+        return None, f"cannot be read ({e.strerror or e})"
+    except (UnicodeDecodeError, ValueError):
+        return None, "is not JSON"
+    if not isinstance(data, dict):
+        return None, "is not a JSON object"
+    if "error" in data:
+        return None, f"is an error record: {data['error']}"
+    return data, None
+
+
+def mismatch(ev, args):
+    """The first rule ev fails, as a phrase, or None when it can be reused."""
+    if ev.get("phase") != PHASE:
+        return f"phase is {ev.get('phase')!r}, not {PHASE!r}"
+    if ev.get("head") != args["head"]:
+        return f"head is {ev.get('head')!r}, not {args['head']!r}"
+    if "head_after" in ev:
+        return f"head_after is present ({ev['head_after']!r}): a command moved HEAD"
+    checkout = ev.get("checkout")
+    if not isinstance(checkout, str) or not checkout or same_path_key(checkout) != args["checkout"]:
+        return f"checkout is {checkout!r}, not the given checkout"
+    if ev.get("ok") is not True:
+        return f"ok is {ev.get('ok')!r}, not true"
+    if ev.get("clean") is not True:
+        return f"clean is {ev.get('clean')!r}, not true"
+    results = ev.get("results")
+    if not isinstance(results, list) or not all(isinstance(r, dict) for r in results):
+        return "results is not a list of objects"
+    for r in results:
+        if r.get("exit") != 0 or isinstance(r.get("exit"), bool):
+            return f"{r.get('group')!r} ({r.get('command')!r}) has exit {r.get('exit')!r}, not 0"
+    for key in ("tracked_before", "untracked_before"):
+        if ev.get(key) != []:
+            return f"{key} is {ev.get(key)!r}, not empty"
+    if ev.get("tree_changed") is not False:
+        return f"tree_changed is {ev.get('tree_changed')!r}, not false"
+    pairs = [(r.get("group"), r.get("command")) for r in results]
+    if pairs != args["cmds"]:
+        return f"the commands {pairs!r} differ from the given commands {args['cmds']!r}"
+    if "setup_commands" not in ev:
+        return "it has no setup_commands (recorded without --record-setup)"
+    if ev["setup_commands"] != args["setup"]:
+        return f"the setup commands {ev['setup_commands']!r} differ from the given setup {args['setup']!r}"
+    return None
+
+
+def decide(args):
+    """{reuse, file} or {reuse, why}."""
+    why = None
+    for _, path in candidates(args["ledger"], args["name"]):
+        ev, skipped = load(path)
+        reason = skipped if ev is None else mismatch(ev, args)
+        if reason is None:
+            return {"reuse": True, "file": _shell.native_path(os.path.abspath(path))}
+        if why is None:
+            why = f"{os.path.basename(path)}: {reason}"
+    if why is None:
+        why = f"no checks/{args['name']}.<n>.json in {args['ledger']}"
+    return {"reuse": False, "why": why}
+
+
+def main(argv):
+    _shell.setup_io()
+    result = decide(parse(argv))
+    print(json.dumps(result))
+    sys.exit(0 if result["reuse"] else 1)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

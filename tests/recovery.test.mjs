@@ -305,6 +305,26 @@ test("a batch's shared range counts every batch task's files, in status and in l
   assert.deepEqual(ok(py('ledger', 'undeclared', c.ledger)), status.undeclared);
 });
 
+test('a permitted path is not undeclared', () => {
+  // 1.6.8 (spec 4.6): a carried pre-flight permit and an adjudicator's both count as declared.
+  const c = newCase();
+  withManifest(c, [ptask('T1', { files: ['a.txt'] }), ptask('T2', { files: ['x.txt'] })]);
+  for (const name of ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt']) write(join(c.repo, name), `${name}\n`);
+  git(c.repo, 'add', '.');
+  git(c.repo, 'commit', '-q', '-m', 'T1');
+  finish(c, c.start, '--task', 'T1');
+  const ruling = (lane, entry) => ok(py('ledger', 'append', c.ledger, lane, JSON.stringify({ event: 'ruling', ...entry })));
+  ruling('_run', { task: '_run', by: 'preflight', pf: 'PF-1', text: 'P', permits: [{ task: 'T1', files: ['b.txt'] }] });
+  ruling('prelude', { task: 'T1', by: 'adjudicator', text: 'A', files: ['C.txt'] });
+  // Not permits for T1: another task's pre-flight permit, and an implementer's files.
+  ruling('_run', { task: '_run', by: 'preflight', pf: 'PF-2', text: 'Q', permits: [{ task: 'T2', files: ['d.txt'] }] });
+  ruling('prelude', { task: 'T1', by: 'implementer', text: 'I', files: ['e.txt'] });
+  ok(py('ledger', 'write-owners', c.ledger, c.manifest));
+  const expected = { T1: ['d.txt', 'e.txt'].map((path) => ({ path, owner: null, relation: null })) };
+  assert.deepEqual(ok(py('ledger', 'undeclared', c.ledger)), expected);
+  assert.deepEqual(ok(py('ledger', 'status', c.ledger, '--manifest', c.manifest)).undeclared, expected);
+});
+
 test('run_ended events add up to the budget spent across launches', () => {
   const c = newCase();
   append(c, { task: '_run', event: 'run_ended', status: 'stopped', agents: 5, rulings: 2 });

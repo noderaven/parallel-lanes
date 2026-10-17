@@ -18,7 +18,7 @@ const {
   preflightPrompt, integratePrompt, resolveConflictsPrompt, postIntegrateFixPrompt, postIntegrateReReviewPrompt,
   postIntegratePrompt, e2ePrompt, finalReviewPrompt, combinedFinalReviewPrompt, finalFixPrompt, finalReReviewPrompt,
   verifyPrompt, verifyRepairPrompt, adjudicatorPrompt, declaredFingerprint, declaredFiles, startCommand, taskChecksLines,
-  shellQuote,
+  shellQuote, startCheckPrompt,
 } = await loadHelpers([
   'implementPrompt', 'reviewPrompt', 'reReviewPrompt', 'fixPrompt', 'laneChecks', 'wideChecks', 'taskChecksCommand',
   'taskEvidenceLine', 'fixMessagesLines', 'fallbackImplementer', 'fallbackFixer', 'laneWhere', 'featureWhere',
@@ -26,7 +26,7 @@ const {
   'resultPath', 'agentRules', 'preflightPrompt', 'integratePrompt', 'resolveConflictsPrompt', 'postIntegrateFixPrompt',
   'postIntegrateReReviewPrompt', 'postIntegratePrompt', 'e2ePrompt', 'finalReviewPrompt', 'combinedFinalReviewPrompt',
   'finalFixPrompt', 'finalReReviewPrompt', 'verifyPrompt', 'verifyRepairPrompt', 'adjudicatorPrompt',
-  'declaredFingerprint', 'declaredFiles', 'startCommand', 'taskChecksLines', 'shellQuote',
+  'declaredFingerprint', 'declaredFiles', 'startCommand', 'taskChecksLines', 'shellQuote', 'startCheckPrompt',
 ]);
 const fp = declaredFingerprint;
 
@@ -108,6 +108,31 @@ test('a batch unit uses its last task\'s entry and passes every --task and the f
   const files = ['src/T2.js', 'tests/T2.test.mjs', 'src/T3.js', 'tests/T3.test.mjs'];
   assert.ok(cmd.includes(`--declared-from-owners '${fp(files)}'`), cmd);
   assert.ok(!cmd.includes('--declared '), cmd);
+});
+
+test('task-checks gets no --permit without permits, and one per kept file of the unit\'s tasks', () => {
+  const plain = manifest();
+  const where = laneWhere(plain, lane(plain, 'alpha'));
+  const p = implementPrompt(plain, t(plain, 'T2'), where, H('b'));
+  assert.ok(!p.includes('--permit') && !p.includes('does not widen your checks'), p);
+  const m = manifest({ run_permits: [
+    { task: 'T3', files: ['tools/a.py', 'tools/b.py'], ruling: 0 },
+    { task: 'T4', files: ['tools/c.py'], ruling: 1 },
+    { task: 'T2', files: ['tools/d.py'], ruling: 2 },
+  ] });
+  const solo = taskChecksCommand(m, t(m, 'T2'), where, H('b'));
+  assert.ok(solo.includes("--permit 'tools/d.py=PF-3'"), solo);
+  assert.ok(!solo.includes('tools/a.py') && !solo.includes('tools/c.py'), solo);
+  const unit = batchUnit([t(m, 'T2'), t(m, 'T3')]);
+  const cmd = taskChecksCommand(m, unit, where, H('b'));
+  for (const part of ["--permit 'tools/a.py=PF-1'", "--permit 'tools/b.py=PF-1'", "--permit 'tools/d.py=PF-3'"]) {
+    assert.ok(cmd.includes(part), part);
+  }
+  assert.ok(!cmd.includes('tools/c.py'), cmd);
+  const text = implementPrompt(m, unit, where, H('b'));
+  assert.ok(text.includes('PF-1 permits T3 to change tools/a.py, tools/b.py: changing them does not widen your checks.'), text);
+  assert.ok(text.includes('PF-3 permits T2 to change tools/d.py: changing them does not widen your checks.'), text);
+  assert.ok(!text.includes('permits T4'), text);
 });
 
 test('prelude and join tasks get project-wide --wide-cmd lists', () => {
@@ -275,6 +300,7 @@ function everyPrompt() {
     verify: verifyPrompt(m, H('d1')),
     verifyFrom: verifyPrompt(m, H('d1'), H('d0')),
     verifyRepair: verifyRepairPrompt(m, verify, H('v1'), 1),
+    startCheck: startCheckPrompt({ ...m, start_points: { ...m.start_points, prelude: H('s0') } }, verify, H('v1')),
     adjudicator: adjudicatorPrompt(m, ctx),
   };
 }

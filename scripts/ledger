@@ -66,8 +66,15 @@ exit 3 with nothing written. A reader skips a last line that has no newline
 yet and is not JSON: an append in progress.
 A ruling may carry 'by' (implementer, reviewer, adjudicator, preflight; none:
 a task agent before 1.6.3, read as an implementer), 'scope' (lane, run),
-'overrides' and 'files' (lists of strings), 'pf' (PF-n) and 'wf'. The values
-are checked, not whether an agent told the truth.
+'overrides' and 'files' (lists of strings), 'pf' (PF-n), 'wf' and (1.6.8)
+'permits' (a list of {task, files}: task a non-empty string, files a list of
+non-empty strings, no other keys; else the error "'permits' must be a list
+of {task, files}"). The values are checked, not whether an agent told the
+truth. Implementer and reviewer rulings permit nothing; an adjudicator
+ruling in force permits its 'files' (adjudicator_permits); a pre-flight
+ruling permits what its 'permits' names for its task (preflight_permits;
+its 'files' permit nothing). task-checks, undeclared and status --manifest
+count a permitted path as declared.
 
 rulings prints the rulings in force, one per line: '<id> [<role>, <task>,
 <scope>] <text>', then ' (overrides <ids>)' (an id that resolves to no ruling
@@ -83,7 +90,11 @@ or for a wf id from <CLAUDE_CONFIG_DIR or ~/.claude>/projects/*/*/workflows/
 <wf>.json) and appends, once per wf: each of result.preflight.rulings as a
 ruling by preflight with scope run and pf PF-<n> (the adjudication at
 preflight.adjudicated is skipped: the adjudicator recorded it; a result
-without that field and with conflicts has it last); a minors event; and a
+without that field and with conflicts has it last), with 'permits': the
+entries of result.preflight.permits whose 'ruling' is its 0-based index, as
+{task, files} in the result's order (none: no 'permits'; an entry without a
+non-empty task, a non-empty files list of non-empty strings and an integer
+ruling is left out); a minors event; and a
 carried event binding every ruling whose overrides name a PF-n no earlier
 carried event bound. Launches are carried in launch order: with the ledger's
 doctor-<wf>.json files (ledger conditions) naming each launch's setup event,
@@ -172,7 +183,9 @@ transitively, in run order. undeclared (with --manifest; else {}): {task:
 [{path, owner, relation}]} for each task with a recorded range and a non-empty
 files list whose range changes a path (git diff --name-only --no-renames base
 head) that is not in its files, nor in the files of a task with the same range
-(a batch); paths compare normalized and case-insensitively, non-ASCII ones
+(a batch), nor permitted to one of those tasks by a ruling in force in DIR
+(an adjudicator's files or a pre-flight ruling's permits, as task-checks
+reads them); paths compare normalized and case-insensitively, non-ASCII ones
 unquoted. owner is the first other task whose files list the path (null when
 none does) and relation when that task runs: earlier, alongside or later.
 minors: {"open": [ids], "covered": [task ids]} from the latest minors event
@@ -393,7 +406,17 @@ def ruling_fields_error(entry):
         return "'pf' must look like PF-1"
     if "wf" in entry and not is_text(entry["wf"]):
         return "'wf' must be a non-empty string"
+    if "permits" in entry and not is_permits(entry["permits"]):
+        return "'permits' must be a list of {task, files}"
     return None
+
+
+def is_permits(v):
+    """A pre-flight ruling's permits (1.6.8): [{task: non-empty string, files:
+    list of non-empty strings}], those two keys only."""
+    return isinstance(v, list) and all(
+        isinstance(p, dict) and set(p) == {"task", "files"} and is_text(p["task"]) and is_text_list(p["files"])
+        for p in v)
 
 
 def is_count(v, least):
@@ -630,7 +653,8 @@ def read_events_at(directory):
     return events
 
 
-def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=None, manifest=None):
+def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=None, manifest=None,
+              ledger_dir=None):
     done, reviewed_by, blocked, start_points = {}, {}, {}, {}
     last_ruling, unblocked, deferred = {}, {}, {}
     review_event = {}
@@ -789,7 +813,7 @@ def summarize(events, plan_text=None, plan_given=False, spec_sha=None, plan_sha=
 
     undeclared = {}
     if manifest is not None:
-        undeclared = annotated_undeclared(manifest, ranges)
+        undeclared = annotated_undeclared(manifest, ranges, ledger_dir=ledger_dir)
 
     return {
         "done": list(done),
@@ -980,8 +1004,9 @@ def adjudicator_permits(directory, task_ids, declared=()):
     (none of _run's without a readable owner map) and that sits in the folder
     of a declared file, or in a declared directory itself (_folder; folders
     compare by case). A permit names files only. Implementer, reviewer
-    and pre-flight rulings permit nothing. task-checks counts these paths as
-    declared."""
+    and pre-flight rulings' files permit nothing (a pre-flight ruling's
+    permits are preflight_permits'). task-checks and undeclared_files count
+    these paths as declared."""
     shown, _marked, overridden_by = ruling_view(directory)
     try:
         owned = set(_owners.load(owners_path(directory))["files"])
@@ -1001,6 +1026,30 @@ def adjudicator_permits(directory, task_ids, declared=()):
             if e.get("task") in task_ids or (e.get("task") == "_run" and owned is not None
                                              and not _owned_or_under(key, owned)
                                              and _folder(path, as_file=True) in folders):
+                out.append((path, r["id"]))
+    return out
+
+
+def preflight_permits(directory, task_ids):
+    """[(path, ruling id)]: the files the pre-flight rulings in force (by
+    preflight, not overridden) permit to one of task_ids through their
+    'permits' (1.6.8, written by carry-launch from the engine's kept
+    permits). A permit names files only: an entry naming a directory, an
+    absolute path or one that leaves the project permits nothing.
+    task-checks and undeclared_files count these paths as declared."""
+    shown, _marked, overridden_by = ruling_view(directory)
+    out = []
+    for r in shown:
+        e = r["event"]
+        if r["role"] != "preflight" or r["id"] in overridden_by:
+            continue
+        for permit in e.get("permits") or []:
+            if not isinstance(permit, dict) or permit.get("task") not in task_ids:
+                continue
+            for path in permit.get("files") or []:
+                if not isinstance(path, str) or _owners.path_key(path) in (None, ".") \
+                        or path.endswith(("/", "\\")):
+                    continue
                 out.append((path, r["id"]))
     return out
 
@@ -1078,7 +1127,11 @@ def path_key(path):
     return norm.lower()
 
 
-def undeclared_files(m, ranges):
+def undeclared_files(m, ranges, ledger_dir=None):
+    """{task: [path]}: the paths each task's range changes outside its Files
+    list. With ledger_dir, a path the rulings in that ledger permit to the
+    task's unit (adjudicator_permits, preflight_permits) counts as declared;
+    without it no permits apply."""
     git = repo_git(m)
     tasks = manifest_tasks(m)
     out = {}
@@ -1089,9 +1142,15 @@ def undeclared_files(m, ranges):
             continue
         # A batch shares one range: the files of every task on it are declared.
         allowed = set()
+        unit_ids, declared = [], []
         for other in tasks:
             if ranges.get(other["id"]) == rng:
+                unit_ids.append(other["id"])
+                declared.extend(other.get("files") or [])
                 allowed.update(k for k in map(path_key, other.get("files") or []) if k is not None)
+        if ledger_dir is not None:
+            found = adjudicator_permits(ledger_dir, unit_ids, declared) + preflight_permits(ledger_dir, unit_ids)
+            allowed.update(k for k in (_owners.path_key(p) for p, _ in found) if k is not None)
         res = git("-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", rng["base"], rng["head"])
         if res.returncode != 0:
             continue
@@ -1122,13 +1181,14 @@ def overrides_list(directory):
             for r in records if resolved[r["id"]]]
 
 
-def annotated_undeclared(manifest, ranges, owners=None):
+def annotated_undeclared(manifest, ranges, owners=None, ledger_dir=None):
     """undeclared_files with each path's owner: {task: [{path, owner,
     relation}]}, owner the first other task listing the path (None when no
-    task does) and relation earlier, alongside or later (None likewise)."""
+    task does) and relation earlier, alongside or later (None likewise).
+    ledger_dir goes to undeclared_files (the ledger whose permits apply)."""
     owners = owners or _owners.build(manifest)
     out = {}
-    for tid, paths in undeclared_files(manifest, ranges).items():
+    for tid, paths in undeclared_files(manifest, ranges, ledger_dir).items():
         rows = []
         for p in paths:
             owner, rel = _owners.first_owner(owners, [tid], p)
@@ -1206,7 +1266,8 @@ def undeclared(directory):
     list, from the owner map and the ledger's ranges."""
     data = load_owners(directory)
     result, _ = summarize(read_events(directory))
-    print(json.dumps(annotated_undeclared(manifest_from_owners(data), result["ranges"], data)))
+    print(json.dumps(annotated_undeclared(manifest_from_owners(data), result["ranges"], data,
+                                          ledger_dir=directory)))
 
 
 def status(directory, plan=None, spec=None, manifest_path=None):
@@ -1216,7 +1277,7 @@ def status(directory, plan=None, spec=None, manifest_path=None):
     events = [entry for _, _, entry in events_at]
     result, _ = summarize(events, plan_text, plan is not None,
                           file_sha256(spec) if spec is not None else None,
-                          file_sha256(plan) if plan is not None else None, manifest)
+                          file_sha256(plan) if plan is not None else None, manifest, ledger_dir=directory)
     result.update(join_facts(events_at))
     snap = latest_minors(events)
     result["minors"] = {"open": [m.get("id") for m in snap["open"]] if snap else [],
@@ -1315,10 +1376,29 @@ def setup_window(directory, n):
     return starts[n - 1], (starts[n] if n < len(starts) else float("inf"))
 
 
+def launch_permits(permits):
+    """{ruling index: [{task, files}]} from a result's preflight.permits (the
+    engine's kept permits, 1.6.8): each well-formed entry ({task: non-empty
+    string, files: non-empty list of non-empty strings, ruling: integer >=
+    0}) under its ruling's 0-based index, in the result's order; the rest
+    are left out."""
+    out = {}
+    for p in permits if isinstance(permits, list) else []:
+        if not isinstance(p, dict):
+            continue
+        task, files, ruling = p.get("task"), p.get("files"), p.get("ruling")
+        if not (is_text(task) and is_text_list(files) and files
+                and isinstance(ruling, int) and not isinstance(ruling, bool) and ruling >= 0):
+            continue
+        out.setdefault(ruling, []).append({"task": task, "files": list(files)})
+    return out
+
+
 def carry_launch(directory, source):
     """Record what a launch knew that the ledger does not: pre-flight's own
-    rulings (by preflight, PF-n), the open task minors, and which PF-n
-    overrides recorded during the launch name. Once per wf id."""
+    rulings (by preflight, PF-n, each with the permits the engine kept for
+    it), the open task minors, and which PF-n overrides recorded during the
+    launch name. Once per wf id."""
     if not os.path.isdir(directory):
         fail(3, f"no ledger dir {directory!r}")
     path = find_launch_file(source)
@@ -1354,6 +1434,7 @@ def carry_launch(directory, source):
         # conflicts only in autonomous runs and pushed the ruling last. With no
         # adjudicator ruling in _run (a supervised stop) there was none.
         adjudicated = len(texts) - 1
+    permits_of = launch_permits(pre.get("permits"))
     pf = {}
     entries = []
     run_rulings = len([r for r in ruling_records(directory) if r["stem"] == "_run"])
@@ -1363,8 +1444,11 @@ def carry_launch(directory, source):
             if adj_ids:
                 pf[key] = adj_ids[-1]
             continue
-        entries.append({"task": "_run", "event": "ruling", "text": text, "by": "preflight",
-                        "scope": "run", "pf": key, "wf": wf})
+        entry = {"task": "_run", "event": "ruling", "text": text, "by": "preflight",
+                 "scope": "run", "pf": key, "wf": wf}
+        if permits_of.get(i):
+            entry["permits"] = permits_of[i]
+        entries.append(entry)
         pf[key] = f"_run-R{run_rulings + len(entries)}"
     written = len(entries)
     bound_before = {(b.get("file"), b.get("line")) for c in carried_events(directory)

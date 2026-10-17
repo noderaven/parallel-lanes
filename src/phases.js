@@ -33,8 +33,12 @@
 // spec 4.5): {admit, first}, the admission check and the number of the first
 // attempt; with it, a failing verify after a fix that returned done with a
 // sha head goes to runRepairs before the re-review, which then covers the
-// repairs too. final.repairs lists them ([] when none).
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null) {
+// repairs too. final.repairs lists them ([] when none). startCheckAt(verify,
+// sha, room) (1.6.8 spec 4.4, supervised runs too): called right after that
+// verify, before any repair; a non-null result is final.start_check, and
+// when every failing command fails at the start point no repair runs.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null,
+  startCheckAt = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -89,30 +93,39 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   };
 
-  // Final fix tier (spec decision 5): Sonnet when every finding is minor or
-  // every finding is in documentation; otherwise Opus. A Sonnet fix that does
-  // not finish reruns once on Opus (same label); still one fix wave.
+  // Final fix tier (spec decision 5): Haiku when every finding is in
+  // documentation, else Sonnet when every finding is minor, otherwise Opus. A
+  // Haiku or Sonnet fix that does not finish reruns once on Opus (same
+  // label); still one fix wave.
   const docsOnly = findings.every((f) => typeof f.file === 'string' && f.file.endsWith('.md'));
   const minorOnly = findings.every((f) => f.severity === 'minor');
-  const fixSettings = minorOnly || docsOnly ? { model: 'sonnet', effort: 'high' } : standard;
+  const fixSettings = docsOnly ? { model: 'haiku', effort: 'high' }
+    : minorOnly ? { model: 'sonnet', effort: 'high' } : standard;
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
   // A refused first call spawned no fix agent: no code changed, so the
   // caller's budget stop runs the checks.
   const fixRan = !(fix && fix.__budget);
-  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
-  // fix's head stands unless its Opus rerun reports a head of its own.
-  // A head that is not a commit sha names no commit, so the run cannot say
-  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
-  // leaves every finding open.
+  // Whatever a fix agent did, commits it reports are delivered code: a Haiku
+  // or Sonnet fix's head stands unless its Opus rerun reports a head of its
+  // own. A head that is not a commit sha names no commit, so the run cannot
+  // say what the fix delivered: a Haiku or Sonnet fix reruns on Opus, and an
+  // Opus one leaves every finding open.
   const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
   if (fix && isSha(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fixSettings !== standard && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
   if (fix && isSha(fix.head)) final.head = fix.head;
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
+  // A failing verify there gets the start check before any repair, only
+  // with room for it and the re-review that must follow (room 2).
+  if (startCheckAt !== null && final.verify) {
+    const sc = await startCheckAt(final.verify, final.head, 2);
+    if (sc !== null) final.start_check = sc;
+  }
+  const allFailAtStart = Boolean(final.start_check && final.start_check.all_fail);
   // A refused call says why (refusalCause: the budget, or agents unavailable).
   const cause = (r) => refusalCause({ unavailable: Boolean(r.__unavailable) });
   if (!fix || fix.__budget) return settle([], null, fix ? `final fix not run: ${cause(fix)}` : 'no result from final fix');
@@ -127,10 +140,12 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // A failing verify after the fix (autonomous): bounded repairs (spec 4.5)
   // before the re-review, whose range tip..final.head then covers them. Only
-  // after a fix that returned a sha head (spec 4.5).
+  // after a fix that returned a sha head (spec 4.5), and not when every
+  // failing command fails at the start point too (1.6.8 spec 4.4).
   let repaired = null;
-  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head)) {
-    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair });
+  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head) && !allFailAtStart) {
+    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair,
+      startCheck: final.start_check || null });
     final.head = repaired.head;
     final.verify = repaired.verify;
     final.repairs = repaired.repairs;
@@ -139,7 +154,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
   const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null,
-    final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+    final.repairs.filter((r) => r.eligible), final.start_check || null), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     settle(dispositions, null, rr && rr.__budget ? `final re-review not run: ${cause(rr)}`
@@ -190,6 +205,88 @@ function repairDue(m, verify, sha) {
   return !nonDefectFailure(results);
 }
 
+// Whether a failing verify at sha calls for a start check (1.6.8 spec 4.4):
+// repairDue's conditions (not autonomy or admission), and a recorded start
+// point (m.start_points.prelude) that is a sha other than sha.
+function startCheckDue(m, verify, sha) {
+  const start = m.start_points && typeof m.start_points === 'object' ? m.start_points.prelude : null;
+  return repairDue(m, verify, sha) && isSha(start) && start !== sha;
+}
+
+// Whether path is a start-check evidence file <ledger_dir>/checks/start.<n>.json,
+// compared with backslashes turned into '/', and without case when the
+// ledger is on a drive (a Windows agent may print C:/ in another case).
+function startEvidenceOk(m, path) {
+  if (!present(path)) return false;
+  const ledger = String(m.repo.ledger_dir).split('\\').join('/').replace(/\/+$/, '');
+  const given = path.split('\\').join('/');
+  const drive = /^[A-Za-z]:\//.test(ledger);
+  const prefix = `${ledger}/checks/start.`;
+  const [p, g] = drive ? [prefix.toLowerCase(), given.toLowerCase()] : [prefix, given];
+  return g.startsWith(p) && /^[0-9]+\.json$/.test(g.slice(p.length));
+}
+
+// The engine's classification of a start check's result r (spec 4.4 "The
+// engine classifies"), per failing command of verify (the failing verify at
+// sha): fails only when r is checked, for the start point, with its evidence
+// under the ledger, a defect exit at the start (not 126, 127 or a
+// nonDefectFailure exit), test names, nothing not run, and every head
+// failure failing at the start; passes when it exited 0 with nothing not
+// run; partly when some but not all head failures fail at the start;
+// unknown otherwise, and for a command r leaves out or lists twice. Every
+// one is unknown when r is not checked, or names another start sha or
+// evidence path (why says which). A null, refused or malformed r is
+// unavailable. Returns {status, why?, start_sha, evidence, verify_head,
+// commands: [{...r's entry, at_start}], all_fail, some_fail, notes}.
+function classifyStartCheck(m, verify, sha, r) {
+  const start = m.start_points && typeof m.start_points === 'object' ? m.start_points.prelude : null;
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((x) => x && x.exit !== 0);
+  const unavailable = (why, notes = '') => ({
+    status: 'unavailable', why, start_sha: start, evidence: null, verify_head: sha, commands: [],
+    all_fail: false, some_fail: false, notes,
+  });
+  if (!r || typeof r !== 'object' || r.__budget) {
+    return unavailable(r && r.__budget ? refusalCause({ unavailable: Boolean(r.__unavailable) }) : 'no result');
+  }
+  const notes = typeof r.notes === 'string' ? r.notes : '';
+  if (r.status === 'unavailable') return unavailable('the start check reported unavailable', notes);
+  if (r.status !== 'checked' || !Array.isArray(r.results)) return unavailable('a malformed result', notes);
+  const evidence = present(r.evidence) ? r.evidence : null;
+  const why = r.start_sha !== start ? `it reported start sha ${JSON.stringify(r.start_sha)}, not ${start}`
+    : !startEvidenceOk(m, evidence) ? `its evidence ${JSON.stringify(r.evidence)} is not a checks/start.<n>.json file`
+      + ` under ${m.repo.ledger_dir}` : null;
+  const names = (v) => (Array.isArray(v) ? v.filter((t) => typeof t === 'string') : []);
+  const atStart = (e) => {
+    if (why !== null) return 'unknown';
+    const exit = e.exit_at_start;
+    if (typeof exit !== 'number') return 'unknown';
+    const head = names(e.failed_at_head);
+    const startFails = names(e.failed_at_start);
+    const notRun = names(e.not_run);
+    if (exit === 0) return notRun.length === 0 ? 'passes' : 'unknown';
+    if (exit === 126 || exit === 127 || nonDefectFailure([{ exit }])) return 'unknown';
+    if (head.length === 0) return 'unknown';
+    const both = head.filter((t) => startFails.includes(t)).length;
+    if (both === head.length) return notRun.length === 0 ? 'fails' : 'unknown';
+    return both > 0 ? 'partly' : 'unknown';
+  };
+  const commands = failing.map((f) => {
+    const entries = r.results.filter((e) => e && typeof e === 'object' && e.verify_command === f.command);
+    if (entries.length !== 1) {
+      return {
+        verify_command: f.command, start_command: null, narrowed: false, exit_at_start: null, failed_at_head: [],
+        failed_at_start: [], not_run: [], at_start: 'unknown',
+      };
+    }
+    return { ...entries[0], at_start: atStart(entries[0]) };
+  });
+  const fails = commands.filter((c) => c.at_start === 'fails').length;
+  return {
+    status: 'checked', ...(why === null ? {} : { why }), start_sha: start, evidence, verify_head: sha, commands,
+    all_fail: commands.length > 0 && fails === commands.length, some_fail: fails > 0, notes,
+  };
+}
+
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
 // at it, and run-checks --descends-from found from, the repair's start, an
 // ancestor (the check must name from, not some other sha).
@@ -217,7 +314,8 @@ function validRepairReview(rr, delivered) {
 
 // The repair loop (spec 4.5). ctx = {head, verify (the failing verify at
 // head), verifyAt(sha, from), admit() (true admits one more attempt and
-// counts it), first (the number of the first attempt: repairs_spent + 1)}.
+// counts it), first (the number of the first attempt: repairs_spent + 1),
+// startCheck (optional: the classified start check, for each repair prompt)}.
 // Each attempt is one 'verify repair <n>' agent (Opus); a sha head that
 // differs from where it started is verified with --descends-from and
 // delivered only when eligible. Returns {head, verify, repairs, unreviewed}:
@@ -230,7 +328,7 @@ async function runRepairs(m, io, ctx) {
   let n = ctx.first;
   while (repairDue(m, verify, head) && ctx.admit()) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
-    const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
+    const r = await io.agent(verifyRepairPrompt(m, verify, head, n, ctx.startCheck || null),
       { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
     // A refused repair's status says why: budget, or unavailable (spec 4.1).
     const refusedAs = r && r.__budget ? (r.__unavailable ? 'unavailable' : 'budget') : null;
@@ -392,6 +490,97 @@ function preflightUndeclared(m, entries) {
   return { kept, dropped };
 }
 
+// Pre-flight's permits (spec 4.6), judged file by file: {kept: [{task, files,
+// ruling}], dropped: [{task, file, why}]}. A permit lets a task change files
+// outside its Files list under rulings[ruling] (0-based). A file is kept when
+// the task is a task of this launch (not done and reviewed), ruling indexes
+// rulings, the file is project-relative (no '..', no trailing '/'), no task
+// that can run at the same time declares it (the file or a folder holding
+// it, compared without case), and no permit kept before it in pre-flight's
+// order gives it to such a task. Two tasks can run at the same time when they
+// are in different lanes, or are join tasks of different units of one wave of
+// waves (the join's waves after wave_moves; null when the join runs one unit
+// at a time). Prelude tasks never run beside another task. log (optional)
+// gets one line per dropped file: 'dropped the permit of <task> for <file>
+// (<why>)', or, for an entry with no string task, 'dropped permit entry
+// <the entry as JSON> (<why>)'.
+function preflightPermits(m, permits, rulings, waves, log = null) {
+  const all = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join];
+  const runnable = new Set(all.filter((t) => taskState(m, t.id) !== 'skip').map((t) => t.id));
+  const laneOf = new Map();
+  for (const l of m.lanes) for (const t of l.tasks) laneOf.set(t.id, l.id);
+  const waveOf = new Map();
+  if (Array.isArray(waves)) {
+    for (const u of joinUnits(m)) {
+      const wave = waves.findIndex((ids) => ids.includes(u.id));
+      if (wave >= 0) for (const t of unitTasks(u)) waveOf.set(t.id, { wave, unit: u.id });
+    }
+  }
+  const alongside = (a, b) => {
+    if (laneOf.has(a) && laneOf.has(b)) return laneOf.get(a) !== laneOf.get(b);
+    const wa = waveOf.get(a);
+    const wb = waveOf.get(b);
+    return Boolean(wa && wb && wa.wave === wb.wave && wa.unit !== wb.unit);
+  };
+  const relative = (f) => typeof f === 'string' && normalizePath(f) !== null && !f.split('/').includes('..')
+    && !f.endsWith('/');
+  const key = (f) => normalizePath(f).toLowerCase();
+  const covers = (declared, k) => {
+    const d = normalizePath(declared);
+    return d !== null && (k === d.toLowerCase() || k.startsWith(`${d.toLowerCase()}/`));
+  };
+  const kept = [];
+  const dropped = [];
+  const given = [];
+  for (const p of Array.isArray(permits) ? permits : []) {
+    const shaped = p !== null && typeof p === 'object' && !Array.isArray(p);
+    const taskId = shaped && typeof p.task === 'string' ? p.task : null;
+    const listed = shaped && Array.isArray(p.files);
+    const files = listed ? p.files : [shaped && p.files !== undefined ? p.files : null];
+    const drop = (file, why) => {
+      dropped.push({ task: taskId, file, why });
+      if (log === null) return;
+      log(taskId === null ? `dropped permit entry ${String(JSON.stringify(p))} (${why})`
+        : `dropped the permit of ${taskId} for ${file} (${why})`);
+    };
+    if (taskId === null || !runnable.has(taskId)) {
+      for (const f of files) drop(f, 'not a task of this launch');
+      continue;
+    }
+    if (!Number.isInteger(p.ruling) || p.ruling < 0 || p.ruling >= rulings.length) {
+      for (const f of files) drop(f, 'no such ruling');
+      continue;
+    }
+    if (!listed) {
+      drop(files[0], 'not a project-relative file');
+      continue;
+    }
+    const mine = [];
+    for (const f of files) {
+      if (!relative(f)) {
+        drop(f, 'not a project-relative file');
+        continue;
+      }
+      const k = key(f);
+      if (mine.some((x) => key(x) === k)) continue;
+      const owner = all.find((t) => alongside(taskId, t.id) && (t.files || []).some((d) => covers(d, k)));
+      if (owner) {
+        drop(f, `declared by ${owner.id}, which can run at the same time`);
+        continue;
+      }
+      const other = given.find((g) => g.key === k && alongside(taskId, g.task));
+      if (other) {
+        drop(f, `also permitted to ${other.task}, which can run at the same time`);
+        continue;
+      }
+      given.push({ task: taskId, key: k });
+      mine.push(f);
+    }
+    if (mine.length > 0) kept.push({ task: taskId, files: mine, ruling: p.ruling });
+  }
+  return { kept, dropped };
+}
+
 // A copy of the manifest with consumes_extra: {<task>: [<producer>, ...]}
 // from the kept undeclared entries, producers in entry order without
 // duplicates. startCommand and the adjudicator's task-brief command pass
@@ -424,9 +613,11 @@ function scheduleFix(m, entry) {
 //    minor_findings (the approving review's, taskMinorFindings; [] unless done
 //    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
-//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
+//  integrate:{status, notes, checks_reused (the evidence file a resumed
+//    integration reused, else null: 1.6.8 spec 4.7), post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
-//    review_problem?, task_minors_open},
+//    review_problem?, task_minors_open, start_check? (classifyStartCheck's
+//    result, only when a start check was due: 1.6.8 spec 4.4)},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  verify_stopped (why the last verify's checks stopped twice without a
 //  result, spec 4.1; verify is then null)|null,
@@ -478,9 +669,9 @@ async function runAll(manifest, io) {
   const autonomous = effectiveAutonomy(m) === 'autonomous';
   const hasChecks = finalChecks(m).length > 0;
 
-  // Run rulings come from this run's pre-flight only, never from the
-  // manifest file.
-  m = { ...m, run_rulings: [] };
+  // Run rulings and permits come from this run's pre-flight only, never from
+  // the manifest file.
+  m = { ...m, run_rulings: [], run_permits: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -689,10 +880,20 @@ async function runAll(manifest, io) {
           + `${mv.producer ? ` (it needs ${mv.producer})` : ''}`);
       }
     }
+    // Permits (spec 4.6) are judged against the waves after the moves; a
+    // result without permits has none.
+    // A dropped entry with no string task is logged as given (JSON).
+    const permits = preflightPermits(m, pre.permits, pre.rulings,
+      shown.mode === 'waves' ? wavePlan(m, waveEdges).waves : null,
+      (line) => io.log(`parallel-lanes: pre-flight: ${line}`));
+    preflight.permits = permits.kept;
+    preflight.permits_dropped = permits.dropped;
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
-    // (taskContext and the final review prompts show m.run_rulings).
-    m = { ...m, run_rulings: [...pre.rulings] };
+    // (taskContext and the final review prompts show m.run_rulings); its
+    // kept permits reach the task-checks call and the prompt of their tasks
+    // (m.run_permits).
+    m = { ...m, run_rulings: [...pre.rulings], run_permits: permits.kept };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -773,7 +974,10 @@ async function runAll(manifest, io) {
     // Post-integrate re-review findings (C2): reported under
     // integrate.fix_review and carried into the final fix wave.
     const fixReview = [];
-    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'), post_integrate: null, fix_review: fixReview });
+    // checks_reused (1.6.8, spec 4.7): the integrate evidence file the agent
+    // reused instead of running the checks, else null.
+    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'),
+      checks_reused: r && present(r.checks_reused) ? r.checks_reused : null, post_integrate: null, fix_review: fixReview });
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
@@ -803,7 +1007,7 @@ async function runAll(manifest, io) {
     let integ = await callM('integrate', 'Integrate',
       integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips,
         keepWorktrees: wavesOn }),
-      statusSchema(), sonnetHigh);
+      integrateSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
     // Any Sonnet result that is not a finished integration (a done without a
     // head included) escalates.
@@ -830,7 +1034,7 @@ async function runAll(manifest, io) {
           joinStartPoint: joinNoHook,
           laneTips: tips,
           keepWorktrees: wavesOn,
-        }), statusSchema(), standard);
+        }), integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
     integrate = integrateReport(integ);
@@ -852,7 +1056,7 @@ async function runAll(manifest, io) {
       integ = await callM('integrate', 'Integrate',
         integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips,
           keepWorktrees: wavesOn }),
-        statusSchema(), standard);
+        integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {
@@ -1073,6 +1277,24 @@ async function runAll(manifest, io) {
     return ok;
   };
   const repair = autonomous ? { admit, first: spent + 1 } : null;
+  // The start check after a failing verify (1.6.8 spec 4.4): at most once
+  // per launch, only when startCheckDue, and an ordinary agent call (not
+  // overBudget). With fewer than `room` agents free (1, or 2 inside the
+  // final review, whose re-review must follow it), or the agents
+  // unavailable, it records unavailable for the budget without a call, so
+  // the advisory check never refuses a later call.
+  // Returns the classified start check, or null when none was due.
+  let startChecked = false;
+  const startCheckAt = async (v, sha, room = 1) => {
+    if (startChecked || !startCheckDue(m, v, sha)) return null;
+    startChecked = true;
+    if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < room) {
+      return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
+    }
+    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
+      { model: 'haiku', effort: 'high' });
+    return classifyStartCheck(m, v, sha, r);
+  };
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them; not
   // once agents are unavailable (the verify agent would be refused too).
@@ -1092,7 +1314,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, [...(integrate ? integrate.fix_review : []), ...waveFixReview],
-    hasChecks ? verifyAt : null, taskMinors, repair);
+    hasChecks ? verifyAt : null, taskMinors, repair, hasChecks ? startCheckAt : null);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -1144,13 +1366,23 @@ async function runAll(manifest, io) {
   // A verify refused under the agents-unavailable latch must not let the run
   // report complete with its checks missing (spec 4.1).
   if (state.refused.length > 0) return budgetReport();
+  // A failing verify here gets the start check before any repair (1.6.8
+  // spec 4.4), supervised runs too.
+  if (hasChecks && !verifiedInReview && verify) {
+    const sc = await startCheckAt(verify, delivered);
+    if (sc !== null) final.start_check = sc;
+    if (state.refused.length > 0) return budgetReport();
+  }
   // No final findings and a failing verify (autonomous): the same bounded
-  // repairs (spec 4.5). A repair that moved the head gets a final re-review
-  // of its range with no findings under verification; anything but a valid
-  // result for the delivered head leaves it unreviewed (closed).
-  if (repair !== null && hasChecks && !verifiedInReview && verify) {
+  // repairs (spec 4.5), not when every failing command fails at the start
+  // point too. A repair that moved the head gets a final re-review of its
+  // range with no findings under verification; anything but a valid result
+  // for the delivered head leaves it unreviewed (closed).
+  if (repair !== null && hasChecks && !verifiedInReview && verify
+    && !(final.start_check && final.start_check.all_fail)) {
     const start = delivered;
-    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair });
+    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair,
+      startCheck: final.start_check || null });
     final.repairs = out.repairs;
     verify = out.verify;
     final.head = out.head;
@@ -1160,7 +1392,8 @@ async function runAll(manifest, io) {
       final.unreviewed_fix = out.unreviewed;
     } else if (out.head !== start) {
       const rr = await call('final re-review', 'Final review',
-        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible),
+          final.start_check || null), finalReReviewSchema());
       if (state.refused.length > 0) return budgetReport();
       const problem = validRepairReview(rr, out.head);
       Object.assign(final, settleFinalFindings([], [], rr && Array.isArray(rr.new_findings) ? rr : null,
@@ -1187,6 +1420,7 @@ async function runAll(manifest, io) {
   post = postCheck;
   acceptance = acceptanceOf({
     m, tasks, final, e2e, verify, post, delivered_sha: delivered, fix_unreviewed: fixUnreviewed,
+    start_check: final.start_check || null,
   });
   io.log(`parallel-lanes: acceptance ${acceptance.status} at ${delivered}`
     + (acceptance.reasons.length > 0 ? `: ${acceptance.reasons.map((r) => r.kind).join(', ')}` : ''));

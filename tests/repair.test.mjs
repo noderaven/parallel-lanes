@@ -608,3 +608,275 @@ test('setup_skipped and the check policy reach the report', async () => {
   const plain = await run(manifest(), { ...noFindings({ verify: [verified(TIP)] }), ...taskScript(ALL) });
   assert.deepEqual(plain.result.setup_skipped, []);
 });
+
+// ---- 1.6.8: the start check after a failing verify (spec 4.4) ----
+
+const { startCheckDue, classifyStartCheck } = await loadHelpers(['startCheckDue', 'classifyStartCheck']);
+
+const SP = H('s');
+const started = (overrides = {}) => manifest({ start_points: { prelude: SP }, ...overrides });
+// One command's start-check entry for the verify command npm test.
+const atStartOf = (exit, head, start, notRun = [], extra = {}) => ({
+  verify_command: 'npm test', start_command: 'npm test -- -t slow', narrowed: true, exit_at_start: exit,
+  failed_at_head: head, failed_at_start: start, not_run: notRun, ...extra,
+});
+const startResult = (results, extra = {}) => ({
+  status: 'checked', start_sha: SP, evidence: '/work/ledger/checks/start.1.json', results, notes: '', ...extra,
+});
+const failsAtStart = () => startResult([atStartOf(1, ['slow test'], ['slow test'])]);
+const passesAtStart = () => startResult([atStartOf(0, ['slow test'], [])]);
+const partlyAtStart = () => startResult([atStartOf(1, ['slow test', 'new test'], ['slow test'])]);
+
+test('a failing verify starts one start check before the first repair', async () => {
+  const { result, calls } = await run(started(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'start check': [passesAtStart()],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  const order = labels(calls).filter((l) => ['verify', 'start check', 'verify repair 1'].includes(l));
+  assert.deepEqual(order, ['verify', 'start check', 'verify repair 1', 'verify']);
+  const sc = calls.find((c) => c.label === 'start check');
+  assert.equal(sc.phase, 'Verify');
+  assert.equal(sc.model, 'haiku');
+  assert.equal(sc.effort, 'high');
+  assert.equal(result.final.start_check.status, 'checked');
+  assert.equal(result.final.start_check.verify_head, H('f1'));
+  assert.deepEqual(result.final.start_check.commands.map((c) => c.at_start), ['passes']);
+  assert.equal(result.acceptance.status, 'accepted', JSON.stringify(result.acceptance));
+});
+
+test('a start check runs at both verify sites', async () => {
+  for (const [name, script, head] of [
+    ['after a final fix', withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }), H('f1')],
+    ['no final fix', noFindings({
+      verify: [verified(TIP, 1), descends(H('r1'), TIP)],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [{ head: H('r1'), results: [], new_findings: [] }],
+    }), TIP],
+  ]) {
+    const { result, calls } = await run(started(), { ...script, 'start check': [passesAtStart()], ...taskScript(ALL) });
+    const l = labels(calls);
+    assert.equal(l.filter((x) => x === 'start check').length, 1, `${name}: ${l}`);
+    assert.ok(l.indexOf('start check') < l.indexOf('verify repair 1'), `${name}: ${l}`);
+    assert.equal(result.final.start_check.verify_head, head, name);
+    const p = calls.find((c) => c.label === 'start check').prompt;
+    assert.ok(p.includes(head) && p.includes(SP), name);
+  }
+});
+
+test('no start check without start_points', async () => {
+  const { result, calls } = await run(manifest(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.ok(!labels(calls).includes('start check'));
+  assert.ok(!('start_check' in result.final), JSON.stringify(result.final));
+});
+
+test('no start check when the start point is the head', async () => {
+  const { result, calls } = await run(started({ start_points: { prelude: H('f1') } }), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.ok(!labels(calls).includes('start check'));
+  assert.ok(!('start_check' in result.final));
+  assert.equal(startCheckDue(started({ start_points: { prelude: H('f1') } }), verified(H('f1'), 1), H('f1')), false);
+  assert.equal(startCheckDue(started(), verified(H('f1'), 1), H('f1')), true);
+  assert.equal(startCheckDue(started({ start_points: { prelude: 'not a sha' } }), verified(H('f1'), 1), H('f1')), false);
+  assert.equal(startCheckDue(started(), verified(H('f1'), 0), H('f1')), false, 'nothing failed');
+});
+
+test('no start check for a non-defect failure', async () => {
+  for (const exit of [75, 124, 137]) {
+    const { result, calls } = await run(started(), {
+      ...withFix({ verify: [verified(H('f1'), exit)], 'final re-review': [resolved(H('f1'))] }),
+      ...taskScript(ALL),
+    });
+    assert.ok(!labels(calls).includes('start check'), `exit ${exit}`);
+    assert.ok(!('start_check' in result.final), `exit ${exit}`);
+  }
+});
+
+test('no start check at the budget-stop verify', async () => {
+  // Pre-flight, 4 implement + 4 review, integrate and 3 lenses spend 13: the
+  // final fix is refused and the budget stop runs the checks at the tip.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 13 } });
+  const { result, calls } = await run(m, { ...withFix({ verify: [verified(TIP, 1)] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'stopped');
+  assert.ok(labels(calls).includes('verify'));
+  assert.ok(!labels(calls).includes('start check'));
+  assert.ok(!('start_check' in result.final));
+});
+
+test('a start check runs only once in a launch', async () => {
+  const { result, calls } = await run(started(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'), 1), descends(H('r2'), H('r1'), 1)],
+      'start check': [passesAtStart()],
+      'verify repair 1': [repaired(H('r1'))],
+      'verify repair 2': [repaired(H('r2'))],
+      'final re-review': [resolved(H('r2'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(labels(calls).filter((l) => l === 'start check').length, 1);
+  assert.equal(result.final.repairs.length, 2);
+  assert.equal(result.final.start_check.verify_head, H('f1'));
+});
+
+test('every command fails at the start: no repair', async () => {
+  for (const [name, script] of [
+    ['after a final fix', withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] })],
+    ['no final fix', noFindings({ verify: [verified(TIP, 1)] })],
+  ]) {
+    const { result, calls } = await run(started(), { ...script, 'start check': [failsAtStart()], ...taskScript(ALL) });
+    assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')), `${name}: ${labels(calls)}`);
+    assert.deepEqual(result.final.repairs, [], name);
+    assert.equal(result.final.start_check.all_fail, true, name);
+    assert.equal(result.acceptance.status, 'rejected', name);
+    assert.ok(kinds(result).includes('checks_failed_at_start'), `${name}: ${kinds(result)}`);
+    assert.ok(!kinds(result).includes('checks_failed'), name);
+  }
+  // The final re-review gets the findings beside the failing verify.
+  const { calls } = await run(started(), {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    'start check': [failsAtStart()], ...taskScript(ALL),
+  });
+  const rr = calls.find((c) => c.label === 'final re-review').prompt;
+  assert.ok(rr.includes(`fails at the start point ${SP} too`) && rr.includes('slow test'), rr);
+});
+
+test('partly: repairs run and their prompt names the tests', async () => {
+  const { result, calls } = await run(started(), {
+    ...withFix({
+      verify: [verified(H('f1'), 1), descends(H('r1'), H('f1'))],
+      'start check': [partlyAtStart()],
+      'verify repair 1': [repaired(H('r1'))],
+      'final re-review': [resolved(H('r1'))],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(result.final.start_check.commands.map((c) => c.at_start), ['partly']);
+  assert.equal(result.final.repairs.length, 1);
+  const p = calls.find((c) => c.label === 'verify repair 1').prompt;
+  assert.ok(p.includes('npm test: partly') && p.includes('slow test') && p.includes('new test'), p);
+  assert.ok(p.includes(SP), p);
+});
+
+test('a supervised run gets the start check and no repair', async () => {
+  for (const [name, script] of [
+    ['after a final fix', withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] })],
+    ['no final fix', noFindings({ verify: [verified(TIP, 1)] })],
+  ]) {
+    const { result, calls } = await run(started({ autonomy: 'supervised' }), {
+      ...script, 'start check': [passesAtStart()], ...taskScript(ALL),
+    });
+    assert.ok(labels(calls).includes('start check'), name);
+    assert.ok(!labels(calls).some((l) => l.startsWith('verify repair')), name);
+    assert.deepEqual(kinds(result), ['checks_failed'], name);
+  }
+});
+
+test('no room for the start check: unavailable and no call', async () => {
+  // 13 agents up to the lenses, then verify (counted, past the cap): none left.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 14 } });
+  const { result, calls } = await run(m, { ...noFindings({ verify: [verified(TIP, 1)] }), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(!labels(calls).includes('start check'));
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.equal(result.final.start_check.why, 'budget');
+  assert.equal(result.final.start_check.all_fail, false);
+  assert.deepEqual(kinds(result), ['checks_failed']);
+});
+
+test('one agent left after a final fix: the re-review gets it, not the start check', async () => {
+  // 13 agents up to the lenses, the final fix and its verify: one left.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 16 } });
+  const { result, calls } = await run(m, {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    'start check': [passesAtStart()], ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(!labels(calls).includes('start check'), `${labels(calls)}`);
+  assert.ok(labels(calls).includes('final re-review'), `${labels(calls)}`);
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.equal(result.final.start_check.why, 'budget');
+  assert.deepEqual(kinds(result), ['checks_failed']);
+});
+
+// The engine's guards (spec 4.4 "The engine classifies").
+test('classifyStartCheck: each guard gives the expected at_start', () => {
+  const m = started();
+  const sha = H('f1');
+  const v = verified(sha, 1);
+  const at = (r) => classifyStartCheck(m, v, sha, r).commands.map((c) => c.at_start);
+  assert.deepEqual(at(failsAtStart()), ['fails']);
+  const good = classifyStartCheck(m, v, sha, failsAtStart());
+  assert.deepEqual([good.status, good.all_fail, good.some_fail, good.start_sha, good.verify_head, good.evidence],
+    ['checked', true, true, SP, sha, '/work/ledger/checks/start.1.json']);
+  assert.deepEqual(at(failsAtStart()), ['fails']);
+  assert.deepEqual(at({ ...failsAtStart(), start_sha: H('other') }), ['unknown'], 'start sha');
+  for (const evidence of ['/work/ledger/checks/verify-x.json', '/elsewhere/checks/start.1.json',
+    '/work/ledger/checks/start.json', '/work/ledger/checks/start.1.json.bak', '']) {
+    assert.deepEqual(at({ ...failsAtStart(), evidence }), ['unknown'], `evidence ${evidence}`);
+  }
+  assert.deepEqual(at(passesAtStart()), ['passes'], 'exit 0');
+  assert.deepEqual(at(startResult([atStartOf(0, ['slow test'], [], ['slow test'])])), ['unknown'], 'exit 0, not run');
+  for (const exit of [126, 127, 124, 75, 137, -1, null]) {
+    assert.deepEqual(at(startResult([atStartOf(exit, ['slow test'], ['slow test'])])), ['unknown'], `exit ${exit}`);
+  }
+  assert.deepEqual(at(startResult([atStartOf(1, ['slow test'], ['slow test'], ['other test'])])), ['unknown'], 'not_run');
+  assert.deepEqual(at(partlyAtStart()), ['partly'], 'a head failure missing at the start');
+  assert.deepEqual(at(startResult([atStartOf(1, ['slow test'], [])])), ['unknown'], 'none fails at the start');
+  assert.deepEqual(at(startResult([atStartOf(1, [], [])])), ['unknown'], 'no test names');
+  // Not checked: no command is classified.
+  const notChecked = classifyStartCheck(m, v, sha, { ...failsAtStart(), status: 'unavailable' });
+  assert.deepEqual([notChecked.status, notChecked.commands, notChecked.all_fail], ['unavailable', [], false]);
+  // A wrong start sha or evidence path says why.
+  assert.match(classifyStartCheck(m, v, sha, { ...failsAtStart(), start_sha: H('other') }).why, /start sha/);
+  assert.match(classifyStartCheck(m, v, sha, { ...failsAtStart(), evidence: '/x/start.1.json' }).why, /evidence/);
+  assert.ok(!('why' in good), 'a sound result has no why');
+  // A failing command the agent left out is unknown, so not every one fails.
+  const two = verified(sha, 1, { results: [...verified(sha, 1).results,
+    { group: 'lint', command: 'npm run lint', exit: 2, log: '/work/ledger/checks/l.log', tail: '' }] });
+  const m2 = started({ commands: { setup: [], test: ['npm test'], lint: ['npm run lint'], build: [] } });
+  const partial = classifyStartCheck(m2, two, sha, failsAtStart());
+  assert.deepEqual(partial.commands.map((c) => [c.verify_command, c.at_start]),
+    [['npm test', 'fails'], ['npm run lint', 'unknown']]);
+  assert.deepEqual([partial.all_fail, partial.some_fail], [false, true]);
+  // A Windows ledger: backslashes and another drive-letter case still match.
+  const win = started({ repo: { ...manifest().repo, ledger_dir: 'C:/Work/Ledger' } });
+  const winPath = ['c:', 'work', 'ledger', 'checks', 'start.2.json'].join(String.fromCharCode(92));
+  assert.deepEqual(classifyStartCheck(win, v, sha, { ...failsAtStart(), evidence: winPath }).commands
+    .map((c) => c.at_start), ['fails']);
+});
+
+test('classifyStartCheck: a null or malformed result is unavailable', () => {
+  const m = started();
+  const sha = H('f1');
+  for (const r of [null, undefined, 'x', { status: 'checked' }, { status: 'maybe', results: [] }, { __budget: true }]) {
+    const c = classifyStartCheck(m, verified(sha, 1), sha, r);
+    assert.equal(c.status, 'unavailable', JSON.stringify(r));
+    assert.deepEqual([c.all_fail, c.some_fail, c.verify_head], [false, false, sha], JSON.stringify(r));
+    assert.equal(typeof c.why, 'string', JSON.stringify(r));
+  }
+  const said = classifyStartCheck(m, verified(sha, 1), sha, { status: 'unavailable', start_sha: SP, evidence: '',
+    results: [], notes: 'a folder is in the way' });
+  assert.deepEqual([said.status, said.all_fail, said.notes], ['unavailable', false, 'a folder is in the way']);
+});

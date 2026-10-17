@@ -1,6 +1,6 @@
 export const meta = {
   name: 'parallel-lanes',
-  description: 'parallel-lanes v1.6.7: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
+  description: 'parallel-lanes v1.6.8: Execute an implementation plan as parallel lanes of tasks with per-task review, then integrate.',
   phases: [
     { title: 'Pre-flight', detail: 'plan and spec conflicts' },
     { title: 'Prelude', detail: 'shared tasks on the feature branch' },
@@ -883,12 +883,14 @@ function withDefaultHooks(m) {
   return { ...m, hooks: {} };
 }
 
-// Model settings. The sonnet and light tiers apply to implementers of
-// sonnet and light tasks only; reviewers always run standard. Integrate,
-// e2e, and minor-only or docs-only final fixes start on Sonnet with settings
-// of their own (phases.js).
+// Model settings. The sonnet tier runs Sonnet and the light tier Haiku,
+// for implementers of those tasks only; reviewers always run standard.
+// Integrate, e2e and minor-only final fixes start on Sonnet, docs-only
+// final fixes and the start check on Haiku, with settings of their own
+// (phases.js).
 function tierSettings(tier) {
-  return tier === 'sonnet' || tier === 'light'
+  if (tier === 'light') return { model: 'haiku', effort: 'high' };
+  return tier === 'sonnet'
     ? { model: 'sonnet', effort: 'high' }
     : { model: 'opus', effort: 'high' };
 }
@@ -912,7 +914,8 @@ function tierSettings(tier) {
 // once, whenever a project or lane test, lint or build command exists
 // (finalChecks): after the final fix and before the final re-review (which
 // gets its result), or after the lenses when they found nothing; it is
-// listed in that place; e2e_recheck and
+// listed in that place. The start check (Haiku) is listed beside it as the
+// upper bound: it runs only after a failing verify. e2e_recheck and
 // post_integrate_recheck are listed as the upper bound: they run only when a
 // later commit made the earlier result stale. Retries, adjudications,
 // escalations, conflict resolution, and post-integrate fixes are not
@@ -968,7 +971,10 @@ function planAgents(m) {
     ? ['final_review_combined']
     : ['final_review_sp', 'final_review_security', 'final_review_correctness'];
   for (const role of [...lenses, 'final_fix']) add('Final review', null, null, role, standard);
-  if (finalChecks(m).length > 0) add('Verify', null, null, 'verify', sonnetHigh);
+  if (finalChecks(m).length > 0) {
+    add('Verify', null, null, 'verify', sonnetHigh);
+    add('Verify', null, null, 'start_check', { model: 'haiku', effort: 'high' });
+  }
   add('Final review', null, null, 'final_re_review', standard);
   if (m.hooks.e2e) add('Verify', null, null, 'e2e_recheck', sonnetHigh);
   if (!lite && m.hooks.post_integrate) add('Verify', null, null, 'post_integrate_recheck', standard);
@@ -1161,13 +1167,46 @@ function longCommandWarnings(lengths) {
     + " shorten the project's check commands, for example with a wrapper script"];
 }
 
+// The widen paths that make a unit's task checks wider (1.6.8 spec 4.5):
+// [{file, widen_path}], one per declared file in declared order, with the
+// first widen path that covers it. A widen path ending in '/' covers the paths
+// under it; any other covers the equal path and the paths under it (the dry
+// run cannot tell whether it names a directory). A declared entry ending in
+// '/' counts when it contains a widen path. Paths compare after turning '\'
+// into '/'; the declared and widen strings are reported as written.
+function unitWidening(files, widen) {
+  const slash = (p) => p.split('\\').join('/');
+  const covers = (w, f) => (w.endsWith('/') ? f.startsWith(w) : f === w || f.startsWith(`${w}/`))
+    || (f.endsWith('/') && w.startsWith(f));
+  const out = [];
+  const seen = new Set();
+  for (const file of files) {
+    const f = slash(file);
+    if (seen.has(f)) continue;
+    seen.add(f);
+    const hit = widen.find((w) => covers(slash(w), f));
+    if (hit !== undefined) out.push({ file, widen_path: hit });
+  }
+  return out;
+}
+
 // The dry run's checks summary (spec 4.9). Units are the units with work,
-// built as planAgents builds them.
+// built as planAgents builds them. widening lists each unit with a
+// task_checks entry whose declared files a widen path covers (a unit without
+// one checks its lane commands whatever it changes), in unit order.
 function checksSummary(m) {
+  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
   const withEntry = [];
   const withoutEntry = [];
+  const widening = [];
   for (const { unit, laneId } of unitsWithWork(m)) {
-    (taskChecksEntry(m, unit, laneId) === null ? withoutEntry : withEntry).push(unit.id);
+    if (taskChecksEntry(m, unit, laneId) === null) {
+      withoutEntry.push(unit.id);
+      continue;
+    }
+    withEntry.push(unit.id);
+    const paths = unitWidening(unit.files, widen);
+    if (paths.length > 0) widening.push({ unit: unit.id, paths });
   }
   const project = (group, command) => commandGroup(m, null, group).includes(command);
   const added = finalChecks(m).filter((c) => !project(c.group, c.command)).map((c) => ({
@@ -1175,7 +1214,6 @@ function checksSummary(m) {
     group: c.group,
     command: c.command,
   }));
-  const widen = Array.isArray(m.widen_paths) ? m.widen_paths : [];
   const hasEntries = Boolean(m.task_checks) && Object.keys(m.task_checks).length > 0;
   return {
     final_count: finalChecks(m).length,
@@ -1189,6 +1227,7 @@ function checksSummary(m) {
       ...(hasEntries && widen.length === 0 ? ['changes to shared files will not widen task checks'] : []),
       ...longCommandWarnings(checkCommandLengths(m)),
     ],
+    widening,
   };
 }
 
@@ -1318,14 +1357,21 @@ function checksPhase(laneId) {
 // (optional) is the evidence file it writes under the ledger dir:
 // resultPath() goes in as given (already quoted), for the path the agent's
 // reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
-// with PL_PHASE set to it. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null, phase = null) {
+// with PL_PHASE set to it. recordSetup (1.6.8, spec 4.7) lists setup
+// commands run-checks records in its evidence (--record-setup, in order)
+// and never runs: an empty list records that there were none
+// (--record-setup-none), null (the default) records nothing. null for an
+// empty checks list.
+function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
+  const setup = recordSetup === null ? []
+    : recordSetup.length === 0 ? ['--record-setup-none']
+      : recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
-    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...parts].join(' ');
+    ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...setup, ...parts].join(' ');
 }
 
 // Every test, lint and build command of a ledger lane, as [{group, command}]
@@ -1494,7 +1540,9 @@ function commandsText(m, laneId, dir = null, name = 'checks', phase = null) {
 // null when the ledger lane has no test, lint or build command. 1.6.6 (spec
 // 4.5): the Files list goes as its fingerprint (task-checks reads the list
 // from owners.json), and a wide list equal to the lane list as --wide-as-lane,
-// so the command does not grow with the Files list.
+// so the command does not grow with the Files list. 1.6.8 (spec 4.6): one
+// --permit '<file>=PF-<n>' per file of a kept pre-flight permit of the unit's
+// tasks.
 function taskChecksCommand(m, task, where, base) {
   const lane = laneChecks(m, where.lane);
   if (lane.length === 0) return null;
@@ -1503,12 +1551,20 @@ function taskChecksCommand(m, task, where, base) {
   const entry = taskChecksEntry(m, task, where.lane);
   const declared = declaredFiles(task);
   const wide = wideChecks(m, where.lane);
+  const permits = [];
+  for (const p of unitPermits(m, task)) {
+    for (const f of p.files) {
+      const value = `${f}=PF-${p.ruling + 1}`;
+      if (!permits.includes(value)) permits.push(value);
+    }
+  }
   return [
     `cd ${q(where.dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/task-checks`)}`, q(where.dir),
     '--base', q(base), '--ledger', q(m.repo.ledger_dir), '--unit', q(task.id), '--evidence', resultPath(),
     '--lane', q(where.lane), '--phase', q(checksPhase(where.lane)),
     ...unitTasks(task).flatMap((t) => ['--task', q(t.id)]),
     ...(declared.length === 0 ? [] : ['--declared-from-owners', q(declaredFingerprint(declared))]),
+    ...permits.flatMap((v) => ['--permit', q(v)]),
     ...(Array.isArray(m.widen_paths) ? m.widen_paths : []).flatMap((p) => ['--widen', q(p)]),
     ...commandGroup(m, null, 'test').flatMap((c) => ['--project-test', q(c)]),
     ...(entry === null ? [] : ['--entry', q(entry.id), ...pairs('--targeted', entry.checks)]),
@@ -1638,6 +1694,20 @@ function runRulingsLines(m) {
   return ['Rulings already made for this run (binding):', ...rulings.map((r, i) => `- PF-${i + 1}: ${r}`)];
 }
 
+// The pre-flight permits the run kept for the unit's tasks (m.run_permits,
+// set only by the workflow, spec 4.6): [{task, files, ruling}], ruling the
+// 0-based index of a run ruling, so its id is PF-<ruling + 1>.
+function unitPermits(m, task) {
+  const ids = unitTasks(task).map((t) => t.id);
+  return (Array.isArray(m.run_permits) ? m.run_permits : []).filter((p) => ids.includes(p.task));
+}
+
+// One prompt line per kept permit of the unit's tasks; [] when there is none.
+function runPermitsLines(m, task) {
+  return unitPermits(m, task).map((p) =>
+    `PF-${p.ruling + 1} permits ${p.task} to change ${p.files.join(', ')}: changing them does not widen your checks.`);
+}
+
 // The message a task fix round commits with: 'fix: address review findings
 // for Task <id>', or for a batch 'for Batch <first>-<last>'.
 function fixCommitMessage(task) {
@@ -1711,6 +1781,7 @@ function taskContext(m, task, where, guidance = null, by = 'implementer') {
     checkoutRules(where.dir, where.branch),
     ...briefs,
     ...runRulingsLines(m),
+    ...runPermitsLines(m, task),
     ...runNotes.map((n) =>
       `A note decided on the user's behalf for this ${unitNoun(task)} (follow it where it settles a question): ${n}`),
     ...amendments.map((a) => (isBatch(task)
@@ -2362,6 +2433,15 @@ function statusSchema() {
   };
 }
 
+// The integrate agent's result (1.6.8, spec 4.7): statusSchema plus the
+// optional checks_reused, the integrate evidence file reuse-checks printed
+// when the agent reused a passing check instead of running the checks
+// (else null).
+function integrateSchema() {
+  const s = statusSchema();
+  return { ...s, properties: { ...s.properties, checks_reused: { type: ['string', 'null'] } } };
+}
+
 function preflightSchema() {
   // undeclared and code_deps share the item shape {task, producer, what}.
   const dependencies = () => ({
@@ -2383,6 +2463,21 @@ function preflightSchema() {
       rulings: { type: 'array', items: { type: 'string' } },
       undeclared: dependencies(),
       code_deps: dependencies(),
+      // Optional (spec 4.6): files a ruling lets a task change outside its
+      // Files list; ruling is the 0-based index in rulings. The run reads a
+      // result without it as [].
+      permits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            task: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' } },
+            ruling: { type: 'integer' },
+          },
+          required: ['task', 'files', 'ruling'],
+        },
+      },
     },
     required: ['conflicts', 'rulings', 'undeclared', 'code_deps'],
   };
@@ -2553,6 +2648,7 @@ function relaunchPreflightLines(m) {
     `Built tasks (done in an earlier launch; never rule on their code): ${done.length > 0 ? done.join(', ') : '(none)'}`,
     'Earlier rulings bind; read them with (a read-only command):',
     `  ${ledgerReadCommand(m, featureDir(m), 'rulings')}`,
+    'Permits an earlier launch recorded are carried; they need no new ruling.',
     'Check only the tasks still to run and their dependence on built work.',
     'A matter an earlier ruling settled is not a conflict and gets no new ruling, unless the plan or the spec changed',
     `since that ruling; then report it as a conflict. ${changed}`,
@@ -2596,6 +2692,10 @@ function preflightPrompt(m, waves = null) {
     'Report serious problems (implementers would build the wrong thing, or check 1 or 2 fails) as conflicts,',
     'one sentence each naming the tasks and plan or spec sections. Settle minor ambiguities yourself and report',
     'each as a ruling in the form "Ruling: decision - why - cost if wrong".',
+    'When a ruling has a task change a file outside its Files list, also return it in permits as',
+    '{task, files, ruling}: the task id, the project-relative files (files, not folders) and the ruling\'s',
+    '0-based index in rulings. A permitted file does not widen that task\'s checks. The run drops a permit',
+    'for a file that a task able to run at the same time declares or is also permitted.',
     '',
     phaseRules(m),
   ].join('\n');
@@ -2654,8 +2754,17 @@ function integratePrompt(m, preludeTip, opts = {}) {
   // and the lanes' distinct ones, then every distinct check of the project
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
   // under the reserve name integrate, its logs beside the result.
+  // The run-checks call records the setup commands (1.6.8, spec 4.7), so a
+  // resumed integration whose merges made no commit can reuse that evidence
+  // through reuse-checks, given the same setup and check commands.
   const setup = finalSetup(m);
-  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate');
+  const checks = runChecksCommand(m, featureDir(m), finalChecks(m), resultPath(), 'integrate', setup);
+  const reuse = checks === null ? null : [
+    `${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/reuse-checks`)} ${q(m.repo.ledger_dir)} --name integrate`,
+    `--head <HEAD> --checkout ${dir}`,
+    ...setup.map((s) => `--setup ${q(s)}`),
+    ...finalChecks(m).map((c) => `--cmd ${q(c.group)} ${q(c.command)}`),
+  ].join(' ');
   // Heal mode reports checks that did not finish (1.6.2 spec 4.3): the
   // engine then starts no fix and stops. The other modes keep the general
   // exit-code rule.
@@ -2665,8 +2774,20 @@ function integratePrompt(m, preludeTip, opts = {}) {
     'tests_failed true and checks_unfinished true, naming the exits in notes. A failing command with any other exit',
     'is a real failure: checks_unfinished false.',
   ] : null;
+  // Only heal mode returns tests_failed, so only its reuse names it.
+  const reuseLines = reuse === null ? [] : [
+    '   Always run the setup commands first: later phases rely on them in this checkout.',
+    '   Only when no merge in step 2 made a commit (every lane branch was already merged, so HEAD did not move),',
+    `   run this read-only call, with <HEAD> the full sha git -C ${dir} rev-parse HEAD prints:`,
+    `   ${reuse}`,
+    `   When it exits 0, skip the run-checks call below: return checks_reused = the file it printed${
+      testFailure === 'heal' ? ' and tests_failed false' : ''},`,
+    '   and say in notes that the checks were reused from that file. When it exits 1 or 2, or a merge in step 2',
+    '   made a commit, run the checks below.',
+  ];
   const step3 = [
     `   setup: ${setup.length > 0 ? setup.join(' && ') : '(none)'}`,
+    ...reuseLines,
     checks === null ? '   checks: (no test, lint or build command)'
       : "   checks, as one run-checks call (each command's exit status is kept; it exits non-zero when any fails).",
     ...(checks === null ? [] : [
@@ -2790,7 +2911,8 @@ function integratePrompt(m, preludeTip, opts = {}) {
     ...(joinStartPoint ? ['', joinStartPointLine(m, testFailure === 'heal')] : []),
     '',
     `Return status done or failed, head (the full sha printed by git -C ${dir} rev-parse HEAD when you finish),`,
-    `notes (merges, conflicts resolved, command results, cleanup)${returnTail}`,
+    `notes (merges, conflicts resolved, command results, cleanup)${reuse === null ? '' : ', checks_reused (the file'
+      + ' reuse-checks printed when you reused its checks, else null)'}${returnTail}`,
   ].join('\n');
 }
 
@@ -3385,8 +3507,9 @@ function finalFixPrompt(m, findings, base) {
 // the project checks' result at head (run before the re-review), or null.
 // repairs: the repairs after a failing verify inside the range
 // ([{attempt, from, head, failed}], spec 4.5); with no findings the
-// re-review judges only those.
-function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = []) {
+// re-review judges only those. startCheck (1.6.8 spec 4.4): the classified
+// start check, shown beside the failing verify, or null.
+function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [], startCheck = null) {
   const dir = shellQuote(featureDir(m));
   const said = (f) => ((f.dispositions || []).length > 0
     ? f.dispositions.map((d) => `   fixer: ${d.status} - ${d.reason}`
@@ -3417,6 +3540,11 @@ function finalReReviewPrompt(m, base, head, findings, verify = null, repairs = [
     '',
     ...(verify ? [
       checksResultText(verify),
+      ...(startCheck ? [
+        ...startCheckLines(startCheck),
+        'A failure that fails at the start point too predates this run: do not hold a finding open over that failure'
+          + ' alone.',
+      ] : []),
       findings.length > 0 ? 'Still judge every finding yourself; a failing check is evidence, not a verdict.'
         : 'A failing check is evidence, not a verdict.',
       '',
@@ -3490,10 +3618,154 @@ function verifyPrompt(m, sha, from = null) {
   ].join('\n');
 }
 
+// The start check after a failing verify (1.6.8 spec 4.4): in a detached
+// worktree at <worktree_root>/start on the run's start point
+// (m.start_points.prelude), with verify's setup and environment (run-checks
+// --phase start sets PL_PHASE=verify), run each failing command of verify
+// (the failing run-checks JSON at sha), narrowed to its failing tests when the
+// project can select them, and report which tests ran and failed. The agent
+// reports what the logs show; the engine classifies it (classifyStartCheck).
+// Its own checkout rule replaces checkoutRules, which would confine it to the
+// feature checkout it must not touch.
+function startCheckPrompt(m, verify, sha) {
+  const q = shellQuote;
+  const start = m.start_points.prelude;
+  const wt = `${m.repo.worktree_root}/start`;
+  const admin = gitAdmin(m);
+  const feature = featureDir(m);
+  const setup = finalSetup(m);
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
+  const evidence = `${m.repo.ledger_dir}/checks/verify-${sha}.json`;
+  const lines = failing.map((r) => [
+    `   - ${r.command} (exit ${r.exit}, group ${r.group})`,
+    present(r.log) ? `     log: ${r.log}` : `     log: beside ${evidence} (its results name each log)`,
+  ].join('\n'));
+  const run = `cd ${q(wt)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/run-checks`)} ${q(wt)} `
+    + `--out ${resultPath()} --root ${q(m.repo.ledger_dir)} --phase 'start' --cmd 'GROUP' 'COMMAND'`;
+  const remove = `${admin} worktree remove --force ${q(wt)}`;
+  const prune = `${admin} worktree prune`;
+  const add = `${admin} worktree add --detach ${q(wt)} ${q(start)}`;
+  const own = [
+    'Your shell may start in another checkout of this repo, so never rely on the current directory:',
+    `- every shell command starts with cd ${q(wt)} && or uses git -C ${q(wt)}, except the worktree commands above,`,
+    `  which run as given (${admin} ...);`,
+    `- every file you write is under ${wt}, except what run-checks and await-checks write under the ledger;`,
+    `- never commit, in ${wt} or anywhere else; do not change, stage or commit anything in the feature checkout`,
+    `  ${q(feature)}, and do not switch its branch.`,
+  ].join('\n');
+  return [
+    `You are the start check for parallel-lanes run ${m.run_id}: the delivery checks failed at ${sha}. Find out`,
+    `whether the failing tests fail at the run's start point ${start} too. Report what the logs show; the run`,
+    'classifies it.',
+    `Work only in the start worktree ${wt}. Do not change, stage or commit anything in the feature checkout`,
+    `${q(feature)}.`,
+    `1. Drop stale worktree entries, then list the worktrees: ${prune} && ${admin} worktree list --porcelain`,
+    `   - Nothing at ${wt} (no worktree listed there and no folder): add it with ${add}`,
+    `   - A worktree of this repo listed at ${wt}, detached at ${start}: it is the run's own, left by an earlier start`,
+    `     check. Remove it first (${remove}, then ${prune}), then add it as above.`,
+    `   - Anything else at that path (a worktree on a branch or at another commit, or a folder git does not list):`,
+    '     return status unavailable with results [] and notes saying what is there, and touch nothing.',
+    `   Once it is added, record the output of git -C ${q(wt)} rev-parse HEAD: you return it as start_sha, and step 5`,
+    '   removes the worktree before you return.',
+    `2. Run the setup commands there, in order: ${setup.length > 0 ? `cd ${q(wt)} && ${setup.join(' && ')}` : '(none)'}`,
+    `3. The failing commands at ${sha}:`,
+    ...lines,
+    '   Read each log for the names of the tests that failed. If the command can select just those tests through',
+    "   the project's own filter (a test-name or test-file argument it supports), run that narrower command;",
+    '   otherwise run the same command unchanged. Run them all in one run-checks call in the start worktree, one',
+    "   --cmd pair per failing command (its group, then the command you run there, each single-quoted, writing any",
+    "   single quote inside as '\\'').",
+    ...procedureLines(m, {
+      name: 'start', start: run,
+      stop: 'return status unavailable with results [] and notes naming both outcomes the wait printed.',
+      exits: ['These are results like any other: report each exit as the wait printed it; the run decides what it means.'],
+    }).map((l) => `   ${l}`),
+    '4. Read each start log and name the tests that ran and failed there. A test the log does not show running',
+    '   (filtered out, skipped, or the command found nothing) is not failing or passing: list it in not_run.',
+    `5. Remove the worktree: ${remove}, then ${prune}. --force is allowed only on this path. If the removal fails`,
+    '   (a process holding files), say so in notes; cleanup or the next start check removes it.',
+    '6. Never change, stage or commit anything in the feature checkout.',
+    '',
+    phaseRules(m, own),
+    '',
+    `Return status checked, start_sha = the output of git -C ${q(wt)} rev-parse HEAD you recorded in step 1`,
+    `(it must be ${start}), evidence = the path reserve printed (the run-checks result file), results = one entry per failing command`,
+    'above: {verify_command (the command as listed above), start_command (the command you ran), narrowed (true when',
+    'you ran a narrower command), exit_at_start (its exit in the run-checks result; null when it did not run),',
+    'failed_at_head (the tests its verify log shows failing), failed_at_start (the tests its start log shows',
+    'failing), not_run (the tests of failed_at_head its start log does not show running)}, and notes. Return status',
+    'unavailable with results [] when you could not check, and say why in notes.',
+  ].join('\n');
+}
+
+// The start check's result (spec 4.4): what the logs show, per failing
+// command; the engine classifies it (classifyStartCheck).
+function startCheckSchema() {
+  const tests = { type: 'array', items: { type: 'string' } };
+  return {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['checked', 'unavailable'] },
+      start_sha: { type: 'string' },
+      evidence: { type: 'string' },
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            verify_command: { type: 'string' },
+            start_command: { type: 'string' },
+            narrowed: { type: 'boolean' },
+            exit_at_start: { type: ['integer', 'null'] },
+            failed_at_head: tests,
+            failed_at_start: tests,
+            not_run: tests,
+          },
+          required: ['verify_command', 'start_command', 'narrowed', 'exit_at_start', 'failed_at_head', 'failed_at_start',
+            'not_run'],
+        },
+      },
+      notes: { type: 'string' },
+    },
+    required: ['status', 'start_sha', 'evidence', 'results', 'notes'],
+  };
+}
+
+// What a classified start check (classifyStartCheck) says, for the repair
+// and final re-review prompts: one line per failing command with its
+// at_start and tests; [] for null.
+function startCheckLines(sc) {
+  if (!sc || typeof sc !== 'object') return [];
+  if (sc.status !== 'checked') {
+    return [`The start check did not run (${sc.why || 'no result'}): no conclusion about the start point.`];
+  }
+  const start = sc.start_sha;
+  const list = (tests) => (tests.length > 0 ? tests.join(', ') : '(no tests named)');
+  const line = (c) => {
+    const head = Array.isArray(c.failed_at_head) ? c.failed_at_head : [];
+    const atStart = Array.isArray(c.failed_at_start) ? c.failed_at_start : [];
+    if (c.at_start === 'fails') return `- ${c.verify_command}: fails at the start point ${start} too: ${list(head)}`;
+    if (c.at_start === 'passes') return `- ${c.verify_command}: passes at the start point ${start}: this run broke it`;
+    if (c.at_start === 'partly') {
+      const both = head.filter((t) => atStart.includes(t));
+      const rest = head.filter((t) => !atStart.includes(t));
+      return `- ${c.verify_command}: partly: ${list(both)} fail at the start point ${start} too (they predate this run);`
+        + ` ${list(rest)} do not`;
+    }
+    return `- ${c.verify_command}: unknown: no conclusion from the start point`;
+  };
+  return [
+    `The start check ran the failing checks at the run's start point ${start} (evidence ${sc.evidence}), for the`
+      + ` failures at ${sc.verify_head}:`,
+    ...(Array.isArray(sc.commands) ? sc.commands : []).map(line),
+  ];
+}
+
 // The repair agent after a failing verify (spec 4.5, 4.6). verify is the
 // failing run-checks JSON at from, the head the repair starts at; attempt is
-// its number.
-function verifyRepairPrompt(m, verify, from, attempt) {
+// its number. startCheck (1.6.8 spec 4.4): the classified start check, whose
+// lines say which failures predate the run, or null.
+function verifyRepairPrompt(m, verify, from, attempt, startCheck = null) {
   const evidence = `${m.repo.ledger_dir}/checks/verify-${from}.json`;
   const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((r) => r && r.exit !== 0);
   const lines = failing.map((r) => [
@@ -3507,8 +3779,13 @@ function verifyRepairPrompt(m, verify, from, attempt) {
     'Failing checks:',
     ...lines,
     `The full evidence is ${evidence}.`,
+    ...(startCheck ? [
+      ...startCheckLines(startCheck),
+      "A failure that fails at the start point too predates this run: it lies outside this run's scope.",
+    ] : []),
     '',
     'Find the cause and fix it with the smallest change that is correct, so the checks pass for the right reason.',
+    `Never create a worktree or checkout outside ${featureDir(m)}.`,
     'Never weaken, skip or delete a check, test or acceptance criterion to get a pass, and never change the',
     'commands, lane_commands or task_checks, or the test runner configuration, to make them pass. Fixing a wrong',
     'test is allowed when the test, not the code, is wrong: say why in notes. If the failure is a flaky, timeout,',
@@ -4972,7 +5249,10 @@ function afterChecksWarning(verify, sha) {
 
 // input: {m, tasks (the run report's), final, e2e ({checked_sha, items}|null),
 // verify (run-checks JSON|null), post ({status, checked_sha}|null),
-// delivered_sha, fix_unreviewed}. Returns {status 'accepted'|'unverified'|
+// delivered_sha, fix_unreviewed, start_check (classifyStartCheck's result,
+// optional: when it was made for the delivered head and every failing
+// command fails at the start point, the reason is checks_failed_at_start;
+// when only some do, checks_failed and a warning naming them)}. Returns {status 'accepted'|'unverified'|
 // 'rejected', delivered_sha, reasons: [{kind, class 'failed'|'missing',
 // detail}], warnings: [string]}. rejected: something failed or is open or
 // deferred; unverified: nothing failed, but required evidence is missing or
@@ -5004,8 +5284,23 @@ function acceptanceOf(input) {
     || want.some((w, i) => verify.results[i].group !== w.group || verify.results[i].command !== w.command)) {
     add('checks_incomplete', 'missing', 'the verify step did not run exactly the configured test, lint and build commands');
   } else if (verify.ok !== true || verify.results.some((r) => r.exit !== 0)) {
-    const failed = verify.results.filter((r) => r.exit !== 0).map((r) => `${r.command} (exit ${r.exit})`);
-    add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
+    const failing = verify.results.filter((r) => r.exit !== 0);
+    const failed = failing.map((r) => `${r.command} (exit ${r.exit})`);
+    // The start check (1.6.8 spec 4.4), when it was made for the delivered
+    // head: each failing command's entry when the engine classified it fails.
+    const sc = input.start_check;
+    const here = sc && sc.status === 'checked' && sc.verify_head === sha && Array.isArray(sc.commands) ? sc : null;
+    const atStart = here === null ? [] : failing.map((r) => here.commands
+      .find((c) => c && c.verify_command === r.command && c.at_start === 'fails') || null);
+    if (failing.length > 0 && atStart.length === failing.length && atStart.every((c) => c !== null)) {
+      const each = failing.map((r, i) => `${r.command} (exit ${r.exit}): ${(atStart[i].failed_at_head || []).join(', ')}`);
+      add('checks_failed_at_start', 'failed', `failing at ${sha} and at the start point ${here.start_sha}: `
+        + `${each.join('; ')}; evidence ${here.evidence}`);
+    } else {
+      add('checks_failed', 'failed', failed.length > 0 ? `failing at ${sha}: ${failed.join(', ')}` : `checks reported not ok at ${sha}`);
+      const too = failing.filter((r, i) => atStart[i]).map((r) => r.command);
+      if (too.length > 0) warnings.push(`fails at the start point ${here.start_sha} too: ${too.join(', ')}`);
+    }
   }
   // Checks that ran on uncommitted tracked or staged changes or with an
   // untracked file present, or changed a tracked file, tested something
@@ -5098,8 +5393,12 @@ function acceptanceOf(input) {
 // spec 4.5): {admit, first}, the admission check and the number of the first
 // attempt; with it, a failing verify after a fix that returned done with a
 // sha head goes to runRepairs before the re-review, which then covers the
-// repairs too. final.repairs lists them ([] when none).
-async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null) {
+// repairs too. final.repairs lists them ([] when none). startCheckAt(verify,
+// sha, room) (1.6.8 spec 4.4, supervised runs too): called right after that
+// verify, before any repair; a non-null result is final.start_check, and
+// when every failing command fails at the start point no repair runs.
+async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null,
+  startCheckAt = null) {
   const standard = tierSettings('standard');
   const call = (label, prompt, schema) =>
     io.agent(prompt, { label, phase: 'Final review', schema, ...standard });
@@ -5154,30 +5453,39 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
     return final;
   };
 
-  // Final fix tier (spec decision 5): Sonnet when every finding is minor or
-  // every finding is in documentation; otherwise Opus. A Sonnet fix that does
-  // not finish reruns once on Opus (same label); still one fix wave.
+  // Final fix tier (spec decision 5): Haiku when every finding is in
+  // documentation, else Sonnet when every finding is minor, otherwise Opus. A
+  // Haiku or Sonnet fix that does not finish reruns once on Opus (same
+  // label); still one fix wave.
   const docsOnly = findings.every((f) => typeof f.file === 'string' && f.file.endsWith('.md'));
   const minorOnly = findings.every((f) => f.severity === 'minor');
-  const fixSettings = minorOnly || docsOnly ? { model: 'sonnet', effort: 'high' } : standard;
+  const fixSettings = docsOnly ? { model: 'haiku', effort: 'high' }
+    : minorOnly ? { model: 'sonnet', effort: 'high' } : standard;
   const callFix = (settings) => io.agent(finalFixPrompt(m, findings, tip),
     { label: 'final fix', phase: 'Final review', schema: finalFixSchema(), ...settings });
   let fix = await callFix(fixSettings);
   // A refused first call spawned no fix agent: no code changed, so the
   // caller's budget stop runs the checks.
   const fixRan = !(fix && fix.__budget);
-  // Whatever a fix agent did, commits it reports are delivered code: a Sonnet
-  // fix's head stands unless its Opus rerun reports a head of its own.
-  // A head that is not a commit sha names no commit, so the run cannot say
-  // what the fix delivered: a Sonnet fix reruns on Opus, and an Opus one
-  // leaves every finding open.
+  // Whatever a fix agent did, commits it reports are delivered code: a Haiku
+  // or Sonnet fix's head stands unless its Opus rerun reports a head of its
+  // own. A head that is not a commit sha names no commit, so the run cannot
+  // say what the fix delivered: a Haiku or Sonnet fix reruns on Opus, and an
+  // Opus one leaves every finding open.
   const badHead = (r) => Boolean(r && !r.__budget && present(r.head) && !isSha(r.head));
   if (fix && isSha(fix.head)) final.head = fix.head;
-  if (fixSettings.model === 'sonnet' && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
+  if (fixSettings !== standard && (!fix || fix.status !== 'done' || badHead(fix))) fix = await callFix(standard);
   if (fix && isSha(fix.head)) final.head = fix.head;
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
+  // A failing verify there gets the start check before any repair, only
+  // with room for it and the re-review that must follow (room 2).
+  if (startCheckAt !== null && final.verify) {
+    const sc = await startCheckAt(final.verify, final.head, 2);
+    if (sc !== null) final.start_check = sc;
+  }
+  const allFailAtStart = Boolean(final.start_check && final.start_check.all_fail);
   // A refused call says why (refusalCause: the budget, or agents unavailable).
   const cause = (r) => refusalCause({ unavailable: Boolean(r.__unavailable) });
   if (!fix || fix.__budget) return settle([], null, fix ? `final fix not run: ${cause(fix)}` : 'no result from final fix');
@@ -5192,10 +5500,12 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   const dispositions = Array.isArray(fix.dispositions) ? fix.dispositions : [];
   // A failing verify after the fix (autonomous): bounded repairs (spec 4.5)
   // before the re-review, whose range tip..final.head then covers them. Only
-  // after a fix that returned a sha head (spec 4.5).
+  // after a fix that returned a sha head (spec 4.5), and not when every
+  // failing command fails at the start point too (1.6.8 spec 4.4).
   let repaired = null;
-  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head)) {
-    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair });
+  if (repair !== null && verifyAt !== null && final.verify && isSha(fix.head) && !allFailAtStart) {
+    repaired = await runRepairs(m, io, { head: final.head, verify: final.verify, verifyAt, ...repair,
+      startCheck: final.start_check || null });
     final.head = repaired.head;
     final.verify = repaired.verify;
     final.repairs = repaired.repairs;
@@ -5204,7 +5514,7 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   // given for its id (more than one shows the contradiction).
   const verifying = findings.map((f) => ({ ...f, dispositions: dispositions.filter((d) => d && d.id === f.id) }));
   const rr = await call('final re-review', finalReReviewPrompt(m, tip, final.head, verifying, final.verify || null,
-    final.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+    final.repairs.filter((r) => r.eligible), final.start_check || null), finalReReviewSchema());
   // A refused re-review returns the budget sentinel, which has no results.
   if (!rr || !Array.isArray(rr.results)) {
     settle(dispositions, null, rr && rr.__budget ? `final re-review not run: ${cause(rr)}`
@@ -5255,6 +5565,88 @@ function repairDue(m, verify, sha) {
   return !nonDefectFailure(results);
 }
 
+// Whether a failing verify at sha calls for a start check (1.6.8 spec 4.4):
+// repairDue's conditions (not autonomy or admission), and a recorded start
+// point (m.start_points.prelude) that is a sha other than sha.
+function startCheckDue(m, verify, sha) {
+  const start = m.start_points && typeof m.start_points === 'object' ? m.start_points.prelude : null;
+  return repairDue(m, verify, sha) && isSha(start) && start !== sha;
+}
+
+// Whether path is a start-check evidence file <ledger_dir>/checks/start.<n>.json,
+// compared with backslashes turned into '/', and without case when the
+// ledger is on a drive (a Windows agent may print C:/ in another case).
+function startEvidenceOk(m, path) {
+  if (!present(path)) return false;
+  const ledger = String(m.repo.ledger_dir).split('\\').join('/').replace(/\/+$/, '');
+  const given = path.split('\\').join('/');
+  const drive = /^[A-Za-z]:\//.test(ledger);
+  const prefix = `${ledger}/checks/start.`;
+  const [p, g] = drive ? [prefix.toLowerCase(), given.toLowerCase()] : [prefix, given];
+  return g.startsWith(p) && /^[0-9]+\.json$/.test(g.slice(p.length));
+}
+
+// The engine's classification of a start check's result r (spec 4.4 "The
+// engine classifies"), per failing command of verify (the failing verify at
+// sha): fails only when r is checked, for the start point, with its evidence
+// under the ledger, a defect exit at the start (not 126, 127 or a
+// nonDefectFailure exit), test names, nothing not run, and every head
+// failure failing at the start; passes when it exited 0 with nothing not
+// run; partly when some but not all head failures fail at the start;
+// unknown otherwise, and for a command r leaves out or lists twice. Every
+// one is unknown when r is not checked, or names another start sha or
+// evidence path (why says which). A null, refused or malformed r is
+// unavailable. Returns {status, why?, start_sha, evidence, verify_head,
+// commands: [{...r's entry, at_start}], all_fail, some_fail, notes}.
+function classifyStartCheck(m, verify, sha, r) {
+  const start = m.start_points && typeof m.start_points === 'object' ? m.start_points.prelude : null;
+  const failing = (Array.isArray(verify && verify.results) ? verify.results : []).filter((x) => x && x.exit !== 0);
+  const unavailable = (why, notes = '') => ({
+    status: 'unavailable', why, start_sha: start, evidence: null, verify_head: sha, commands: [],
+    all_fail: false, some_fail: false, notes,
+  });
+  if (!r || typeof r !== 'object' || r.__budget) {
+    return unavailable(r && r.__budget ? refusalCause({ unavailable: Boolean(r.__unavailable) }) : 'no result');
+  }
+  const notes = typeof r.notes === 'string' ? r.notes : '';
+  if (r.status === 'unavailable') return unavailable('the start check reported unavailable', notes);
+  if (r.status !== 'checked' || !Array.isArray(r.results)) return unavailable('a malformed result', notes);
+  const evidence = present(r.evidence) ? r.evidence : null;
+  const why = r.start_sha !== start ? `it reported start sha ${JSON.stringify(r.start_sha)}, not ${start}`
+    : !startEvidenceOk(m, evidence) ? `its evidence ${JSON.stringify(r.evidence)} is not a checks/start.<n>.json file`
+      + ` under ${m.repo.ledger_dir}` : null;
+  const names = (v) => (Array.isArray(v) ? v.filter((t) => typeof t === 'string') : []);
+  const atStart = (e) => {
+    if (why !== null) return 'unknown';
+    const exit = e.exit_at_start;
+    if (typeof exit !== 'number') return 'unknown';
+    const head = names(e.failed_at_head);
+    const startFails = names(e.failed_at_start);
+    const notRun = names(e.not_run);
+    if (exit === 0) return notRun.length === 0 ? 'passes' : 'unknown';
+    if (exit === 126 || exit === 127 || nonDefectFailure([{ exit }])) return 'unknown';
+    if (head.length === 0) return 'unknown';
+    const both = head.filter((t) => startFails.includes(t)).length;
+    if (both === head.length) return notRun.length === 0 ? 'fails' : 'unknown';
+    return both > 0 ? 'partly' : 'unknown';
+  };
+  const commands = failing.map((f) => {
+    const entries = r.results.filter((e) => e && typeof e === 'object' && e.verify_command === f.command);
+    if (entries.length !== 1) {
+      return {
+        verify_command: f.command, start_command: null, narrowed: false, exit_at_start: null, failed_at_head: [],
+        failed_at_start: [], not_run: [], at_start: 'unknown',
+      };
+    }
+    return { ...entries[0], at_start: atStart(entries[0]) };
+  });
+  const fails = commands.filter((c) => c.at_start === 'fails').length;
+  return {
+    status: 'checked', ...(why === null ? {} : { why }), start_sha: start, evidence, verify_head: sha, commands,
+    all_fail: commands.length > 0 && fails === commands.length, some_fail: fails > 0, notes,
+  };
+}
+
 // Whether a repair's reported head may be delivered (spec 4.5): verify ran
 // at it, and run-checks --descends-from found from, the repair's start, an
 // ancestor (the check must name from, not some other sha).
@@ -5282,7 +5674,8 @@ function validRepairReview(rr, delivered) {
 
 // The repair loop (spec 4.5). ctx = {head, verify (the failing verify at
 // head), verifyAt(sha, from), admit() (true admits one more attempt and
-// counts it), first (the number of the first attempt: repairs_spent + 1)}.
+// counts it), first (the number of the first attempt: repairs_spent + 1),
+// startCheck (optional: the classified start check, for each repair prompt)}.
 // Each attempt is one 'verify repair <n>' agent (Opus); a sha head that
 // differs from where it started is verified with --descends-from and
 // delivered only when eligible. Returns {head, verify, repairs, unreviewed}:
@@ -5295,7 +5688,7 @@ async function runRepairs(m, io, ctx) {
   let n = ctx.first;
   while (repairDue(m, verify, head) && ctx.admit()) {
     const failed = verify.results.filter((r) => r.exit !== 0).map((r) => r.command);
-    const r = await io.agent(verifyRepairPrompt(m, verify, head, n),
+    const r = await io.agent(verifyRepairPrompt(m, verify, head, n, ctx.startCheck || null),
       { label: `verify repair ${n}`, phase: 'Verify', schema: repairSchema(), ...tierSettings('standard') });
     // A refused repair's status says why: budget, or unavailable (spec 4.1).
     const refusedAs = r && r.__budget ? (r.__unavailable ? 'unavailable' : 'budget') : null;
@@ -5457,6 +5850,97 @@ function preflightUndeclared(m, entries) {
   return { kept, dropped };
 }
 
+// Pre-flight's permits (spec 4.6), judged file by file: {kept: [{task, files,
+// ruling}], dropped: [{task, file, why}]}. A permit lets a task change files
+// outside its Files list under rulings[ruling] (0-based). A file is kept when
+// the task is a task of this launch (not done and reviewed), ruling indexes
+// rulings, the file is project-relative (no '..', no trailing '/'), no task
+// that can run at the same time declares it (the file or a folder holding
+// it, compared without case), and no permit kept before it in pre-flight's
+// order gives it to such a task. Two tasks can run at the same time when they
+// are in different lanes, or are join tasks of different units of one wave of
+// waves (the join's waves after wave_moves; null when the join runs one unit
+// at a time). Prelude tasks never run beside another task. log (optional)
+// gets one line per dropped file: 'dropped the permit of <task> for <file>
+// (<why>)', or, for an entry with no string task, 'dropped permit entry
+// <the entry as JSON> (<why>)'.
+function preflightPermits(m, permits, rulings, waves, log = null) {
+  const all = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join];
+  const runnable = new Set(all.filter((t) => taskState(m, t.id) !== 'skip').map((t) => t.id));
+  const laneOf = new Map();
+  for (const l of m.lanes) for (const t of l.tasks) laneOf.set(t.id, l.id);
+  const waveOf = new Map();
+  if (Array.isArray(waves)) {
+    for (const u of joinUnits(m)) {
+      const wave = waves.findIndex((ids) => ids.includes(u.id));
+      if (wave >= 0) for (const t of unitTasks(u)) waveOf.set(t.id, { wave, unit: u.id });
+    }
+  }
+  const alongside = (a, b) => {
+    if (laneOf.has(a) && laneOf.has(b)) return laneOf.get(a) !== laneOf.get(b);
+    const wa = waveOf.get(a);
+    const wb = waveOf.get(b);
+    return Boolean(wa && wb && wa.wave === wb.wave && wa.unit !== wb.unit);
+  };
+  const relative = (f) => typeof f === 'string' && normalizePath(f) !== null && !f.split('/').includes('..')
+    && !f.endsWith('/');
+  const key = (f) => normalizePath(f).toLowerCase();
+  const covers = (declared, k) => {
+    const d = normalizePath(declared);
+    return d !== null && (k === d.toLowerCase() || k.startsWith(`${d.toLowerCase()}/`));
+  };
+  const kept = [];
+  const dropped = [];
+  const given = [];
+  for (const p of Array.isArray(permits) ? permits : []) {
+    const shaped = p !== null && typeof p === 'object' && !Array.isArray(p);
+    const taskId = shaped && typeof p.task === 'string' ? p.task : null;
+    const listed = shaped && Array.isArray(p.files);
+    const files = listed ? p.files : [shaped && p.files !== undefined ? p.files : null];
+    const drop = (file, why) => {
+      dropped.push({ task: taskId, file, why });
+      if (log === null) return;
+      log(taskId === null ? `dropped permit entry ${String(JSON.stringify(p))} (${why})`
+        : `dropped the permit of ${taskId} for ${file} (${why})`);
+    };
+    if (taskId === null || !runnable.has(taskId)) {
+      for (const f of files) drop(f, 'not a task of this launch');
+      continue;
+    }
+    if (!Number.isInteger(p.ruling) || p.ruling < 0 || p.ruling >= rulings.length) {
+      for (const f of files) drop(f, 'no such ruling');
+      continue;
+    }
+    if (!listed) {
+      drop(files[0], 'not a project-relative file');
+      continue;
+    }
+    const mine = [];
+    for (const f of files) {
+      if (!relative(f)) {
+        drop(f, 'not a project-relative file');
+        continue;
+      }
+      const k = key(f);
+      if (mine.some((x) => key(x) === k)) continue;
+      const owner = all.find((t) => alongside(taskId, t.id) && (t.files || []).some((d) => covers(d, k)));
+      if (owner) {
+        drop(f, `declared by ${owner.id}, which can run at the same time`);
+        continue;
+      }
+      const other = given.find((g) => g.key === k && alongside(taskId, g.task));
+      if (other) {
+        drop(f, `also permitted to ${other.task}, which can run at the same time`);
+        continue;
+      }
+      given.push({ task: taskId, key: k });
+      mine.push(f);
+    }
+    if (mine.length > 0) kept.push({ task: taskId, files: mine, ruling: p.ruling });
+  }
+  return { kept, dropped };
+}
+
 // A copy of the manifest with consumes_extra: {<task>: [<producer>, ...]}
 // from the kept undeclared entries, producers in entry order without
 // duplicates. startCommand and the adjudicator's task-brief command pass
@@ -5489,9 +5973,11 @@ function scheduleFix(m, entry) {
 //    minor_findings (the approving review's, taskMinorFindings; [] unless done
 //    in this launch), rulings (the adjudicator's rulings for the task, [] when none)}},
 //  stopped_lanes:[{lane, task, reason}], preflight:{conflicts, rulings, undeclared, schedule},
-//  integrate:{status, notes, post_integrate, fix_review}, e2e:{items, checked_sha}|null,
+//  integrate:{status, notes, checks_reused (the evidence file a resumed
+//    integration reused, else null: 1.6.8 spec 4.7), post_integrate, fix_review}, e2e:{items, checked_sha}|null,
 //  final:{findings, fixed, declined, open, cannot_verify, missing_lenses, head, lens_heads,
-//    review_problem?, task_minors_open},
+//    review_problem?, task_minors_open, start_check? (classifyStartCheck's
+//    result, only when a start check was due: 1.6.8 spec 4.4)},
 //  verify (the run-checks result at the delivered revision, run once)|null,
 //  verify_stopped (why the last verify's checks stopped twice without a
 //  result, spec 4.1; verify is then null)|null,
@@ -5543,9 +6029,9 @@ async function runAll(manifest, io) {
   const autonomous = effectiveAutonomy(m) === 'autonomous';
   const hasChecks = finalChecks(m).length > 0;
 
-  // Run rulings come from this run's pre-flight only, never from the
-  // manifest file.
-  m = { ...m, run_rulings: [] };
+  // Run rulings and permits come from this run's pre-flight only, never from
+  // the manifest file.
+  m = { ...m, run_rulings: [], run_permits: [] };
   const tasks = {};
   const deferredBefore = new Set(m.deferred || []);
   for (const t of [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join]) {
@@ -5754,10 +6240,20 @@ async function runAll(manifest, io) {
           + `${mv.producer ? ` (it needs ${mv.producer})` : ''}`);
       }
     }
+    // Permits (spec 4.6) are judged against the waves after the moves; a
+    // result without permits has none.
+    // A dropped entry with no string task is logged as given (JSON).
+    const permits = preflightPermits(m, pre.permits, pre.rulings,
+      shown.mode === 'waves' ? wavePlan(m, waveEdges).waves : null,
+      (line) => io.log(`parallel-lanes: pre-flight: ${line}`));
+    preflight.permits = permits.kept;
+    preflight.permits_dropped = permits.dropped;
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
-    // (taskContext and the final review prompts show m.run_rulings).
-    m = { ...m, run_rulings: [...pre.rulings] };
+    // (taskContext and the final review prompts show m.run_rulings); its
+    // kept permits reach the task-checks call and the prompt of their tasks
+    // (m.run_permits).
+    m = { ...m, run_rulings: [...pre.rulings], run_permits: permits.kept };
     if (pre.conflicts.length > 0) {
       // Supervised keeps Plan 1 (stop and wait); autonomous adjudicates (C1).
       if (!autonomous) return report('preflight_conflicts');
@@ -5838,7 +6334,10 @@ async function runAll(manifest, io) {
     // Post-integrate re-review findings (C2): reported under
     // integrate.fix_review and carried into the final fix wave.
     const fixReview = [];
-    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'), post_integrate: null, fix_review: fixReview });
+    // checks_reused (1.6.8, spec 4.7): the integrate evidence file the agent
+    // reused instead of running the checks, else null.
+    const integrateReport = (r) => ({ ...phaseResult(r, 'integrate'),
+      checks_reused: r && present(r.checks_reused) ? r.checks_reused : null, post_integrate: null, fix_review: fixReview });
     // The Opus fix + scoped re-review (C2) for a post-integration failure.
     // Returns the head to rerun from (base when the fix made no commit), or
     // BUDGET when a spawn was refused.
@@ -5868,7 +6367,7 @@ async function runAll(manifest, io) {
     let integ = await callM('integrate', 'Integrate',
       integratePrompt(m, preludeTip, { conflictMode: 'abort', joinStartPoint: joinNoHook, laneTips: tips,
         keepWorktrees: wavesOn }),
-      statusSchema(), sonnetHigh);
+      integrateSchema(), sonnetHigh);
     if (state.refused.length > 0) return budgetReport();
     // Any Sonnet result that is not a finished integration (a done without a
     // head included) escalates.
@@ -5895,7 +6394,7 @@ async function runAll(manifest, io) {
           joinStartPoint: joinNoHook,
           laneTips: tips,
           keepWorktrees: wavesOn,
-        }), statusSchema(), standard);
+        }), integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
     }
     integrate = integrateReport(integ);
@@ -5917,7 +6416,7 @@ async function runAll(manifest, io) {
       integ = await callM('integrate', 'Integrate',
         integratePrompt(m, preludeTip, { testFailure: 'heal', joinStartPoint: joinNoHook, laneTips: tips,
           keepWorktrees: wavesOn }),
-        statusSchema(), standard);
+        integrateSchema(), standard);
       if (state.refused.length > 0) return budgetReport();
       integrate = integrateReport(integ);
       if (integrate.status !== 'done' || integ.tests_failed === true) {
@@ -6138,6 +6637,24 @@ async function runAll(manifest, io) {
     return ok;
   };
   const repair = autonomous ? { admit, first: spent + 1 } : null;
+  // The start check after a failing verify (1.6.8 spec 4.4): at most once
+  // per launch, only when startCheckDue, and an ordinary agent call (not
+  // overBudget). With fewer than `room` agents free (1, or 2 inside the
+  // final review, whose re-review must follow it), or the agents
+  // unavailable, it records unavailable for the budget without a call, so
+  // the advisory check never refuses a later call.
+  // Returns the classified start check, or null when none was due.
+  let startChecked = false;
+  const startCheckAt = async (v, sha, room = 1) => {
+    if (startChecked || !startCheckDue(m, v, sha)) return null;
+    startChecked = true;
+    if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < room) {
+      return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
+    }
+    const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
+      { model: 'haiku', effort: 'high' });
+    return classifyStartCheck(m, v, sha, r);
+  };
   // A budget stop once every task is in: the checks still run at the
   // feature head the run reached, and the stopped report carries them; not
   // once agents are unavailable (the verify agent would be refused too).
@@ -6157,7 +6674,7 @@ async function runAll(manifest, io) {
 
   io.phase('Final review');
   final = await runFinalReview(m, e2e, tip, counted, [...(integrate ? integrate.fix_review : []), ...waveFixReview],
-    hasChecks ? verifyAt : null, taskMinors, repair);
+    hasChecks ? verifyAt : null, taskMinors, repair, hasChecks ? startCheckAt : null);
   // Checks that ran inside the final review (a fix agent ran) are the run's
   // verify: the report carries them once, at the top level.
   const verifiedInReview = 'verify' in final;
@@ -6209,13 +6726,23 @@ async function runAll(manifest, io) {
   // A verify refused under the agents-unavailable latch must not let the run
   // report complete with its checks missing (spec 4.1).
   if (state.refused.length > 0) return budgetReport();
+  // A failing verify here gets the start check before any repair (1.6.8
+  // spec 4.4), supervised runs too.
+  if (hasChecks && !verifiedInReview && verify) {
+    const sc = await startCheckAt(verify, delivered);
+    if (sc !== null) final.start_check = sc;
+    if (state.refused.length > 0) return budgetReport();
+  }
   // No final findings and a failing verify (autonomous): the same bounded
-  // repairs (spec 4.5). A repair that moved the head gets a final re-review
-  // of its range with no findings under verification; anything but a valid
-  // result for the delivered head leaves it unreviewed (closed).
-  if (repair !== null && hasChecks && !verifiedInReview && verify) {
+  // repairs (spec 4.5), not when every failing command fails at the start
+  // point too. A repair that moved the head gets a final re-review of its
+  // range with no findings under verification; anything but a valid result
+  // for the delivered head leaves it unreviewed (closed).
+  if (repair !== null && hasChecks && !verifiedInReview && verify
+    && !(final.start_check && final.start_check.all_fail)) {
     const start = delivered;
-    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair });
+    const out = await runRepairs(m, counted, { head: start, verify, verifyAt, ...repair,
+      startCheck: final.start_check || null });
     final.repairs = out.repairs;
     verify = out.verify;
     final.head = out.head;
@@ -6225,7 +6752,8 @@ async function runAll(manifest, io) {
       final.unreviewed_fix = out.unreviewed;
     } else if (out.head !== start) {
       const rr = await call('final re-review', 'Final review',
-        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible)), finalReReviewSchema());
+        finalReReviewPrompt(m, start, out.head, [], verify, out.repairs.filter((r) => r.eligible),
+          final.start_check || null), finalReReviewSchema());
       if (state.refused.length > 0) return budgetReport();
       const problem = validRepairReview(rr, out.head);
       Object.assign(final, settleFinalFindings([], [], rr && Array.isArray(rr.new_findings) ? rr : null,
@@ -6252,6 +6780,7 @@ async function runAll(manifest, io) {
   post = postCheck;
   acceptance = acceptanceOf({
     m, tasks, final, e2e, verify, post, delivered_sha: delivered, fix_unreviewed: fixUnreviewed,
+    start_check: final.start_check || null,
   });
   io.log(`parallel-lanes: acceptance ${acceptance.status} at ${delivered}`
     + (acceptance.reasons.length > 0 ? `: ${acceptance.reasons.map((r) => r.kind).join(', ')}` : ''));
@@ -6277,7 +6806,7 @@ function noHead(r, label) {
 // The skill version this script was built from (scripts/build stamps VERSION
 // here and in the meta description): the version actually running. Logged
 // first and returned with every result, dry runs included.
-const VERSION = '1.6.7';
+const VERSION = '1.6.8';
 log(`parallel-lanes v${VERSION} loaded`);
 
 if (args !== null && typeof args === 'object' && args.dry_run === true) {

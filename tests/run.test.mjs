@@ -214,8 +214,10 @@ test('happy path: complete, phases in order, report filled in', async () => {
     assert.deepEqual(t.commits, [bases[id], H(`${id}-h`)]);
   }
   assert.deepEqual(result.stopped_lanes, []);
-  assert.deepEqual(result.preflight,
-    { conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], schedule: [], adjudicated: null });
+  assert.deepEqual(result.preflight, {
+    conflicts: [], rulings: ['Ruling: x - y - z'], undeclared: [], schedule: [], adjudicated: null, permits: [],
+    permits_dropped: [],
+  });
   assert.equal(result.integrate.status, 'done');
   assert.equal(result.integrate.post_integrate.status, 'done');
   assert.deepEqual(result.e2e.items.map((i) => i.result), ['PASS']);
@@ -230,7 +232,8 @@ test('happy path: complete, phases in order, report filled in', async () => {
   assert.equal(result.e2e.checked_sha, H('f1'));
   assert.deepEqual(result.acceptance, { status: 'accepted', delivered_sha: H('f1'), reasons: [], warnings: [] });
   assert.equal(result.agents_spawned, calls.length);
-  assert.equal(result.agents_spawned, planAgents(m).length, 'no fix rounds: matches the dry-run plan');
+  // The start check runs only after a failing verify.
+  assert.equal(result.agents_spawned, planAgents(m).filter((a) => a.role !== 'start_check').length, 'no fix rounds: matches the dry-run plan without the start check');
   assert.ok(logs.includes(`parallel-lanes: launching run run-1: 2 lanes, ${planAgents(m).length} agents`), JSON.stringify(logs));
   assert.ok(!logs.some((l) => l.includes('resuming')));
 
@@ -272,17 +275,18 @@ test('the review approval command passes the spec', async () => {
   assert.ok(!noSpec.includes(`${head} '`), 'no spec path without a spec');
 });
 
-test('mechanical phases start on sonnet high; everything else runs opus high and all carry the commit rules', async () => {
+test('mechanical phases start on sonnet high, a light implementer on haiku high; the rest run opus high and all carry the commit rules', async () => {
   const m = manifest();
   m.lanes[1].tasks[0].tier = 'light';
   const { calls } = await run(m, { ...phaseScript(), ...taskScript(ALL) });
-  // Integrate and e2e start on Sonnet (D5); the light T4 implementer too. On a
-  // clean run they succeed first try, so no Opus rerun follows.
-  const sonnet = new Set(['T4 implement', 'integrate', 'e2e', 'verify', 'e2e recheck']);
+  // Integrate and e2e start on Sonnet (D5), the light T4 implementer on
+  // Haiku. On a clean run they succeed first try, so no Opus rerun follows.
+  const sonnet = new Set(['integrate', 'e2e', 'verify', 'e2e recheck']);
   for (const c of calls) {
     assert.ok(c.prompt.includes('COMMIT-RULES: plain ASCII, no trailers'), c.label);
     assert.ok(/^[\x00-\x7f]*$/.test(c.prompt), `${c.label}: plain ASCII`);
-    const want = sonnet.has(c.label) ? ['sonnet', 'high'] : ['opus', 'high'];
+    const want = c.label === 'T4 implement' ? ['haiku', 'high']
+      : sonnet.has(c.label) ? ['sonnet', 'high'] : ['opus', 'high'];
     assert.deepEqual([c.model, c.effort], want, c.label);
   }
 });
@@ -335,6 +339,60 @@ test('shadow integrate prompt: lane branches are deleted from the feature worktr
   assert.ok(!p.includes("git --git-dir='/shadow/abc' branch -d"), 'the bare shadow HEAD is pl-base, not the feature branch');
   assert.match(p, /first of steps 1-5 that fails/);
   assert.match(p, /Cleanup never fails the integration/);
+});
+
+// 1.6.8 (spec 4.7): a resumed integration whose merges made no commit may
+// reuse a passing check; the report keeps the evidence file it reused.
+test('an integrate result with checks_reused reaches the report', async () => {
+  const file = '/work/ledger/checks/integrate.3.json';
+  const reused = { status: 'done', head: H('I1'), notes: 'checks reused from integrate.3.json', tests_failed: false,
+    checks_reused: file };
+  const first = await run(manifest(), { ...phaseScript({ integrate: [reused] }), ...taskScript(ALL) });
+  assert.equal(first.result.status, 'complete');
+  assert.equal(first.result.integrate.checks_reused, file);
+  // The escalated rerun (the second integrate call) and the heal rerun (the
+  // third) report it the same way, from the result that ran last.
+  const healed = await run(manifest(), {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'merged but tests fail', tests_failed: true },
+        { status: 'done', head: H('I3'), notes: 'reused', checks_reused: file },
+      ],
+      'post-integrate fix': [{ status: 'done', head: H('FX'), notes: 'fixed import' }],
+      'post-integrate re-review': [{ findings: [] }],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(healed.result.status, 'complete');
+  assert.equal(healed.result.integrate.checks_reused, file);
+  const escalated = await run(manifest(), {
+    ...phaseScript({
+      integrate: [
+        { status: 'failed', head: '', notes: 'tests red', conflict_files: [] },
+        { status: 'done', head: H('I2'), notes: 'reused', checks_reused: file },
+      ],
+    }),
+    ...taskScript(ALL),
+  });
+  assert.equal(escalated.result.integrate.checks_reused, file);
+  // Every integrate call offers the field.
+  const integ = healed.calls.filter((c) => c.label === 'integrate');
+  assert.equal(integ.length, 3);
+  for (const c of integ) assert.deepEqual(c.schema.properties.checks_reused, { type: ['string', 'null'] });
+});
+
+test('a missing checks_reused is null', async () => {
+  const { result } = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
+  assert.equal(result.status, 'complete');
+  assert.ok('checks_reused' in result.integrate, JSON.stringify(result.integrate));
+  assert.equal(result.integrate.checks_reused, null);
+  const failed = await run(manifest({ autonomy: 'supervised' }), {
+    ...phaseScript({ integrate: [{ status: 'failed', head: '', notes: 'x' }, null], 'integrate retry': [null] }),
+    ...taskScript(ALL),
+  });
+  assert.equal(failed.result.integrate.status, 'failed');
+  assert.equal(failed.result.integrate.checks_reused, null);
 });
 
 test('pre-flight conflicts stop before any implement (supervised)', async () => {
@@ -1741,6 +1799,170 @@ test('the pre-flight prompt sends code dependencies to code_deps and its schema 
   assert.deepEqual(s.properties.code_deps, s.properties.undeclared);
 });
 
+// ---- pre-flight permits (spec 4.6) ----
+
+const { preflightPermits } = await loadHelpers(['preflightPermits']);
+const permit = (taskId, files, ruling = 0) => ({ task: taskId, files, ruling });
+const ONE_RULING = ['Ruling: a - b - c'];
+
+test('preflightPermits keeps a permit of a runnable task for a file no task alongside declares', () => {
+  const m = manifest();
+  const out = preflightPermits(m, [permit('T2', ['tools/x.py', 'tools/y.py'])], ONE_RULING, null);
+  assert.deepEqual(out, { kept: [permit('T2', ['tools/x.py', 'tools/y.py'])], dropped: [] });
+});
+
+test('preflightPermits takes a missing or malformed permits list as none', () => {
+  for (const given of [undefined, null, 'x', {}]) {
+    assert.deepEqual(preflightPermits(manifest(), given, ONE_RULING, null), { kept: [], dropped: [] }, String(given));
+  }
+  // An entry that is not an object, or whose files is not a list, is dropped whole.
+  const out = preflightPermits(manifest(), ['x', permit('T2', 'tools/x.py')], ONE_RULING, null);
+  assert.deepEqual(out, { kept: [], dropped: [
+    { task: null, file: null, why: 'not a task of this launch' },
+    { task: 'T2', file: 'tools/x.py', why: 'not a project-relative file' },
+  ] });
+});
+
+test('preflightPermits drops a permit of a task that is not in this launch', () => {
+  const m = manifest({ done: ['T1', 'T3'], reviewed: ['T1'], backfill: backfillFor(['T1', 'T3']) });
+  const out = preflightPermits(m, [permit('T9', ['a.py']), permit('T1', ['b.py']), permit('T3', ['c.py'])],
+    ONE_RULING, null);
+  assert.deepEqual(out.kept, [permit('T3', ['c.py'])], 'a done task still to review keeps its permit');
+  assert.deepEqual(out.dropped, [
+    { task: 'T9', file: 'a.py', why: 'not a task of this launch' },
+    { task: 'T1', file: 'b.py', why: 'not a task of this launch' },
+  ]);
+});
+
+test('preflightPermits drops a file that is not project-relative', () => {
+  const bad = ['/abs/x.py', 'C:/x.py', '../x.py', 'a/../b.py', 'tools/', '', 'a\\b.py', 7];
+  const out = preflightPermits(manifest(), [permit('T2', ['tools/ok.py', ...bad])], ONE_RULING, null);
+  assert.deepEqual(out.kept, [permit('T2', ['tools/ok.py'])]);
+  assert.deepEqual(out.dropped, bad.map((file) => ({ task: 'T2', file, why: 'not a project-relative file' })));
+});
+
+test('preflightPermits drops a file a task of another lane declares, in any case or under a declared folder', () => {
+  const m = manifest({
+    lanes: [
+      { id: 'alpha', name: 'Lane alpha', tasks: [task('T2'), task('T3')] },
+      { id: 'beta', name: 'Lane beta', tasks: [task('T4', { files: ['src/T4.js', 'tools/'] })] },
+    ],
+  });
+  const out = preflightPermits(m, [
+    permit('T2', ['SRC/t4.js', 'tools/x.py', 'src/T3.js']),
+    permit('T1', ['src/T2.js']),
+    permit('T5', ['src/T4.js']),
+  ], ONE_RULING, null);
+  assert.deepEqual(out.kept, [
+    permit('T2', ['src/T3.js']),
+    permit('T1', ['src/T2.js']),
+    permit('T5', ['src/T4.js']),
+  ], 'a task of the same lane, the prelude and a serial join run at other times');
+  assert.deepEqual(out.dropped, [
+    { task: 'T2', file: 'SRC/t4.js', why: 'declared by T4, which can run at the same time' },
+    { task: 'T2', file: 'tools/x.py', why: 'declared by T4, which can run at the same time' },
+  ]);
+});
+
+test('preflightPermits keeps the first of two tasks in different lanes given the same undeclared file', () => {
+  const out = preflightPermits(manifest(), [
+    permit('T2', ['tools/x.py']),
+    permit('T4', ['tools/x.py', 'tools/y.py']),
+    permit('T3', ['tools/x.py']),
+  ], ONE_RULING, null);
+  assert.deepEqual(out.kept, [
+    permit('T2', ['tools/x.py']),
+    permit('T4', ['tools/y.py']),
+    permit('T3', ['tools/x.py']),
+  ], 'T3 is in the lane of T2: they never run at the same time');
+  assert.deepEqual(out.dropped, [{ task: 'T4', file: 'tools/x.py', why: 'also permitted to T2, which can run at the same time' }]);
+});
+
+test('preflightPermits checks a join task against the other units of its wave after a wave move', () => {
+  const m = manifest({ join: [task('J1'), task('J2'), task('J3')] });
+  // J3 moved from wave 1 to wave 2, beside J2.
+  const waves = [['J1'], ['J2', 'J3']];
+  const permits = [
+    permit('J3', ['src/J2.js', 'src/J1.js', 'tools/x.py']),
+    permit('J2', ['tools/x.py']),
+    permit('J1', ['tools/x.py']),
+  ];
+  const out = preflightPermits(m, permits, ONE_RULING, waves);
+  assert.deepEqual(out.kept, [permit('J3', ['src/J1.js', 'tools/x.py']), permit('J1', ['tools/x.py'])]);
+  assert.deepEqual(out.dropped, [
+    { task: 'J3', file: 'src/J2.js', why: 'declared by J2, which can run at the same time' },
+    { task: 'J2', file: 'tools/x.py', why: 'also permitted to J3, which can run at the same time' },
+  ]);
+  // Without waves the join runs one task at a time.
+  assert.deepEqual(preflightPermits(m, permits, ONE_RULING, null).kept, permits);
+});
+
+test('preflightPermits drops a permit whose ruling is not an index into the rulings', () => {
+  const out = preflightPermits(manifest(), [
+    permit('T2', ['a.py'], 1), permit('T2', ['b.py'], -1), permit('T2', ['c.py'], '0'), permit('T2', ['d.py'], 0.5),
+    permit('T2', ['e.py'], 0),
+  ], ONE_RULING, null);
+  assert.deepEqual(out.kept, [permit('T2', ['e.py'], 0)]);
+  assert.deepEqual(out.dropped, ['a.py', 'b.py', 'c.py', 'd.py'].map((file) => ({ task: 'T2', file, why: 'no such ruling' })));
+});
+
+test('a kept permit reaches task-checks and the implementer', async () => {
+  const rulings = ['Ruling: x - y - z', 'Ruling: T2 may change tools/x.py - it owns the tool - none'];
+  const script = {
+    ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings, undeclared: [], code_deps: [], permits: [
+      permit('T2', ['tools/x.py'], 1), permit('T4', ['src/T2.js'], 1),
+    ] }] }),
+    ...taskScript(ALL),
+  };
+  const { result, calls, logs } = await run(manifest(), script);
+  assert.equal(result.status, 'complete', JSON.stringify(result));
+  assert.deepEqual(result.preflight.permits, [permit('T2', ['tools/x.py'], 1)]);
+  assert.deepEqual(result.preflight.permits_dropped,
+    [{ task: 'T4', file: 'src/T2.js', why: 'declared by T2, which can run at the same time' }]);
+  assert.ok(logs.includes('parallel-lanes: pre-flight: dropped the permit of T4 for src/T2.js'
+    + ' (declared by T2, which can run at the same time)'), JSON.stringify(logs));
+  const line = 'PF-2 permits T2 to change tools/x.py: changing them does not widen your checks.';
+  const t2 = calls.find((c) => c.label === 'T2 implement').prompt;
+  assert.ok(t2.includes("--permit 'tools/x.py=PF-2'"), t2);
+  assert.ok(t2.includes(line), t2);
+  for (const label of ['T3 implement', 'T4 implement']) {
+    const p = calls.find((c) => c.label === label).prompt;
+    assert.ok(!p.includes('--permit') && !p.includes('permits T'), label);
+  }
+});
+
+test('a dropped permit entry with no string task is logged as given', async () => {
+  const script = {
+    ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: ONE_RULING, undeclared: [], code_deps: [],
+      permits: [null, { task: 7, files: ['a.py'], ruling: 0 }] }] }),
+    ...taskScript(ALL),
+  };
+  const { result, logs } = await run(manifest(), script);
+  assert.deepEqual(result.preflight.permits_dropped, [
+    { task: null, file: null, why: 'not a task of this launch' },
+    { task: null, file: 'a.py', why: 'not a task of this launch' },
+  ]);
+  const dropped = logs.filter((l) => l.startsWith('parallel-lanes: pre-flight: dropped permit'));
+  assert.deepEqual(dropped, [
+    'parallel-lanes: pre-flight: dropped permit entry null (not a task of this launch)',
+    'parallel-lanes: pre-flight: dropped permit entry {"task":7,"files":["a.py"],"ruling":0} (not a task of this launch)',
+  ], JSON.stringify(logs));
+  assert.ok(!logs.some((l) => l.includes('the permit of null')), JSON.stringify(logs));
+});
+
+test('the pre-flight prompt asks for permits with a ruling that adds a file; the schema does not require them', () => {
+  const p = preflightPrompt(manifest()).replace(/\s+/g, ' ');
+  assert.ok(p.includes('When a ruling has a task change a file outside its Files list, also return it in permits as'
+    + ' {task, files, ruling}'), p);
+  const s = preflightSchema();
+  assert.ok(!s.required.includes('permits'));
+  const item = s.properties.permits.items;
+  assert.deepEqual(item.required, ['task', 'files', 'ruling']);
+  assert.equal(item.properties.task.type, 'string');
+  assert.deepEqual(item.properties.files, { type: 'array', items: { type: 'string' } });
+  assert.equal(item.properties.ruling.type, 'integer');
+});
+
 test('autonomous integrate conflict: sonnet aborts, an opus resolver runs, the opus rerun reviews it', async () => {
   const script = {
     ...phaseScript({
@@ -2027,7 +2249,7 @@ test('e2e all PASS on sonnet does not rerun on opus', async () => {
   assert.deepEqual(e2e.map((c) => c.model), ['sonnet']);
 });
 
-test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwise, sonnet null reruns on opus', async () => {
+test('final fix tier: haiku for docs-only findings, sonnet for other minor-only ones, opus otherwise; a null reruns on opus', async () => {
   const minorF = (file = 'src/a.js') => ({ severity: 'minor', file, line: 1, issue: 'nit', fix: 'tidy' });
   const okFix = { status: 'done', head: H('f1'), tests: 'pass', notes: '', declined: [] };
   const oneLens = (findings) => ({
@@ -2045,7 +2267,12 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   const docs = await run(manifest(), {
     ...phaseScript({ ...oneLens([finding('typo', 'README.md', 2)]), 'final fix': [okFix] }), ...taskScript(ALL),
   });
-  assert.equal(docs.calls.find((c) => c.label === 'final fix').model, 'sonnet');
+  assert.equal(docs.calls.find((c) => c.label === 'final fix').model, 'haiku');
+
+  const docsMinor = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF('README.md')]), 'final fix': [okFix] }), ...taskScript(ALL),
+  });
+  assert.equal(docsMinor.calls.find((c) => c.label === 'final fix').model, 'haiku');
 
   const mixed = await run(manifest(), { ...phaseScript(), ...taskScript(ALL) });
   assert.equal(mixed.calls.find((c) => c.label === 'final fix').model, 'opus');
@@ -2057,6 +2284,13 @@ test('final fix tier: sonnet for minor-only or docs-only findings, opus otherwis
   const fixes = nul.calls.filter((c) => c.label === 'final fix');
   assert.deepEqual(fixes.map((c) => c.model), ['sonnet', 'opus']);
   assert.equal(nul.result.status, 'complete');
+
+  const docsNul = await run(manifest(), {
+    ...phaseScript({ ...oneLens([minorF('README.md')]), 'final fix': [null, okFix], 'final fix retry': [null] }),
+    ...taskScript(ALL),
+  });
+  assert.deepEqual(docsNul.calls.filter((c) => c.label === 'final fix').map((c) => c.model), ['haiku', 'opus']);
+  assert.equal(docsNul.result.status, 'complete');
 });
 
 // Reviewer of 1.2.1: commits a Sonnet final fix made stay delivered when its

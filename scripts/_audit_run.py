@@ -17,6 +17,13 @@ commands replaced by <check:<id>>. facts ({"verdict", "gate", "evidence",
 "verify_head", "accepted_run", "order_known"}) are the run facts the
 per-task sections take.
 
+launches also compares the launches the archived ledger records
+(_launches.recorded_launches) with the ones archived: recorded is a ref of
+{"recorded", "archived", "named"} (unavailable without a ledger), and
+missing holds one missing ref per recorded launch the archive lacks when it
+records more (the named wf ids with no launch here, then None per unnamed
+one); equal counts give none.
+
 Run-level facts come from the latest launch (_audit_core.latest_launch);
 when the launch order is unknown they are unavailable, never taken from an
 arbitrary launch.
@@ -59,8 +66,10 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _audit_core as c  # noqa: E402
 import _autopsy  # noqa: E402
+import _launches as launch_counts  # noqa: E402  (the name _launches is the section below)
 
 SCRIPTS = os.path.dirname(os.path.realpath(__file__))
+MISSING_LAUNCH = "the ledger records this launch; its transcripts are not archived"
 
 GATES = ("match", "not_required", "missing", "stale", "mismatch", "invalid", "unavailable", "checker_error")
 # What check-verify itself prints; checker_error is audit's own.
@@ -414,6 +423,26 @@ def _launches(run, pairs):
         })
     sources = [c.src(l["wf"] + ".json") for l in launches if l.get("data") is not None]
     return c.ref(entries, "present", sources)
+
+
+def _recorded(run):
+    """(the recorded ref, the missing refs): the launches the archived ledger
+    records (_launches.recorded_launches) against the launches archived here.
+    When it records more, each one missing is a gap: the named wf ids with no
+    launch here first, then None for each unnamed one."""
+    if not run.get("ledger"):
+        return c.ref(None, "unavailable", [], "no ledger in the archive"), []
+    recorded = launch_counts.recorded_launches(os.path.join(run["folder"], run["ledger"]))
+    sources = [c.src(run["ledger"], None)]
+    archived = set(l["wf"] for l in run.get("launches") or [])
+    count, named = recorded["count"], recorded["named"]
+    value = {"recorded": count, "archived": len(archived), "named": named}
+    missing = []
+    if count > len(archived):
+        absent = [wf for wf in named if wf not in archived]
+        absent += [None] * max(0, count - len(archived) - len(absent))
+        missing = [c.ref(wf, "missing", sources, MISSING_LAUNCH) for wf in absent]
+    return c.ref(value, "present", sources), missing
 
 
 # ---- code outside recorded task ranges ----
@@ -915,9 +944,10 @@ def run_sections(run, git, head=None, check_verify=run_check_verify, git_note=No
         "order_known": order_known,
     }
     want = expected_checks(manifest)
+    recorded, missing = _recorded(run)
     return {
         "launches": {"latest": launch["wf"] if launch is not None else None, "order": why,
-                     "entries": _launches(run, pairs)},
+                     "entries": _launches(run, pairs), "recorded": recorded, "missing": missing},
         "code_outside_ranges": _code_outside(run, git, git_note, launch, why, pairs),
         "checks": _checks(run, launch, why, gate, evidence, rule, want),
         "acceptance": _acceptance(run, launch, why, facts, gate, evidence, rule, accepted_events, pairs),
