@@ -478,6 +478,32 @@ test('batch: a non-empty string on a light task is valid', () => {
   assert.deepEqual(validateManifest(m), []);
 });
 
+// External review F1 (2026-10-17): batch A, B runs as the unit A-B, which
+// a task named A-B also is; the units then share agent labels, briefs,
+// reports and branches, and the join wave map keeps one of them. A resume
+// can run part of a batch (B-C of A, B, C), so every first-last stretch of a
+// batch is a possible unit id.
+test('a batch unit id that equals a task id or another batch unit id is reported', () => {
+  const light = (id, file, batch) => task(id, [file], { tier: 'light', batch });
+  const cases = [
+    ['a task named like the batch', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), task('A-B', ['c.js'])], 'A-B'],
+    ['in another letter case', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), task('a-b', ['c.js'])], 'a-b'],
+    ['part of a batch', [light('A', 'a.md', 'x'), light('B', 'b.md', 'x'), light('C', 'c.md', 'x'), task('B-C', ['d.js'])], 'B-C'],
+    ['two batches', [light('A', 'a.md', 'x'), light('B-C', 'b.md', 'x'), light('A-B', 'c.md', 'y'), light('C', 'd.md', 'y')], 'A-B-C'],
+  ];
+  for (const [name, tasks, id] of cases) {
+    const m = validManifest();
+    m.lanes[0].tasks = tasks;
+    assertError(validateManifest(m), id, 'batch');
+    assert.ok(validateManifest(m).length >= 1, name);
+  }
+  // Across groups: the lane's batch T2-T6 and a prelude task T2-T6.
+  const m = validManifest();
+  m.lanes[0].tasks = [light('T2', 'src/a.js', 'docs'), light('T6', 'src/a2.js', 'docs')];
+  m.prelude = [task('T2-T6', ['src/p.js'])];
+  assertError(validateManifest(m), 'T2-T6', 'batch');
+});
+
 test('batch on a standard or sonnet task is reported', () => {
   for (const tier of ['standard', 'sonnet']) {
     const m = validManifest();

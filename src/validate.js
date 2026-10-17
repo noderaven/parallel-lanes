@@ -351,6 +351,44 @@ function validateManifest(m) {
 
   if ('join' in m) checkTaskList('join', m.join);
 
+  // Batch unit ids (batchUnit: '<first>-<last>') name agent labels, briefs,
+  // reports and branches as task ids do, so none may equal a task id or
+  // another batch's, in any letter case (external review F1, 2026-10-17). A
+  // resume can run part of a batch (batchGroup), so every first-last stretch
+  // of consecutive tasks with one batch key counts.
+  {
+    const taskOf = new Map();
+    for (const t of allTasks) if (isObject(t) && isText(t.id)) taskOf.set(t.id.toLowerCase(), t.id);
+    const unitOf = new Map();
+    const lists = [m.prelude, ...(Array.isArray(m.lanes) ? m.lanes.map((l) => (isObject(l) ? l.tasks : null)) : []), m.join];
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (let i = 0; i < list.length;) {
+        const t = list[i];
+        let j = i + 1;
+        if (isObject(t) && isText(t.batch)) {
+          while (j < list.length && isObject(list[j]) && list[j].batch === t.batch) j += 1;
+        }
+        const run = list.slice(i, j).filter((x) => isObject(x) && isText(x.id));
+        for (let a = 0; a < run.length; a += 1) {
+          for (let b = a + 1; b < run.length; b += 1) {
+            const id = `${run[a].id}-${run[b].id}`;
+            const key = id.toLowerCase();
+            const what = `batch ${run[a].id}..${run[b].id}`;
+            if (taskOf.has(key)) {
+              err(`${what}: runs as unit ${id}, which task ${taskOf.get(key)} also names (ids name files); rename one`);
+            } else if (unitOf.has(key)) {
+              err(`${what}: runs as unit ${id}, as ${unitOf.get(key)} does (ids name files); rename a task`);
+            } else {
+              unitOf.set(key, what);
+            }
+          }
+        }
+        i = j;
+      }
+    }
+  }
+
   // Every overlaps entry names known tasks that list its file.
   if (Array.isArray(m.overlaps)) {
     const files = new Map();
