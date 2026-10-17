@@ -257,7 +257,8 @@ Relaunch once with the relaunch notice: carry budgets over (reference.md "Transi
 `repairs_spent` to the repairs in the stopped run's `final.repairs` plus the earlier value.
 First recompute `done`, `reviewed`, `deferred`, the `carry` notes, `carried_minors`,
 `inputs_changed`, the join wave fields and `backfill` as in Resume
-steps 2-3, then rerun `scripts/setup --owner <token>` and take `start_points`; if validation
+steps 2-3, then rerun `scripts/setup --owner <token>`, put its output in `setup_result` and take
+`start_points`; if validation
 rejects its `setup_skipped`, rerun setup. Launch again. No second table. A second transient
 stop is a real stop, unless it is a usage-limit stop (reference.md "Usage limit").
 
