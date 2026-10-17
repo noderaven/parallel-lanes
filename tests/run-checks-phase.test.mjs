@@ -1,6 +1,8 @@
 // scripts/run-checks --phase (1.6.5 design 4.6): every command, first attempt
 // and busy retry alike, runs with PL_PHASE set to the phase; without --phase
 // an inherited PL_PHASE is removed. task-checks passes its --phase through.
+// The start phase (1.6.8 design 4.4) runs with PL_PHASE=verify, and
+// --record-setup (4.7) records setup commands without running them.
 // Real scripts, real git repos.
 
 import { test, after } from 'node:test';
@@ -93,12 +95,53 @@ test('an unknown phase is a usage error', () => {
 });
 
 test('every phase name is accepted', () => {
-  for (const phase of ['prelude', 'lane', 'join', 'integrate', 'post-integrate', 'final-fix', 'verify']) {
+  for (const phase of ['prelude', 'lane', 'join', 'integrate', 'post-integrate', 'final-fix', 'verify', 'start']) {
     const { dir, record } = fresh();
     const r = runChecks(dir, ['--phase', phase], [['test', recorder(record)]]);
     assert.equal(r.status, 0, `${phase}: ${r.stderr}`);
-    assert.deepEqual(recorded(record), [phase]);
+    // The start check reproduces verify's environment.
+    assert.deepEqual(recorded(record), [phase === 'start' ? 'verify' : phase]);
+    assert.equal(JSON.parse(r.stdout).phase, phase);
   }
+});
+
+test('--phase start runs with PL_PHASE=verify and records start', () => {
+  const { dir, record } = fresh();
+  const r = runChecks(dir, ['--phase', 'start'], [['test', recorder(record, [75, 0])], ['lint', recorder(record)]],
+    { PL_PHASE: 'lane' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(recorded(record), ['verify', 'verify', 'verify']);
+  assert.equal(JSON.parse(r.stdout).phase, 'start');
+});
+
+test('--record-setup is recorded and not run', () => {
+  const { dir, record } = fresh();
+  const made = join(TMP, `setup${serial}.txt`).replace(/\\/g, '/');
+  const setup = [`node -e 'require("fs").writeFileSync(${JSON.stringify(made)}, "x")'`, 'npm ci'];
+  const out = join(TMP, `evidence${serial}.json`);
+  const r = runChecks(dir, ['--out', out, '--record-setup', setup[0], '--phase', 'integrate', '--record-setup', setup[1]],
+    [['test', recorder(record)]]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(made), false, 'a recorded setup command must not run');
+  assert.deepEqual(JSON.parse(r.stdout).setup_commands, setup);
+  assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')).setup_commands, setup);
+  assert.deepEqual(recorded(record), ['integrate']);
+});
+
+test('without --record-setup there is no setup_commands key', () => {
+  const { dir, record } = fresh();
+  const r = runChecks(dir, [], [['test', recorder(record)]]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal('setup_commands' in JSON.parse(r.stdout), false);
+});
+
+test('--record-setup without a command is a usage error', () => {
+  const { dir, record } = fresh();
+  for (const extra of [['--record-setup'], ['--record-setup', '']]) {
+    const r = runChecks(dir, extra, [['test', recorder(record)]]);
+    assert.equal(r.status, 2, `${extra.join(' ')}: ${r.stderr}`);
+  }
+  assert.equal(existsSync(record), false);
 });
 
 test('task-checks passes --phase through', () => {
