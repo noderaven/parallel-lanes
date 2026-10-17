@@ -5,6 +5,20 @@ function gitAdmin(m) {
     : `git -C ${shellQuote(m.repo.root)}`;
 }
 
+// The run's git identity (1.6.7): the user.name=/user.email= pairs setup
+// read from the commit rules, [] when it recorded none (a dry run, or a
+// manifest from before 1.6.7).
+function gitIdentity(m) {
+  const r = m.setup_result;
+  return r && Array.isArray(r.git_identity) ? r.git_identity : [];
+}
+
+// The identity as git options, each shell-quoted and followed by a space so
+// it goes between `git -C <dir> ` and the subcommand; '' for none.
+function gitIdentityArgs(m) {
+  return gitIdentity(m).map((p) => `-c ${shellQuote(p)} `).join('');
+}
+
 // Rules every phase agent gets, the general long-command rule included.
 // checkout (optional) replaces the checkout rules for the feature checkout
 // (setup works in several checkouts).
@@ -340,8 +354,9 @@ function integratePrompt(m, preludeTip, opts = {}) {
   const q = shellQuote;
   const dir = q(featureDir(m));
   const admin = gitAdmin(m);
+  const id = gitIdentityArgs(m);
   const merges = m.lanes.map((lane) =>
-    `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
+    `   git -C ${dir} ${id}merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
   // Step 3 runs the delivery inventory once (spec 4.4): the project's setup
   // and the lanes' distinct ones, then every distinct check of the project
   // and the lane_commands overrides, with the long-check procedure (1.6.1)
@@ -402,8 +417,9 @@ function integratePrompt(m, preludeTip, opts = {}) {
     '   file in conflict_files (a later agent resolves them).',
   ] : [
     '   A branch that is already merged reports already up to date; that is fine. On a conflict, resolve it',
-    '   keeping the intent of both lanes (read the plan tasks that touched the file) and commit the merge; if',
-    '   you cannot resolve it with confidence, run git merge --abort and fail naming the files.',
+    '   keeping the intent of both lanes (read the plan tasks that touched the file) and commit the merge with',
+    `   \`git -C ${dir} ${id}commit --no-edit\`; if you cannot resolve it with confidence, run git merge --abort`,
+    '   and fail naming the files.',
   ];
   const testFailureLine = testFailure === 'heal'
     ? '   Fix only small, obvious integration breakage (commit it per the commit rules). If a project command '
@@ -492,8 +508,9 @@ function integratePrompt(m, preludeTip, opts = {}) {
 function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
   const q = shellQuote;
   const dir = q(featureDir(m));
+  const id = gitIdentityArgs(m);
   const merges = m.lanes.map((lane) =>
-    `   git -C ${dir} merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
+    `   git -C ${dir} ${id}merge --no-ff -m <message> ${q(laneWhere(m, lane).branch)}`);
   const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
   return [
     `You are the conflict resolver for parallel-lanes run ${m.run_id}.`,
@@ -506,7 +523,8 @@ function resolveConflictsPrompt(m, preludeTip, conflictFiles) {
     ...merges,
     '   A branch already merged reports already up to date; that is fine. On a conflict, resolve it keeping',
     '   the intent of both lanes: read the plan tasks that touched the conflicting files and keep what each',
-    '   lane meant to do, then commit the merge. Resolve the conflicts only; make no other change.',
+    `   lane meant to do, then commit the merge with \`git -C ${dir} ${id}commit --no-edit\`. Resolve the`,
+    '   conflicts only; make no other change.',
     '   Do not run the project commands, rewrite history, or remove any worktree or branch.',
     '',
     `Plan: ${m.plan}`,
@@ -532,7 +550,8 @@ function waveMergePrompt(m, wave, units, checks = [], known = []) {
   const dir = featureDir(m);
   const recovery = wave === null;
   const merge = [`cd ${q(dir)} && ${pythonCommand(m)} ${q(`${m.skill_dir}/scripts/merge-wave`)} ${q(dir)}`,
-    q(m.repo.ledger_dir), ...(recovery ? ['--recovery'] : ['--wave', q(String(wave))]),
+    q(m.repo.ledger_dir), ...gitIdentity(m).flatMap((p) => ['--git-config', q(p)]),
+    ...(recovery ? ['--recovery'] : ['--wave', q(String(wave))]),
     ...units.flatMap((u) => ['--unit', q(u.id), q(u.base), q(u.head)]),
     ...known.flatMap((u) => ['--known', q(u.id), q(u.head)])].join(' ');
   const run = checks.length > 0 ? runChecksCommand(m, dir, checks, resultPath(), 'join') : null;
@@ -614,6 +633,7 @@ function waveMergeSchema() {
 function waveResolvePrompt(m, wave, unit, conflictFiles) {
   const q = shellQuote;
   const dir = q(featureDir(m));
+  const id = gitIdentityArgs(m);
   const files = conflictFiles && conflictFiles.length > 0 ? conflictFiles.join(', ') : '(the files the merge reports)';
   const message = wave === null ? `join recovery: merge ${unit.id}` : `join wave ${wave}: merge ${unit.id}`;
   return [
@@ -623,10 +643,11 @@ function waveResolvePrompt(m, wave, unit, conflictFiles) {
     '',
     `1. git -C ${dir} status --porcelain --untracked-files=all must print nothing; otherwise return status`,
     '   failed (never make it so by deleting, cleaning, or stashing files).',
-    `2. git -C ${dir} merge --no-ff -m ${q(message)} ${q(unit.head)}`,
+    `2. git -C ${dir} ${id}merge --no-ff -m ${q(message)} ${q(unit.head)}`,
     "   Resolve each conflict keeping the intent of both sides: read the plan tasks of the units that touched the",
-    '   file and keep what each meant to do, then commit the merge. Resolve the conflicts only; make no other',
-    '   change, run no project command, rewrite no history, and remove no worktree or branch.',
+    `   file and keep what each meant to do, then commit the merge with \`git -C ${dir} ${id}commit --no-edit\`.`,
+    '   Resolve the conflicts only; make no other change, run no project command, rewrite no history, and remove',
+    '   no worktree or branch.',
     `3. If you cannot resolve it, run git -C ${dir} merge --abort so the checkout is clean, and return status`,
     '   failed saying why.',
     '',
