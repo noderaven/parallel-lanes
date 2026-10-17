@@ -45,7 +45,7 @@ function install(configDir, args = [], env = {}) {
 }
 
 // The tools install.sh and find-python start, found on the real PATH.
-const TOOLS = ['bash', 'cat', 'chmod', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
+const TOOLS = ['bash', 'cat', 'chmod', 'cmp', 'cp', 'date', 'dirname', 'git', 'head', 'jq', 'ls', 'mkdir',
   'mktemp', 'mv', 'rm', 'sed', 'tar', 'tr', 'uname'];
 const which = (name) => spawnSync(BASH, ['-c', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
 
