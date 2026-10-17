@@ -753,6 +753,33 @@ test('startCommand ignores inherited consumes_extra entries', async () => {
 
 // ---- 1.6.0 check policy fields (spec 4.1, 4.5, 4.8) ----
 
+// External review F2 (2026-10-17): task-checks treats a folder entry as
+// covering the paths under it, so two lanes claiming src/ and src/x.js may
+// both change src/x.js; validation compared exact strings.
+test('a folder in one lane and a path under it in another is a claim by two lanes', () => {
+  for (const [folder, file] of [['src/', 'src/a/x.js'], ['src', 'src/x.js'], ['./SRC/', 'src/x.js'], ['src/x.js', 'src/']]) {
+    const m = validManifest();
+    m.lanes[0].tasks = [task('T2', [folder])];
+    m.lanes[1].tasks = [task('T3', [file])];
+    assertError(validateManifest(m), 'claimed by lanes alpha and beta', `${folder} and ${file}`);
+  }
+  // A sibling that only shares a prefix, and a folder and file in one lane, are fine.
+  const sibling = validManifest();
+  sibling.lanes[0].tasks = [task('T2', ['src/'])];
+  sibling.lanes[1].tasks = [task('T3', ['src2/x.js'])];
+  assert.deepEqual(validateManifest(sibling), []);
+  const one = validManifest();
+  one.lanes[0].tasks = [task('T2', ['src/']), task('T5', ['src/x.js'])];
+  one.lanes[1].tasks = [task('T3', ['lib/y.js'])];
+  assert.deepEqual(validateManifest(one), []);
+  // A deliberate overlap on the file covers the pair.
+  const declared = validManifest();
+  declared.lanes[0].tasks = [task('T2', ['src/'])];
+  declared.lanes[1].tasks = [task('T3', ['src/x.js'])];
+  declared.overlaps = [{ file: 'src/x.js', tasks: ['T2', 'T3'], reason: 'both edit it', merge_owner: 'T3' }];
+  assert.deepEqual(validateManifest(declared), []);
+});
+
 test('task_checks accepts task ids with test and inherits lint and build', () => {
   const m = { ...validManifest(), task_checks: { T2: { test: ['node --test tests/a.test.mjs'] } } };
   assert.deepEqual(validateManifest(m), []);

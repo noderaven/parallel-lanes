@@ -134,6 +134,19 @@ test('unitBranch names the unit branch', () => {
   assert.equal(unitBranch(manifest(), { id: 'J2-J3' }), 'pl-run-1-u-J2-J3');
 });
 
+// External review F2: the owner map names the task whose folder holds a
+// path, as it names the task listing the path itself.
+test('_owners.first_owner finds the task whose folder holds the path', () => {
+  const m = { lanes: [{ id: 'a', tasks: [{ id: 'T1', files: ['src/'] }] }, { id: 'b', tasks: [{ id: 'T2', files: ['docs/x.md'] }] }],
+    join: [] };
+  const got = python([
+    'import _owners',
+    'o = _owners.build(json.load(sys.stdin))',
+    'print(json.dumps([_owners.first_owner(o, ["T2"], p)[0] for p in ["src/a/b.js", "SRC/c.js", "src2/d.js", "docs/x.md"]]))',
+  ], m);
+  assert.deepEqual(got, ['T1', 'T1', null, null]);
+});
+
 test('_waves.task_waves and join_units', () => {
   const d1a = CASES.find((c) => c.name === 'd1a');
   const got = python(['tasks = json.load(sys.stdin)', 'print(json.dumps(_waves.task_waves(tasks)))'], d1a.units);
