@@ -733,7 +733,11 @@ raised it).
   since the final re-review must follow it), or the agents unavailable, the run makes no call
   and records `final.start_check` as `unavailable` with `why: 'budget'`, and nothing else
   changes; `repairReserve` is unchanged, since the start check runs before repair
-  admission and its agent is already counted.
+  admission and its agent is already counted. From 1.6.10 it is an advisory call: it runs once,
+  with no retry and no availability probe, and when no agent is free it is not run and sets no
+  refusal latch. A start check that returns nothing is `unavailable` (`why: 'no result'`), and
+  the run goes on to its acceptance; before 1.6.10 its refused retry could stop the run on
+  `budget`.
 - Agents unavailable (see "Usage limit") uses the same refusal path: once the availability
   probe found no agent answering, every later spawn is refused, `verify` included (a refused
   verify is never stored as evidence), and the run stops with reason `agents_unavailable`

@@ -1292,7 +1292,8 @@ async function runAll(manifest, io) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
     const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
-      { model: 'haiku', effort: 'high' });
+      { model: 'haiku', effort: 'high', advisory: true });
+    if (r && r.__budget) return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     return classifyStartCheck(m, v, sha, r);
   };
   // A budget stop once every task is in: the checks still run at the

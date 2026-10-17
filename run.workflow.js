@@ -4311,9 +4311,28 @@ function makeIo(m, baseIo, state) {
     }
     return again;
   };
+  // An advisory call (opts.advisory: the start check) runs once: no retry and
+  // no availability probe, and with no agent free it is not run and sets no
+  // refusal latch, so it can never change how the run ends (external review
+  // F5). Its answer, a refusal sentinel, or null on an error, goes back.
+  const advisoryCall = async (prompt, opts) => {
+    const { advisory, ...rest } = opts;
+    if (state.unavailable || state.refused.length > 0 || state.agents >= limits.max_agents) {
+      baseIo.log(`parallel-lanes: ${rest.label} was not run: no agent free (it is advisory; the run goes on)`);
+      return state.unavailable ? { __budget: true, __unavailable: true } : { __budget: true };
+    }
+    const agentType = state.untyped ? null : agentTypeFor(m, rest.label);
+    try {
+      return await spawn(prompt, agentType === null ? rest : { ...rest, agentType });
+    } catch (e) {
+      baseIo.log(`parallel-lanes: ${rest.label} failed (${e && e.message ? e.message : String(e)}); it is advisory`);
+      return null;
+    }
+  };
   return {
     ...baseIo,
     agent: async (prompt, opts) => {
+      if (opts && opts.advisory) return advisoryCall(prompt, opts);
       // Every null result has been retried once: a null here is a dead pair.
       const r = await call(prompt, opts);
       if (r !== null && r !== undefined) return r;
@@ -6706,7 +6725,8 @@ async function runAll(manifest, io) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
     const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(),
-      { model: 'haiku', effort: 'high' });
+      { model: 'haiku', effort: 'high', advisory: true });
+    if (r && r.__budget) return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     return classifyStartCheck(m, v, sha, r);
   };
   // A budget stop once every task is in: the checks still run at the
