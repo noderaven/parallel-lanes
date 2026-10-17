@@ -618,7 +618,7 @@ function validateManifest(m) {
             none = false;
           }
           if (none) {
-            err(`${where}: the task's ${lane === null ? 'project' : `lane ${lane}`} has no test, lint or build command, `
+            err(`${where}: ${lane === null ? 'the project' : `the task's lane ${lane}`} has no test, lint or build command, `
               + 'so the run would never run these task checks; add those commands, or remove the entry');
           }
         }
