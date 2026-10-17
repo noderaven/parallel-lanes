@@ -157,10 +157,10 @@ resolver's lane merges, the resolved-merge commits (`git -C <dir> -c ... commit 
 the integrate prompt, the lane resolver and the wave resolver, the wave resolver's merge, the
 supervised conflict stop's by-hand commands, and the wave merge (merge-wave's `--git-config`,
 one per pair). Each pair is shell-quoted in a prompt and one argv item in merge-wave. With
-none, these use the user's git config, as before 1.6.7. Agents' own commits keep following `commit_rules`. Only name and email
-are carried: other `-c` options in the commit rules (a signing key, an editor) do not reach the
-scripted merges. A manifest whose setup ran under 1.6.6 has no `git_identity` (read as `[]`);
-setup reruns on a resume or relaunch and adds it.
+none, these use the user's git config, as before 1.6.7. Agents' own commits keep following
+`commit_rules`. Only name and email are carried: other `-c` options in the commit rules (a
+signing key, an editor) do not reach the scripted merges. A manifest whose setup ran under
+1.6.6 has no `git_identity` (read as `[]`); setup reruns on a resume or relaunch and adds it.
 
 A repository with SHA-256 object names (`git rev-parse --show-object-format` prints `sha256`) is
 not supported: the run names commits by 40-hex SHA-1 ids. `scripts/setup` refuses it (exit 3,
@@ -209,9 +209,10 @@ unit out (`join <name>: the merge left out <ids>`). A refused merge needs the us
 a hook, a held lock), then Resume. A missing wave or recovery merge result reads exactly `no
 result from <name> merge`, so it is transient like any other missing result. The causes are
 every `stopped_lanes[].reason` when `reason` is `prelude stopped`, `lanes stopped`, `join
-stopped`, or `agents_unavailable`, else `reason` itself. A cause is transient only if it starts with `no result from`, `error:`, or `setup failed`, or
-reads `integration failed: no result from ...` or `post-integrate failed: no result from ...`,
-and, under `agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
+stopped`, or `agents_unavailable`, else `reason` itself. A cause is transient only if it
+starts with `no result from`, `error:`, or `setup failed`, or reads `integration failed: no
+result from ...` or `post-integrate failed: no result from ...`, and, under
+`agents_unavailable` only, if it starts with `agents unavailable:` (a lane whose
 agent the latch refused). So `agents_unavailable` is transient only when every other cause is
 transient too: a lane already stopped at `review_rounds`, a supervised question and the like
 keep their own cause, the stop is real, and Resume step 4 applies. A stop with
@@ -409,12 +410,13 @@ worktrees, when no wave has two units, and when the join started in an earlier l
   (`--known`, `in_history`) which of the other such units an earlier launch already merged; the
   rest of the join runs serially on the feature checkout from that tip. A merged unit whose
   approval went stale is reviewed again over its recorded range without moving the tip. A unit
-  that ran on its own branch, is not done and reviewed, and is not in the history starts again from the tip
-  (`start-task --restart`: the ledger drops its earlier attempt), told its branch and abandoned
-  refs to reuse. Any other unit starts from its latest `started` base (`start_bases`), else the
-  tip. A unit branch an earlier launch left that is not built on the wave's base is saved under
-  the abandoned refs and made again (`start-task` prints `recreated`). Integration's history audit allows the
-  merge, resolver and wave checks fix commits, and final-fix commits after `join_tip`.
+  that ran on its own branch, is not done and reviewed, and is not in the history starts again
+  from the tip (`start-task --restart`: the ledger drops its earlier attempt), told its branch
+  and abandoned refs to reuse. Any other unit starts from its latest `started` base
+  (`start_bases`), else the tip. A unit branch an earlier launch left that is not built on the
+  wave's base is saved under the abandoned refs and made again (`start-task` prints
+  `recreated`). Integration's history audit allows the merge, resolver and wave checks fix
+  commits, and final-fix commits after `join_tip`.
 - `run-checks --phase NAME` (and `task-checks --phase`) sets `PL_PHASE=NAME` (prelude, lane,
   join, integrate, post-integrate, final-fix, verify) for every check; without it `PL_PHASE` is
   removed. A project's check script may read it: a join unit runs in a lane worktree. Task prompts
