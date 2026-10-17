@@ -56,6 +56,8 @@ function agentRules() {
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
       'an Edit or Write on a file not read first, or changed since, fails and costs a retry. ' +
       'Read it with the Read tool: output of grep, sed or cat through Bash does not count.',
+    'Put any scratch file or copy (redirected test output, helper scripts) in your own folder made with mktemp -d,' +
+      " outside the checkout, the project and the session's scratchpad, and remove it when done: agents running at the same time share that scratchpad.",
   ].join('\n');
 }
 

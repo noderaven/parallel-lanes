@@ -237,6 +237,17 @@ test('the fix fallback is not the implement fallback', () => {
 
 // ---- 1.6.6: agents write long files with Edit and Write (spec 4.6)
 
+// r168: seven implementers wrote red.txt and green.txt in the session's
+// scratchpad, and two of them overwrote each other's file within a minute.
+const SCRATCH_RULE = 'Put any scratch file or copy (redirected test output, helper scripts) in your own folder made with mktemp -d, outside the checkout, the project and the session\'s scratchpad, and remove it when done: agents running at the same time share that scratchpad.';
+
+test('every prompt keeps scratch files in its own mktemp -d folder, once', () => {
+  for (const [name, p] of Object.entries(everyPrompt())) {
+    assert.equal(p.split('\n').filter((l) => l === SCRATCH_RULE).length, 1, `${name}: ${p}`);
+  }
+  assert.ok(agentRules().split('\n').includes(SCRATCH_RULE), agentRules());
+});
+
 test('agentRules names the Bash command limit and how to add to a file', () => {
   const text = flat(agentRules());
   assert.ok(text.includes('7,000 characters'), text);

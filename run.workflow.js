@@ -71,6 +71,8 @@ function agentRules() {
     'Read a file right before you edit or overwrite it (and again after anything else may have changed it): ' +
       'an Edit or Write on a file not read first, or changed since, fails and costs a retry. ' +
       'Read it with the Read tool: output of grep, sed or cat through Bash does not count.',
+    'Put any scratch file or copy (redirected test output, helper scripts) in your own folder made with mktemp -d,' +
+      " outside the checkout, the project and the session's scratchpad, and remove it when done: agents running at the same time share that scratchpad.",
   ].join('\n');
 }
 
@@ -3429,8 +3431,6 @@ function finalReviewFrame(m, intro, focus, minors = [], other = false) {
     ...fixMessagesLines(),
     'Run only the focused checks a finding needs; do not run the full project commands.'
       + (finalChecks(m).length > 0 ? ' Verify runs every check at the delivered revision after the review.' : ''),
-    'Put any scratch copy or file in your own folder made with mktemp -d, outside the checkout,'
-      + " the project and the session's scratchpad, and remove it when done.",
     phaseRules(m),
     '',
     'Return findings = [{severity ("critical", "important", or "minor"), file, line (0 when no single line',
