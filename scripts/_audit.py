@@ -189,9 +189,12 @@ def _counts(audit):
     open_work = run["open_work"]
     final = open_work.get("final")
     findings = final["value"]["findings"] if _is_ref(final) and isinstance(final.get("value"), dict) else []
+    recorded = run["launches"].get("recorded")
+    recorded = recorded.get("value") if _is_ref(recorded) and isinstance(recorded.get("value"), dict) else None
     return {
         "verdict": run["acceptance"]["verdict"].get("value"),
         "launches": len(launches),
+        "recorded": recorded["recorded"] if recorded is not None else None,
         "latest": run["launches"].get("latest"),
         "order": run["launches"].get("order"),
         "tasks": len(tasks),
@@ -211,10 +214,13 @@ def _counts(audit):
 def _summary_lines(audit):
     c = _counts(audit)
     lines = ["audit of run %s: verdict %s" % (audit.get("run_id") or "unknown", _scalar(c["verdict"]))]
+    count = "%d" % c["launches"]
+    if c["recorded"] is not None and c["recorded"] > c["launches"]:
+        count = "%d archived, %d recorded" % (c["launches"], c["recorded"])
     if c["latest"] is not None:
-        lines.append("launches: %d, latest %s" % (c["launches"], c["latest"]))
+        lines.append("launches: %s, latest %s" % (count, c["latest"]))
     else:
-        lines.append("launches: %d, latest unknown (%s)" % (c["launches"], c["order"]))
+        lines.append("launches: %s, latest unknown (%s)" % (count, c["order"]))
     lines.append("tasks: %d; committed %d, reviewed %d, verified %d, accepted %d"
                  % (c["tasks"], c["committed"], c["reviewed"], c["verified"], c["accepted"]))
     if c["outside"] is None:
@@ -297,6 +303,14 @@ def _md_launches(launches, out):
                 out += _quote("reason", e["reason"], "  ")
             for gap in e.get("layout") or []:
                 out.append(_ref("layout", gap, "  "))
+    recorded = launches.get("recorded")
+    if _is_ref(recorded):
+        value = recorded.get("value")
+        text = ("%d recorded, %d archived" % (value["recorded"], value["archived"])
+                if isinstance(value, dict) else None)
+        out.append(_ref("launches the ledger records", recorded, value=text))
+    for gap in launches.get("missing") or []:
+        out.append(_ref("missing launch", gap))
     out.append("")
 
 

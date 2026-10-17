@@ -262,8 +262,13 @@ test('engine version unavailable without a report', () => {
 
 test('usage errors and unreadable inputs exit 2', () => {
   const r = makeRun();
-  assert.equal(archive(r.manifest, [], r.hist).code, 2);
+  // A manifest alone needs --notes (for a run already archived).
+  const alone = archive(r.manifest, [], r.hist);
+  assert.equal(alone.code, 2);
+  assert.match(alone.stderr, /at least one transcript dir are needed, or --notes for a run already archived/);
+  assert.match(alone.stderr, /--ledger DIR/);
   assert.equal(archive(join(r.run, 'missing.lanes.json'), [r.wf1], r.hist).code, 2);
+  assert.equal(archive(r.manifest, [r.wf1, '--bogus'], r.hist).code, 2);
   assert.equal(archive(r.manifest, [join(r.root, 's', 'wf_9')], r.hist).code, 2);
   // An unreadable index is reported, not replaced.
   mkdirSync(r.hist, { recursive: true });

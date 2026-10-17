@@ -59,13 +59,14 @@ VERSION = 1
 
 # The keys of an index entry. folder is relative to the history dir; project
 # is repo.root, or the shadow's project root; platform is sys.platform;
-# first_launch and last_launch are ISO 8601 UTC.
+# first_launch and last_launch are ISO 8601 UTC; launches_recorded is the
+# launch count the run's ledger recorded (_launches), or "unavailable".
 ENTRY_KEYS = (
     "run_id", "folder", "ledger_dir",
     "project", "plan", "engine_version",
     "machine", "platform",
     "first_launch", "last_launch",
-    "launches", "status", "acceptance",
+    "launches", "launches_recorded", "status", "acceptance",
 )
 
 # How often index_lock retries while another process holds the lock.
