@@ -34,7 +34,7 @@
 // attempt; with it, a failing verify after a fix that returned done with a
 // sha head goes to runRepairs before the re-review, which then covers the
 // repairs too. final.repairs lists them ([] when none). startCheckAt(verify,
-// sha) (1.6.8 spec 4.4, supervised runs too): called right after that
+// sha, room) (1.6.8 spec 4.4, supervised runs too): called right after that
 // verify, before any repair; a non-null result is final.start_check, and
 // when every failing command fails at the start point no repair runs.
 async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, taskMinors = [], repair = null,
@@ -117,9 +117,10 @@ async function runFinalReview(m, e2e, base, io, carried = [], verifyAt = null, t
   // The checks at the delivered head, before the re-review (spec: no
   // repeated checks at one commit).
   if (verifyAt !== null && fixRan) final.verify = await verifyAt(final.head);
-  // A failing verify there gets the start check before any repair.
+  // A failing verify there gets the start check before any repair, only
+  // with room for it and the re-review that must follow (room 2).
   if (startCheckAt !== null && final.verify) {
-    const sc = await startCheckAt(final.verify, final.head);
+    const sc = await startCheckAt(final.verify, final.head, 2);
     if (sc !== null) final.start_check = sc;
   }
   const allFailAtStart = Boolean(final.start_check && final.start_check.all_fail);
@@ -497,8 +498,11 @@ function preflightUndeclared(m, entries) {
 // order gives it to such a task. Two tasks can run at the same time when they
 // are in different lanes, or are join tasks of different units of one wave of
 // waves (the join's waves after wave_moves; null when the join runs one unit
-// at a time). Prelude tasks never run beside another task.
-function preflightPermits(m, permits, rulings, waves) {
+// at a time). Prelude tasks never run beside another task. log (optional)
+// gets one line per dropped file: 'dropped the permit of <task> for <file>
+// (<why>)', or, for an entry with no string task, 'dropped permit entry
+// <the entry as JSON> (<why>)'.
+function preflightPermits(m, permits, rulings, waves, log = null) {
   const all = [...m.prelude, ...m.lanes.flatMap((l) => l.tasks), ...m.join];
   const runnable = new Set(all.filter((t) => taskState(m, t.id) !== 'skip').map((t) => t.id));
   const laneOf = new Map();
@@ -531,7 +535,12 @@ function preflightPermits(m, permits, rulings, waves) {
     const taskId = shaped && typeof p.task === 'string' ? p.task : null;
     const listed = shaped && Array.isArray(p.files);
     const files = listed ? p.files : [shaped && p.files !== undefined ? p.files : null];
-    const drop = (file, why) => dropped.push({ task: taskId, file, why });
+    const drop = (file, why) => {
+      dropped.push({ task: taskId, file, why });
+      if (log === null) return;
+      log(taskId === null ? `dropped permit entry ${String(JSON.stringify(p))} (${why})`
+        : `dropped the permit of ${taskId} for ${file} (${why})`);
+    };
     if (taskId === null || !runnable.has(taskId)) {
       for (const f of files) drop(f, 'not a task of this launch');
       continue;
@@ -871,13 +880,12 @@ async function runAll(manifest, io) {
     }
     // Permits (spec 4.6) are judged against the waves after the moves; a
     // result without permits has none.
+    // A dropped entry with no string task is logged as given (JSON).
     const permits = preflightPermits(m, pre.permits, pre.rulings,
-      shown.mode === 'waves' ? wavePlan(m, waveEdges).waves : null);
+      shown.mode === 'waves' ? wavePlan(m, waveEdges).waves : null,
+      (line) => io.log(`parallel-lanes: pre-flight: ${line}`));
     preflight.permits = permits.kept;
     preflight.permits_dropped = permits.dropped;
-    for (const d of permits.dropped) {
-      io.log(`parallel-lanes: pre-flight: dropped the permit of ${d.task} for ${d.file} (${d.why})`);
-    }
     m = withConsumesExtra(m, kept);
     // Pre-flight's rulings bind every task and final reviewer of this run
     // (taskContext and the final review prompts show m.run_rulings); its
@@ -1269,14 +1277,16 @@ async function runAll(manifest, io) {
   const repair = autonomous ? { admit, first: spent + 1 } : null;
   // The start check after a failing verify (1.6.8 spec 4.4): at most once
   // per launch, only when startCheckDue, and an ordinary agent call (not
-  // overBudget). With no agent free, or the agents unavailable, it records
-  // unavailable for the budget without a call, so nothing is refused.
+  // overBudget). With fewer than `room` agents free (1, or 2 inside the
+  // final review, whose re-review must follow it), or the agents
+  // unavailable, it records unavailable for the budget without a call, so
+  // the advisory check never refuses a later call.
   // Returns the classified start check, or null when none was due.
   let startChecked = false;
-  const startCheckAt = async (v, sha) => {
+  const startCheckAt = async (v, sha, room = 1) => {
     if (startChecked || !startCheckDue(m, v, sha)) return null;
     startChecked = true;
-    if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < 1) {
+    if (state.refused.length > 0 || state.unavailable || effectiveLimits(m).max_agents - state.agents < room) {
       return { ...classifyStartCheck(m, v, sha, null), why: 'budget' };
     }
     const r = await callM('start check', 'Verify', startCheckPrompt(m, v, sha), startCheckSchema(), sonnetHigh);

@@ -805,6 +805,21 @@ test('no room for the start check: unavailable and no call', async () => {
   assert.deepEqual(kinds(result), ['checks_failed']);
 });
 
+test('one agent left after a final fix: the re-review gets it, not the start check', async () => {
+  // 13 agents up to the lenses, the final fix and its verify: one left.
+  const m = started({ limits: { review_rounds: 5, max_parallel_lanes: 3, max_agents: 16 } });
+  const { result, calls } = await run(m, {
+    ...withFix({ verify: [verified(H('f1'), 1)], 'final re-review': [resolved(H('f1'))] }),
+    'start check': [passesAtStart()], ...taskScript(ALL),
+  });
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason));
+  assert.ok(!labels(calls).includes('start check'), `${labels(calls)}`);
+  assert.ok(labels(calls).includes('final re-review'), `${labels(calls)}`);
+  assert.equal(result.final.start_check.status, 'unavailable');
+  assert.equal(result.final.start_check.why, 'budget');
+  assert.deepEqual(kinds(result), ['checks_failed']);
+});
+
 // The engine's guards (spec 4.4 "The engine classifies").
 test('classifyStartCheck: each guard gives the expected at_start', () => {
   const m = started();

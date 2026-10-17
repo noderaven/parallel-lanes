@@ -541,6 +541,27 @@ test('an earlier-producer finding moves the unit to a later wave and is reported
   assert.ok(callOf(calls, 'J3 implement').prompt.includes("cd '/work/repo'"), 'J3 runs alone, on the feature checkout');
 });
 
+test('pre-flight permits are judged against the waves after the moves', async () => {
+  // Waves [J1, J3], [J2]; the code dependency moves J3 to wave 2, beside J2,
+  // so a permit giving J3 a file J2 declares is dropped (before the move J3
+  // and J2 never ran at the same time, and the permit would stand).
+  const m = manifest({ join: [task('J1', []), task('J2', ['J1']), task('J3', [])] });
+  const { result } = await run(m, script(H('M2'), {
+    'pre-flight': [{ conflicts: [], rulings: ['Ruling: J3 may change src/J2.js - it shares a helper - none'],
+      undeclared: [], code_deps: [{ task: 'J3', producer: 'J1', what: 'calls it' }],
+      permits: [{ task: 'J3', files: ['src/J2.js'], ruling: 0 }] }],
+    'J2 implement': [done(H('J1'), H('J2'))],
+    'J3 implement': [done(H('J1'), H('J3'))],
+    'wave 1 merge': [],
+    'wave 2 merge': [merged(H('M2'), { merged: ['J2', 'J3'] })],
+  }));
+  assert.equal(result.status, 'complete', JSON.stringify(result.reason || result.errors));
+  assert.deepEqual(result.preflight.wave_moves, [{ unit: 'J3', from: 1, to: 2, producer: 'J1' }]);
+  assert.deepEqual(result.preflight.permits, []);
+  assert.deepEqual(result.preflight.permits_dropped,
+    [{ task: 'J3', file: 'src/J2.js', why: 'declared by J2, which can run at the same time' }]);
+});
+
 test('a later-producer code dependency is still a schedule conflict', async () => {
   const { result } = await run(manifest(), script(H('J3'), {
     'pre-flight': [{ conflicts: [], rulings: [], undeclared: [], code_deps: [{ task: 'J1', producer: 'J2', what: 'calls it' }] }],

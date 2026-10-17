@@ -639,7 +639,13 @@ that leaves the project permits nothing; a ruling another overrides permits noth
 launch task-checks counts such a path as declared and lists it in `policy.permitted` with the
 ledger's ruling id (for example `_run-R2`, since `PF-n` numbers restart every launch); only a
 `--permit` of this launch shows `PF-n`. Implementer and reviewer rulings permit nothing, and a
-pre-flight ruling's `files` permit nothing.
+pre-flight ruling's `files` permit nothing. A known gap: the engine checks a new pre-flight
+permit only against the Files lists and the other permits of its own launch, never against a
+carried one (the relaunch's pre-flight is told only that carried permits exist, and `ledger
+rulings` does not print them). So a carried permit for a task still to run and a new permit for
+the same undeclared file to a task that can run at the same time (another lane, or another unit
+of its join wave) both stand, and neither task widens for that file; the task reviews and the
+final lenses still see both changes.
 
 **Outside the Files list.** Setup writes `<ledger_dir>/owners.json`: which tasks list each path,
 and where each task runs. A reviewer's scope list and `<python> <skill_dir>/scripts/ledger owners
@@ -722,9 +728,10 @@ raised it).
   not exempt like `verify`: it judges logs and may run long. The dry run lists one `start check`
   row (Verify, Sonnet high) beside `verify` whenever verify is planned, as an upper bound (it runs
   only after a failing verify, at most once per launch), so the table's agent count and the
-  `max_agents` it suggests grow by one. With no agent free, or the agents unavailable, the run
-  makes no call and records `final.start_check` as `unavailable` with `why: 'budget'`, and
-  nothing else changes; `repairReserve` is unchanged, since the start check runs before repair
+  `max_agents` it suggests grow by one. With no agent free (after a final fix: fewer than two,
+  since the final re-review must follow it), or the agents unavailable, the run makes no call
+  and records `final.start_check` as `unavailable` with `why: 'budget'`, and nothing else
+  changes; `repairReserve` is unchanged, since the start check runs before repair
   admission and its agent is already counted.
 - Agents unavailable (see "Usage limit") uses the same refusal path: once the availability
   probe found no agent answering, every later spawn is refused, `verify` included (a refused
@@ -951,7 +958,8 @@ submodule holding only untracked files is not a tracked change, as before. The t
 untracked lists are as before; `clean` is the after snapshot being empty, so it no longer
 follows a `status.showUntrackedFiles=no` setting. From 1.6.8 `--record-setup COMMAND`
 (repeatable) records the setup commands as `setup_commands` in the evidence, in order, and never
-runs them; without it the key is absent.
+runs them; `--record-setup-none` records that there were none (`setup_commands: []`); without
+either the key is absent.
 
 **Reuse** (1.6.8). A resumed integration need not rerun a check an earlier launch passed at the
 same head. The integrate agent always runs the setup commands first (later phases rely on them in
@@ -968,7 +976,8 @@ the `--setup` list. It prints `{reuse: true, file}` (exit 0) or `{reuse: false, 
 the why names the newest file and the first rule it fails); exit 2 is a usage error. On exit 0
 the agent skips the run-checks call, returns `checks_reused` (the file) and says so in its notes;
 otherwise it runs the checks as before. Its run-checks call passes `--record-setup` for each
-setup command, so a later resume can reuse that evidence. Evidence without
+setup command (`--record-setup-none` when there are none), so a later resume can reuse that
+evidence. Evidence without
 `setup_commands` (1.6.7 and earlier) is never reused. Verify, wave checks, task checks and
 post-integrate checks are never reused.
 
@@ -1281,7 +1290,9 @@ Fields added in 1.6.8, all additive (a reader treats a missing key as null or `[
   verify_head, commands: [{verify_command, start_command, narrowed, exit_at_start,
   failed_at_head, failed_at_start, not_run, at_start}], all_fail, some_fail, notes}`, with
   `at_start` one of `fails`, `passes`, `partly`, `unknown`; `status` is `checked` or
-  `unavailable` (`why` says which refusal or problem, `budget` when no agent was free).
+  `unavailable` (`why` says which refusal or problem, `budget` when no agent was free); `why`
+  also appears on a `checked` result whose start sha or evidence path is wrong (every command
+  is then `unknown`).
 - `integrate.checks_reused`: the integrate evidence file a resumed integration reused (see
   "Reuse" in Check ownership), else null.
 - `preflight.permits` (`[{task, files, ruling}]`, the kept ones) and `preflight.permits_dropped`
@@ -1730,8 +1741,8 @@ A call needs at least one transcript dir, or `--notes` for a run already in the 
   even when the live file differs. Otherwise the first source with that sha is written: the live
   file, then, for a file inside the repo, its blob at each recorded setup head from the latest
   back, as git stores it (`git show <head>:<path>`) and with the checkout filters (`git cat-file
-  --filters`, so a CRLF checkout matches), the path looked up in git without case (`git ls-tree`),
-  with `--git-dir` in shadow mode. When no source has the sha, an archived copy is kept and,
+  --filters`, so a CRLF checkout matches), the path looked up in git without case (`git ls-tree`)
+  only when git does not hold it as given, with `--git-dir` in shadow mode. When no source has the sha, an archived copy is kept and,
   without one, the live file is copied, with a `plan_unpinned` or `spec_unpinned` warning naming
   the recorded sha (the audit then reports the mismatch as a gap). A ledger with no recorded sha
   (before `plan_sha256`) never replaces an archived copy; without one the live file is copied. A

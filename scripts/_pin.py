@@ -36,8 +36,9 @@ The rules (spec 4.1):
      head once), 'git show <head>:<path>' and 'git cat-file --filters
      <head>:<path>' (the bytes a checkout writes, so a CRLF checkout
      matches). <path> is the live path relative to repo_root as git stores
-     it at that head: the name from 'git ls-tree -r --name-only -z <head>'
-     equal to it, else one equal to it compared without case. A live path
+     it at that head: the path itself when git holds it there, else the
+     first name from 'git ls-tree -r --name-only -z <head>' equal to it
+     compared without case (the tree is listed only then). A live path
      outside repo_root has no git source.
   4. No source has the sha: an archived copy is kept; without one the live
      file is copied (nothing when it is missing). Either way: the warning.
@@ -127,7 +128,8 @@ def repo_path(live, repo_root):
 
 def stored_path(git_cmd, head, rel):
     """The path git stores at head for rel: the equal name, else the first
-    equal without case; None when git holds neither."""
+    equal without case; None when git holds neither. It lists the whole
+    tree, so git_sources calls it only when rel itself is missing at head."""
     out = git_bytes(git_cmd, ["ls-tree", "-r", "--name-only", "-z", head])
     if out is None:
         return None
@@ -151,17 +153,30 @@ def heads_from_last(recorded):
     return out
 
 
+def blob_sources(git_cmd, head, path):
+    """The bytes 'git show <head>:<path>' and 'git cat-file --filters
+    <head>:<path>' give, each that succeeds, in that order."""
+    out = []
+    spec = head + ":" + path
+    for args in (["show", spec], ["cat-file", "--filters", spec]):
+        data = git_bytes(git_cmd, args)
+        if data is not None:
+            out.append(data)
+    return out
+
+
 def git_sources(git_cmd, recorded, rel):
-    """Yields the bytes of each git source of rel, in rule 3's order."""
+    """Yields the bytes of each git source of rel, in rule 3's order: the
+    exact path first; the tree is listed only when git holds no rel at a
+    head."""
     for head in heads_from_last(recorded):
-        path = stored_path(git_cmd, head, rel)
-        if path is None:
-            continue
-        spec = head + ":" + path
-        for args in (["show", spec], ["cat-file", "--filters", spec]):
-            data = git_bytes(git_cmd, args)
-            if data is not None:
-                yield data
+        found = blob_sources(git_cmd, head, rel)
+        if not found:
+            path = stored_path(git_cmd, head, rel)
+            if path is not None and path != rel:
+                found = blob_sources(git_cmd, head, path)
+        for data in found:
+            yield data
 
 
 def result(action, source=None, state=None, warning=None):

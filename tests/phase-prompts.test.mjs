@@ -219,12 +219,14 @@ test('the integrate prompt runs setup, then reuse-checks only when its merges ma
     assert.ok(text.indexOf(flat(reuse)) < text.indexOf(flat(line)), 'reuse is tried before the run-checks call');
     assert.ok(text.includes('checks_reused (the file reuse-checks printed when you reused its checks, else null)'), text);
   }
-  // No setup commands: no --setup and no --record-setup.
+  // No setup commands: no --setup, and the run-checks call records that
+  // there were none (setup_commands: []), so reuse-checks can match it.
   const bare = manifest({ commands: { setup: [], test: ['npm test'], lint: [], build: [] } });
   const p = integratePrompt(bare, H('pre'));
   const reuse = p.split('\n').find((l) => l.includes("/scripts/reuse-checks' "));
   assert.ok(!reuse.includes('--setup'), reuse);
-  assert.ok(!runChecksLines(p)[0].includes('--record-setup'), p);
+  assert.ok(runChecksLines(p)[0].includes(' --record-setup-none '), p);
+  assert.ok(!runChecksLines(p)[0].includes('--record-setup '), p);
   // No checks at all: nothing to reuse.
   const none = integratePrompt(manifest({ commands: { setup: ['npm ci'], test: [], lint: [], build: [] } }), H('pre'));
   assert.ok(!none.includes('reuse-checks'), none);
@@ -524,6 +526,10 @@ test('the start-check prompt names its worktree, the start sha, the start phase 
   assert.ok(text.includes(`every shell command starts with cd ${wt} &&`), p);
   assert.ok(!text.includes("every shell command starts with cd '/work/repo' &&"), p);
   assert.ok(text.includes('is not failing or passing: list it in not_run'), p);
+  // The start sha is read before step 5 removes the worktree, and returned from that record.
+  const record = text.indexOf(`record the output of git -C ${wt} rev-parse HEAD`);
+  assert.ok(record >= 0 && record < text.indexOf('2. Run the setup commands'), p);
+  assert.ok(text.includes(`start_sha = the output of git -C ${wt} rev-parse HEAD you recorded in step 1`), p);
   // Shadow mode administers worktrees through the shadow git dir.
   const shadow = manifest({ start_points: { prelude: START },
     repo: { ...manifest().repo, mode: 'shadow', git_dir: '/work/shadow.git' } });

@@ -18,7 +18,7 @@ const {
   preflightPrompt, integratePrompt, resolveConflictsPrompt, postIntegrateFixPrompt, postIntegrateReReviewPrompt,
   postIntegratePrompt, e2ePrompt, finalReviewPrompt, combinedFinalReviewPrompt, finalFixPrompt, finalReReviewPrompt,
   verifyPrompt, verifyRepairPrompt, adjudicatorPrompt, declaredFingerprint, declaredFiles, startCommand, taskChecksLines,
-  shellQuote,
+  shellQuote, startCheckPrompt,
 } = await loadHelpers([
   'implementPrompt', 'reviewPrompt', 'reReviewPrompt', 'fixPrompt', 'laneChecks', 'wideChecks', 'taskChecksCommand',
   'taskEvidenceLine', 'fixMessagesLines', 'fallbackImplementer', 'fallbackFixer', 'laneWhere', 'featureWhere',
@@ -26,7 +26,7 @@ const {
   'resultPath', 'agentRules', 'preflightPrompt', 'integratePrompt', 'resolveConflictsPrompt', 'postIntegrateFixPrompt',
   'postIntegrateReReviewPrompt', 'postIntegratePrompt', 'e2ePrompt', 'finalReviewPrompt', 'combinedFinalReviewPrompt',
   'finalFixPrompt', 'finalReReviewPrompt', 'verifyPrompt', 'verifyRepairPrompt', 'adjudicatorPrompt',
-  'declaredFingerprint', 'declaredFiles', 'startCommand', 'taskChecksLines', 'shellQuote',
+  'declaredFingerprint', 'declaredFiles', 'startCommand', 'taskChecksLines', 'shellQuote', 'startCheckPrompt',
 ]);
 const fp = declaredFingerprint;
 
@@ -300,6 +300,7 @@ function everyPrompt() {
     verify: verifyPrompt(m, H('d1')),
     verifyFrom: verifyPrompt(m, H('d1'), H('d0')),
     verifyRepair: verifyRepairPrompt(m, verify, H('v1'), 1),
+    startCheck: startCheckPrompt({ ...m, start_points: { ...m.start_points, prelude: H('s0') } }, verify, H('v1')),
     adjudicator: adjudicatorPrompt(m, ctx),
   };
 }

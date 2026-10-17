@@ -81,7 +81,7 @@ this unit by, in this order:
     by ledger carry-launch) names the file for one of the --task ids, found
     by the ledger script's preflight_permits.
 ruling is the ledger's ruling id for the last two. Implementer and reviewer
-rulings permit nothing; a pre-flight ruling permits what its `permits` names
+rulings permit nothing; a pre-flight ruling permits what its 'permits' names
 for its task. When the ledger cannot be read only --permit paths are
 permitted; when the owner map cannot be read, none of _run's adjudicator
 rulings are.

@@ -189,6 +189,45 @@ test('a ledger without plan_sha256 never replaces an archived plan', () => {
   assert.deepEqual(out.warnings, []);
 });
 
+function gitAt(gitDir, ...args) {
+  const res = spawnSync('git', ['--git-dir', gitDir, ...args], { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(res.status, 0, `git ${args.join(' ')}: ${res.stderr}`);
+  return res.stdout.trim();
+}
+
+test('a shadow-mode run pins from its git dir, with paths relative to repo.root', () => {
+  // The project has no .git: its history lives in a separate git dir whose
+  // core.worktree is the project, as the shadow mode sets it up.
+  const r = makeRun();
+  const proj = join(r.root, 'shadowproj');
+  const gitDir = join(r.root, 'shadow.git');
+  mkdirSync(join(proj, 'docs'), { recursive: true });
+  writeFileSync(join(proj, 'docs', 'plan.md'), '# Plan\nin the shadow\n');
+  writeFileSync(join(proj, 'docs', 'spec.md'), '# Spec\nin the shadow\n');
+  gitAt(gitDir, 'init', '-q');
+  gitAt(gitDir, 'config', 'core.bare', 'false');
+  gitAt(gitDir, 'config', 'core.worktree', proj);
+  gitAt(gitDir, 'config', 'core.autocrlf', 'false');
+  gitAt(gitDir, '--work-tree', proj, 'add', '-A');
+  gitAt(gitDir, '--work-tree', proj, ...IDENTITY, 'commit', '-q', '-m', 'docs');
+  const head = gitAt(gitDir, 'rev-parse', 'HEAD');
+  assert.ok(!existsSync(join(proj, '.git')), 'the project holds no git dir');
+  const plan = join(proj, 'docs', 'plan.md');
+  const specFile = join(proj, 'docs', 'spec.md');
+  const planBytes = readFileSync(plan);
+  writeJson(r.manifest, { version: 1, run_id: 'x1', plan, spec: specFile,
+    repo: { mode: 'shadow', root: proj, git_dir: gitDir, ledger_dir: r.ledger } });
+  writeFileSync(join(r.ledger, '_run.jsonl'), JSON.stringify({ task: '_run', event: 'run_started', phase: 'setup',
+    head, plan_sha256: sha(planBytes), spec_sha256: sha(readFileSync(specFile)) }) + '\n');
+  // Edited after the recorded setup event: only the shadow git dir has the sha.
+  writeFileSync(plan, '# Plan\nedited after the run\n');
+  const out = archive(r);
+  assert.ok(readFileSync(join(r.folder, 'plan.md')).equals(planBytes), 'the archived plan is the shadow commit');
+  assert.ok(out.pinned.includes('plan.md'), JSON.stringify(out));
+  assert.ok(out.pinned.includes('spec.md'), JSON.stringify(out));
+  assert.deepEqual(out.warnings, []);
+});
+
 test('a spec of null pins nothing', () => {
   const r = makeRun({ spec: false });
   const out = archive(r);

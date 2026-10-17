@@ -72,7 +72,7 @@ non-empty strings, no other keys; else the error "'permits' must be a list
 of {task, files}"). The values are checked, not whether an agent told the
 truth. Implementer and reviewer rulings permit nothing; an adjudicator
 ruling in force permits its 'files' (adjudicator_permits); a pre-flight
-ruling permits what its `permits` names for its task (preflight_permits;
+ruling permits what its 'permits' names for its task (preflight_permits;
 its 'files' permit nothing). task-checks, undeclared and status --manifest
 count a permitted path as declared.
 

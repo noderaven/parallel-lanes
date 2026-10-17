@@ -126,13 +126,17 @@ function checksPhase(laneId) {
 // reserve prints. phase (1.6.5) is run-checks' --phase: the commands run
 // with PL_PHASE set to it. recordSetup (1.6.8, spec 4.7) lists setup
 // commands run-checks records in its evidence (--record-setup, in order)
-// and never runs. null for an empty list.
-function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = []) {
+// and never runs: an empty list records that there were none
+// (--record-setup-none), null (the default) records nothing. null for an
+// empty checks list.
+function runChecksCommand(m, dir, checks, out = null, phase = null, recordSetup = null) {
   if (checks.length === 0) return null;
   const parts = checks.flatMap((c) => ['--cmd', shellQuote(c.group), shellQuote(c.command)]);
   const target = out === resultPath() ? out : shellQuote(out);
   const evidence = out === null ? [] : ['--out', target, '--root', shellQuote(m.repo.ledger_dir)];
-  const setup = recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
+  const setup = recordSetup === null ? []
+    : recordSetup.length === 0 ? ['--record-setup-none']
+      : recordSetup.flatMap((s) => ['--record-setup', shellQuote(s)]);
   return [`cd ${shellQuote(dir)} && ${pythonCommand(m)} ${shellQuote(`${m.skill_dir}/scripts/run-checks`)}`, shellQuote(dir),
     ...evidence, ...(phase === null ? [] : ['--phase', shellQuote(phase)]), ...setup, ...parts].join(' ');
 }

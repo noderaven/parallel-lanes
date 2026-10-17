@@ -128,6 +128,54 @@ test('--record-setup is recorded and not run', () => {
   assert.deepEqual(recorded(record), ['integrate']);
 });
 
+test('--record-setup is recorded in the early report of a failed --descends-from, not run', () => {
+  const { dir, record } = fresh();
+  // A commit on a side branch is not an ancestor of main's HEAD.
+  git(dir, 'checkout', '-q', '-b', 'side');
+  writeFileSync(join(dir, 'b.txt'), 'b\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'side');
+  const side = git(dir, 'rev-parse', 'HEAD');
+  git(dir, 'checkout', '-q', 'main');
+  const made = join(TMP, `setup${serial}.txt`).replace(/\\/g, '/');
+  const setup = `node -e 'require("fs").writeFileSync(${JSON.stringify(made)}, "x")'`;
+  const out = join(TMP, `evidence${serial}.json`);
+  const r = runChecks(dir, ['--out', out, '--descends-from', side, '--record-setup', setup],
+    [['test', recorder(record)]]);
+  const report = JSON.parse(readFileSync(out, 'utf8'));
+  assert.deepEqual(report.descends_from, { sha: side, ok: false }, r.stdout);
+  assert.deepEqual(report.results, []);
+  assert.deepEqual(report.setup_commands, [setup]);
+  assert.deepEqual(JSON.parse(r.stdout).setup_commands, [setup]);
+  assert.equal(existsSync(made), false, 'a recorded setup command must not run');
+  assert.equal(existsSync(record), false, 'no check runs');
+});
+
+test('--record-setup-none records no setup commands, and reuse-checks with no --setup reuses it', () => {
+  const { dir, record } = fresh();
+  const ledger = join(TMP, `ledger${serial}`);
+  mkdirSync(join(ledger, 'checks'), { recursive: true });
+  const out = join(ledger, 'checks', 'integrate.1.json');
+  const cmd = recorder(record);
+  const r = runChecks(dir, ['--out', out, '--root', ledger, '--phase', 'integrate', '--record-setup-none'],
+    [['test', cmd]]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')).setup_commands, []);
+  const res = spawnSync('python3', ['-B', join(SCRIPTS, 'reuse-checks'), ledger, '--name', 'integrate',
+    '--head', git(dir, 'rev-parse', 'HEAD'), '--checkout', dir, '--cmd', 'test', cmd], { encoding: 'utf8' });
+  assert.equal(res.status, 0, `${res.stdout} ${res.stderr}`);
+  assert.equal(JSON.parse(res.stdout).reuse, true, res.stdout);
+});
+
+test('--record-setup-none beside --record-setup is a usage error', () => {
+  const { dir, record } = fresh();
+  for (const extra of [['--record-setup-none', '--record-setup', 'npm ci'], ['--record-setup', 'npm ci', '--record-setup-none']]) {
+    const r = runChecks(dir, extra, [['test', recorder(record)]]);
+    assert.equal(r.status, 2, `${extra.join(' ')}: ${r.stderr}`);
+  }
+  assert.equal(existsSync(record), false);
+});
+
 test('without --record-setup there is no setup_commands key', () => {
   const { dir, record } = fresh();
   const r = runChecks(dir, [], [['test', recorder(record)]]);

@@ -2,7 +2,8 @@
 """Run a checkout's project commands one by one and keep every exit status.
 
 usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA]
-                  [--lock-held] [--phase NAME] [--record-setup COMMAND ...]
+                  [--lock-held] [--phase NAME]
+                  [--record-setup COMMAND ... | --record-setup-none]
                   --cmd GROUP COMMAND [--cmd ...]
 
 --phase NAME (prelude, lane, join, integrate, post-integrate, final-fix,
@@ -19,7 +20,9 @@ null without it.
 records the setup commands the caller ran before this call: the JSON gains
 "setup_commands": [COMMAND, ...] in the order given; without the flag the key
 is absent. They are recorded only, never run. reuse-checks compares them, so
-a passing check is reused only after the same setup.
+a passing check is reused only after the same setup. --record-setup-none
+records that there were none ("setup_commands": []); given with
+--record-setup it is a usage error.
 
 Each COMMAND runs with bash -c in DIR (the bash _shell.find_bash resolves:
 Git Bash on Windows, never the WSL launcher), in the given order, and every
@@ -162,7 +165,8 @@ BUSY_EXIT = 75  # sysexits EX_TEMPFAIL: busy or temporary, retried once
 BUSY_WAIT_S = 60
 SHA = re.compile(r"^[0-9a-f]{7,40}$")
 USAGE = ("usage: run-checks DIR [--out FILE] [--root ROOT] [--descends-from SHA] [--lock-held] "
-         "[--phase NAME] [--record-setup COMMAND ...] --cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
+         "[--phase NAME] [--record-setup COMMAND ... | --record-setup-none] "
+         "--cmd GROUP COMMAND [--cmd GROUP COMMAND ...]")
 # The run phases a check can belong to (--phase, PL_PHASE).
 PHASES = ("prelude", "lane", "join", "integrate", "post-integrate", "final-fix", "verify", "start")
 # The PL_PHASE a phase sets when it is not the phase's own name: the start
@@ -202,6 +206,7 @@ def parse(argv):
     out = root = descends = phase = None
     lock_held = False
     cmds, setup = [], None
+    setup_none = False
     while rest:
         if rest[0] == "--cmd" and len(rest) >= 3 and rest[1] and rest[2]:
             cmds.append((rest[1], rest[2]))
@@ -209,6 +214,9 @@ def parse(argv):
         elif rest[0] == "--record-setup" and len(rest) >= 2 and rest[1]:
             setup = (setup or []) + [rest[1]]
             rest = rest[2:]
+        elif rest[0] == "--record-setup-none":
+            setup_none = True
+            rest = rest[1:]
         elif rest[0] == "--lock-held":
             lock_held = True
             rest = rest[1:]
@@ -226,6 +234,11 @@ def parse(argv):
             rest = rest[2:]
         else:
             fail(2, USAGE)
+    if setup_none:
+        # No setup commands, recorded as such: never beside a command.
+        if setup is not None:
+            fail(2, USAGE)
+        setup = []
     return directory, out, root, cmds, descends, lock_held, phase, setup
 
 

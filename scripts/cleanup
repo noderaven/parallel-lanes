@@ -674,7 +674,9 @@ def write_restore_point(repo, plan, run_folder):
     lines += [git + " fetch " + shlex.quote(bundle) + " " + shlex.quote(ref + ":" + ref) for ref in sorted(saved)]
     if not saved:
         lines.append("# no run refs existed, so there is nothing to restore")
-    lines += ["```", "", "## Worktrees", "", "Recreate a removed worktree once its branch is back:", "", "```bash"]
+    lines += ["```", "", "## Worktrees", "",
+              "Recreate a removed worktree (a lane or feature worktree once its branch is back; the start worktree"
+              " at its sha):", "", "```bash"]
     removed = [w for w in plan["worktrees"] if w["action"] == "remove"]
     lines += [git + " worktree add " + shlex.quote(w["path"]) + " " + shlex.quote(w["branch"])
               if w["branch"] is not None else
@@ -796,7 +798,8 @@ def remove_owned(repo, m, plan):
         reason = recheck_worktree(repo, w)
         if reason is not None:
             note(False, entry, reason)
-            still_out[w["branch"]] = "its worktree " + w["path"] + " " + reason
+            if w["branch"] is not None:
+                still_out[w["branch"]] = "its worktree " + w["path"] + " " + reason
             continue
         if w["branch"] is None:
             # The start worktree holds no commits: the one forced removal.

@@ -1930,6 +1930,25 @@ test('a kept permit reaches task-checks and the implementer', async () => {
   }
 });
 
+test('a dropped permit entry with no string task is logged as given', async () => {
+  const script = {
+    ...phaseScript({ 'pre-flight': [{ conflicts: [], rulings: ONE_RULING, undeclared: [], code_deps: [],
+      permits: [null, { task: 7, files: ['a.py'], ruling: 0 }] }] }),
+    ...taskScript(ALL),
+  };
+  const { result, logs } = await run(manifest(), script);
+  assert.deepEqual(result.preflight.permits_dropped, [
+    { task: null, file: null, why: 'not a task of this launch' },
+    { task: null, file: 'a.py', why: 'not a task of this launch' },
+  ]);
+  const dropped = logs.filter((l) => l.startsWith('parallel-lanes: pre-flight: dropped permit'));
+  assert.deepEqual(dropped, [
+    'parallel-lanes: pre-flight: dropped permit entry null (not a task of this launch)',
+    'parallel-lanes: pre-flight: dropped permit entry {"task":7,"files":["a.py"],"ruling":0} (not a task of this launch)',
+  ], JSON.stringify(logs));
+  assert.ok(!logs.some((l) => l.includes('the permit of null')), JSON.stringify(logs));
+});
+
 test('the pre-flight prompt asks for permits with a ruling that adds a file; the schema does not require them', () => {
   const p = preflightPrompt(manifest()).replace(/\s+/g, ' ');
   assert.ok(p.includes('When a ruling has a task change a file outside its Files list, also return it in permits as'
