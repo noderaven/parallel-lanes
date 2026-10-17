@@ -79,7 +79,7 @@ PATH, else `C:/Program Files/Git`), never the WSL `bash.exe` in System32.
 | `commands` | `setup`, `test`, `lint`, `build`: lists of shell commands run from a checkout. Take them from the plan's conventions, then the project (package.json scripts, pyproject, Makefile). Use `[]` for a group the project lacks. |
 | `lane_commands` | Optional `{<lane id>: {setup?, test?, lint?, build?}}` overrides for lanes that need only a subset (e.g. backend lanes skip the frontend suite). They are the lane's own checks: integration and verify run every distinct one, so a narrower run of a project check belongs in `task_checks`, not here. |
 | `task_checks` | Optional `{<task id>: {test, lint?, build?}}`: the targeted checks a task runs once before committing (see Check ownership). `test` is required and names at least one command; an absent `lint` or `build` inherits the lane's. A batch uses its last task's entry. Every command must be a narrower run of a check the delivery inventory already runs, in the same checkout and environment; must run correctly at the task that uses it (list the lane's test files created or changed by that task and the lane's earlier tasks, cumulatively, so no entry names a file a later task creates); must fail when it selects no tests (name existing test files; a filter that passes on zero matches needs a wrapper that fails); and keeps an explicit worker limit like the project's test command (for example `node --test --test-concurrency=4 ...`). Derive the entries from the briefs' test files and commands; a task you cannot map gets no entry and runs its lane's checks. Never part of the delivery inventory. |
-| `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory; an existing directory named without it counts as one too) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Take them from the plan's shared files; no absolute path or `..`. |
+| `widen_paths` | Optional list of project-relative paths (a trailing `/` marks a directory; an existing directory named without it counts as one too) of shared infrastructure: test harness and helpers, package and lock files, build and CI config, modules many lanes import. A task whose change touches one runs project-wide checks instead of its targeted ones. Name the files every check runs through (wrappers, shared fixtures, settings), not a folder that also holds tools and tests; name a folder only when everything under it is shared (`Packages/`, `ProjectSettings/`). For example, run f2a listed `Tools/Unity/` for the Unity batch wrappers in it: units RP2 and RB4 declared other files under it (`Tools/Unity/tests/__init__.py`) and widened to every Unity suite, 72 minutes on the critical path (32% of the run) that found nothing; the wrapper files themselves were the entries it needed. The dry run lists every unit that will widen (`checks.widening`, see Confirmation header). Take them from the plan's shared files; no absolute path or `..`. |
 | `repairs_spent` | Optional integer, default 0: repairs after a failing verify that earlier launches of this run made (the sum of `final.repairs` lengths in their reports; a report without `final` made none). Set it on a transient relaunch or a resume, like the budget carry-over; a run allows 2 in all (see Check ownership). |
 | `prelude` | Tasks run first on the feature branch, before lanes. |
 | `lanes` | `[{id, name, setup_note?, tasks}]`. `id` matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$` (it names the ledger file); `name` is the progress phase label. Ids `prelude` and `join` are reserved. No file may appear in two lanes unless an `overlaps` entry records it; files are compared normalized (`./a`, `a//b`, `a/../b`) and case-insensitively. |
@@ -179,7 +179,19 @@ for 9 of 12 units; delivery runs 3 checks (1 added by lane_commands); repairs up
 characters; the Bash tool on Windows fails at about 7,000: shorten the project's check commands,
 for example with a wrapper script", when the longest engine-built check command is over 6,000
 characters, with <what> "<unit id>'s task-checks command" or "the integration checks command"
-and <N> its length (see "Command length" in Check ownership). One line comes from the dry run's
+and <N> its length (see "Command length" in Check ownership). From 1.6.8 one more line comes
+from the summary's `widening` (`[{unit, paths: [{file, widen_path}]}]`), when it is not empty:
+"Widening: 2 units widen when they change: RP2 (Tools/Unity/tests/__init__.py under
+Tools/Unity/), RB4 (Tools/Unity/a.py under Tools/Unity/, +1 more)": the number of units, then
+each unit with its first file and the widen path that covers it, and `+k more` when k more of its
+files are covered. A unit is listed when it has a `task_checks` entry (a unit without one checks
+its lane commands whatever it changes) and a declared file a widen path covers, or a declared
+directory that holds a widen path (then `file` is that directory). A widen path ending in `/`
+covers the paths under it; one without `/` covers the equal path and the paths under it (the
+dry run cannot tell whether it names a directory; task-checks treats an existing one as a
+directory). Paths compare after `\` becomes `/`; units come in run order and files in declared
+order (every task of a batch). The line is advice: such a unit runs its project-wide checks only
+when it really changes that file. One line comes from the dry run's
 `join_waves`: "Join: waves 1-2-4 (DJ1 | DJ2, DJ4 | DJ3, DJ5, DJ6, DJ7)", or "Join: serial
 (<reason>)" (see Join waves).
 
@@ -420,7 +432,12 @@ worktrees, when no wave has two units, and when the join started in an earlier l
 - `run-checks --phase NAME` (and `task-checks --phase`) sets `PL_PHASE=NAME` (prelude, lane,
   join, integrate, post-integrate, final-fix, verify) for every check; without it `PL_PHASE` is
   removed. A project's check script may read it: a join unit runs in a lane worktree. Task prompts
-  tell agents to set it for commands they run themselves.
+  tell agents to set it for commands they run themselves. `--phase start` (1.6.8) is the start
+  check's (see Check ownership): it runs in `<worktree_root>/start` with `PL_PHASE=verify`, so it
+  reproduces verify's environment, and its evidence records `phase: start`. A wrapper that
+  chooses tests by phase must key on `PL_PHASE` before the checkout path: one that leaves slow
+  tests out in a worktree path would leave them out at the start point too, where the start
+  check reports them `not_run` (so `unknown`, never a wrong `passes`).
 - Ledger: appends hold each lane file's OS lock (up to 5 s); a reader skips a last line without a
   newline that is not JSON. New events `wave_merged` and `wave_checked` (task `_run`); `started`
   may carry `dir`, `unit_branch` and `restart`. `ledger status` adds `join_started`,
@@ -531,6 +548,27 @@ and reviewed has none either: there is no task left to check, and a pre-flight t
 re-rule work already built. Its `preflight` is empty with `skipped: "no task left to run"`, and
 the dry run plans no pre-flight agent.
 
+**Pre-flight permits** (1.6.8). When a pre-flight ruling has a task change a file outside its
+Files list, pre-flight also returns it in `permits` (`[{task, files, ruling}]`, optional, read as
+`[]` when absent): the task id, the files, and the ruling's 0-based index in `rulings`. The
+engine judges each file after `wave_moves` and keeps it only when the task runs in this launch
+(not done and reviewed), the ruling exists, the file is project-relative (no `..`, no trailing
+`/`), no task that can run at the same time declares it (the file or a folder above it, compared
+without case), and no permit kept before it in pre-flight's order gives it to such a task. Two
+tasks can run at the same time when they are in different lanes (done ones too: their branches
+still merge), or are join tasks of different units of one wave; a prelude task, and a join task
+when the join runs one unit at a time, run beside no other task. A permit naming a file the task
+already declares is kept and changes nothing. Kept permits are `preflight.permits`; the others
+are `preflight.permits_dropped` (`[{task, file, why}]`, why one of `not a task of this launch`,
+`no such ruling`, `not a project-relative file`, `declared by <id>, which can run at the same
+time`, `also permitted to <id>, which can run at the same time`), and the run log names each
+dropped one. Each kept file reaches its task's task-checks call as `--permit '<file>=PF-<n>'`
+(n = ruling + 1, as the prompts number the rulings; every task of a batch) and its implementer
+prompt as `PF-<n> permits <task> to change <files>: changing them does not widen your checks.`
+Both keys are present only when the pre-flight agent ran: the lite and `no task left to run`
+`preflight` have neither, and neither does a pre-flight that stops the run on a schedule
+problem. A later launch gets the permits from the ledger ("Carry-over").
+
 Run rulings: pre-flight's own rulings, then the adjudicator's ruling on pre-flight conflicts,
 reach every task not yet done, every adjudicator and every final reviewer as "Rulings already
 made for this run (binding)", in that order, each quoted as written, so no agent decides a settled point again.
@@ -547,7 +585,9 @@ From 1.6.3 what earlier agents decided or found reaches the agents after them, o
 **The ledger holds every ruling.** A `ruling` event may carry `by` (`implementer`, `reviewer`,
 `adjudicator`, `preflight`), `scope` (`lane` or `run`), `overrides` (the ids it departs from),
 `files` (paths an adjudicator ruling permits outside a task's Files list; an implementer lists
-the files its ruling explains, which permits nothing), `pf` and `wf`. The
+the files its ruling explains, which permits nothing), `pf`, `wf` and (1.6.8) `permits` (`[{task,
+files}]`, the files a pre-flight ruling permits to a task; anything else is refused with
+`'permits' must be a list of {task, files}`). The
 ledger checks the values, not whether an agent told the truth. A ruling's id is `<file
 stem>-R<n>`, n counting that ledger file's rulings in append order (`rig-R4`, `_run-R2`); this
 launch's pre-flight rulings are numbered `PF-1`... in the prompts until `carry-launch` records
@@ -567,7 +607,9 @@ is critical or important, and then cites the ruling.
 
 **carry-launch.** After each launch (Launch step 5), `<python> <skill_dir>/scripts/ledger
 carry-launch <ledger_dir> <transcript dir>` reads that launch's Workflow result file and records,
-once per wf id: each pre-flight ruling (by `preflight`, scope `run`, its `PF-n`), skipping the
+once per wf id: each pre-flight ruling (by `preflight`, scope `run`, its `PF-n`, and from 1.6.8
+`permits`: the entries of `preflight.permits` whose `ruling` is its index, as `{task, files}`; a
+malformed entry is left out, not the whole launch), skipping the
 pre-flight adjudication the adjudicator recorded itself (`preflight.adjudicated`); one `minors`
 snapshot, the task minors still open after that launch; and a `carried` event that binds any
 `PF-n` a ruling of that launch overrode. Launches are carried in launch order (each
@@ -587,8 +629,17 @@ critical or important. On a resume the session copies `ledger status`'s `minors`
 
 **A relaunch's pre-flight** is told which tasks are built, gets the `ledger rulings` command and
 `inputs_changed`, and checks only the tasks still to run: a matter an earlier ruling settled is
-not a conflict and gets no new ruling unless the plan or spec changed since. With no task left to
+not a conflict and gets no new ruling unless the plan or spec changed since. It is also told
+that permits an earlier launch recorded are carried and need no new ruling. With no task left to
 run there is no pre-flight (`preflight.skipped`).
+
+**Carried permits** (1.6.8). Once carried, a pre-flight ruling in force permits what its
+`permits` names for its task (files only: an entry naming a directory, an absolute path or one
+that leaves the project permits nothing; a ruling another overrides permits nothing). In a later
+launch task-checks counts such a path as declared and lists it in `policy.permitted` with the
+ledger's ruling id (for example `_run-R2`, since `PF-n` numbers restart every launch); only a
+`--permit` of this launch shows `PF-n`. Implementer and reviewer rulings permit nothing, and a
+pre-flight ruling's `files` permit nothing.
 
 **Outside the Files list.** Setup writes `<ledger_dir>/owners.json`: which tasks list each path,
 and where each task runs. A reviewer's scope list and `<python> <skill_dir>/scripts/ledger owners
@@ -598,7 +649,9 @@ and where each task runs. A reviewer's scope list and `<python> <skill_dir>/scri
 instead of changing it, and its own ruling never counts), `in your Files list; also in X's
 Files` (the reviewer checks the plan's split of that shared file), or `no task owns it`.
 `ledger undeclared <ledger_dir>` (and `ledger status --manifest`) report `{task: [{path, owner,
-relation}]}`.
+relation}]}`; from 1.6.8 a path permitted to the task (or to a task sharing its range, a batch)
+by a ruling in force in that ledger, an adjudicator's `files` or a pre-flight ruling's `permits`
+as task-checks reads them, counts as declared and is not reported.
 
 From 1.6.6 owners.json also gives each task its `declared`: its exact Files list as the manifest
 gives it (no case change or normalising, manifest order, each exact string once, `[]` for a task
@@ -665,6 +718,14 @@ raised it).
   the final review), the stopped report carries `verify` at the feature head it reached; it
   counts in `agents_spawned`, which can then exceed the cap by one, or two when a verify that
   returned nothing is retried.
+- The `start check` agent (1.6.8, see Check ownership) is an ordinary agent under `max_agents`,
+  not exempt like `verify`: it judges logs and may run long. The dry run lists one `start check`
+  row (Verify, Sonnet high) beside `verify` whenever verify is planned, as an upper bound (it runs
+  only after a failing verify, at most once per launch), so the table's agent count and the
+  `max_agents` it suggests grow by one. With no agent free, or the agents unavailable, the run
+  makes no call and records `final.start_check` as `unavailable` with `why: 'budget'`, and
+  nothing else changes; `repairReserve` is unchanged, since the start check runs before repair
+  admission and its agent is already counted.
 - Agents unavailable (see "Usage limit") uses the same refusal path: once the availability
   probe found no agent answering, every later spawn is refused, `verify` included (a refused
   verify is never stored as evidence), and the run stops with reason `agents_unavailable`
@@ -720,10 +781,11 @@ tool call never ends the agent's turn.
 | Implementer (task, retry) | Focused tests while iterating, then `scripts/task-checks` once before committing (a batch: once, before its last commit). |
 | Task fixer | The tests that cover the amended code; no task checks, no full suite. |
 | Task reviewer, re-reviewer | Nothing: they read the task-check evidence and may report a wrong selection as a finding. |
-| Integration | The delivery inventory once: `finalSetup`, then one `run-checks` call over `finalChecks` (the project's commands plus each distinct `lane_commands` one). |
+| Integration | The delivery inventory once: `finalSetup`, then one `run-checks` call over `finalChecks` (the project's commands plus each distinct `lane_commands` one). From 1.6.8 a resumed integration whose merges made no commit may reuse a passing check of the same head instead (see "Reuse" below); setup still runs. |
 | Post-integration fixer | After a test failure: focused tests (it may rerun the failing command to reproduce it); the integration rerun owns the full commands. After a hook failure: every project command, since only the hook reruns. |
 | Final fixer | Autonomous: focused checks; verify owns the full inventory. Supervised: every project command, as before 1.6.0. |
 | Verify | The full delivery inventory at the delivered head, fresh, every time. Acceptance reads only this. |
+| Start check (1.6.8) | After a failing verify: the failing commands, narrowed to their failing tests when the project can select them, at the run's start point in `<worktree_root>/start` (see "The start check" below). |
 
 **task-checks** (`scripts/task-checks`; the workflow builds the call) picks one list:
 - `lane`: the unit has no `task_checks` entry: the lane's checks run, as before 1.6.0.
@@ -734,12 +796,18 @@ tool call never ends the agent's turn.
   worktree never ran the project's setup, and integration still runs every check.
 
 Reasons, all recorded in order: `no_entry`, `no_files` (no Files list), `outside_files` (a
-changed path the Files list does not cover, nor an adjudicator ruling in force permits: one filed
+changed path the Files list does not cover, nor a ruling permits: a `--permit PATH=PF-<n>` of this
+launch's pre-flight (1.6.8, repeatable, one per kept file of the unit's tasks, see
+"Adjudicator"; PATH is normalised like `--declared`, so `\` becomes `/`, and a directory, an
+absolute path, one that leaves the project or a value without `=PF-<n>` exits 2), an earlier
+launch's pre-flight ruling in force whose `permits` names the file for one of the unit's tasks
+("Carry-over"), or an adjudicator ruling in force: one filed
 under the unit's task, or under `_run` for a path no task's Files list names (neither the path
 nor a folder above it), in the folder of a file the unit declares or in a directory it declares
 (folders compared by case); a permit names files, and an
 entry naming a directory permits nothing; such a path is
-listed in `policy.permitted` with the ruling's id), `widen_path` (a changed path under
+listed in `policy.permitted` as `{path, ruling}`, the ruling being `PF-<n>` for a `--permit`
+and the ledger's ruling id otherwise), `widen_path` (a changed path under
 `widen_paths`), `forced` (the agent's `--force-full '<why>'`, for a shared contract,
 configuration, generated or ignored inputs, a dependency that is not a direct import, or a
 targeted list that turned out invalid), `git_failed`. Changed paths are the working tree
@@ -794,7 +862,51 @@ warns when a unit's task-checks command, or the integration's run-checks command
 6,000 characters (see Confirmation header); the fix is to shorten the project's check commands,
 for example with a wrapper script. The warning is advice and never refuses.
 
-**Repair after a failing verify** (autonomous runs only; supervised runs reject as before):
+**The start check** (1.6.8) finds out whether a failing verify's failures predate the run.
+- **When:** right after the first verify of the delivered head in a launch that fails for a
+  repair's reasons (verify at the head, the exact inventory, no `head_after`, a clean checkout,
+  and not only exits 75, 124, 128 or above, negative or not a number), whatever the autonomy
+  and before any repair admission, so a supervised run gets it too. Only when the manifest's
+  `start_points.prelude` is a sha other than the head (a manifest without `start_points`, or a
+  run that changed nothing, gets none), and at most once per launch (a later launch may run its
+  own). Both verify sites call it: the verify after a final fix and the main verify after the
+  final review. The verify of a budget stop never does. Its agent's budget is in "Budgets".
+- **The agent:** `start check`, phase Verify, Sonnet high, with its own checkout rule. It adds a
+  detached worktree at `<worktree_root>/start` on the start sha (`git worktree add --detach`,
+  from `repo.git_dir` in shadow mode); a worktree of this repo already there and detached at the
+  start sha is the run's own, left by an earlier start check, and is removed first (`git
+  worktree remove --force`, `git worktree prune`); anything else at that path makes it return
+  `unavailable` and touch nothing. It runs the setup commands (`finalSetup`) there, reads each
+  failing command's log for the failing tests, and runs, in one `run-checks --phase start` call
+  reserved as `start` (`<ledger>/checks/start.<n>.json`, the "Long checks" procedure), the
+  narrower command when the project's own filter can select just those tests, else the same
+  command. It reads each start log for the tests that ran and failed (a test the log does not
+  show running is `not_run`, never failing or passing), then removes the worktree with `git
+  worktree remove --force` and `git worktree prune` (`--force` only on this path; a failed
+  removal is left to cleanup or the next start check). It never changes, stages or commits
+  anything in the feature checkout. It returns `{status: checked|unavailable, start_sha,
+  evidence, results: [{verify_command, start_command, narrowed, exit_at_start, failed_at_head,
+  failed_at_start, not_run}], notes}`: what the logs show, without judging it.
+- **The engine classifies** each failing command (`at_start`): `fails` only when the status is
+  `checked`, `start_sha` is `start_points.prelude`, `evidence` is a `checks/start.<n>.json` path
+  under the ledger dir (`\` read as `/`, without case on a drive path), `exit_at_start` is a
+  defect exit (non-zero, not 126 or 127, and not one of "Exit codes"' non-defect exits),
+  `failed_at_head` names tests, `not_run` is empty and every head failure fails at the start;
+  `passes` when it exited 0 with nothing `not_run`; `partly` when some but not all head failures
+  fail at the start; `unknown` otherwise (a command whose log names no tests, like a lint, is
+  `unknown` unless it passes at the start, and so is a command the result leaves out or lists
+  twice). A wrong start sha or evidence path makes every command `unknown`. The result is
+  `final.start_check` (see "Report").
+- **Effect:** when every failing command `fails`, no repair runs (the failures are out of scope)
+  and acceptance gives `checks_failed_at_start` instead of `checks_failed` (still rejected; the
+  user may accept it with `ledger accept`). Otherwise repairs run as below, and each repair
+  prompt, and the final re-review beside the failing verify, carry one line per command: `fails
+  at the start point <sha> too`, `passes at the start point <sha>: this run broke it`, `partly`
+  with the tests that predate the run, or `unknown: no conclusion from the start point`. The
+  final re-review does not hold a finding open over a failure that predates the run alone.
+
+**Repair after a failing verify** (autonomous runs only; supervised runs reject as before; the
+start check above runs first in both):
 - Due only when verify ran at the head, with exactly the configured inventory, no
   `head_after`, a clean checkout, and a failure that is not made only of exits 75, 124, 128 or
   above, or negative (a busy project, a timeout or a signal is not a defect to fix; see "Exit
@@ -809,7 +921,10 @@ for example with a wrapper script. The warning is advice and never refuses.
   correct fix, focused checks only, `fix: make the delivery checks pass`. It never weakens,
   skips or deletes a check, test or criterion, never changes the commands or the scripts and
   config they run, and reports blocked for a flaky, timeout, crash, environment or
-  out-of-scope failure.
+  out-of-scope failure. From 1.6.8 its prompt also carries the start check's line for each
+  failing command, and says never to create a worktree or checkout outside the feature dir.
+- No repair runs when the start check found that every failing command fails at the start
+  point too.
 - Its head is delivered only when verify, run with `run-checks --descends-from <start>`,
   confirms the branch head is that sha and descends from where the repair started; otherwise
   the observed head is recorded and the result is closed (`final_fix_unreviewed`).
@@ -817,7 +932,9 @@ for example with a wrapper script. The warning is advice and never refuses.
   fix, or by a `final re-review` of the repair range when there were no findings. Repairs
   have no id: a problem in one goes in `new_findings`. A missing, refused, other-head or
   malformed re-review leaves the repair unreviewed.
-- After 2 repairs, or without room, a still-failing verify is `checks_failed`, rejected.
+- After 2 repairs, or without room, a still-failing verify is `checks_failed`, rejected
+  (`checks_failed_at_start` when the start check made for that head found every failing
+  command failing at the start point).
 - The report's `final.repairs` lists each attempt `{attempt, from, observed_head, eligible,
   head, failed, status, notes}`; `check_policy` records the policy the run ran under.
 
@@ -832,7 +949,28 @@ stale).
 tracked changes, the tracked list is read with `--untracked-files=no` (one more call), so a
 submodule holding only untracked files is not a tracked change, as before. The tracked and
 untracked lists are as before; `clean` is the after snapshot being empty, so it no longer
-follows a `status.showUntrackedFiles=no` setting.
+follows a `status.showUntrackedFiles=no` setting. From 1.6.8 `--record-setup COMMAND`
+(repeatable) records the setup commands as `setup_commands` in the evidence, in order, and never
+runs them; without it the key is absent.
+
+**Reuse** (1.6.8). A resumed integration need not rerun a check an earlier launch passed at the
+same head. The integrate agent always runs the setup commands first (later phases rely on them in
+the feature checkout); then, only when its merges made no commit, it runs `<python>
+<skill_dir>/scripts/reuse-checks <ledger_dir> --name integrate --head <HEAD> --checkout <feature
+dir> [--setup COMMAND]... --cmd GROUP COMMAND [--cmd ...]`, with the same setup and check
+commands as its run-checks call. It reads `<ledger>/checks/integrate.<n>.json`, highest `n` (as a
+number) first, skipping a file that is unreadable, not a JSON object or an error record, and
+reuses the first where `phase` is `integrate`, `head` is HEAD with no `head_after`, `checkout`
+is the feature dir (compared after realpath and normcase), `ok` and `clean` are true and every
+exit is 0, `tracked_before` and `untracked_before` are empty, `tree_changed` is false, the
+results' `(group, command)` pairs equal the `--cmd` list in order, and `setup_commands` equals
+the `--setup` list. It prints `{reuse: true, file}` (exit 0) or `{reuse: false, why}` (exit 1;
+the why names the newest file and the first rule it fails); exit 2 is a usage error. On exit 0
+the agent skips the run-checks call, returns `checks_reused` (the file) and says so in its notes;
+otherwise it runs the checks as before. Its run-checks call passes `--record-setup` for each
+setup command, so a later resume can reuse that evidence. Evidence without
+`setup_commands` (1.6.7 and earlier) is never reused. Verify, wave checks, task checks and
+post-integrate checks are never reused.
 
 ## Long checks
 
@@ -923,7 +1061,8 @@ agent improvised.
 ## Exit codes
 
 The contract for the exit codes of commands run through `scripts/run-checks` (task checks,
-integration, verify and the rechecks, fixers' and repairs' checks, long commands). It does not
+integration, verify and the rechecks, the start check, fixers' and repairs' checks, long
+commands). It does not
 cover setup commands and hook commands: their exits are read as before.
 
 | Exit | Means | What the run does |
@@ -940,7 +1079,13 @@ failure beside a timeout is still a real failure. The codes steer repair, fix an
 acceptance: a check that exits `75` or `124` has still failed (`ok` false), and acceptance reads
 it as `checks_failed` like any other failure. Per caller:
 - **Verify:** returns `run-checks`' result as printed. A repair after a failing verify (see
-  "Check ownership") is not due for a failure made only of these exits.
+  "Check ownership") is not due for a failure made only of these exits, and neither is the
+  start check.
+- **Start check** (1.6.8): the agent reports each exit as the wait printed it, and the engine
+  reads it. At the start point `0` (with no test `not_run`) is `passes`; `75`, `124`, `128` and
+  above, negative, and also `126` and `127` (the command could not be run or was not found at
+  the start point, which says nothing about the tests) are `unknown` for that command, never
+  `fails`.
 - **Integration:** the integrate agent sets `checks_unfinished` true (beside `tests_failed`)
   when every failing command exited `75`, `124`, `128` and above or negative. The engine then
   starts no post-integration fix and stops with `integration checks did not finish: <notes>`,
@@ -1130,6 +1275,18 @@ Fields added in 1.6.2, all optional and additive:
 - `index_commit` (a sha or null), `index_saved` and, when that is false, `index_error` in each
   `setup_result.preserved` entry (see "Cleanup").
 
+Fields added in 1.6.8, all additive (a reader treats a missing key as null or `[]`):
+- `final.start_check`, only when a start check was due (it ran, or was recorded unavailable for
+  the budget; see "The start check" in Check ownership): `{status, why?, start_sha, evidence,
+  verify_head, commands: [{verify_command, start_command, narrowed, exit_at_start,
+  failed_at_head, failed_at_start, not_run, at_start}], all_fail, some_fail, notes}`, with
+  `at_start` one of `fails`, `passes`, `partly`, `unknown`; `status` is `checked` or
+  `unavailable` (`why` says which refusal or problem, `budget` when no agent was free).
+- `integrate.checks_reused`: the integrate evidence file a resumed integration reused (see
+  "Reuse" in Check ownership), else null.
+- `preflight.permits` (`[{task, files, ruling}]`, the kept ones) and `preflight.permits_dropped`
+  (`[{task, file, why}]`), when the pre-flight agent ran (see "Adjudicator").
+
 `unreadable_lines` (per agent, and the total at the top level) counts the non-blank transcript
 lines that are not valid JSON, such as a truncated write, or not valid UTF-8. A line with
 invalid UTF-8 counts even when it still parses after the bad bytes are replaced (they may have
@@ -1150,7 +1307,12 @@ from the evidence: `accepted` (no reason), `rejected` (a check failed at `delive
 blocking finding is open, or a task is deferred or not done), or `unverified` (nothing failed,
 but evidence is missing or covers another revision). Reasons are `{kind, class, detail}`:
 `checks_failed`, `checks_missing`, `checks_stale`, `checks_incomplete` (from `verify`, the
-`scripts/run-checks` result at `delivered_sha`), `e2e_failed`, `e2e_missing`, `e2e_stale`
+`scripts/run-checks` result at `delivered_sha`), `checks_failed_at_start` (1.6.8, class
+`failed`, still `rejected`: in place of `checks_failed` when the start check made for
+`delivered_sha` found every failing command failing at the start point too; detail `failing at
+<sha> and at the start point <start>: <command> (exit N): <tests>; evidence <file>`; when only
+some do, `checks_failed` stays and a warning says `fails at the start point <start> too:
+<command>`), `e2e_failed`, `e2e_missing`, `e2e_stale`
 (`e2e.checked_sha`), `post_integrate_failed`, `post_integrate_missing`,
 `post_integrate_stale`, `blocking_findings` (open critical or important final findings),
 `review_missing` (a final lens with no result), `review_unbound` (the final lenses did not all
@@ -1208,7 +1370,13 @@ what their hook adds. Show the
 status and every reason first; only `accepted` is delivered work. A reason or warning the
 user explicitly accepts is recorded with `ledger accept <ledger_dir> <repo root>
 <delivered_sha> "<what>"` (an `accepted` event; `ledger status` lists them under `accepted`)
-and shown as accepted by the user, never folded into `accepted`.
+and shown as accepted by the user, never folded into `accepted`. `checks_failed_at_start` is
+shown like any rejection, with its detail and evidence file, and the hand-back suggests the
+accept text, for example `ledger accept <ledger_dir> <repo root> <delivered_sha>
+"checks_failed_at_start: <command> fails at the start point <start> too (evidence <file>)"`.
+Once the accepts cover every reason (and the warnings the user named) and archive-run, audit
+and tool-outcomes have run again, remove the marker with `bash <skill_dir>/scripts/active-run
+remove <run_id>`: a marker left `unaccepted` sends a later session to Resume.
 Each task result's `commits` is its range `[base, head]` (the base before its first commit and
 its last head), not a list of commits; the ledger's `committed` events list every commit.
 
@@ -1530,9 +1698,10 @@ run, ask: reuse (resume the old run) or remove. To remove: Cleanup below for its
 
 ## Run history
 
-`<python> <skill_dir>/scripts/archive-run <manifest> <transcript dir>... [--history-dir DIR]`
-copies a run that ended after a launch into the run history (never a dry run). Run it after
-`run-report` has written its report beside the manifest.
+`<python> <skill_dir>/scripts/archive-run <manifest> [<transcript dir>...] [--ledger DIR]
+[--notes FILE...] [--history-dir DIR]` copies a run that ended after a launch into the run
+history (never a dry run). Run it after `run-report` has written its report beside the manifest.
+A call needs at least one transcript dir, or `--notes` for a run already in the index.
 
 - **History dir:** `--history-dir`, else `PL_HISTORY_DIR`, else
   `<config dir>/parallel-lanes/history/`. `_history.history_dir` resolves it for Python and
@@ -1545,14 +1714,51 @@ copies a run that ended after a launch into the run history (never a dry run). R
   `cleanup` finds the run by the same key.
 - **Folder:** `<history dir>/<YYYY-MM-DD>-<run_id>/` (the UTC date of the first launch; `-2`,
   `-3` ... when another run owns the name). It holds the manifest, the ledger dir (`checks/`
-  included), the run-report JSON, the plan and spec when they exist, each transcript dir
-  `wf_<id>/` with its `wf_<id>.json` result file, and, written by other tools, `autopsy.json`,
-  `autopsy.md` and `cleanup/`. Copying is idempotent: a missing file is added, a changed file is
-  replaced, and a file already in the archive is never deleted. `launches` counts the `wf_<id>`
-  dirs in the folder, so archiving again never raises it.
+  included), the run-report JSON, the plan and spec when they exist (pinned, below), each
+  transcript dir `wf_<id>/` with its `wf_<id>.json` result file, `notes/` (1.6.8, below),
+  `derive.json` and `setup.json` (1.6.8: copied when present and the manifest's directory is the
+  run-owned `<config dir>/parallel-lanes/runs/<run_id>/`; a plans-folder run directory is shared
+  between runs, so nothing generic is taken from there), and, written by other tools,
+  `autopsy.json`, `autopsy.md` and `cleanup/`. Copying is idempotent: a missing file is added, a
+  changed file is replaced, and a file already in the archive is never deleted. `launches`
+  counts the `wf_<id>` dirs in the folder, so archiving again never raises it. Two different
+  files that would get one name (compared without case) are refused with exit 2 before anything
+  is written.
+- **Pinning** (1.6.8): an archived plan or spec is only ever the version a launch recorded. Each
+  setup `run_started` event in the ledger's `_run.jsonl` carries `head`, `plan_sha256` and
+  `spec_sha256`; the latest one's sha is the one pinned. An archived copy with that sha is kept,
+  even when the live file differs. Otherwise the first source with that sha is written: the live
+  file, then, for a file inside the repo, its blob at each recorded setup head from the latest
+  back, as git stores it (`git show <head>:<path>`) and with the checkout filters (`git cat-file
+  --filters`, so a CRLF checkout matches), the path looked up in git without case (`git ls-tree`),
+  with `--git-dir` in shadow mode. When no source has the sha, an archived copy is kept and,
+  without one, the live file is copied, with a `plan_unpinned` or `spec_unpinned` warning naming
+  the recorded sha (the audit then reports the mismatch as a gap). A ledger with no recorded sha
+  (before `plan_sha256`) never replaces an archived copy; without one the live file is copied. A
+  spec of `null` is not pinned, and a plan outside the repo (the plans folder) can match only
+  its live file.
+- **Launch counts** (1.6.8): the launches the ledger records are the larger of its `run_ended`
+  count (one per launch the session recorded, relaunches included) and the number of distinct wf
+  ids its `carried` events and `doctor-<wf>.json` files name (a launch whose session died has no
+  `run_ended`). When the folder holds fewer `wf_<id>` dirs, archive-run warns `launches_missing`
+  with both counts and the named wf ids that have no dir ("unknown" when none are named): pass
+  the missing transcript dirs to archive-run again.
+- **`--ledger DIR`** (1.6.8) reads the ledger from DIR instead of `repo.ledger_dir`, for a run
+  whose live folder is gone: `archive-run <archived manifest> <transcript dir>... --ledger
+  <archived ledger>`. DIR must hold `_run.jsonl` (else exit 2). The run is found in the index by
+  its key, so it keeps its folder; a ledger copied onto itself is left as it is. The ledger a call
+  reads for pinning and counting is `--ledger`, else `repo.ledger_dir` when it exists, else the
+  folder's archived ledger.
+- **`--notes FILE...`** (1.6.8) copies each file to `<run folder>/notes/<basename>` with the same
+  add-or-replace rule (hand-written observations, a review, recommendations). It takes every
+  following argument up to the next `--` option. Two different notes with one basename exit 2
+  with nothing written. Without transcript dirs the call is allowed only for a run already in
+  the index (else exit 2): it adds the notes, pins, counts, and copies the ledger only when its
+  source exists.
 - **`index.json`:** `{"version": 1, "runs": [entry, ...]}`, one entry per run with `run_id`,
   `folder`, `ledger_dir`, `project`, `plan`, `engine_version`, `machine`, `platform`,
-  `first_launch`, `last_launch`, `launches`, `status` and `acceptance`. A value that cannot be
+  `first_launch`, `last_launch`, `launches`, `launches_recorded` (1.6.8, from the folder's
+  archived ledger as counted above; `unavailable` without one), `status` and `acceptance`. A value that cannot be
   read is `unavailable` (an older run has `engine_version: "unavailable"`; it is never inferred).
   Stored paths use `/`, and `C:/...` on Windows; a Linux path from another machine stays as
   written.
@@ -1565,7 +1771,9 @@ copies a run that ended after a launch into the run history (never a dry run). R
 - **`--reindex`:** `archive-run --reindex [--history-dir DIR]` rebuilds `index.json` from the
   folders already there (imported runs, hand-archived runs). Every folder holding a
   `*.lanes.json` is one run; the report is the first of `*.report.json`, `*.run-report.json`
-  and `report.json`. Folders keep their names; it prints `{"runs": N, "skipped": [...]}`.
+  and `report.json`; `launches_recorded` comes from the folder's archived ledger
+  (`<plan-name>.<run_id>.ledger`, else its one `*.ledger` dir). Folders keep their names; it
+  prints `{"runs": N, "skipped": [...]}`.
 - **Comparing two runs:** `history --runs A,B [--json]` (two run ids or folder names) prints,
   for each run, its plan's sha256, task ids, lanes, a hash of its `commands`, versions, launches,
   status, acceptance, wall time, fixed phases, task time, full-suite time and tokens, and whether
@@ -1579,9 +1787,16 @@ copies a run that ended after a launch into the run history (never a dry run). R
   `history` only add their own files (`index.json`, `autopsy.json`, `autopsy.md`, `history.json`,
   `history.md`) and never change or remove an imported file.
 
-archive-run prints `{"folder": ..., "added": [...], "updated": [...]}`. Exit 0 on success; exit 2
-on a usage error, an unreadable manifest, transcript dir, ledger dir or index, a failed copy, or
-the lock not acquired; exit 3 when the history dir is inside the project (nothing written).
+archive-run prints `{"folder": ..., "added": [...], "updated": [...], "pinned": [...], "kept":
+[...], "replaced": [...], "warnings": [{"code", "detail"}]}`: `pinned` names a plan or spec newly
+archived with its recorded sha, `kept` one whose archived copy already had it, `replaced` one
+whose archived copy lacked it and was replaced (a file with no recorded sha, or none that
+matched, is in none of the three); `warnings` holds `plan_unpinned`, `spec_unpinned` and
+`launches_missing`. Show the warnings in the hand-back. Exit 0 on success; exit 2
+on a usage error, an unreadable manifest, transcript dir, note, ledger dir (a `--ledger` DIR
+without `_run.jsonl` included) or index, two notes with one basename, a notes-only call for a
+run not in the index, a failed copy, or the lock not acquired; exit 3 when the history dir is
+inside the project (nothing written).
 `--reindex` exits 0, or 2 when the history dir is not a readable directory or the lock is not
 acquired.
 
@@ -1795,6 +2010,15 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   placement, changes (rulings, events, escalations), commits and review (reviews, each with its
   brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
   `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`.
+- **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
+  (counted as archive-run counts them, see "Run history") with the archived ones.
+  `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one
+  `missing` entry in `run.launches.missing` and one evidence gap ("the ledger records this
+  launch; its transcripts are not archived"), named wf ids first, then one unnamed entry per
+  launch left. A launch with a `wf_<id>` dir or a `wf_<id>.json` counts as archived. When more
+  are recorded than archived the summary line reads `launches: 1 archived, 2 recorded, latest
+  <wf>`; equal counts add no gap and leave the line as it was. Without an archived ledger the
+  recorded count is `unavailable` (one gap) and nothing is listed missing.
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
 <run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from
@@ -1817,7 +2041,8 @@ nothing is written. exit 2 also when `--out` cannot be made or written (`cannot 
 non-zero exit goes to `tool-outcomes --audit-exit` and never changes `acceptance`.
 
 After `ledger accept`, run archive-run, audit and `tool-outcomes` again so the override and any
-session-verify evidence reach the archive and `audit.json`.
+session-verify evidence reach the archive and `audit.json`; once the accepts cover every reason,
+remove the marker (see "Report").
 
 ## Doctor
 
@@ -2026,13 +2251,20 @@ and changes nothing; show the plan, and run it with `--yes` only on the user's y
   can still resume.
 - **Ownership rule:** it removes only `<worktree_root>/lane-<id>` for each manifest lane (and
   `<worktree_root>/feature` in shadow mode), each a worktree of the same repository on its
-  expected branch (`pl-<run_id>-<id>`, or `repo.branch`), plus those branches. Anything else
-  under `worktree_root` is left and listed as `not owned by this run`. A worktree with
+  expected branch (`pl-<run_id>-<id>`, or `repo.branch`), plus those branches, and (1.6.8) the
+  start check's worktree `<worktree_root>/start` when `git worktree list --porcelain` shows it
+  detached, of this repository, at the run's start sha (`start_points.prelude`, else the head of
+  the first setup `run_started` in the ledger). Anything else
+  under `worktree_root` (the start path on another sha or on a branch included) is left and listed as `not owned by this run`. A worktree with
   uncommitted files, or a locked one, is kept and named. Untracked files count as uncommitted
   even when the Git configuration hides them (`status.showUntrackedFiles`): cleanup reads the
   status with `--untracked-files=all`. But ignored files do not keep a worktree, and `git
   worktree remove` deletes them with it (build output, `node_modules`, an ignored `.env` or
-  local config): copy any ignored file you still need out of the worktree before `--yes`.
+  local config): copy any ignored file you still need out of the worktree before `--yes`. The
+  start worktree is the exception: it holds no commits, and a failed start check can leave files
+  behind, so it is removed with `git worktree remove --force` even when it has uncommitted or
+  untracked files (it is still kept when locked, and checked again right before the removal).
+  The plan lists it, and `restore.md` gets `git worktree add --detach <path> <sha>` for it.
 - **Locks, during `--yes`:** cleanup takes the run lock the way a resume does (`active-run
   acquire`), so no resume or second cleanup works on the run meanwhile, and in git mode the
   checkout lock of the main checkout, so no other run's setup switches it. A run lock held by
@@ -2058,7 +2290,8 @@ and changes nothing; show the plan, and run it with `--yes` only on the user's y
   (`git merge --ff-only`); otherwise the checkout and branch stay as they are, with the reason,
   and cleanup can be run again later. Shadow mode keeps every branch and the shadow repo
   (`shadow remove` stays a separate step).
-- **It never** uses `--force` or `branch -D`, deletes a remote branch, makes a merge commit,
+- **It never** uses `--force` (except `git worktree remove --force` for the start worktree) or
+  `branch -D`, deletes a remote branch, makes a merge commit,
   resets or rebases, deletes `refs/parallel-lanes/<run_id>/abandoned/` refs, or removes the
   manifest, the ledger or the history folder.
 
