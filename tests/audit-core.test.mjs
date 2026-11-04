@@ -52,6 +52,7 @@ test('gap_causes lists each cause once, with its tasks or its run-level values',
     '         "esc": [c.ref(None, "unavailable", [], "no transcripts archived") for _ in range(n_esc)]}',
     '    if sha:',
     '        t["files"] = c.ref(None, "unavailable", [], "the repo does not contain %s" % sha)',
+    '        t["head"] = c.ref(None, "stale", [], "behind fedcba9")',
     '    if lacks:',
     '        t["brief"] = c.ref(None, "missing", [], "no brief")',
     '    return t',
@@ -62,7 +63,7 @@ test('gap_causes lists each cause once, with its tasks or its run-level values',
     '       "tasks": [task("A1", 2, "abcdef1", True), task("A2", 1, "1234567"), task("A3", 0, None, True)]}',
     'print(json.dumps({"gaps": c.collect_gaps(doc), "causes": c.gap_causes(doc)}))',
   ]);
-  assert.equal(out.gaps.length, 15);
+  assert.equal(out.gaps.length, 17);
   assert.deepEqual(out.causes, [
     { pointer: '#/repo', state: 'unavailable', note: 'no --repo', tasks: null, values: [null] },
     // Every value of a run-level cause, in order, repeats included.
@@ -73,8 +74,11 @@ test('gap_causes lists each cause once, with its tasks or its run-level values',
     // A cause in every task lists every task once, however often a task holds it.
     { pointer: '#/tasks/N/status/committed', state: 'unavailable', note: 'no ledger', tasks: ['A1', 'A2', 'A3'], values: null },
     { pointer: '#/tasks/N/esc/N', state: 'unavailable', note: 'no transcripts archived', tasks: ['A1', 'A2'], values: null },
-    // Masked shas merge the notes; the first raw note is kept.
-    { pointer: '#/tasks/N/files', state: 'unavailable', note: 'the repo does not contain abcdef1', tasks: ['A1', 'A2'], values: null },
+    // Masked shas merge the notes; notes that differ print masked, since
+    // either raw note would be false for the other task.
+    { pointer: '#/tasks/N/files', state: 'unavailable', note: 'the repo does not contain <sha>', tasks: ['A1', 'A2'], values: null },
+    // The same raw note in every gap of the cause is kept as written.
+    { pointer: '#/tasks/N/head', state: 'stale', note: 'behind fedcba9', tasks: ['A1', 'A2'], values: null },
     // A per-task cause in some tasks lists exactly those.
     { pointer: '#/tasks/N/brief', state: 'missing', note: 'no brief', tasks: ['A1', 'A3'], values: null },
   ]);

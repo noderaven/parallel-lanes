@@ -568,6 +568,10 @@ test('open counts add the open task minors and the carried ones', () => {
   assert.equal(noOpen.header,
     '- final review: unavailable open and 1 declined final finding(s), 0 open task minor(s) [present] (wf_aaaaaa.json #/result/final)');
   assert.equal(noOpen.bottom, 'Final findings: unavailable open, 1 declined; open task minors: 0; cannot-verify items: 0.');
+  // Nor a cannot_verify list: that count is unavailable too.
+  const noCannot = counts(finalWith({ cannot_verify: undefined, task_minors_open: [] }));
+  assert.deepEqual(noCannot.final.not_recorded, ['cannot_verify']);
+  assert.equal(noCannot.bottom, 'Final findings: 1 open, 0 declined; open task minors: 0; cannot-verify items: unavailable.');
 
   // Neither key: unavailable, never 0; Open work says once that the engine
   // recorded none, and no task block has a line.
@@ -788,6 +792,8 @@ test('the bottom line names a user override at the delivered head, never its tex
   // no-override verdict is the same, so the run's reason kinds stay.
   assert.deepEqual([json.run.acceptance.verdict_without_override, json.run.acceptance.verdict_rule_without_override],
     ['unverified', null]);
+  // Acceptance then adds no line for it.
+  assert.deepEqual(mdSection(md, 'Acceptance').filter((l) => l.startsWith('- verdict without the override')), []);
 });
 
 test('the bottom line names the fault audit found that an override overrode', () => {
@@ -802,9 +808,12 @@ test('the bottom line names the fault audit found that an override overrode', ()
     ['accepted by user', 'mismatch', null, 'unverified', 'gate mismatch']);
   assert.equal(a.overrides[0].overrode, 'accepted');
   assert.equal(mdSection(mismatch.md, 'Bottom line')[0], 'Verdict: accepted by user (over unverified: gate mismatch).');
-  // Acceptance keeps what the override overrode, the run's own verdict.
+  // Acceptance keeps what the override overrode, the run's own verdict, and
+  // names the verdict without the override, as the Bottom line does.
   assert.ok(mismatch.md.split('\n').some((l) => l.startsWith('- user override at: ') && l.endsWith('; it overrode accepted')),
     mismatch.md);
+  const without = (md) => mdSection(md, 'Acceptance').filter((l) => l.startsWith('- verdict without the override'));
+  assert.deepEqual(without(mismatch.md), ['- verdict without the override: unverified (gate mismatch)']);
   // Late evidence: audit would say accepted (gate unavailable), with
   // check-verify's reason inside its parenthesis.
   const late = makeRun(acceptedSpec(r, { evidenceMtime: START / 1000 + DURATION / 1000 + 600, runEvents: [accept] }));
@@ -813,6 +822,8 @@ test('the bottom line names the fault audit found that an override overrode', ()
     ['accepted (gate unavailable)', null]);
   assert.equal(mdSection(lateView.md, 'Bottom line')[0],
     'Verdict: accepted by user (over accepted (gate unavailable: verify_evidence_time_untrusted)).');
+  assert.deepEqual(without(lateView.md),
+    ['- verdict without the override: accepted (gate unavailable: verify_evidence_time_untrusted)']);
   // Without a gate reason the no-override verdict stands bare.
   const bare = pythonJSON([
     'import _audit',
@@ -848,8 +859,9 @@ test('audit.md ends with its terms', () => {
     'context added by pre-flight', 'cause',
   ]);
   assert.equal(terms.at(-1), '- cause: gaps that share a pointer (each array index read as N), a state and a note (each '
-    + 'sha read as <sha>; the first note is shown), listed once under Evidence gaps with the tasks whose blocks hold '
-    + 'them, or with run and every value for a run-level cause.');
+    + 'sha read as <sha>, and shown so when the notes differ), listed once under Evidence gaps with the tasks whose '
+    + 'blocks hold them, or, for a run-level cause, with run, followed by every value when there is more than one or a '
+    + 'single string or number.');
   // The four gap states say they are gaps; the others say they are not.
   for (const l of terms.slice(0, 7)) {
     const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
@@ -1123,6 +1135,31 @@ test('Evidence gaps lists each cause once, with its tasks or the run', () => {
   assert.equal(mdSection(md, 'Bottom line').at(-1), `${both} (cannot-verify items and inferred lines are not gaps).`);
   assert.ok(mdSection(md, 'Summary').includes(`- ${both}`), md);
   assert.ok(stdout.split('\n').includes(both), stdout);
+});
+
+test('a cause whose notes differ prints its note masked, true for every task', () => {
+  // Legacy tasks (no recorded base) whose last recorded commit is not the
+  // result's head, each with its own shas, as in sq1.
+  const result = { tasks: { A1: { status: 'done', commits: [S('a'), S('c')] }, A2: { status: 'done', commits: [S('a'), S('e')] } } };
+  const legacy = (a2Commit) => view(makeRun({
+    ledger: { 'a.jsonl': [{ task: 'A1', event: 'committed', commits: [S('b')] }, { task: 'A2', event: 'committed', commits: [a2Commit] }] },
+    launches: [{ wf: 'wf_aaaaaa', startTime: START, durationMs: DURATION, result, dirless: true }],
+  }));
+  const pointer = '#/tasks/N/commits/legacy/agreement';
+  const raw = (head, last) => `the last recorded commit ${last} is not the result's head ${head}`;
+  const both = legacy(S('d'));
+  // gaps keeps each task's own note; the cause's note is masked.
+  assert.deepEqual(both.json.gaps.filter((g) => g.where.endsWith('/commits/legacy/agreement')).map((g) => g.note),
+    [raw(S('c'), S('b')), raw(S('e'), S('d'))]);
+  const masked = "the last recorded commit <sha> is not the result's head <sha>";
+  assert.deepEqual(both.json.gap_causes.find((g) => g.pointer === pointer),
+    { pointer, state: 'conflicting', note: masked, tasks: ['A1', 'A2'], values: null });
+  assert.ok(mdSection(both.md, 'Evidence gaps').includes(`- ${pointer} [conflicting] - ${masked} (tasks A1, A2)`), both.md);
+  assert.doesNotMatch(mdSection(both.md, 'Evidence gaps').join('\n'), new RegExp(S('b')));
+  // One task's note, or the same note in every gap, is printed as written.
+  const one = legacy(S('e'));
+  assert.deepEqual(one.json.gap_causes.find((g) => g.pointer === pointer).note, raw(S('c'), S('b')));
+  assert.ok(mdSection(one.md, 'Evidence gaps').includes(`- ${pointer} [conflicting] - ${raw(S('c'), S('b'))} (tasks A1)`), one.md);
 });
 
 test('the plan and spec hashes print once, in Checks, by setup event and ledger line', () => {

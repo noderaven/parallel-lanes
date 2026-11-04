@@ -520,6 +520,14 @@ test('the plan and spec hashes are run checks, one per setup event with its ledg
   writeFileSync(join(unreadable, 'p.md'), Buffer.from([0xff, 0xfe, 0xfd]));
   assert.deepEqual(sections(unreadable).checks.section_hash,
     { value: null, state: 'unavailable', sources: [plan], note: 'the plan copy could not be read' });
+  // One run-level gap for it, and none in any task.
+  const u = built(unreadable);
+  assert.deepEqual(u.gaps.filter((g) => g.note === 'the plan copy could not be read').map((g) => g.where),
+    ['#/run/checks/section_hash']);
+  assert.deepEqual(u.gaps.filter((g) => g.where.startsWith('#/tasks/') && /section|plan copy/.test(`${g.where} ${g.note}`)), []);
+  assert.deepEqual(u.causes.filter((g) => g.note === 'the plan copy could not be read'),
+    [{ pointer: '#/run/checks/section_hash', state: 'unavailable', note: 'the plan copy could not be read', tasks: null,
+      values: [null] }]);
 });
 
 test('e2e is stale only when both shas are recorded and differ', () => {
@@ -609,12 +617,15 @@ test('acceptance gives the verdict without the override and its rule', () => {
 test('carried minor tasks come from the ledger minors snapshot', () => {
   const minors = (wf, open) => ({ task: '_run', event: 'minors', wf, open, covered: [] });
   const entry = (id, task) => ({ id, task, file: 'a.js', line: 1, issue: 'zqissue', fix: 'f' });
-  const result = accepted(D, { final: finalAt(D, { carried_minors_open: ['A1-1', 'T2-1', 'Z9-1'] }) });
+  const result = accepted(D, { final: finalAt(D, { carried_minors_open: ['A1-1', 'T2-1', 'Z9-1', 'X1-1'] }) });
+  const manifest = { lanes: [{ id: 'a', tasks: [{ id: 'A1' }, { id: '2' }, { id: 'T2' }] }] };
   const s = sections(makeRun({
+    manifest,
     ledger: { '_run.jsonl': [
       minors('wf_old', [entry('A1-1', 'A1'), entry('T2-1', '2')]),
-      // The latest snapshot that lists an id names its task.
-      minors('wf_aaaaaa', [entry('T2-1', 'T2'), entry('Q1-1', 'Q1'), { id: 'Z9-1' }]),
+      // The latest snapshot that lists an id names its task; a task that is
+      // no manifest task id (X1) is left out.
+      minors('wf_aaaaaa', [entry('T2-1', 'T2'), entry('Q1-1', 'Q1'), { id: 'Z9-1' }, entry('X1-1', 'X1')]),
     ] },
     launches: [launch(result)],
   }));
@@ -784,6 +795,11 @@ test('open work is listed', () => {
   delete older.final.open;
   const o = sections(makeRun({ launches: [launch(older)] })).open_work.final.value;
   assert.deepEqual([o.not_recorded, o.findings.map((x) => x.id)], [['open'], ['F2']]);
+  // A final without a cannot_verify list records none: unknown, not [].
+  const noCannot = { ...result, final: { ...result.final } };
+  delete noCannot.final.cannot_verify;
+  const n = sections(makeRun({ launches: [launch(noCannot)] })).open_work.final.value;
+  assert.deepEqual([n.not_recorded, n.cannot_verify], [['cannot_verify'], []]);
   assert.deepEqual(ow.excluded.map((x) => [x.id, x.reason.quote]), [['X9', 'manual step']]);
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);

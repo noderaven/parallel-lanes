@@ -74,10 +74,12 @@ open_work.final, from the latest launch's final review result, is a ref of
 result's findings, quoted; None when the result has no such list, as before
 1.3.1), "carried_minors_open" (the result's carried minor ids, its strings;
 None when it has none, as before 1.6.3), "carried_minor_tasks" ({id: task
-id} for the carried ids a ledger minors snapshot lists with a task, the
-latest snapshot that lists each; None with carried_minors_open),
-"not_recorded" (which of "open" and "declined" the result has no list for,
-as older engines have no open list: that count is unknown, not 0)}.
+id} for the carried ids a ledger minors snapshot lists with a task that
+is a manifest task id, the latest snapshot that lists each; None with
+carried_minors_open),
+"not_recorded" (which of "open", "declined" and "cannot_verify" the result
+has no list for, as older engines have no open list: that count is
+unknown, not 0; cannot_verify is then [])}.
 
 acceptance also holds verdict_without_override (derive_verdict with no
 override) and verdict_rule_without_override (_verdict_rule when that verdict
@@ -1015,7 +1017,8 @@ def _open_work(run, launch, why, pairs):
     value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
              "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
              # Older engines' finals have no open list: its count is unknown, not 0.
-             "not_recorded": [key for key in ("open", "declined") if not isinstance(final.get(key), list)]}
+             "not_recorded": [key for key in ("open", "declined", "cannot_verify")
+                              if not isinstance(final.get(key), list)]}
     out["final"] = c.ref(value, "present", [_wf_src(launch, "final")])
     return out
 
@@ -1023,9 +1026,11 @@ def _open_work(run, launch, why, pairs):
 def _carried_tasks(run, carried):
     """{carried id: task id} for the carried ids a ledger minors snapshot
     (carry-launch's) lists with a task, the latest snapshot that lists each,
-    in carried order; None when the result has no carried list."""
+    in carried order, keeping only tasks that are manifest task ids; None
+    when the result has no carried list."""
     if carried is None:
         return None
+    ids = set(t["id"] for t, _lane in c.manifest_tasks(run.get("manifest")))
     found = {}
     for event, _source in reversed(_events(run)):
         if event.get("task") != "_run" or event.get("event") != "minors" or not isinstance(event.get("open"), list):
@@ -1034,7 +1039,7 @@ def _carried_tasks(run, carried):
             if isinstance(m, dict) and m.get("id") in carried and m["id"] not in found \
                     and isinstance(m.get("task"), str) and m["task"]:
                 found[m["id"]] = m["task"]
-    return {cid: found[cid] for cid in carried if cid in found}
+    return {cid: found[cid] for cid in carried if cid in found and found[cid] in ids}
 
 
 # ---- the sections ----

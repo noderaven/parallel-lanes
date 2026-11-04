@@ -253,6 +253,25 @@ test('the brief hash is the plan section\'s', () => {
     [null, 'missing', "the plan copy has no usable section: no heading for task 'A2'"]);
   assert.deepEqual(lacking.A2.requirement.brief_hash.sources, [{ path: 'p.md', at: null }]);
   assert.deepEqual(vs(lacking.A1.requirement.brief_hash), [SECTION.A1, 'present']);
+  // A reviewed task whose section the plan copy lacks: its brief hash (the
+  // review's recorded hash) is missing and its review's brief match
+  // unavailable, two gaps, and none for a section hash of its own.
+  const noA1 = `# Plan\n\n${DEFAULT_PLAN.slice(DEFAULT_PLAN.indexOf('### Task A2'))}`;
+  const reviewedLacking = audit(makeRun({ ...reviewedRun(s0, s1), plan: noA1 }), facts()).A1;
+  assert.deepEqual([...vs(reviewedLacking.requirement.brief_hash), reviewedLacking.requirement.brief_hash.note],
+    [SECTION.A1, 'missing', "the plan copy has no usable section: no heading for task 'A1'"]);
+  assert.deepEqual(reviewedLacking.requirement.brief_hash.sources, [{ path: `${LEDGER}/a.jsonl`, at: 'L3' }, { path: 'p.md', at: null }]);
+  assert.equal(reviewedLacking.review.reviews[0].brief_match.state, 'unavailable');
+  const gapsOf = (node, where = '#') => {
+    if (Array.isArray(node)) return node.flatMap((x, i) => gapsOf(x, `${where}/${i}`));
+    if (node === null || typeof node !== 'object') return [];
+    const own = Array.isArray(node.sources) && ['missing', 'stale', 'conflicting', 'unavailable'].includes(node.state)
+      ? [`${where} ${node.state}`] : [];
+    return own.concat(Object.entries(node).filter(([k]) => k !== 'sources').flatMap(([k, v]) => gapsOf(v, `${where}/${k}`)));
+  };
+  assert.deepEqual(gapsOf(reviewedLacking).filter((g) => /brief|section/.test(g)),
+    ['#/requirement/brief_hash missing', '#/review/reviews/0/brief_match unavailable']);
+  assert.equal(reviewedLacking.requirement.section_hash, undefined);
   // Every review's brief hash is compared, not only the latest one's.
   const twice = reviewedRun(s0, s1, [reviewed('A1', s1)]);
   twice.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: sha256('brief\n') });

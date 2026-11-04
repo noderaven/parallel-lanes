@@ -38,9 +38,13 @@ hashes once, each labelled by its setup event, its ledger line among the
 sources, and the plan copy for the section hashes), After delivery (only
 with --head), Open work, Evidence gaps (under '<G> evidence gap(s) in <C>
 cause(s)', one line per cause: '- <pointer> [<state>] - <note> (tasks <id>,
-...)', or '(run)' for a run-level cause, '(run: <v>, ...)' with every value,
-null as unknown, when it has more than one or a single plain one) and Terms
-(TERMS, fixed text). The Bottom line is one paragraph, each part from one
+...)', the note as gap_causes gives it (masked when the cause's raw notes
+differ), or '(run)' for a run-level cause, '(run: <v>, ...)' with every
+value, null as unknown, when it has more than one or a single plain one) and
+Terms (TERMS, fixed text). Acceptance names the verdict without the override
+when an accepted by user verdict overrode one that differs from the run's
+own ('- verdict without the override: <verdict> (<rule>)', the verdict as
+the Bottom line names it). The Bottom line is one paragraph, each part from one
 value audit computed and none from recorded text: the verdict with why
 (_verdict_line: its verdict_rule, else, unavailable, its note, else,
 accepted by user, 'over <acceptance.verdict_without_override>[: <its
@@ -67,9 +71,9 @@ carried_minors_open (_autopsy.open_task_minors), '<M> listed (more may be
 missing)' (_autopsy.MINORS_LOWER_BOUND; in the Summary and the header
 '<M> open task minor(s) listed (more may be missing)') when a cannot_verify
 quote holds _autopsy.MINORS_NOT_REACHED, and unavailable when both lists
-are null; open or declined is unavailable when the result has no such list
-(open_work.final's not_recorded: older engines have no open list), and
-every count when the final review is. Under the
+are null; open, declined or the cannot-verify items read unavailable when
+the result has no such list (open_work.final's not_recorded: older engines
+have no open list), and every count when the final review is. Under the
 header come the open task minors, then each carried id as '<id> open
 (carried minor)'. Each open minor is placed by its id's prefix
 (_minor_task: the task id when it starts with a letter, else T<id>; a
@@ -174,8 +178,9 @@ TERMS = (
                                     "Consumes (the result's preflight.undeclared): its Produces block went into "
                                     "the task's brief; it does not order the task after the producer."),
     ("cause", "gaps that share a pointer (each array index read as N), a state and a note (each sha read as "
-              "<sha>; the first note is shown), listed once under Evidence gaps with the tasks whose blocks hold "
-              "them, or with run and every value for a run-level cause."),
+              "<sha>, and shown so when the notes differ), listed once under Evidence gaps with the tasks whose "
+              "blocks hold them, or, for a run-level cause, with run, followed by every value when there is more "
+              "than one or a single string or number."),
 )
 
 
@@ -323,24 +328,27 @@ def _final_value(final):
 
 
 def _final_counts(final):
-    """{"open", "declined", "minors", "at_least", "cannot_verify"} of
-    open_work.final: open and declined the final findings of each status
-    (None for a list the result does not record, its not_recorded), minors
-    the open task minors plus the carried ones (_autopsy.open_task_minors
-    over the quotes' text), at_least True when that is a lower bound. Each
-    count is None when the final review is unavailable, and minors also
-    when the result records neither list."""
+    """{"present", "open", "declined", "minors", "at_least",
+    "cannot_verify"} of open_work.final: present False when the final
+    review is unavailable; open and declined the final findings of each
+    status, cannot_verify the cannot-verify items (each None for a list the
+    result does not record, its not_recorded); minors the open task minors
+    plus the carried ones (_autopsy.open_task_minors over the quotes' text),
+    at_least True when that is a lower bound. Each count is None when the
+    final review is unavailable, and minors also when the result records
+    neither list."""
     value = _final_value(final)
     if value is None:
-        return {"open": None, "declined": None, "minors": None, "at_least": False, "cannot_verify": None}
+        return {"present": False, "open": None, "declined": None, "minors": None, "at_least": False,
+                "cannot_verify": None}
     cannot = value.get("cannot_verify") or []
     minors, at_least = _autopsy.open_task_minors(value.get("task_minors_open"), value.get("carried_minors_open"),
                                                  [x.get("quote") for x in cannot if isinstance(x, dict)])
     status = [f.get("status") for f in value["findings"]]
     unrecorded = value.get("not_recorded") or []
     count = lambda key: None if key in unrecorded else status.count(key)  # noqa: E731
-    return {"open": count("open"), "declined": count("declined"), "minors": minors, "at_least": at_least,
-            "cannot_verify": len(cannot)}
+    return {"present": True, "open": count("open"), "declined": count("declined"), "minors": minors,
+            "at_least": at_least, "cannot_verify": None if "cannot_verify" in unrecorded else len(cannot)}
 
 
 def _number(n):
@@ -510,18 +518,28 @@ def _gate_text(value, gate_reason):
     return _scalar(value)
 
 
-def _overrode_text(a, gate_reason):
-    """What an accepted by user verdict overrode: 'over
-    <verdict_without_override>[: <its rule>]' when that verdict (audit's,
-    with no override) differs from the run's own, so a fault audit found is
-    named ('over unverified: gate mismatch'); else 'over <overrode>' (the
-    in-effect override's overrode: the run's own verdict and reason kinds,
-    as Acceptance computes them); None when there is neither."""
+def _without_override(a, gate_reason):
+    """(the verdict without the override as _gate_text names it, its rule or
+    None) for an accepted by user verdict when that verdict (audit's, with
+    no override) differs from the run's own, so a fault audit found that the
+    override set aside; else None."""
     without = a.get("verdict_without_override")
     run_verdict = a.get("run_verdict")
-    if isinstance(without, str) and without and _is_ref(run_verdict) and without != run_verdict.get("value"):
-        rule = a.get("verdict_rule_without_override")
-        return "over %s%s" % (_gate_text(without, gate_reason), ": %s" % rule if rule else "")
+    if a["verdict"].get("value") != "accepted by user" or not (isinstance(without, str) and without) \
+            or not _is_ref(run_verdict) or without == run_verdict.get("value"):
+        return None
+    return _gate_text(without, gate_reason), a.get("verdict_rule_without_override")
+
+
+def _overrode_text(a, gate_reason):
+    """What an accepted by user verdict overrode: 'over
+    <verdict_without_override>[: <its rule>]' (_without_override: 'over
+    unverified: gate mismatch'); else 'over <overrode>' (the in-effect
+    override's overrode: the run's own verdict and reason kinds, as
+    Acceptance computes them); None when there is neither."""
+    without = _without_override(a, gate_reason)
+    if without is not None:
+        return "over %s%s" % (without[0], ": %s" % without[1] if without[1] else "")
     overrode = [o["overrode"] for o in a.get("overrides") or [] if isinstance(o.get("overrode"), str) and o["overrode"]]
     return "over %s" % overrode[0] if overrode else None
 
@@ -584,12 +602,11 @@ def _md_bottom_line(audit, out):
         held = ["%d %s" % (n, state) for state, n in held if n]
     lines.append(line + ("; " + ", ".join(held) if held else "") + ".")
     f = c["final"]
-    # cannot_verify is None only when the final review is unavailable.
-    if f["cannot_verify"] is None:
+    if not f["present"]:
         lines.append("Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.")
     else:
-        lines.append("Final findings: %s open, %s declined; open task minors: %s; cannot-verify items: %d."
-                     % (_number(f["open"]), _number(f["declined"]), _minors_text(f), f["cannot_verify"]))
+        lines.append("Final findings: %s open, %s declined; open task minors: %s; cannot-verify items: %s."
+                     % (_number(f["open"]), _number(f["declined"]), _minors_text(f), _number(f["cannot_verify"])))
     lines.append("Code outside recorded task ranges: %s." % _outside_text(c))
     missing = len(run["launches"].get("missing") or [])
     if missing and c["recorded"] is not None:
@@ -611,12 +628,16 @@ def _md_summary(audit, out):
     out.append("")
 
 
-def _md_acceptance(a, rule, out):
-    """rule is run.checks.rule, the evidence validity rule."""
+def _md_acceptance(a, rule, out, gate_reason=None):
+    """rule is run.checks.rule, the evidence validity rule, and gate_reason
+    run.checks.gate_reason."""
     out += ["## Acceptance", ""]
     out.append(_ref("verdict", a["verdict"]))
     if a.get("verdict_rule"):
         out.append("- what made it unverified: %s" % a["verdict_rule"])
+    without = _without_override(a, gate_reason)
+    if without is not None:
+        out.append("- verdict without the override: %s%s" % (without[0], " (%s)" % without[1] if without[1] else ""))
     out.append(_ref("run verdict", a["run_verdict"]))
     for r in a.get("reasons") or []:
         label = "reason %s (%s)" % (_scalar(r.get("kind")), _scalar(r.get("class")))
@@ -1005,7 +1026,7 @@ def render_md(audit):
     run = audit["run"]
     _md_bottom_line(audit, out)
     _md_summary(audit, out)
-    _md_acceptance(run["acceptance"], run["checks"].get("rule"), out)
+    _md_acceptance(run["acceptance"], run["checks"].get("rule"), out, run["checks"].get("gate_reason"))
     _md_launches(run["launches"], out)
     out += ["## Tasks", ""]
     if not audit["tasks"]:

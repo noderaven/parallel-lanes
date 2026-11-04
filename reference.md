@@ -2179,7 +2179,9 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   every task, so `audit.json` also has `gap_causes`, one entry per cause in first-seen order:
   `{pointer, state, note, tasks, values}`. A cause is the gap pointer with every array index read
   as `N` (`#/tasks/N/status/verified`), the state, and the note with every sha of 7 to 64 hex
-  digits read as `<sha>`; `note` is the cause's first note as written. `tasks` lists the ids of
+  digits read as `<sha>`; `note` is the note as written when every gap of the cause has the same
+  one, else the note with its shas read as `<sha>` (one raw note would be false for the other
+  tasks), and `audit.md` prints that note. `tasks` lists the ids of
   the tasks whose blocks hold the cause, each once, in run order (`null` for a run-level cause);
   `values` lists every value of a run-level cause in order, repeats included, so three missing
   launches stay three values (`null` for a task cause). `audit.md`'s Evidence gaps section opens
@@ -2188,8 +2190,9 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `(run: <v>, <v>)` with every value (`unknown` for `null`) when it has more than one or a single
   plain one. `gaps` itself is per value as before. An older run audited again counts fewer gaps
   where the plan and spec hashes or the plan copy's state were a gap in every task (each is now
-  one run-level gap), and a task whose section the plan copy lacks has one gap, its brief hash,
-  instead of two.
+  one run-level gap), and a task whose section the plan copy lacks has one gap fewer: its brief
+  hash is `missing` with the reason and no section hash is listed (one gap without a review, two
+  with one, its brief match `unavailable` too).
 - **Acceptance** is three facts and one derived verdict: `run_verdict` (the result's
   `acceptance`), `gate` (check-verify's archive-mode outcome: its status, or `checker_error`),
   and `override` (the ledger `accepted` event). The verdict is `accepted`, `accepted by user`,
@@ -2200,7 +2203,9 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   another head it is listed `stale`. `acceptance.verdict_without_override` (1.6.16) is the
   verdict with no override, and `acceptance.verdict_rule_without_override` what made it
   `unverified` when the run said `accepted` (else `null`), so `accepted by user` can name a fault
-  the audit found that the override set aside.
+  the audit found that the override set aside. When that verdict differs from the run's own,
+  `audit.md`'s Acceptance adds `- verdict without the override: <verdict> (<rule>)` (the verdict
+  as the Bottom line names it), beside the override's `it overrode`.
 - **Evidence validity.** The audit judges evidence validity from `result.verify` against the manifest's
   configured checks, with each failed rule named: `checks_missing`, `checks_stale`,
   `checks_incomplete`, `checks_failed`, `checks_unclean`, or `integrity_not_recorded` (older
@@ -2231,9 +2236,10 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   raised, quoted; `null` when the result has no such list, as before 1.3.1),
   `carried_minors_open` (the carried minor ids no final lens raised; `null` before 1.6.3) and
   `carried_minor_tasks` (1.6.16: `{id: task}` for the carried ids a ledger `minors` snapshot
-  lists with a task, the latest snapshot that lists each; `null` with `carried_minors_open`) and
-  `not_recorded` (which of `open` and `declined` the result has no list for: older engines'
-  finals have no `open` list, so that count reads `unavailable`, never 0). The summary's open
+  lists with a task that is a manifest task id, the latest snapshot that lists each; `null` with
+  `carried_minors_open`) and `not_recorded` (which of `open`, `declined` and `cannot_verify` the
+  result has no list for: older engines' finals have no `open` list, so that count reads
+  `unavailable`, never 0, as the cannot-verify items do without their list). The summary's open
   work line and the Open work header read `<open> open and <declined> declined final
   finding(s), <M> open task minor(s)`: M is the open task minors plus the carried ones,
   `<M> open task minor(s) listed (more may be missing)` when the result's `cannot_verify` holds

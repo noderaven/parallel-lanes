@@ -19,9 +19,10 @@ Gap causes. gap_causes(obj) groups those gaps by cause, one entry per cause
 in first-seen order: {"pointer", "state", "note", "tasks", "values"}. The
 cause key is the pointer with every array index (only those) replaced by N,
 the state, and the note with every sha of 7 to 64 hex digits (NOTE_SHA)
-read as <sha>; note is the first raw note of the cause. A gap under
-obj["tasks"][i] belongs to that task: tasks lists the ids of the tasks
-holding the cause, each once, in run order, and values is None. A gap
+read as <sha>; note is the cause's raw note when all its gaps have the same
+one, else the masked note (a raw one would be false for the other gaps). A
+gap under obj["tasks"][i] belongs to that task: tasks lists the ids of the
+tasks holding the cause, each once, in run order, and values is None. A gap
 anywhere else is run-level: tasks is None and values every value of the
 cause in first-seen order, repeats included.
 
@@ -158,6 +159,10 @@ def gap_causes(obj):
                      "tasks": [] if task is not None else None, "values": None if task is not None else []}
             by_key[key] = cause
             causes.append(cause)
+        elif note != cause["note"] and isinstance(note, str):
+            # Raw notes that differ only in their shas: either one would be
+            # false for the other gaps, so the cause carries the masked note.
+            cause["note"] = key[2]
         if task is not None:
             if task not in cause["tasks"]:
                 cause["tasks"].append(task)
