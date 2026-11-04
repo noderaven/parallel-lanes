@@ -770,7 +770,6 @@ test('a call queued behind an earlier call of its turn starts at that call\'s re
   assert.deepEqual(out.own_starts, [0, 1]);
 });
 
-
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
   const moved = 'Command did not complete within its 600s timeout and was moved to the background '
     + '(ID: b14yf1jq4). Output is being written to: /tmp/x/b14yf1jq4.output';

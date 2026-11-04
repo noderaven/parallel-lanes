@@ -2016,7 +2016,8 @@ def waits_section(run):
     'await-checks wait' on their file followed, and left_running those whose
     last wait said the check was still running (exit 4): the agent stopped
     waiting before the check ended (1.6.4: Claude Code 2.1.300 discourages
-    waiting on background commands). Each is {agent, file}.
+    waiting on background commands). Each is {agent, file}, file the
+    result file's name only: the path holds the user's config dir.
 
     background_not_waited counts the calls Claude Code moved to the
     background, outside a procedure, whose completion was observed and in
@@ -2043,11 +2044,12 @@ def waits_section(run):
             path = procedure_file(c)
             if path is None:
                 continue
-            after = _wait_indexes(calls, i, _basename(path))
+            name = _basename(path)
+            after = _wait_indexes(calls, i, name)
             if not after:
-                unwaited.append({"agent": label, "file": path})
+                unwaited.append({"agent": label, "file": name})
             elif calls[after[-1]]["end"] is not None and exit_code(calls[after[-1]]["text"]) == STILL_RUNNING_EXIT:
-                left_running.append({"agent": label, "file": path})
+                left_running.append({"agent": label, "file": name})
         reserved = False
         for i, c in enumerate(calls):
             found = _await_call(c)

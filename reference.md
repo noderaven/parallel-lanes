@@ -1864,10 +1864,10 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     counts the commands that went to the background, with an observed completion, that the agent
     did not wait for (see "Background waits" below): no slowdown. `unwaited` lists the
     background check starts no `await-checks wait` on their file followed, and `left_running` those
-    whose last wait said still running (exit 4), each `{agent, file}`: no await-checks wait on its
-    file followed to the end (the agent may still have read the result another way, after a
-    completion notice). Claude Code 2.1.300 discourages waiting on background commands, so a
-    run on it is worth checking here.
+    whose last wait said still running (exit 4), each `{agent, file}` with the file's name only
+    (never its path): no await-checks wait on its file followed to the end (the agent may still
+    have read the result another way, after a completion notice). Claude Code 2.1.300
+    discourages waiting on background commands, so a run on it is worth checking here.
   - `commands` (1.6.4, `checks.commands`): check time per configured command, from every file in the ledger's
     `checks/` with a results list (task checks, integrate, verify, final fix, accept): one entry
     `{check, group, runs, total_s, median_s, project_suite}` per configured command that ran, in
@@ -1975,8 +1975,9 @@ also has `background_s`, its background window's length):
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
 name, the exit code when known, the matched marker string, the program that ran, and the id of
-the check the call ran, as `checks` names it (such as `test#1`, `<lane>.test#1`, `run-checks` or
-`task-checks`), or null. A Bash line is read as check matching reads it, in simple commands
+the check the call's line runs, as `checks` names it (such as `test#1`, `<lane>.test#1`,
+`run-checks` or `task-checks`), or null; the call may not have reached it (see "`ran` versus
+`inferred`" under Checks). A Bash line is read as check matching reads it, in simple commands
 (leading keywords, `NAME=value` assignments and prefixes such as `env`, `timeout DURATION` or
 `npx` skipped; a simple command that is `cd DIR`, `export ...`, a loop header, a closing
 keyword, assignments alone or a case pattern runs no program). The program is, by the first

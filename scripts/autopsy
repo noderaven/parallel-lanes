@@ -123,8 +123,9 @@ the kinds folded into it, sorted (see One second, one row below).
 evidence is {tool, exit, marker, program, check}: the tool name, the exit
 code a result reports (or null), the marker string matched (from the table
 in _autopsy.py, or null), the program a Bash command ran, as a basename,
-and the id of the check the call ran, as checks names it (such as test#1,
-<lane>.test#1, run-checks or task-checks), or null. The line is read in
+and the id of the check the call's line runs, as checks names it (such as
+test#1, <lane>.test#1, run-checks or task-checks), or null; the call may
+not have reached it (see certainty in checks). The line is read in
 simple commands as check matching reads it (leading keywords, NAME=value
 assignments and prefixes such as env, 'timeout DURATION' or npx skipped;
 'cd DIR', 'export ...', a loop header, a closing keyword, assignments alone
@@ -147,7 +148,9 @@ program is null when it holds '=', '@' or ':'. A line whose quoting does
 not parse is read as plain words, which may split quoted text: its program
 is the first simple command's, with none of the rules above. No command,
 output or prompt text is written. A call fails when its result is an error or starts with
-an 'Exit code N' line with N not 0. The kinds:
+an 'Exit code N' line with N not 0. A call's time starts at its own start:
+the later of its tool_use and the latest result of an earlier call of its
+model turn that came at or before its own result. The kinds:
 - background_check: a Bash call went to the background (see Background
   runs); the time the agent waited inside the background window, from the
   call (from its result, after a timeout) to its observed completion
@@ -305,7 +308,9 @@ by_status: {<status>: n}}, setup {skipped, no_setup_commands} and waits
 sleep_blocked, harness_output_reads}, unwaited, left_running,
 background_not_waited} (the long-check procedure;
 checks_via_procedure is unavailable for a run that could not have used it,
-and waits is unavailable for a run without tool events).
+and waits is unavailable for a run without tool events). unwaited and
+left_running are [{agent, file}], file the result file's name only, never
+its path.
 background_not_waited counts the calls that went to the background, with
 an observed completion, in whose window the agent did not wait (see
 background_check): no slowdown, so the run still shows work it sent to
