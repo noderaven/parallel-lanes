@@ -9,12 +9,18 @@ build(folder, repo=None, head=None) reads the run folder once
 (_audit_core.load_run, which raises _audit_core.OutsideRunFolder for an input
 that resolves outside it) and returns
 
-  {"audit_version": 1, "run_id", "repo", "run", "tasks", "gaps"}
+  {"audit_version": 2, "run_id", "repo", "run", "tasks", "gaps",
+   "gap_causes"}
 
 run is _audit_run.run_sections without its facts, tasks
-_audit_tasks.task_sections, and gaps _audit_core.collect_gaps over the rest
-(JSON pointers from the document root). repo is a ref saying how far the
-git facts can be trusted:
+_audit_tasks.task_sections, gaps _audit_core.collect_gaps over the rest
+(JSON pointers from the document root; one entry per gap value, the length
+tool-outcomes prints) and gap_causes _audit_core.gap_causes over the same
+(one entry per cause: {"pointer", "state", "note", "tasks", "values"}).
+audit_version 2 (1.6.16) added gap_causes and moved the plan and spec
+hashes and the plan copy's state from every task to run.checks (plan_hash,
+spec_hash, section_hash). repo is a ref saying how far the git facts can be
+trusted:
   - no repo: unavailable, "no --repo", and every git fact says so;
   - a repo that is not a git repo, or lacks the run's start point
     (_audit_run.start_point): unavailable with open_repo's reason, and every
@@ -27,31 +33,64 @@ inputs give the same bytes wherever the run folder lies.
 
 render_md(audit) is audit.md: its first line is FIRST_LINE, then the
 sections Bottom line, Summary, Acceptance, Launches, Tasks (one block per
-task), Code outside recorded task ranges, Checks, After delivery (only with
---head), Open work, Evidence gaps and Terms (TERMS, fixed text). The Bottom
-line is one paragraph, each part from one value audit computed and none
-from recorded text: the verdict with why (_verdict_line: its verdict_rule,
-else, unavailable, its note, else, accepted by user, 'over <overrode>'
-(the run's own verdict and reason kinds, as Acceptance computes them),
-else the engine's reason kinds for the engine's own verdict; accepted (gate
-unavailable) carries run.checks.gate_reason inside its parenthesis),
-ACCEPTED_BY_USER when an override's head is present (at the delivered sha)
-and the verdict is not already accepted by user, the tasks' committed,
-reviewed, verified and accepted counts of true values (each with '(<k>
-settled, <k> not required, <k> unavailable)' for the kinds there are) and
-the blocked and deferred counts above 0 ('blocked and deferred unknown'
-when open_work.ledger_state is set), the final findings, open task minors
-and cannot-verify items, the code outside recorded task ranges, the
-launches missing from the archive, and the gap count with NOT_GAPS. The
-Summary's open work line and the Open work header read '<N> open or
-declined final finding(s), <M> open task minor(s)': M is open_work.final's
-task_minors_open plus its carried_minors_open (_autopsy.open_task_minors),
-'at least M' when a cannot_verify quote holds _autopsy.MINORS_NOT_REACHED,
-and unavailable when both lists are null; N and M are unavailable when the
-final review is. Under the header come the open task minors, then each
-carried id as '<id> open (carried minor)'. When open_work.ledger_state is
-set, the open work line's task count is OPEN_TASKS_UNKNOWN and Open work's
-blocked or deferred tasks read unknown rather than none. A value is shown as
+task), Code outside recorded task ranges, Checks (with the plan and spec
+hashes once, each labelled by its setup event, its ledger line among the
+sources, and the plan copy for the section hashes), After delivery (only
+with --head), Open work, Evidence gaps (under '<G> evidence gap(s) in <C>
+cause(s)', one line per cause: '- <pointer> [<state>] - <note> (tasks <id>,
+...)', the note as gap_causes gives it (masked when the cause's raw notes
+differ), or '(run)' for a run-level cause, '(run: <v>, ...)' with every
+value, null as unknown, when it has more than one or a single plain one) and
+Terms (TERMS, fixed text). Acceptance names the verdict without the override
+when an accepted by user verdict overrode one that differs from the run's
+own ('- verdict without the override: <verdict> (<rule>)', the verdict as
+the Bottom line names it). The Bottom line is one paragraph, each part from one
+value audit computed and none from recorded text: the verdict with why
+(_verdict_line: its verdict_rule, else, unavailable, its note, else,
+accepted by user, 'over <acceptance.verdict_without_override>[: <its
+rule>]' when audit's verdict with no override differs from the run's own
+('accepted by user (over unverified: gate mismatch)'), else 'over
+<overrode>' (the run's own verdict and reason kinds, as Acceptance computes
+them), else the engine's reason kinds for the engine's own verdict;
+accepted (gate unavailable) carries run.checks.gate_reason inside its
+parenthesis, also after 'over'), ACCEPTED_BY_USER when an override's head
+is present (at the delivered sha) and the verdict is not already accepted
+by user, the tasks' committed, reviewed, verified and accepted counts of
+true values (_task_count: each with '(<k> settled, <k> not required, <k>
+unavailable)' for the kinds there are; the summary's tasks line counts the
+same way) and the blocked and deferred counts above 0 ('blocked and
+deferred unknown' when open_work.ledger_state is set), 'Final findings:
+<open> open, <declined> declined; open task minors: <M>' and the
+cannot-verify items, the code outside recorded task ranges, the launches
+missing from the archive, and '<G> evidence gap(s) in <C> cause(s)' with
+NOT_GAPS (the summary's last line before the report path gives the same
+counts). The Summary's open work line and the Open work header read
+'<open> open and <declined> declined final finding(s), <M> open task
+minor(s)': M is open_work.final's task_minors_open plus its
+carried_minors_open (_autopsy.open_task_minors), '<M> listed (more may be
+missing)' (_autopsy.MINORS_LOWER_BOUND; in the Summary and the header
+'<M> open task minor(s) listed (more may be missing)') when a cannot_verify
+quote holds _autopsy.MINORS_NOT_REACHED, and unavailable when both lists
+are null; open, declined or the cannot-verify items read unavailable when
+the result has no such list (open_work.final's not_recorded: older engines
+have no open list), and every count when the final review is. Under the
+header come the open task minors, then each carried id as '<id> open
+(carried minor)'. Each open minor is placed by its id's prefix
+(_minor_task: the task id when it starts with a letter, else T<id>; a
+carried id's task from the ledger's minors snapshot,
+open_work.final.carried_minor_tasks, when it is one of the prefix's tasks;
+an exact match over T<id>), and a task block ends with '- open minors:
+<id>, ...' for its own; an id that names a batch unit, no task or more than
+one task is in no task block, and Open work names it once ('open task
+minors in no task block'). Open work also says once 'open task minors:
+not recorded by this run's engine' (NOT_RECORDED) when both lists are
+null, 'no final review' (NO_FINAL_REVIEW) without one (no launch, or the
+latest launch has none; nothing when the launch order is unknown, as the
+final review header gives that reason), and for a lower
+bound LOWER_BOUND_NOTE (a task with no line has none listed). When
+open_work.ledger_state is set, the open work line's task count is
+OPEN_TASKS_UNKNOWN and Open work's blocked or deferred tasks read unknown
+rather than none. A value is shown as
 '<value> [<state>]', with its note after ' - ' and its sources in
 parentheses; a review verdict read from the journal shows its state as
 '[inferred: read from the transcript]' (TRANSCRIPT_INFERRED; other inferred
@@ -69,6 +108,7 @@ render_summary(audit, md_path) is at most 10 lines, the last 'full report:
 
 import datetime
 import os
+import re
 import sys
 
 sys.dont_write_bytecode = True
@@ -80,6 +120,8 @@ import _audit_tasks  # noqa: E402
 import _autopsy  # noqa: E402
 
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
+# 2 (1.6.16): gap_causes, and the plan and spec hashes in run.checks.
+AUDIT_VERSION = 2
 NO_REPO = "no --repo"
 UNCHECKED = "repo not checked against the run"
 # audit.md's bracket for a review verdict read from the journal.
@@ -91,6 +133,18 @@ FAILED_CHECKS = "failed checks"
 OPEN_TASKS_UNKNOWN = "unknown (ledger status unavailable)"
 # The bottom line's last sentence, after the gap count.
 NOT_GAPS = "(cannot-verify items and inferred lines are not gaps)"
+# Open work's line on the open task minors when the result records neither
+# list, or when there is no final review to read.
+NOT_RECORDED = "not recorded by this run's engine"
+NO_FINAL_REVIEW = "no final review"
+# Why an open minor is under Open work only, in no task block.
+UNPLACED = "each id names a batch unit, no task, or more than one task"
+# Open work's line on the open task minors when their count is a lower bound.
+LOWER_BOUND_NOTE = ("a task block with no open minors line has none listed; more may be missing: minors of tasks "
+                    "an earlier launch approved")
+# A minor id: '<prefix>-<n>' (src/engine.js taskMinorFindings).
+MINOR_ID = re.compile(r"^(.+)-[0-9]+$")
+LETTER_FIRST = re.compile(r"^[A-Za-z]")
 # The Terms section: (term, definition), fixed text in this order.
 TERMS = (
     ("[present]", "the value is established (from the sources named after it, when there are any). Not a gap."),
@@ -123,6 +177,10 @@ TERMS = (
     ("context added by pre-flight", "a producer pre-flight found the task relies on without naming it in its "
                                     "Consumes (the result's preflight.undeclared): its Produces block went into "
                                     "the task's brief; it does not order the task after the producer."),
+    ("cause", "gaps that share a pointer (each array index read as N), a state and a note (each sha read as "
+              "<sha>, and shown so when the notes differ), listed once under Evidence gaps with the tasks whose "
+              "blocks hold them, or, for a run-level cause, with run, followed by every value when there is more "
+              "than one or a single string or number."),
 )
 
 
@@ -152,13 +210,15 @@ def build(folder, repo=None, head=None):
     tasks = _audit_tasks.task_sections(run, git, facts, pairs, git_note=git_note)
     run_id = manifest.get("run_id")
     audit = {
-        "audit_version": 1,
+        "audit_version": AUDIT_VERSION,
         "run_id": run_id if isinstance(run_id, str) else None,
         "repo": repo_ref,
         "run": sections,
         "tasks": tasks,
     }
-    audit["gaps"] = core.collect_gaps(audit)
+    gaps, causes = core.collect_gaps(audit), core.gap_causes(audit)
+    audit["gaps"] = gaps
+    audit["gap_causes"] = causes
     return audit
 
 
@@ -261,20 +321,34 @@ def _time(seconds):
 
 # ---- counts shared by the summary and audit.md ----
 
+def _final_value(final):
+    """open_work.final's value, or None when the final review is
+    unavailable."""
+    return final.get("value") if _is_ref(final) and isinstance(final.get("value"), dict) else None
+
+
 def _final_counts(final):
-    """{"findings", "minors", "at_least", "cannot_verify"} of
-    open_work.final: findings the open and declined final findings, minors
-    the open task minors plus the carried ones (_autopsy.open_task_minors
-    over the quotes' text), at_least True when that is a lower bound. Each
-    count is None when the final review is unavailable, and minors also
-    when the result records neither list."""
-    value = final.get("value") if _is_ref(final) and isinstance(final.get("value"), dict) else None
+    """{"present", "open", "declined", "minors", "at_least",
+    "cannot_verify"} of open_work.final: present False when the final
+    review is unavailable; open and declined the final findings of each
+    status, cannot_verify the cannot-verify items (each None for a list the
+    result does not record, its not_recorded); minors the open task minors
+    plus the carried ones (_autopsy.open_task_minors over the quotes' text),
+    at_least True when that is a lower bound. Each count is None when the
+    final review is unavailable, and minors also when the result records
+    neither list."""
+    value = _final_value(final)
     if value is None:
-        return {"findings": None, "minors": None, "at_least": False, "cannot_verify": None}
+        return {"present": False, "open": None, "declined": None, "minors": None, "at_least": False,
+                "cannot_verify": None}
     cannot = value.get("cannot_verify") or []
     minors, at_least = _autopsy.open_task_minors(value.get("task_minors_open"), value.get("carried_minors_open"),
                                                  [x.get("quote") for x in cannot if isinstance(x, dict)])
-    return {"findings": len(value["findings"]), "minors": minors, "at_least": at_least, "cannot_verify": len(cannot)}
+    status = [f.get("status") for f in value["findings"]]
+    unrecorded = value.get("not_recorded") or []
+    count = lambda key: None if key in unrecorded else status.count(key)  # noqa: E731
+    return {"present": True, "open": count("open"), "declined": count("declined"), "minors": minors,
+            "at_least": at_least, "cannot_verify": None if "cannot_verify" in unrecorded else len(cannot)}
 
 
 def _number(n):
@@ -282,22 +356,77 @@ def _number(n):
 
 
 def _minors_text(counts):
-    """M as audit.md and the summary print it: a number, 'at least M' or
-    'unavailable'."""
+    """M as the bottom line prints it: a number, '<M> listed (more may be
+    missing)' for a lower bound, or 'unavailable'."""
     if counts["minors"] is None:
         return "unavailable"
-    return ("at least %d" if counts["at_least"] else "%d") % counts["minors"]
+    if counts["at_least"]:
+        return "%d %s" % (counts["minors"], _autopsy.MINORS_LOWER_BOUND)
+    return str(counts["minors"])
 
 
 def _open_counts(counts):
-    return "%s open or declined final finding(s), %s open task minor(s)" % (_number(counts["findings"]),
-                                                                          _minors_text(counts))
+    """'<open> open and <declined> declined final finding(s), <M> open task
+    minor(s)' (the Summary and the Open work header), M's lower bound read
+    '<M> open task minor(s) listed (more may be missing)'."""
+    if counts["minors"] is None:
+        minors = "unavailable open task minor(s)"
+    else:
+        minors = "%d open task minor(s)%s" % (counts["minors"],
+                                              " " + _autopsy.MINORS_LOWER_BOUND if counts["at_least"] else "")
+    return "%s open and %s declined final finding(s), %s" % (_number(counts["open"]), _number(counts["declined"]),
+                                                             minors)
+
+
+def _minor_prefix(task_id):
+    """The prefix the engine gives a task's minor ids (src/engine.js
+    taskMinorFindings): the id when it starts with a letter, else T<id>."""
+    return task_id if LETTER_FIRST.match(task_id) else "T" + task_id
+
+
+def _minor_task(minor_id, task_ids, recorded=None):
+    """The task id an open minor's block is, or None (Open work only). The
+    id's prefix ('<prefix>-<n>') names the tasks whose _minor_prefix it is;
+    recorded (a carried id's task in the ledger's minors snapshot) chooses
+    among them, else one task is it, else the one whose id is the prefix
+    itself (a T2 over the task 2). A batch unit '<first>-<last>', a prefix
+    no task has, or a choice still open gives None."""
+    m = MINOR_ID.match(minor_id) if isinstance(minor_id, str) else None
+    if m is None:
+        return None
+    named = [t for t in task_ids if _minor_prefix(t) == m.group(1)]
+    if recorded in named:
+        return recorded if named.count(recorded) == 1 else None
+    if len(named) == 1:
+        return named[0]
+    exact = [t for t in named if t == m.group(1)]
+    return exact[0] if len(exact) == 1 else None
+
+
+def _placed_minors(audit):
+    """({task index: [minor ids]}, [ids in no task block]) of the final
+    review's open task minors, then its carried ids, by _minor_task; None
+    when the final review is unavailable or records neither list."""
+    value = _final_value(audit["run"]["open_work"]["final"])
+    if value is None or (value.get("task_minors_open") is None and value.get("carried_minors_open") is None):
+        return None
+    ids = [t["id"] for t in audit["tasks"]]
+    recorded = value.get("carried_minor_tasks") or {}
+    minors = [(f.get("id"), None) for f in value.get("task_minors_open") or [] if isinstance(f, dict)]
+    minors += [(cid, recorded.get(cid)) for cid in value.get("carried_minors_open") or []]
+    by_task, unplaced = {}, []
+    for mid, task in minors:
+        task = _minor_task(mid, ids, task)
+        if task is None:
+            unplaced.append(_scalar(mid))
+        else:
+            by_task.setdefault(ids.index(task), []).append(mid)
+    return by_task, unplaced
 
 
 def _counts(audit):
     run = audit["run"]
     tasks = audit["tasks"]
-    status = lambda field: sum(1 for t in tasks if t["status"][field].get("value") is True)  # noqa: E731
     entries = run["launches"]["entries"]
     launches = entries["value"] if isinstance(entries.get("value"), list) else []
     outside = run["code_outside_ranges"]
@@ -312,10 +441,6 @@ def _counts(audit):
         "latest": run["launches"].get("latest"),
         "order": run["launches"].get("order"),
         "tasks": len(tasks),
-        "committed": status("committed"),
-        "reviewed": status("reviewed"),
-        "verified": status("verified"),
-        "accepted": status("accepted"),
         "outside": commits,
         "outside_note": outside.get("note"),
         "unreviewed": sum(1 for c in commits or [] if c["coverage"]["state"] == "missing"),
@@ -324,7 +449,14 @@ def _counts(audit):
         "held_unknown": open_work.get("ledger_state") is not None,
         "final": _final_counts(open_work.get("final")),
         "gaps": len(audit["gaps"]),
+        "causes": len(audit["gap_causes"]),
     }
+
+
+def _gaps_text(c):
+    """'<G> evidence gap(s) in <C> cause(s)', for the summary, the Bottom
+    line and the Evidence gaps header."""
+    return "%d evidence gap(s) in %d cause(s)" % (c["gaps"], c["causes"])
 
 
 def _outside_text(c):
@@ -343,12 +475,15 @@ def _summary_lines(audit):
         lines.append("launches: %s, latest %s" % (count, c["latest"]))
     else:
         lines.append("launches: %s, latest unknown (%s)" % (count, c["order"]))
-    lines.append("tasks: %d; committed %d, reviewed %d, verified %d, accepted %d"
-                 % (c["tasks"], c["committed"], c["reviewed"], c["verified"], c["accepted"]))
+    # Counted as the bottom line counts them, the unknown ones named.
+    tasks = audit["tasks"]
+    lines.append("tasks: %d; committed %s, reviewed %s, verified %s, accepted %s"
+                 % (c["tasks"], _task_count(tasks, "committed"), _task_count(tasks, "reviewed"),
+                    _task_count(tasks, "verified"), _task_count(tasks, "accepted")))
     lines.append("code outside recorded task ranges: %s" % _outside_text(c))
     held = OPEN_TASKS_UNKNOWN if c["held_unknown"] else "%d task(s)" % c["open_tasks"]
     lines.append("open work: %s, %s" % (held, _open_counts(c["final"])))
-    lines.append("evidence gaps: %d" % c["gaps"])
+    lines.append(_gaps_text(c))
     return lines
 
 
@@ -374,30 +509,61 @@ def _task_count(tasks, field):
     return "%d (%s)" % (n, ", ".join(extra)) if extra else str(n)
 
 
+def _gate_text(value, gate_reason):
+    """A verdict as the bottom line names it: accepted (gate unavailable)
+    with gate_reason (run.checks.gate_reason, check-verify's fixed reason
+    code) inside its parenthesis, 'accepted (gate unavailable: <reason>)'."""
+    if value == _audit_run.GATE_UNAVAILABLE_VERDICT and isinstance(gate_reason, str) and gate_reason:
+        return "%s: %s)" % (value[:-1], gate_reason)
+    return _scalar(value)
+
+
+def _without_override(a, gate_reason):
+    """(the verdict without the override as _gate_text names it, its rule or
+    None) for an accepted by user verdict when that verdict (audit's, with
+    no override) differs from the run's own, so a fault audit found that the
+    override set aside; else None."""
+    without = a.get("verdict_without_override")
+    run_verdict = a.get("run_verdict")
+    if a["verdict"].get("value") != "accepted by user" or not (isinstance(without, str) and without) \
+            or not _is_ref(run_verdict) or without == run_verdict.get("value"):
+        return None
+    return _gate_text(without, gate_reason), a.get("verdict_rule_without_override")
+
+
+def _overrode_text(a, gate_reason):
+    """What an accepted by user verdict overrode: 'over
+    <verdict_without_override>[: <its rule>]' (_without_override: 'over
+    unverified: gate mismatch'); else 'over <overrode>' (the in-effect
+    override's overrode: the run's own verdict and reason kinds, as
+    Acceptance computes them); None when there is neither."""
+    without = _without_override(a, gate_reason)
+    if without is not None:
+        return "over %s%s" % (without[0], ": %s" % without[1] if without[1] else "")
+    overrode = [o["overrode"] for o in a.get("overrides") or [] if isinstance(o.get("overrode"), str) and o["overrode"]]
+    return "over %s" % overrode[0] if overrode else None
+
+
 def _verdict_line(a, gate_reason=None):
     """'Verdict: <verdict>' with why: the verdict_rule (audit's own reason),
-    else, unavailable, the verdict's note, else, accepted by user, 'over
-    <overrode>' (the in-effect override's overrode: the run's own verdict
-    and reason kinds, as Acceptance computes them; nothing when there is
-    none), else, for the engine's own verdict, its reason kinds (unquoted,
-    as Acceptance prints them); in parentheses, or after '; ' when the text
-    has its own. For accepted (gate unavailable), gate_reason
-    (run.checks.gate_reason, check-verify's fixed reason code) goes inside
-    the verdict's parenthesis: 'accepted (gate unavailable: <reason>)'.
-    ACCEPTED_BY_USER follows when an override is in effect (its head
-    present, at the delivered sha) and the verdict does not already say so:
-    only a verdict unavailable for want of an acceptance object can be
-    one."""
+    else, unavailable, the verdict's note, else, accepted by user, what it
+    overrode (_overrode_text, always in parentheses), else, for the
+    engine's own verdict, its reason kinds (unquoted, as Acceptance prints
+    them); in parentheses, or after '; ' when the text has its own. The
+    verdict is named by _gate_text. ACCEPTED_BY_USER follows when an
+    override is in effect (its head present, at the delivered sha) and the
+    verdict does not already say so: only a verdict unavailable for want of
+    an acceptance object can be one."""
     verdict = a["verdict"]
     value = verdict.get("value")
     why = a.get("verdict_rule")
     run_verdict = a.get("run_verdict")
     overrides = a.get("overrides") or []
+    wrap = False
     if not why and verdict.get("state") == "unavailable":
         why = verdict.get("note")
     elif not why and value == "accepted by user":
-        overrode = [o["overrode"] for o in overrides if isinstance(o.get("overrode"), str) and o["overrode"]]
-        why = "over %s" % overrode[0] if overrode else None
+        why, wrap = _overrode_text(a, gate_reason), True
     elif not why and _is_ref(run_verdict) and value == run_verdict.get("value"):
         kinds = []
         for r in a.get("reasons") or []:
@@ -405,12 +571,9 @@ def _verdict_line(a, gate_reason=None):
             if isinstance(kind, str) and kind and kind not in kinds:
                 kinds.append(kind)
         why = ", ".join(kinds)
-    text = _scalar(value)
-    if value == _audit_tasks.GATE_UNAVAILABLE_VERDICT and isinstance(gate_reason, str) and gate_reason:
-        text = "%s: %s)" % (value[:-1], gate_reason)
-    line = "Verdict: %s" % text
+    line = "Verdict: %s" % _gate_text(value, gate_reason)
     if why:
-        line += ("; %s" if "(" in why else " (%s)") % why
+        line += ("; %s" if "(" in why and not wrap else " (%s)") % why
     # An override counts only at the delivered sha; its text is never shown.
     in_effect = any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in overrides)
     if in_effect and value != "accepted by user":
@@ -439,16 +602,16 @@ def _md_bottom_line(audit, out):
         held = ["%d %s" % (n, state) for state, n in held if n]
     lines.append(line + ("; " + ", ".join(held) if held else "") + ".")
     f = c["final"]
-    if f["findings"] is None:
+    if not f["present"]:
         lines.append("Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.")
     else:
-        lines.append("Final findings: %d open or declined; open task minors: %s; cannot-verify items: %d."
-                     % (f["findings"], _minors_text(f), f["cannot_verify"]))
+        lines.append("Final findings: %s open, %s declined; open task minors: %s; cannot-verify items: %s."
+                     % (_number(f["open"]), _number(f["declined"]), _minors_text(f), _number(f["cannot_verify"])))
     lines.append("Code outside recorded task ranges: %s." % _outside_text(c))
     missing = len(run["launches"].get("missing") or [])
     if missing and c["recorded"] is not None:
         lines.append("Launches missing from the archive: %d of %d recorded." % (missing, c["recorded"]))
-    lines.append("%d evidence gap(s) %s." % (c["gaps"], NOT_GAPS))
+    lines.append("%s %s." % (_gaps_text(c), NOT_GAPS))
     out += ["## Bottom line", ""] + lines + [""]
 
 
@@ -465,12 +628,16 @@ def _md_summary(audit, out):
     out.append("")
 
 
-def _md_acceptance(a, rule, out):
-    """rule is run.checks.rule, the evidence validity rule."""
+def _md_acceptance(a, rule, out, gate_reason=None):
+    """rule is run.checks.rule, the evidence validity rule, and gate_reason
+    run.checks.gate_reason."""
     out += ["## Acceptance", ""]
     out.append(_ref("verdict", a["verdict"]))
     if a.get("verdict_rule"):
         out.append("- what made it unverified: %s" % a["verdict_rule"])
+    without = _without_override(a, gate_reason)
+    if without is not None:
+        out.append("- verdict without the override: %s%s" % (without[0], " (%s)" % without[1] if without[1] else ""))
     out.append(_ref("run verdict", a["run_verdict"]))
     for r in a.get("reasons") or []:
         label = "reason %s (%s)" % (_scalar(r.get("kind")), _scalar(r.get("class")))
@@ -535,7 +702,9 @@ def _md_launches(launches, out):
     out.append("")
 
 
-def _md_task(t, out):
+def _md_task(t, out, minors=None):
+    """One task block; it ends with '- open minors: <id>, ...' when minors
+    (the open minors _placed_minors puts here) has any."""
     out += ["### Task %s (lane %s)" % (t["id"], _scalar(t.get("lane"))), ""]
     s = t["status"]
     out.append("Status:")
@@ -545,13 +714,8 @@ def _md_task(t, out):
 
     req = t["requirement"]
     out += ["", "Requirement:"]
-    out.append(_ref("plan section hash", req["section_hash"]))
     out.append(_ref("brief hash (latest review)", req["brief_hash"]))
     out.append(_ref("brief file", req["brief_file"]))
-    for i, r in enumerate(req.get("plan_hash") or [], 1):
-        out.append(_ref("plan hash, launch %d" % i, r))
-    for i, r in enumerate(req.get("spec_hash") or [], 1):
-        out.append(_ref("spec hash, launch %d" % i, r))
 
     p = t["placement"]
     out += ["", "Placement:"]
@@ -658,6 +822,8 @@ def _md_task(t, out):
         if approval.get("stale_by"):
             line += "; made stale by %s" % _where([approval["stale_by"]])
         out.append(line)
+    if minors:
+        out.append("- open minors: %s" % ", ".join(minors))
     out.append("")
 
 
@@ -711,7 +877,22 @@ def _md_checks(c, out):
                         % (_scalar(ev.get("checked_sha")), ev.get("items"), ev.get("failed"))))
     else:
         out.append(_ref("e2e", e2e))
+    # The run's input hashes, once: by setup event, its ledger line among
+    # the sources.
+    for kind in ("plan", "spec"):
+        for i, r in enumerate(c.get("%s_hash" % kind) or [], 1):
+            label = "%s hash, setup event %d" % (kind, i) if _at_line(r) else "%s hash" % kind
+            out.append(_ref(label, r))
+    if c.get("section_hash") is not None:
+        out.append(_ref("plan copy for the section hashes", c["section_hash"]))
     out.append("")
+
+
+def _at_line(r):
+    """True when a ref's first source is a ledger line (L<n>)."""
+    sources = r.get("sources") if _is_ref(r) else None
+    at = sources[0].get("at") if sources and isinstance(sources[0], dict) else None
+    return isinstance(at, str) and at.startswith("L")
 
 
 def _md_after(r, out):
@@ -742,7 +923,12 @@ def _md_finding(f, out, indent=""):
                 out += _quote("disposition %s" % key, d[key], indent + "    ")
 
 
-def _md_open(o, out):
+def _md_open(o, out, placed, order_unknown=False):
+    """placed is _placed_minors' result: after the final review's entries,
+    one line on the open task minors when there is something to say (no
+    final review, none recorded, ids in no task block, a lower bound).
+    order_unknown (launches archived, the latest not known) adds none: the
+    final review may exist, and its header already gives the reason."""
     out += ["## Open work", ""]
     if not o["tasks"]:
         # Unknown, not none, when ledger status failed (ledger_state is set).
@@ -772,7 +958,8 @@ def _md_open(o, out):
         out.append(_ref("stopped lanes", stopped, value="none" if isinstance(lanes, list) else None))
     final = o["final"]
     value = final.get("value")
-    out.append(_ref("final review", final, value=_open_counts(_final_counts(final))))
+    counts = _final_counts(final)
+    out.append(_ref("final review", final, value=_open_counts(counts)))
     if isinstance(value, dict):
         for f in value["findings"]:
             _md_finding(f, out, "  ")
@@ -788,22 +975,49 @@ def _md_open(o, out):
         # The carried ids the header counts, as recorded (ids only).
         for cid in value.get("carried_minors_open") or []:
             out.append("  - %s open (carried minor)" % cid)
+    # Said once here, never per task.
+    if _final_value(final) is None:
+        if not order_unknown:
+            out.append("- open task minors: %s" % NO_FINAL_REVIEW)
+    elif placed is None:
+        out.append("- open task minors: %s" % NOT_RECORDED)
+    else:
+        if placed[1]:
+            out.append("- open task minors in no task block: %s (%s)" % (", ".join(placed[1]), UNPLACED))
+        if counts["at_least"]:
+            out.append("- open task minors: %s" % LOWER_BOUND_NOTE)
     out.append("")
 
 
-def _md_gaps(gaps, out):
+def _plain(value):
+    return isinstance(value, (str, int, float)) and not isinstance(value, bool)
+
+
+def _cause_where(cause):
+    """'(tasks <id>, ...)' for a cause under tasks; '(run)', or '(run: <v>,
+    ...)' with every value ('unknown' for null) when there is more than one
+    or a single plain one, for a run-level cause."""
+    if cause.get("tasks") is not None:
+        return "(tasks %s)" % ", ".join(str(t) for t in cause["tasks"])
+    values = cause.get("values") or []
+    if not values or (len(values) == 1 and not _plain(values[0])):
+        return "(run)"
+    return "(run: %s)" % ", ".join(str(v) if _plain(v) else _scalar(v) for v in values)
+
+
+def _md_gaps(audit, out):
+    """'<G> evidence gap(s) in <C> cause(s)', then one line per cause:
+    '- <pointer> [<state>] - <note> (tasks <id>, ...)' or '(run...)'."""
     out += ["## Evidence gaps", ""]
-    out.append("evidence gaps: %d" % len(gaps))
+    out.append(_gaps_text(_counts(audit)))
     out.append("")
-    for g in gaps:
-        line = "- %s: %s" % (g["where"], g["state"])
-        value = g.get("value")
-        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-            line += " (%s)" % value
-        if g.get("note"):
-            line += " - %s" % g["note"]
-        out.append(line)
-    if gaps:
+    causes = audit["gap_causes"]
+    for cause in causes:
+        line = "- %s [%s]" % (cause["pointer"], cause["state"])
+        if cause.get("note"):
+            line += " - %s" % cause["note"]
+        out.append("%s %s" % (line, _cause_where(cause)))
+    if causes:
         out.append("")
 
 
@@ -812,19 +1026,22 @@ def render_md(audit):
     run = audit["run"]
     _md_bottom_line(audit, out)
     _md_summary(audit, out)
-    _md_acceptance(run["acceptance"], run["checks"].get("rule"), out)
+    _md_acceptance(run["acceptance"], run["checks"].get("rule"), out, run["checks"].get("gate_reason"))
     _md_launches(run["launches"], out)
     out += ["## Tasks", ""]
     if not audit["tasks"]:
         out += ["The manifest lists no task.", ""]
-    for t in audit["tasks"]:
-        _md_task(t, out)
+    placed = _placed_minors(audit)
+    for i, t in enumerate(audit["tasks"]):
+        _md_task(t, out, placed[0].get(i) if placed is not None else None)
     _md_outside(run["code_outside_ranges"], out)
     _md_checks(run["checks"], out)
     if run.get("after_delivery") is not None:
         _md_after(run["after_delivery"], out)
-    _md_open(run["open_work"], out)
-    _md_gaps(audit["gaps"], out)
+    entries = run["launches"]["entries"].get("value")
+    order_unknown = run["launches"].get("latest") is None and isinstance(entries, list) and bool(entries)
+    _md_open(run["open_work"], out, placed, order_unknown)
+    _md_gaps(audit, out)
     _md_terms(out)
     while out and out[-1] == "":
         out.pop()

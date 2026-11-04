@@ -43,6 +43,49 @@ test('collect_gaps walks into a ref value and escapes pointer keys', () => {
   ]);
 });
 
+test('gap_causes lists each cause once, with its tasks or its run-level values', () => {
+  const out = pythonJSON([
+    'import _audit_core as c',
+    'MN = "the ledger records this launch; its transcripts are not archived"',
+    'def task(tid, n_esc, sha=None, lacks=False):',
+    '    t = {"id": tid, "status": {"committed": c.ref(None, "unavailable", [], "no ledger")},',
+    '         "esc": [c.ref(None, "unavailable", [], "no transcripts archived") for _ in range(n_esc)]}',
+    '    if sha:',
+    '        t["files"] = c.ref(None, "unavailable", [], "the repo does not contain %s" % sha)',
+    '        t["head"] = c.ref(None, "stale", [], "behind fedcba9")',
+    '    if lacks:',
+    '        t["brief"] = c.ref(None, "missing", [], "no brief")',
+    '    return t',
+    'doc = {"repo": c.ref(None, "unavailable", [], "no --repo"),',
+    '       "run": {"launches": {"missing": [c.ref("wf_bbbbbb", "missing", [], MN), c.ref(None, "missing", [], MN),',
+    '                                        c.ref(None, "missing", [], MN)]},',
+    '               "keyed": {"7": c.ref(1, "stale", [], "a dict key, not an index")}},',
+    '       "tasks": [task("A1", 2, "abcdef1", True), task("A2", 1, "1234567"), task("A3", 0, None, True)]}',
+    'print(json.dumps({"gaps": c.collect_gaps(doc), "causes": c.gap_causes(doc)}))',
+  ]);
+  assert.equal(out.gaps.length, 17);
+  assert.deepEqual(out.causes, [
+    { pointer: '#/repo', state: 'unavailable', note: 'no --repo', tasks: null, values: [null] },
+    // Every value of a run-level cause, in order, repeats included.
+    { pointer: '#/run/launches/missing/N', state: 'missing', note: 'the ledger records this launch; its transcripts are not archived',
+      tasks: null, values: ['wf_bbbbbb', null, null] },
+    // Only array indices read as N.
+    { pointer: '#/run/keyed/7', state: 'stale', note: 'a dict key, not an index', tasks: null, values: [1] },
+    // A cause in every task lists every task once, however often a task holds it.
+    { pointer: '#/tasks/N/status/committed', state: 'unavailable', note: 'no ledger', tasks: ['A1', 'A2', 'A3'], values: null },
+    { pointer: '#/tasks/N/esc/N', state: 'unavailable', note: 'no transcripts archived', tasks: ['A1', 'A2'], values: null },
+    // Masked shas merge the notes; notes that differ print masked, since
+    // either raw note would be false for the other task.
+    { pointer: '#/tasks/N/files', state: 'unavailable', note: 'the repo does not contain <sha>', tasks: ['A1', 'A2'], values: null },
+    // The same raw note in every gap of the cause is kept as written.
+    { pointer: '#/tasks/N/head', state: 'stale', note: 'behind fedcba9', tasks: ['A1', 'A2'], values: null },
+    // A per-task cause in some tasks lists exactly those.
+    { pointer: '#/tasks/N/brief', state: 'missing', note: 'no brief', tasks: ['A1', 'A3'], values: null },
+  ]);
+  // No gap, no cause.
+  assert.deepEqual(pythonJSON(['import _audit_core as c', 'print(json.dumps(c.gap_causes({"tasks": []})))']), []);
+});
+
 const COMMANDS_MANIFEST = {
   commands: { setup: ['pip install zqsetup', ''], test: ['npm test zqcmd', 'npm test'], lint: ['ls'], build: [] },
   lane_commands: { a: { setup: ['make zqlane', 'ls'], test: ['npm test'] } },

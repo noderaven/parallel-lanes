@@ -23,13 +23,16 @@ ledger events are the ledger lines whose event names it, in ledger order
 them in. Sources under the ledger are relative to the run folder, with the
 ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
 
-  requirement  section_hash (_brief.section_sha256 of the archived plan
-               copy), brief_hash (the latest review's brief_sha256 against
-               it: present, stale, or unavailable when either is missing),
+  requirement  brief_hash (the latest review's brief_sha256 against the
+               task's plan section hash, _brief.section_sha256 of the
+               archived plan copy: present, stale, or unavailable when
+               either is missing; missing, with the reason, when the plan
+               copy reads but has no usable section for the task) and
                brief_file (briefs/<id>.md, "latest regeneration, not
-               hashed"), plan_hash and spec_hash (one ref per setup
-               run_started event: its recorded hash against the archived
-               copy's sha256).
+               hashed"). The section hash itself is not listed, and the plan
+               and spec hashes and the plan copy's state are run-level
+               (_audit_run: run.checks plan_hash, spec_hash and
+               section_hash), never repeated per task.
   placement    lane, depends_on, and preflight_context: per launch, the
                result's preflight.undeclared entries naming the task, with
                'what' quoted ("context added by pre-flight (not ordering)";
@@ -51,8 +54,9 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                agree when the last recorded commit is the result's head and,
                with git, every recorded commit lies in rev_list(head, [base]).
   review       reviews (one per reviewed event, with brief_match: its
-               brief_sha256 against section_hash, in brief_hash's states,
-               and spec_match), packages
+               brief_sha256 against the section hash, in brief_hash's
+               states, unavailable when there is no section hash, and
+               spec_match), packages
                (<ledger>/reviews/<id>-*), verdicts (from the journal's
                '<id> review' and '<id> re-review <n>' structured results, a
                trailing ' retry' being the same round with the later result
@@ -64,7 +68,8 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                in the spec's table. verified is false, "the verify at <sha7>
                failed (checks_failed)", when the evidence is invalid by
                checks_failed (else "the verify evidence is invalid"). When
-               the verdict is "accepted (gate unavailable)", accepted is
+               the verdict is "accepted (gate unavailable)"
+               (_audit_run.GATE_UNAVAILABLE_VERDICT), accepted is
                unavailable, "the acceptance gate is unavailable", for a task
                the result reports done that is neither settled nor blocked;
                a task that is not done, or is settled or blocked, stays
@@ -79,7 +84,6 @@ order). It is unavailable when the review recorded none ("recorded before
 1.4.4") or there is nothing to compare.
 """
 
-import hashlib
 import os
 import re
 import sys
@@ -89,12 +93,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _audit_core as core  # noqa: E402
 import _brief  # noqa: E402
 import _transcripts  # noqa: E402
+from _audit_run import GATE_UNAVAILABLE_VERDICT  # noqa: E402
 
 NO_REPO = "no --repo"
 PREFLIGHT_LABEL = "context added by pre-flight (not ordering)"
 TRANSITIONS = ("committed", "settled")
 UNREVIEWED_STATUSES = ("skipped", "not_run")
-GATE_UNAVAILABLE_VERDICT = "accepted (gate unavailable)"
 
 ref = core.ref
 src = core.src
@@ -110,22 +114,6 @@ def _line_src(le):
 
 def _wf_file(launch):
     return launch["wf"] + ".json"
-
-
-def _read_text(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _file_sha256(path):
-    try:
-        with open(path, "rb") as f:
-            return hashlib.sha256(f.read()).hexdigest()
-    except OSError:
-        return None
 
 
 def _is_sha_pair(value):
@@ -181,9 +169,8 @@ class _Ctx(object):
                        if le["event"].get("event") == "run_started" and le["event"].get("phase") == "setup"]
         self.plan_path = run.get("plan_path")
         self.spec_path = run.get("spec_path")
-        self.plan_text = _read_text(os.path.join(self.folder, self.plan_path)) if self.plan_path else None
-        self.plan_sha = _file_sha256(os.path.join(self.folder, self.plan_path)) if self.plan_path else None
-        self.spec_sha = _file_sha256(os.path.join(self.folder, self.spec_path)) if self.spec_path else None
+        self.plan_text = core.read_text(os.path.join(self.folder, self.plan_path)) if self.plan_path else None
+        self.spec_sha = core.file_sha256(os.path.join(self.folder, self.spec_path)) if self.spec_path else None
         self.escalations = {}  # wf -> ([entry], [earlier tier or None]) or a reason
 
     def quote(self, text, sources):
@@ -217,6 +204,9 @@ class _Ctx(object):
 # ---- requirement ----
 
 def _section_hash(ctx, task_id):
+    """The task's plan section hash, which the brief hashes are compared
+    with (not listed in the task: without a plan copy, or with one that
+    cannot be read, run.checks.section_hash says so once)."""
     if ctx.plan_path is None:
         return ref(None, "unavailable", [], "no plan copy archived")
     if ctx.plan_text is None:
@@ -228,6 +218,12 @@ def _section_hash(ctx, task_id):
 
 
 def _brief_hash(section, reviews):
+    if section["state"] == "missing":
+        # The plan copy reads, but has no usable section for this task: the
+        # task's own gap, carried by its brief hash.
+        recorded = reviews[-1]["event"].get("brief_sha256") if reviews else None
+        sources = ([_line_src(reviews[-1])] if reviews else []) + section["sources"]
+        return ref(recorded if isinstance(recorded, str) else None, "missing", sources, section["note"])
     if not reviews:
         return ref(None, "unavailable", [], "no review recorded")
     return _brief_match(section, reviews[-1])
@@ -256,42 +252,11 @@ def _brief_file(ctx, task_id):
     return ref(rel, "unavailable", [src(rel)], "no brief file archived (latest regeneration, not hashed)")
 
 
-def _input_hashes(ctx, key, copy_path, copy_sha, what):
-    if not ctx.setups:
-        return [ref(None, "unavailable", ctx.ledger_src(), "no setup run_started recorded")]
-    out = []
-    for le in ctx.setups:
-        ev = le["event"]
-        sources = [_line_src(le)]
-        if key not in ev:
-            out.append(ref(None, "unavailable", sources, "the launch recorded no %s hash" % what))
-            continue
-        recorded = ev[key]
-        if copy_path:
-            sources.append(src(copy_path))
-        if recorded is None:
-            if copy_sha is None:
-                out.append(ref(None, "present", sources, "the launch recorded no %s" % what))
-            else:
-                out.append(ref(None, "stale", sources, "the launch recorded no %s, but the archive holds one" % what))
-        elif copy_sha is None:
-            out.append(ref(recorded, "unavailable", sources, "no %s copy archived to compare" % what))
-        elif recorded == copy_sha:
-            out.append(ref(recorded, "present", sources))
-        else:
-            out.append(ref(recorded, "stale", sources, "the archived %s copy differs from this launch's" % what))
-    return out
-
-
-def _requirement(ctx, task_id, events):
-    section = _section_hash(ctx, task_id)
+def _requirement(ctx, task_id, events, section):
     reviews = [le for le in events if le["event"].get("event") == "reviewed"]
     return {
-        "section_hash": section,
         "brief_hash": _brief_hash(section, reviews),
         "brief_file": _brief_file(ctx, task_id),
-        "plan_hash": _input_hashes(ctx, "plan_sha256", ctx.plan_path, ctx.plan_sha, "plan"),
-        "spec_hash": _input_hashes(ctx, "spec_sha256", ctx.spec_path, ctx.spec_sha, "spec"),
     }
 
 
@@ -786,8 +751,9 @@ def task_sections(run, git, facts, pairs, git_note=None):
             any(le["event"].get("event") == "committed" and "base" not in le["event"] for le in events)
         carry_text = (ctx.status.get("carry") or {}).get(task_id) if ctx.status is not None else None
         result_status = _result_status(ctx, task_id, events, is_legacy)
-        requirement = _requirement(ctx, task_id, events)
-        review = _review(ctx, task_id, events, requirement["section_hash"])
+        section = _section_hash(ctx, task_id)
+        requirement = _requirement(ctx, task_id, events, section)
+        review = _review(ctx, task_id, events, section)
 
         transitions = [le for le in events if le["event"].get("event") in TRANSITIONS]
         task_head = _event_head(transitions[-1]["event"]) if transitions else None

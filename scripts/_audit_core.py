@@ -1,5 +1,5 @@
-"""The shared core of scripts/audit: evidence references, the gap list,
-quoting, run loading and launch order.
+"""The shared core of scripts/audit: evidence references, the gap list and
+its causes, quoting, run loading and launch order.
 
 Import with:
     sys.dont_write_bytecode = True
@@ -14,6 +14,17 @@ separators, or git:<sha>, or transcript:<wf>/<label>; at a ledger line
 a sha, or None. collect_gaps(obj) lists every nested ref whose state is in
 GAP_STATES, in document order, as {"where": <JSON pointer>, "state",
 "value", "note"}.
+
+Gap causes. gap_causes(obj) groups those gaps by cause, one entry per cause
+in first-seen order: {"pointer", "state", "note", "tasks", "values"}. The
+cause key is the pointer with every array index (only those) replaced by N,
+the state, and the note with every sha of 7 to 64 hex digits (NOTE_SHA)
+read as <sha>; note is the cause's raw note when all its gaps have the same
+one, else the masked note (a raw one would be false for the other gaps). A
+gap under obj["tasks"][i] belongs to that task: tasks lists the ids of the
+tasks holding the cause, each once, in run order, and values is None. A gap
+anywhere else is run-level: tasks is None and values every value of the
+cause in first-seen order, repeats included.
 
 Quoting. Recorded text is quoted as written, except that every configured
 command (command_pairs: the ids of _autopsy.configured_checks, plus
@@ -43,6 +54,7 @@ reports the task with a status other than skipped or not_run.
 """
 
 import glob
+import hashlib
 import json
 import math
 import os
@@ -58,6 +70,8 @@ SCRIPTS = os.path.dirname(os.path.realpath(__file__))
 
 STATES = ("present", "missing", "stale", "conflicting", "unavailable", "inferred")
 GAP_STATES = ("missing", "stale", "conflicting", "unavailable")
+# A sha in a gap note, read as <sha> in the cause key.
+NOTE_SHA = re.compile(r"\b[0-9a-f]{7,64}\b")
 
 
 # ---- evidence references ----
@@ -83,28 +97,78 @@ def _pointer_key(key):
     return str(key).replace("~", "~0").replace("/", "~1")
 
 
+def _gap_refs(obj):
+    """[(where, pattern, ref)] for every nested ref whose state is in
+    GAP_STATES, in document order (a ref before the refs inside its value):
+    where its JSON pointer from the root of obj ('#' for obj), pattern the
+    same pointer with every array index as N."""
+    found = []
+
+    def walk(node, where, pattern):
+        if isinstance(node, dict):
+            is_ref = _is_ref(node)
+            if is_ref and isinstance(node["state"], str) and node["state"] in GAP_STATES:
+                found.append((where, pattern, node))
+            for key, value in node.items():
+                if is_ref and key == "sources":
+                    continue
+                part = _pointer_key(key)
+                walk(value, "%s/%s" % (where, part), "%s/%s" % (pattern, part))
+        elif isinstance(node, (list, tuple)):
+            for i, value in enumerate(node):
+                walk(value, "%s/%d" % (where, i), pattern + "/N")
+
+    walk(obj, "#", "#")
+    return found
+
+
 def collect_gaps(obj):
     """[{"where", "state", "value", "note"}] for every nested ref whose state
     is in GAP_STATES, in document order (a ref before the refs inside its
     value). where is a JSON pointer from the root of obj ('#' for obj)."""
-    gaps = []
+    return [{"where": where, "state": r["state"], "value": r.get("value"), "note": r.get("note")}
+            for where, _pattern, r in _gap_refs(obj)]
 
-    def walk(node, where):
-        if isinstance(node, dict):
-            is_ref = _is_ref(node)
-            if is_ref and isinstance(node["state"], str) and node["state"] in GAP_STATES:
-                gaps.append({"where": where, "state": node["state"], "value": node.get("value"),
-                             "note": node.get("note")})
-            for key, value in node.items():
-                if is_ref and key == "sources":
-                    continue
-                walk(value, "%s/%s" % (where, _pointer_key(key)))
-        elif isinstance(node, (list, tuple)):
-            for i, value in enumerate(node):
-                walk(value, "%s/%d" % (where, i))
 
-    walk(obj, "#")
-    return gaps
+def _note_key(note):
+    if isinstance(note, str):
+        return NOTE_SHA.sub("<sha>", note)
+    return note if note is None else json.dumps(note, sort_keys=True)
+
+
+def gap_causes(obj):
+    """[{"pointer", "state", "note", "tasks", "values"}]: the gaps of
+    collect_gaps(obj) grouped by cause, in first-seen order (see the module
+    docstring). A gap under obj["tasks"][i] (a list) is that task's, named
+    by its id."""
+    tasks = obj.get("tasks") if isinstance(obj, dict) else None
+    tasks = tasks if isinstance(tasks, list) else None
+    causes, by_key = [], {}
+    for where, pattern, r in _gap_refs(obj):
+        parts = where.split("/")
+        task = None
+        if tasks is not None and len(parts) > 2 and parts[1] == "tasks":
+            entry = tasks[int(parts[2])]
+            task = entry.get("id") if isinstance(entry, dict) else None
+            task = task if isinstance(task, str) else parts[2]
+        note = r.get("note")
+        key = (pattern, r["state"], _note_key(note))
+        cause = by_key.get(key)
+        if cause is None:
+            cause = {"pointer": pattern, "state": r["state"], "note": note,
+                     "tasks": [] if task is not None else None, "values": None if task is not None else []}
+            by_key[key] = cause
+            causes.append(cause)
+        elif note != cause["note"] and isinstance(note, str):
+            # Raw notes that differ only in their shas: either one would be
+            # false for the other gaps, so the cause carries the masked note.
+            cause["note"] = key[2]
+        if task is not None:
+            if task not in cause["tasks"]:
+                cause["tasks"].append(task)
+        else:
+            cause["values"].append(r.get("value"))
+    return causes
 
 
 # ---- quoting ----
@@ -202,6 +266,24 @@ def _guard_tree(folder, top):
 
 def _rel(folder, path):
     return os.path.relpath(path, folder).replace("\\", "/")
+
+
+def read_text(path):
+    """path's text read as UTF-8, or None when it cannot be read or decoded."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def file_sha256(path):
+    """The sha256 hex digest of path's bytes, or None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
 
 
 def _read_object(path):

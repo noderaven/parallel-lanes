@@ -49,6 +49,18 @@ E2E_NO_DELIVERED, or both joined by "; "). A commit outside the task ranges
 that a final lens head contains is present with the note LENS_NOTE (that
 head's first 7 digits).
 
+The plan and spec hashes are run-level facts, in checks once (never per
+task; input_hashes): plan_hash and spec_hash hold one ref per setup
+run_started event, in ledger order, its sources that ledger line and the
+archived copy: the recorded hash against the copy's sha256 (present when
+they agree, or when neither exists; stale when they differ, or when the
+launch recorded none but the archive holds a copy; unavailable without a
+copy to compare, or when the event has no such key). Without a setup event
+each is one unavailable ref, "no setup run_started recorded". section_hash
+is the plan copy the tasks' section hashes are read from: present, its
+value the copy's path, else unavailable ("no plan copy archived", "the plan
+copy could not be read").
+
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
 in manifest run order, with a recorded range; with its ledger source. When
@@ -61,7 +73,20 @@ open_work.final, from the latest launch's final review result, is a ref of
 {"findings" (open and declined), "cannot_verify", "task_minors_open" (the
 result's findings, quoted; None when the result has no such list, as before
 1.3.1), "carried_minors_open" (the result's carried minor ids, its strings;
-None when it has none, as before 1.6.3)}.
+None when it has none, as before 1.6.3), "carried_minor_tasks" ({id: task
+id} for the carried ids a ledger minors snapshot lists with a task that
+is a manifest task id, the latest snapshot that lists each; None with
+carried_minors_open),
+"not_recorded" (which of "open", "declined" and "cannot_verify" the result
+has no list for, as older engines have no open list: that count is
+unknown, not 0; cannot_verify is then [])}.
+
+acceptance also holds verdict_without_override (derive_verdict with no
+override) and verdict_rule_without_override (_verdict_rule when that verdict
+is unverified for an accepted run, else None), so a verdict of accepted by
+user can name the fault audit found that the override set aside.
+GATE_UNAVAILABLE_VERDICT is the one constant for accepted (gate
+unavailable).
 
 after_delivery (with --head) lists the commits reachable from the head but
 not from the delivered sha: unavailable, "no run evidence", when there are
@@ -91,6 +116,9 @@ E2E_NO_CHECKED = "the end-to-end check recorded no sha"
 E2E_NO_DELIVERED = "the run recorded no delivered sha"
 
 GATES = ("match", "not_required", "missing", "stale", "mismatch", "invalid", "unavailable", "checker_error")
+# The verdict of an accepted run whose gate check-verify could not judge
+# (derive_verdict); _audit_tasks and _audit use this one constant.
+GATE_UNAVAILABLE_VERDICT = "accepted (gate unavailable)"
 # What check-verify itself prints; checker_error is audit's own.
 CHECKER_STATUSES = GATES[:-1]
 REASONS = ("verify_invalid", "verify_evidence_missing", "verify_evidence_stale", "verify_mismatch",
@@ -305,7 +333,7 @@ def derive_verdict(run_verdict, gate, evidence, override, delivered_sha, order_k
         if (gate == "match" and evidence == "valid") or (gate == "not_required" and evidence == "not_required"):
             return "accepted"
         if gate in ("unavailable", "checker_error"):
-            return "accepted (gate unavailable)"
+            return GATE_UNAVAILABLE_VERDICT
         if gate in ("missing", "stale", "mismatch", "invalid") or evidence == "invalid" \
                 or (gate == "not_required" and evidence != "not_required"):
             return "unverified"
@@ -691,7 +719,54 @@ def _checks(run, launch, why, gate, evidence, rule, want):
         e_note = "the gate is %s" % gate["status"]
     out["evidence"] = c.ref(evidence, e_state, g_sources, e_note)
     out["rule"] = rule
+    out.update(input_hashes(run))
     return out
+
+
+def _hashes(run, setups, key, copy_path, what):
+    """One ref per setup event: its recorded key against the archived copy."""
+    if not setups:
+        return [c.ref(None, "unavailable", _ledger_src(run), "no setup run_started recorded")]
+    copy_sha = c.file_sha256(os.path.join(run["folder"], copy_path)) if copy_path else None
+    out = []
+    for event, source in setups:
+        sources = [source]
+        if key not in event:
+            out.append(c.ref(None, "unavailable", sources, "the launch recorded no %s hash" % what))
+            continue
+        recorded = event[key]
+        if copy_path:
+            sources.append(c.src(copy_path))
+        if recorded is None:
+            if copy_sha is None:
+                out.append(c.ref(None, "present", sources, "the launch recorded no %s" % what))
+            else:
+                out.append(c.ref(None, "stale", sources, "the launch recorded no %s, but the archive holds one" % what))
+        elif copy_sha is None:
+            out.append(c.ref(recorded, "unavailable", sources, "no %s copy archived to compare" % what))
+        elif recorded == copy_sha:
+            out.append(c.ref(recorded, "present", sources))
+        else:
+            out.append(c.ref(recorded, "stale", sources, "the archived %s copy differs from this launch's" % what))
+    return out
+
+
+def input_hashes(run):
+    """{"plan_hash", "spec_hash", "section_hash"}: the run-level input facts
+    (see the module docstring)."""
+    setups = [(e, s) for e, s in _events(run) if e.get("event") == "run_started" and e.get("phase") == "setup"]
+    plan = run.get("plan_path")
+    if plan is None:
+        section = c.ref(None, "unavailable", [], "no plan copy archived")
+    elif c.read_text(os.path.join(run["folder"], plan)) is None:
+        section = c.ref(None, "unavailable", [c.src(plan)], "the plan copy could not be read")
+    else:
+        section = c.ref(plan, "present", [c.src(plan)])
+    return {
+        "plan_hash": _hashes(run, setups, "plan_sha256", plan, "plan"),
+        "spec_hash": _hashes(run, setups, "spec_sha256", run.get("spec_path"), "spec"),
+        "section_hash": section,
+    }
 
 
 def _evidence_source(run, launch, files):
@@ -733,7 +808,8 @@ def _e2e(run, launch, result):
 
 def _acceptance(run, launch, why, facts, gate, evidence, rule, accepted_events, pairs):
     out = {"run_verdict": None, "reasons": [], "warnings": [], "gate": gate["status"], "evidence": evidence,
-           "overrides": [], "verdict": None, "verdict_rule": None, "run_ended": [], "delivered_sha": None}
+           "overrides": [], "verdict": None, "verdict_rule": None, "verdict_without_override": None,
+           "verdict_rule_without_override": None, "run_ended": [], "delivered_sha": None}
     result = (launch.get("result") if launch is not None else None) or {}
     acceptance = result.get("acceptance")
     run_verdict = acceptance.get("status") if isinstance(acceptance, dict) else None
@@ -789,6 +865,12 @@ def _acceptance(run, launch, why, facts, gate, evidence, rule, accepted_events, 
         out["verdict"] = c.ref(verdict, "present", v_sources)
         if verdict == "unverified" and run_verdict == "accepted":
             out["verdict_rule"] = _verdict_rule(gate["status"], evidence, rule)
+    # What the verdict would be with no override, so the bottom line can name
+    # a fault audit found that the user's override set aside.
+    without = derive_verdict(run_verdict, gate["status"], evidence, None, delivered, facts["order_known"])
+    out["verdict_without_override"] = without
+    if without == "unverified" and run_verdict == "accepted":
+        out["verdict_rule_without_override"] = _verdict_rule(gate["status"], evidence, rule)
 
     for event, source in _events(run):
         if event.get("event") == "run_ended":
@@ -933,9 +1015,31 @@ def _open_work(run, launch, why, pairs):
     carried = final.get("carried_minors_open")
     carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
     value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
-             "carried_minors_open": carried}
+             "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
+             # Older engines' finals have no open list: its count is unknown, not 0.
+             "not_recorded": [key for key in ("open", "declined", "cannot_verify")
+                              if not isinstance(final.get(key), list)]}
     out["final"] = c.ref(value, "present", [_wf_src(launch, "final")])
     return out
+
+
+def _carried_tasks(run, carried):
+    """{carried id: task id} for the carried ids a ledger minors snapshot
+    (carry-launch's) lists with a task, the latest snapshot that lists each,
+    in carried order, keeping only tasks that are manifest task ids; None
+    when the result has no carried list."""
+    if carried is None:
+        return None
+    ids = set(t["id"] for t, _lane in c.manifest_tasks(run.get("manifest")))
+    found = {}
+    for event, _source in reversed(_events(run)):
+        if event.get("task") != "_run" or event.get("event") != "minors" or not isinstance(event.get("open"), list):
+            continue
+        for m in event["open"]:
+            if isinstance(m, dict) and m.get("id") in carried and m["id"] not in found \
+                    and isinstance(m.get("task"), str) and m["task"]:
+                found[m["id"]] = m["task"]
+    return {cid: found[cid] for cid in carried if cid in found and found[cid] in ids}
 
 
 # ---- the sections ----

@@ -5,11 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SYMLINKS } from './platform.mjs';
 import { loadHelpers } from './harness.mjs';
-import { LEDGER, commit, makeRepo, makeRun, pythonJSON } from './audit-helpers.mjs';
+import { DEFAULT_PLAN, DEFAULT_RUN, LEDGER, commit, makeRepo, makeRun, pythonJSON } from './audit-helpers.mjs';
 
 const { finalChecks } = await loadHelpers(['finalChecks']);
 
@@ -427,7 +428,13 @@ test('launches list layout gaps; no launch is unavailable', () => {
 const ENDED = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
 const MISSING_NOTE = 'the ledger records this launch; its transcripts are not archived';
 const LEDGER_SRC = [{ path: LEDGER, at: null }];
-const auditGaps = (folder) => pythonJSON(['import _audit', 'print(json.dumps(_audit.build(sys.argv[1])["gaps"]))'], [folder]);
+// _audit.build's gaps and gap_causes.
+const built = (folder) => pythonJSON([
+  'import _audit',
+  'a = _audit.build(sys.argv[1])',
+  'print(json.dumps({"gaps": a["gaps"], "causes": a["gap_causes"]}))',
+], [folder]);
+const auditGaps = (folder) => built(folder).gaps;
 
 test('two recorded launches and one archived give one missing gap', () => {
   const folder = makeRun({ ledger: { '_run.jsonl': [ENDED, ENDED] }, launches: [launch(accepted(D))] });
@@ -447,6 +454,12 @@ test('two recorded launches and one archived give one missing gap', () => {
   const none = sections(makeRun({ ledger: null, launches: [launch(accepted(D))] }));
   assert.deepEqual([none.launches.recorded.state, none.launches.recorded.note], ['unavailable', 'no ledger in the archive']);
   assert.deepEqual(none.launches.missing, []);
+  // Three unnamed missing launches: three gaps, one cause keeping all three
+  // values, never merged into one.
+  const three = built(makeRun({ ledger: { '_run.jsonl': [ENDED, ENDED, ENDED, ENDED] }, launches: [launch(accepted(D))] }));
+  assert.equal(three.gaps.filter((g) => g.where.startsWith('#/run/launches/missing')).length, 3);
+  assert.deepEqual(three.causes.filter((g) => g.pointer.startsWith('#/run/launches/missing')),
+    [{ pointer: '#/run/launches/missing/N', state: 'missing', note: MISSING_NOTE, tasks: null, values: [null, null, null] }]);
 });
 
 test('named missing launches are listed by wf id', () => {
@@ -462,8 +475,59 @@ test('named missing launches are listed by wf id', () => {
   // Named ones first, then one unnamed launch.
   assert.deepEqual(s.launches.missing.map((g) => [g.value, g.state, g.note]),
     [['wf_bbbbbb', 'missing', MISSING_NOTE], ['wf_cccccc', 'missing', MISSING_NOTE], [null, 'missing', MISSING_NOTE]]);
-  assert.deepEqual(auditGaps(folder).filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
+  const b = built(folder);
+  assert.deepEqual(b.gaps.filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
     ['#/run/launches/missing/0', '#/run/launches/missing/1', '#/run/launches/missing/2']);
+  // One run-level cause whose values keep the wf ids, in order.
+  assert.deepEqual(b.causes.filter((g) => g.pointer.startsWith('#/run/launches/missing')),
+    [{ pointer: '#/run/launches/missing/N', state: 'missing', note: MISSING_NOTE, tasks: null,
+      values: ['wf_bbbbbb', 'wf_cccccc', null] }]);
+});
+
+test('the plan and spec hashes are run checks, one per setup event with its ledger line', () => {
+  const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+  const [planSha, specSha] = [sha256(DEFAULT_PLAN), sha256(DEFAULT_RUN.spec)];
+  const setup = (over = {}) => ({ task: '_run', event: 'run_started', phase: 'setup', head: D, plan_sha256: planSha, spec_sha256: specSha, ...over });
+  const folder = makeRun({ ledger: { '_run.jsonl': [setup(), ENDED, setup({ plan_sha256: OTHER })] }, launches: [launch(accepted(D))] });
+  const c = sections(folder).checks;
+  const at = (n) => ({ path: `${LEDGER}/_run.jsonl`, at: `L${n}` });
+  const plan = { path: 'p.md', at: null };
+  assert.deepEqual(c.plan_hash, [
+    { value: planSha, state: 'present', sources: [at(1), plan] },
+    { value: OTHER, state: 'stale', sources: [at(3), plan], note: "the archived plan copy differs from this launch's" },
+  ]);
+  assert.deepEqual(c.spec_hash.map((r) => [r.value, r.state, r.sources[0]]), [[specSha, 'present', at(1)], [specSha, 'present', at(3)]]);
+  assert.deepEqual(c.section_hash, { value: 'p.md', state: 'present', sources: [plan] });
+  // The stale setup event is one run-level gap, not one per task.
+  const b = built(folder);
+  assert.deepEqual(b.gaps.filter((g) => /plan_hash|spec_hash|section_hash/.test(g.where)).map((g) => g.where),
+    ['#/run/checks/plan_hash/1']);
+  assert.deepEqual(b.causes.filter((g) => g.pointer.includes('plan_hash')),
+    [{ pointer: '#/run/checks/plan_hash/N', state: 'stale', note: "the archived plan copy differs from this launch's",
+      tasks: null, values: [OTHER] }]);
+  // No setup event: one unavailable entry each.
+  const none = sections(makeRun({ ledger: { '_run.jsonl': [ENDED] }, launches: [launch(accepted(D))] })).checks;
+  assert.deepEqual([none.plan_hash, none.spec_hash].map((l) => l.map((r) => [r.state, r.note, r.sources])),
+    [[['unavailable', 'no setup run_started recorded', LEDGER_SRC]], [['unavailable', 'no setup run_started recorded', LEDGER_SRC]]]);
+  // Without a plan copy, or with one that cannot be read, the section hashes
+  // are unavailable once.
+  const noPlan = makeRun({ plan: null, launches: [launch(accepted(D))] });
+  assert.deepEqual(sections(noPlan).checks.section_hash,
+    { value: null, state: 'unavailable', sources: [], note: 'no plan copy archived' });
+  assert.deepEqual(built(noPlan).gaps.filter((g) => g.note === 'no plan copy archived').map((g) => g.where),
+    ['#/run/checks/section_hash']);
+  const unreadable = makeRun({ launches: [launch(accepted(D))] });
+  writeFileSync(join(unreadable, 'p.md'), Buffer.from([0xff, 0xfe, 0xfd]));
+  assert.deepEqual(sections(unreadable).checks.section_hash,
+    { value: null, state: 'unavailable', sources: [plan], note: 'the plan copy could not be read' });
+  // One run-level gap for it, and none in any task.
+  const u = built(unreadable);
+  assert.deepEqual(u.gaps.filter((g) => g.note === 'the plan copy could not be read').map((g) => g.where),
+    ['#/run/checks/section_hash']);
+  assert.deepEqual(u.gaps.filter((g) => g.where.startsWith('#/tasks/') && /section|plan copy/.test(`${g.where} ${g.note}`)), []);
+  assert.deepEqual(u.causes.filter((g) => g.note === 'the plan copy could not be read'),
+    [{ pointer: '#/run/checks/section_hash', state: 'unavailable', note: 'the plan copy could not be read', tasks: null,
+      values: [null] }]);
 });
 
 test('e2e is stale only when both shas are recorded and differ', () => {
@@ -489,9 +553,13 @@ test('e2e is stale only when both shas are recorded and differ', () => {
     const name = JSON.stringify([checked, delivered]);
     assert.deepEqual([e2e.state, e2e.note], [state, note], name);
     assert.deepEqual(e2e.value, { checked_sha: checked === undefined ? null : checked, items: 2, failed: 1 }, name);
-    // Stale and unavailable are both gaps: the gap count stays.
-    const gaps = auditGaps(folder).filter((g) => g.where === '#/run/checks/e2e');
+    // Stale and unavailable are both gaps: the gap count stays, and each is
+    // one run-level cause with its value.
+    const b = built(folder);
+    const gaps = b.gaps.filter((g) => g.where === '#/run/checks/e2e');
     assert.deepEqual(gaps.map((g) => [g.state, g.note]), state === 'present' ? [] : [[state, note]], name);
+    assert.deepEqual(b.causes.filter((g) => g.pointer === '#/run/checks/e2e').map((g) => [g.state, g.note, g.tasks, g.values]),
+      state === 'present' ? [] : [[state, note, null, [e2e.value]]], name);
   }
 });
 
@@ -515,6 +583,57 @@ test('an override at another head is stale and changes nothing', () => {
   assert.equal(s.acceptance.overrides[1].head.state, 'present');
   assert.equal(s.acceptance.overrides[1].overrode, 'rejected: checks_failed');
   assert.deepEqual(s.acceptance.overrides[1].head.sources, [{ path: `${LEDGER}/_run.jsonl`, at: 'L3' }]);
+  // Without the override the verdict is the run's own.
+  assert.deepEqual([s.acceptance.verdict_without_override, s.acceptance.verdict_rule_without_override], ['rejected', null]);
+});
+
+test('acceptance gives the verdict without the override and its rule', () => {
+  const accept = { task: '_run', event: 'accepted', head: D, text: 'ship it' };
+  const keys = (s) => [s.facts.verdict, s.acceptance.verdict_rule, s.acceptance.verdict_without_override,
+    s.acceptance.verdict_rule_without_override];
+  const withOverride = makeRun({ ledger: { '_run.jsonl': [accept] }, launches: [launch(accepted(D))] });
+  const without = makeRun({ launches: [launch(accepted(D))] });
+  // [gate, with the override, without it]
+  const cases = [
+    ['mismatch', ['accepted by user', null, 'unverified', 'gate mismatch'],
+      ['unverified', 'gate mismatch', 'unverified', 'gate mismatch']],
+    ['unavailable', ['accepted by user', null, 'accepted (gate unavailable)', null],
+      ['accepted (gate unavailable)', null, 'accepted (gate unavailable)', null]],
+    ['match', ['accepted by user', null, 'accepted', null], ['accepted', null, 'accepted', null]],
+  ];
+  for (const [gate, over, bare] of cases) {
+    assert.deepEqual(keys(sections(withOverride, { gate })), over, gate);
+    assert.deepEqual(keys(sections(without, { gate })), bare, gate);
+  }
+  // The two keys follow verdict_rule.
+  const order = Object.keys(sections(withOverride).acceptance);
+  assert.deepEqual(order.slice(order.indexOf('verdict_rule'), order.indexOf('verdict_rule') + 3),
+    ['verdict_rule', 'verdict_without_override', 'verdict_rule_without_override']);
+  // No launch: unavailable, as the verdict is.
+  const none = sections(makeRun({}));
+  assert.deepEqual(keys(none), ['unavailable', null, 'unavailable', null]);
+});
+
+test('carried minor tasks come from the ledger minors snapshot', () => {
+  const minors = (wf, open) => ({ task: '_run', event: 'minors', wf, open, covered: [] });
+  const entry = (id, task) => ({ id, task, file: 'a.js', line: 1, issue: 'zqissue', fix: 'f' });
+  const result = accepted(D, { final: finalAt(D, { carried_minors_open: ['A1-1', 'T2-1', 'Z9-1', 'X1-1'] }) });
+  const manifest = { lanes: [{ id: 'a', tasks: [{ id: 'A1' }, { id: '2' }, { id: 'T2' }] }] };
+  const s = sections(makeRun({
+    manifest,
+    ledger: { '_run.jsonl': [
+      minors('wf_old', [entry('A1-1', 'A1'), entry('T2-1', '2')]),
+      // The latest snapshot that lists an id names its task; a task that is
+      // no manifest task id (X1) is left out.
+      minors('wf_aaaaaa', [entry('T2-1', 'T2'), entry('Q1-1', 'Q1'), { id: 'Z9-1' }, entry('X1-1', 'X1')]),
+    ] },
+    launches: [launch(result)],
+  }));
+  assert.deepEqual(s.open_work.final.value.carried_minor_tasks, { 'A1-1': 'A1', 'T2-1': 'T2' });
+  assert.doesNotMatch(JSON.stringify(s.open_work.final.value), /zqissue/);
+  // No carried list: null; a carried list without a snapshot: {}.
+  const empty = sections(makeRun({ launches: [launch(accepted(D, { final: finalAt(D, { carried_minors_open: [] }) }))] }));
+  assert.deepEqual(empty.open_work.final.value.carried_minor_tasks, {});
 });
 
 test('checker_error mapping', () => {
@@ -669,6 +788,18 @@ test('open work is listed', () => {
   assert.deepEqual(f.task_minors_open.map((x) => [x.id, x.issue.quote]), [['A1-1', 'nit']]);
   // A result without carried_minors_open (before 1.6.3) has none recorded.
   assert.equal(f.carried_minors_open, null);
+  assert.equal(f.carried_minor_tasks, null);
+  // Both finding lists are recorded; an older engine's final has no open list.
+  assert.deepEqual(f.not_recorded, []);
+  const older = { ...result, final: { ...result.final } };
+  delete older.final.open;
+  const o = sections(makeRun({ launches: [launch(older)] })).open_work.final.value;
+  assert.deepEqual([o.not_recorded, o.findings.map((x) => x.id)], [['open'], ['F2']]);
+  // A final without a cannot_verify list records none: unknown, not [].
+  const noCannot = { ...result, final: { ...result.final } };
+  delete noCannot.final.cannot_verify;
+  const n = sections(makeRun({ launches: [launch(noCannot)] })).open_work.final.value;
+  assert.deepEqual([n.not_recorded, n.cannot_verify], [['cannot_verify'], []]);
   assert.deepEqual(ow.excluded.map((x) => [x.id, x.reason.quote]), [['X9', 'manual step']]);
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);

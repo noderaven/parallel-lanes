@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 12);
+  assert.equal(A.autopsy_version, 13);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   // commits counts the ledger's commits (A1 one, B1 two in one round); range
@@ -160,7 +160,8 @@ test('done.final counts the open task minors and the carried ones', () => {
   // The engine's note makes the count a lower bound.
   const lower = run((f) => { f.task_minors_open = [minor('B1-1')]; f.carried_minors_open = []; f.cannot_verify = [earlier]; });
   assert.deepEqual(lower.final, counts({ task_minors_open: 1, task_minors_open_min: true }));
-  assert.equal(lower.line, `${head}at least 1`);
+  assert.equal(lower.line, `${head}1 listed (more may be missing)`);
+  assert.doesNotMatch(lower.text, /at least|more may be missing/);
   // An engine before carried minors counts its task minors alone.
   const older = run((f) => { f.task_minors_open = [minor('A1-1')]; });
   assert.deepEqual(older.final, counts({ task_minors_open: 1, task_minors_open_min: false }));

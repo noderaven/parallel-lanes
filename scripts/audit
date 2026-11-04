@@ -26,25 +26,39 @@ It writes audit.json and audit.md, as UTF-8, to --out (default
 RUN_FOLDER/audit/), replacing only those two files, and prints a summary of
 at most 10 lines whose last line is 'full report: <path of audit.md>' (with
 --json it prints audit.json instead). The contract of both files is in
-_audit.py: audit.json is {"audit_version": 1, "run_id", "repo", "run",
-"tasks", "gaps"}, every value a ref {"value", "state", "sources"[, "note"]}
-and every recorded text a quote {"quote", "sources", "commands_replaced"}
-in which configured commands are check ids; gaps lists every value whose
-state is missing, stale, conflicting or unavailable. audit.md starts with a
-line saying it holds local paths and recorded text and is not meant to be
-shared as-is, then a Bottom line paragraph built only from values audit
+_audit.py: audit.json is {"audit_version": 2, "run_id", "repo", "run",
+"tasks", "gaps", "gap_causes"}, every value a ref {"value", "state",
+"sources"[, "note"]} and every recorded text a quote {"quote", "sources",
+"commands_replaced"} in which configured commands are check ids; gaps lists
+every value whose state is missing, stale, conflicting or unavailable, and
+gap_causes the same gaps once per cause (the pointer with every array index
+as N, the state, the note with its shas masked), with the ids of the tasks
+holding it, or every value of a run-level one. The plan and spec hashes and
+the plan copy's state are run-level: run.checks holds them once, and
+audit.md prints them once under Checks. audit.md starts with a line saying
+it holds local paths and recorded text and is not meant to be shared
+as-is, then a Bottom line paragraph built only from values audit
 computed (no recorded text), and ends with a Terms section defining its
 labels. In audit.md, checks that ran and failed read 'failed checks'
 (audit.json keeps invalid and the checks_failed rule), review verdicts,
 which come from the journal, read '[inferred: read from the transcript]',
 and a ruling without a by reads 'implementer (no role recorded)'. The
-summary's open work line and audit.md's Open work header count '<N> open
-or declined final finding(s), <M> open task minor(s)', M being the
-result's task_minors_open plus its carried_minors_open ('at least M' when
-the engine noted that some minors did not reach the final lenses;
-unavailable when the result has neither list); when 'ledger status'
-failed, the open work line's task count reads 'unknown (ledger status
-unavailable)'. The same inputs give the same bytes.
+summary's open work line and audit.md's Open work header count '<open>
+open and <declined> declined final finding(s), <M> open task minor(s)', M
+being the result's task_minors_open plus its carried_minors_open ('<M> open
+task minor(s) listed (more may be missing)' when the engine noted that some
+minors did not reach the final lenses; unavailable when the result has
+neither list, and Open work then says once that this run's engine recorded
+none); each task block ends with the open minors its id prefix places
+there, and a minor of a batch unit or of no task is under Open work only.
+The summary's tasks line counts as the Bottom line does. For accepted by
+user, the Bottom line names audit's verdict without the override when it
+differs from the run's own (acceptance.verdict_without_override and
+verdict_rule_without_override). When 'ledger status' failed, the open work
+line's task count reads 'unknown (ledger status unavailable)'. The
+summary, the Bottom line and the Evidence gaps header
+say '<G> evidence gap(s) in <C> cause(s)', and Evidence gaps lists one line
+per cause. The same inputs give the same bytes.
 
 An --out that is RUN_FOLDER, is equal to or inside any *.ledger or wf_* dir
 of the run, would make one (its first part under RUN_FOLDER matches *.ledger
