@@ -671,6 +671,10 @@ test('reference.md documents the audit', () => {
     'checked before its commit', '`tasks[i].checks.task_check`', '`run.checks.task_checks`',
     'is in the head the delivered verify passed at', 'the last attempt the archive holds decides',
     "a check file's `error`, `tail`, `log` or `checkout`",
+    // the final-review fixes: the Bottom line clause, an unreadable engine
+    // version, a join restart, a final with no findings list
+    '`task checks: <k> whose last check failed`', 'records an engine version audit cannot read',
+    '`restart: true`', 'the result records no final findings list',
     // the journal as a record and each final finding's re-review (1.6.17)
     '`<wf>/journal.jsonl L<n>`', '(the engine read it as', '`final re-review [present] - judged <head7>`',
     '- final re-review: judged <head7>', 'raised by the re-review', 'resolved (the decline upheld)',
@@ -679,6 +683,8 @@ test('reference.md documents the audit', () => {
   ];
   // The journal's verdicts are recorded, not inferred from the transcript.
   assert.ok(!audit.includes('read from the transcript'), 'the Audit section still says read from the transcript');
+  // A retried round is the engine's automatic retry, not a budget one.
+  assert.ok(!audit.includes('budget retry'), 'the Audit section still says budget retry');
   for (const word of wants) {
     assert.ok(audit.includes(word), `the Audit section lacks ${word}`);
   }

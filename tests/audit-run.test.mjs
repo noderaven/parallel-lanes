@@ -859,6 +859,14 @@ test('the final re-review line counts each final finding against the journal', (
     ['not_run', 'present', "each finding's reason says why", []]);
   const none = finalWork({}, [{ label: 'final review sp', result: { head: D, findings: [] } }]).value.re_review;
   assert.deepEqual([none.value.form, none.state, none.sources], ['none', 'present', []]);
+  // None needs a findings list: a final with no list is unknown, a gap, not none.
+  const lists = { findings: undefined, fixed: undefined, declined: undefined, open: undefined };
+  const unlisted = finalWork(lists, []).value.re_review;
+  assert.deepEqual([unlisted.value.form, unlisted.state, unlisted.note, unlisted.sources],
+    ['unavailable', 'unavailable', 'the result records no final findings list', [{ path: 'wf_aaaaaa.json', at: '#/result/final' }]]);
+  assert.equal(finalWork({ ...lists, declined: [] }, []).value.re_review.value.form, 'unavailable');
+  // A final finding in another list still means the re-review did not run.
+  assert.equal(finalWork({ ...lists, fixed: [F('F1')] }, []).value.re_review.value.form, 'not_run');
   // No journal archived, or one that cannot be read: unavailable, a gap.
   const result = accepted(D, { final: finalAt(D, { findings }) });
   const lost = sections(makeRun({ launches: [launch(result, { journal: undefined })] })).open_work.final.value.re_review;

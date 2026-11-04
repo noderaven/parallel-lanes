@@ -595,8 +595,8 @@ test('the task check before its commit: a pass', () => {
   assert.deepEqual(r.sources, [{ path: `${CHECKS}/task-A1.1.json`, at: null }]);
   assert.deepEqual(r.value, {
     file: `${CHECKS}/task-A1.1.json`, unit: 'A1', attempt: 1, selected: 'lane', reasons: ['no_entry'], ok: true, failed: [],
-    base: s0, head: s0, head_is_task_commit: false, tree_changed: false, earlier: { passed: 0, failed: 0, no_result: 0 },
-    fix_commits_after: 0,
+    base: s0, range_base: s0, head: s0, head_is_task_commit: false, tree_changed: false,
+    earlier: { passed: 0, failed: 0, no_result: 0 }, fix_commits_after: 0,
   });
   // Not a status: the Bottom line's four counts are unchanged.
   assert.deepEqual(Object.keys(out.A1.status), ['committed', 'reviewed', 'verified', 'accepted', 'result_status']);
@@ -790,6 +790,65 @@ test('a task with no file is judged by the engines of the launches that report i
   // A version audit cannot read is no engine before 1.6.0 either.
   const unreadable = [null, 'unavailable', 'a launch result that reports this task records an engine version audit cannot read'];
   assert.deepEqual(of([engine('dev', both)]), [unreadable, unreadable]);
+});
+
+test('a join task begun again from the feature tip is judged from its restart', () => {
+  // The join continuation (1.6.5) restarts a join unit: a started event with
+  // restart true, after which its earlier events no longer count.
+  const [s0, s1, s2, s3] = [S('a'), S('b'), S('c'), S('d')];
+  const check = (base, minute) => taskCheck('J1', base, {}, { lane: 'join', started: AT(minute) });
+  const out = audit(makeRun({
+    manifest: { join: [{ id: 'J1', title: 'Join' }] },
+    ledger: { 'join.jsonl': [started('J1', s0), committed('J1', s0, s1), { ...started('J1', s2), restart: true },
+      committed('J1', s2, s3)] },
+    launches: [engine('1.6.5', { J1: { status: 'done', commits: [s2, s3] } })],
+    files: files({ 'task-J1.1.json': check(s0, 0), 'task-J1.2.json': check(s2, 5) }),
+  }), facts());
+  const r = tc(out.J1);
+  assert.deepEqual([r.state, r.note, r.value.base, r.value.range_base, r.value.fix_commits_after, r.value.earlier],
+    ['present', undefined, s2, s2, 0, { passed: 1, failed: 0, no_result: 0 }]);
+  // A fix after the restart still counts.
+  const fixed = tc(audit(makeRun({
+    manifest: { join: [{ id: 'J1', title: 'Join' }] },
+    ledger: { 'join.jsonl': [started('J1', s0), committed('J1', s0, s1), { ...started('J1', s2), restart: true },
+      committed('J1', s2, s3), committed('J1', s3, S('e'))] },
+    launches: [engine('1.6.5', { J1: { status: 'done', commits: [s2, S('e')] } })],
+    files: files({ 'task-J1.1.json': check(s2, 0) }),
+  }), facts()).J1);
+  assert.deepEqual([fixed.state, fixed.value.range_base, fixed.value.fix_commits_after], ['present', s2, 1]);
+});
+
+test('a batch file without a policy counts for every task of its batch, in its lane\'s order', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const ids = ['A1', 'A2', 'A3'];
+  const out = audit(makeRun({
+    manifest: { lanes: [{ id: 'a', name: 'Lane a', tasks: ids.map((id) => ({ id, title: id })) }] },
+    ledger: { 'a.jsonl': ids.flatMap((id) => [started(id, s0), committed(id, s0, s1)]) },
+    launches: [engine('1.6.0', Object.fromEntries(ids.map((id) => [id, { status: 'done', commits: [s0, s1] }])))],
+    files: files({ 'task-A1-A3.1.json': taskCheck('A1-A3', s0, {}, { tasks: ids }), 'task-A1-A3.2.json': '' }),
+  }), facts());
+  // Attempt 2 is a reserved file never written: the last for all three.
+  for (const id of ids) {
+    const r = tc(out[id]);
+    assert.deepEqual([r.value.file, r.state, r.value.earlier], [`${CHECKS}/task-A1-A3.2.json`, 'unavailable',
+      { passed: 1, failed: 0, no_result: 0 }], id);
+  }
+});
+
+test('what a task check does not record is null, never false or 0', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  // A file with no head: whether HEAD was the task's commit is unknown.
+  const noHead = tc(audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': taskCheck('A1', s0, { head: undefined }) })),
+    facts()).A1);
+  assert.deepEqual([noHead.value.head, noHead.value.head_is_task_commit, noHead.state], [null, null, 'present']);
+  // A committed event with no base (legacy): the range base, and so the fix
+  // commits after the check, are unknown, and nothing is stale.
+  const legacy = tc(audit(makeRun({
+    ledger: { 'a.jsonl': [{ task: 'A1', event: 'committed', commits: [s1] }] },
+    launches: [engine('1.6.0', { A1: { status: 'done', commits: [s0, s1] } })],
+    files: files({ 'task-A1.1.json': taskCheck('A1', s0) }),
+  }), facts()).A1);
+  assert.deepEqual([legacy.value.range_base, legacy.value.fix_commits_after, legacy.state], [null, null, 'present']);
 });
 
 test('a settled task gets no line, even with files', () => {

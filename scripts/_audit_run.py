@@ -102,10 +102,12 @@ counted by the statuses its results give it: none, more than one, resolved,
 or another, so of = the four counts; new the new findings), not_recorded
 (findings only: before 1.2.0), no_valid_result (any other result, or a
 started entry with none), not_run (no entry, with final findings; note
-RE_REVIEW_NOT_RUN), none (no entry and no final findings), each present
-with the journal line for judged and no_valid_result; unavailable without
-a journal (NO_JOURNAL) or with one whose file cannot be read
-(UNREADABLE_JOURNAL; _audit_core.read_journal tells them apart).
+RE_REVIEW_NOT_RUN), none (no entry and no final findings, final.findings a
+list), each present with the journal line for judged and no_valid_result;
+unavailable without a journal (NO_JOURNAL) or with one whose file cannot be
+read (UNREADABLE_JOURNAL; _audit_core.read_journal tells them apart), and,
+with no entry, for a final with no findings list and no finding in the
+others (NO_FINDINGS_LIST: unknown, not none).
 
 Each final finding (open or declined, never a task minor) has re_review
 (_finding_re_review): {rule, status, head, delivered, evidence (the
@@ -151,6 +153,8 @@ RE_REVIEW_NOTE = "judged %s"
 RE_REVIEW_LABELS = ("final re-review", "final re-review retry")
 # The final re-review line's note when no journal entry ran it.
 RE_REVIEW_NOT_RUN = "each finding's reason says why"
+# ... and when no entry ran it and the final has no findings list to say none.
+NO_FINDINGS_LIST = "the result records no final findings list"
 # Why a launch's journal gives nothing (read_journal), and what a null
 # review's line adds then.
 NO_JOURNAL = "no journal archived for %s"
@@ -943,10 +947,14 @@ def _check_attempt(manifest, rel, stem, n, data, why):
     }
 
 
-def _check_tasks(attempt, ids):
-    """The manifest task ids (in run order) one task-check file is for: by
-    its policy's unit and tasks; without a policy, by its stem: an exact id,
-    else a batch unit '<first>-<last>' whose two parts are ids (each)."""
+def _check_tasks(attempt, tasks):
+    """The manifest task ids (in run order) one task-check file is for, tasks
+    being [(id, lane)] in run order: by its policy's unit and tasks; without
+    a policy, by its stem: an exact id, else a batch unit '<first>-<last>'
+    whose two parts are ids: every task from the first through the last in
+    their lane's order (a batch is consecutive tasks of one lane), or the
+    two parts when they are not in that order in one lane."""
+    ids = [t for t, _lane in tasks]
     policy = attempt["policy"]
     if policy is not None:
         listed = policy.get("tasks")
@@ -960,6 +968,10 @@ def _check_tasks(attempt, ids):
     for first in ids:
         last = stem[len(first) + 1:]
         if stem.startswith(first + "-") and last in ids:
+            lane = dict(reversed(tasks))  # each id's lane, its first entry's
+            order = [t for t, l in tasks if l == lane[first]]
+            if lane[first] == lane[last] and order.index(first) <= order.index(last):
+                return order[order.index(first):order.index(last) + 1]
             return [t for t in ids if t in (first, last)]
     return []
 
@@ -997,7 +1009,7 @@ def task_check_index(run):
     the policy's reason codes and the results' check ids, groups and exits
     are kept: never a file's error, tail, log or checkout."""
     manifest = run.get("manifest") or {}
-    ids = [t["id"] for t, _lane in c.manifest_tasks(manifest)]
+    tasks = [(t["id"], lane) for t, lane in c.manifest_tasks(manifest)]
     by_task, unmatched = {}, []
     checks = os.path.join(run["folder"], run["ledger"], "checks") if run.get("ledger") else None
     try:
@@ -1012,10 +1024,10 @@ def task_check_index(run):
         rel = "%s/checks/%s" % (run["ledger"], name)
         data, why = _read_check(path)
         attempt = _check_attempt(manifest, rel, match.group(1), int(match.group(2)), data, why)
-        tasks = _check_tasks(attempt, ids)
-        if not tasks:
+        matched = _check_tasks(attempt, tasks)
+        if not matched:
             unmatched.append(rel)
-        for tid in tasks:
+        for tid in matched:
             by_task.setdefault(tid, []).append(attempt)
     return {"attempts": dict((tid, _ordered_attempts(a)) for tid, a in by_task.items()), "unmatched": unmatched}
 
@@ -1240,6 +1252,10 @@ def _re_review(launch, final, entry, why):
         return c.ref(value, "unavailable", [], journal_note(launch, why))
     if entry is None:
         findings = any(isinstance(final.get(k), list) and final[k] for k in ("findings", "fixed", "declined", "open"))
+        if not findings and not isinstance(final.get("findings"), list):
+            # No list to read none from: unknown, not none.
+            value["form"] = "unavailable"
+            return c.ref(value, "unavailable", [_wf_src(launch, "final", "findings")], NO_FINDINGS_LIST)
         value["form"] = "not_run" if findings else "none"
         return c.ref(value, "present", [], RE_REVIEW_NOT_RUN if findings else None)
     result, at = entry["result"], [c.journal_src(launch, entry["line"])]

@@ -63,7 +63,7 @@ true values (_task_count: each with '(<k> settled, <k> not required, <k>
 unavailable)' for the kinds there are; the summary's tasks line counts the
 same way) and the blocked and deferred counts above 0 ('blocked and
 deferred unknown' when open_work.ledger_state is set), then '; task checks:
-<k> committed after a failed check' when k > 0 (_failed_checks), 'Final
+<k> whose last check failed' when k > 0 (_failed_checks), 'Final
 findings: <open> open, <declined> declined; open task minors: <M>' and the
 cannot-verify items, the code outside recorded task ranges, the launches
 missing from the archive, and '<G> evidence gap(s) in <C> cause(s)' with
@@ -659,7 +659,7 @@ def _md_bottom_line(audit, out):
                 for state in ("blocked", "deferred")]
         held = ["%d %s" % (n, state) for state, n in held if n]
     failed = _failed_checks(tasks)
-    checked = "; task checks: %d committed after a failed check" % failed if failed else ""
+    checked = "; task checks: %d whose last check failed" % failed if failed else ""
     lines.append(line + ("; " + ", ".join(held) if held else "") + checked + ".")
     f = c["final"]
     if not f["present"]:
@@ -766,15 +766,6 @@ def _sha7(sha):
     return sha[:7] if isinstance(sha, str) and sha else _scalar(sha)
 
 
-def _task_entry_head(entry):
-    """A commits entry's head as _audit_tasks reads it: its head, else
-    (legacy) its last recorded commit, else None."""
-    if isinstance(entry.get("head"), str) and entry["head"]:
-        return entry["head"]
-    recorded = entry.get("recorded")
-    return recorded[-1] if isinstance(recorded, list) and recorded and isinstance(recorded[-1], str) else None
-
-
 def _verified_line(t):
     """The verified line. Git containment says what it covers (CONTAINED,
     NOT_CONTAINED: the task's last commit, and the verify head from the
@@ -787,7 +778,8 @@ def _verified_line(t):
     verify = [x.get("at") for x in r.get("sources") or [] if isinstance(x, dict)
               and isinstance(x.get("path"), str) and x["path"].startswith("git:")]
     text = (CONTAINED if contained else NOT_CONTAINED) % (
-        _sha7(_task_entry_head(entries[-1]) if entries else None), _sha7(verify[-1] if verify else None))
+        _sha7(_audit_tasks.event_head(entries[-1], "recorded") if entries else None),
+        _sha7(verify[-1] if verify else None))
     return _with_sources("- verified: %s [%s] - %s" % (_scalar(r["value"]), r["state"], text), r.get("sources"))
 
 
@@ -805,7 +797,7 @@ def _task_check_lines(t):
     without an attempt as any ref; else '<passed|failed|no result> [<state>]
     - ' and, with a policy (reasons not null), '[<why no result>; ]<selected>
     check of the working tree against the task base <base7>' (a stale one
-    'against <base7>, not the task's recorded base <base7>'), then '; HEAD
+    'against <base7>, not the task's recorded base <range_base7>'), then '; HEAD
     was <head7>[, the task's own commit: this check ran after it]' when HEAD
     was not the base, the earlier attempts, '; the checkout changed while it
     ran' and the fix commits after it; without one, why it has no result (or
@@ -827,9 +819,7 @@ def _task_check_lines(t):
             parts.append(r["note"])
         base = _sha7(v.get("base"))
         if r["state"] == "stale":
-            entries = t["commits"]["entries"]
-            recorded = entries[0].get("base") if entries else None
-            where = "against %s, not the task's recorded base %s" % (base, _sha7(recorded))
+            where = "against %s, not the task's recorded base %s" % (base, _sha7(v.get("range_base")))
         else:
             where = "against the task base %s" % base
         parts.append("%s check of the working tree %s" % (_scalar(v.get("selected")), where))
@@ -857,8 +847,8 @@ def _task_check_lines(t):
 
 
 def _failed_checks(tasks):
-    """The tasks committed after a failed task check: their last attempt
-    failed."""
+    """The tasks whose last task-check attempt failed (one that ran after the
+    task's own commit, or where no command failed, included)."""
     values = [t.get("checks", {}).get("task_check", {}).get("value") for t in tasks]
     return sum(1 for v in values if isinstance(v, dict) and _task_check_outcome(v) == "failed")
 

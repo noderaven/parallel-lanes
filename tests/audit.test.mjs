@@ -537,9 +537,10 @@ test('audit.md says whether each task\'s own check ran before its commit, and ho
   const a2Check = byTask(json).A2.checks.task_check;
   assert.deepEqual([a2Check.value.failed, a2Check.value.head_is_task_commit, a2Check.value.fix_commits_after],
     [[{ check: 'test#1', group: 'test', exit: 2 }], true, 1]);
-  // The Bottom line counts the tasks committed after a failed check.
+  // The Bottom line counts the tasks whose last check failed (this one ran
+  // after the task's own commit, so not "committed after" it).
   assert.equal(mdSection(md, 'Bottom line')[1],
-    'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 2 of 2; task checks: 1 committed after a failed check.');
+    'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 2 of 2; task checks: 1 whose last check failed.');
   // A 1.6.0 engine records them: Checks has no task checks line.
   assert.deepEqual(json.run.checks.task_checks, { not_recorded: [], unmatched: [] });
   assert.deepEqual(mdSection(md, 'Checks').filter((l) => /task check/.test(l)), []);
@@ -559,6 +560,40 @@ test('audit.md says whether each task\'s own check ran before its commit, and ho
   passed.files[`${checks}/task-A2.1.json`] = JSON.stringify({ ...moved, ok: true, head: r.a1, tree_changed: false });
   assert.equal(mdSection(view(makeRun(passed)).md, 'Bottom line')[1],
     'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 2 of 2.');
+});
+
+test('the task-check line\'s other wordings: stale, no result with and without a policy, HEAD elsewhere', () => {
+  const r = repoRun();
+  const s7 = (sha) => sha.slice(0, 7);
+  const checks = `${LEDGER}/checks`;
+  const line = (edit) => {
+    const spec = taskCheckSpec(r);
+    edit(spec.files);
+    return taskBlock(view(makeRun(spec)).md, 'A1').filter((l) => l.startsWith('- checked before its commit: '));
+  };
+  const third = (over) => (files) => {
+    const data = JSON.parse(files[`${checks}/task-A1.3.json`]);
+    files[`${checks}/task-A1.3.json`] = JSON.stringify({ ...data, ...over(data) });
+  };
+  const earlier = '2 earlier attempt(s): 0 passed, 1 failed, 1 without a result';
+  // A policy base other than the task's recorded base: stale, both named.
+  assert.deepEqual(line(third((d) => ({ head: r.a2, policy: { ...d.policy, base: r.a2 } }))), [
+    `- checked before its commit: passed [stale] - lane check of the working tree against ${s7(r.a2)}, not the task's`
+    + ` recorded base ${s7(r.p0)}; ${earlier} (${checks}/task-A1.3.json)`]);
+  // HEAD at a sha that is neither the base nor one of the task's commits.
+  assert.deepEqual(line(third(() => ({ head: S('e') }))), [
+    `- checked before its commit: passed [present] - lane check of the working tree against the task base ${s7(r.p0)};`
+    + ` HEAD was eeeeeee; ${earlier} (${checks}/task-A1.3.json)`]);
+  // The last attempt an error record that kept its policy: why first.
+  assert.deepEqual(line((files) => {
+    delete files[`${checks}/task-A1.2.json`];
+    delete files[`${checks}/task-A1.3.json`];
+  }), [`- checked before its commit: no result [unavailable] - an error record; lane check of the working tree against`
+    + ` the task base ${s7(r.p0)} (${checks}/task-A1.1.json)`]);
+  // A reserved file never written: no policy, so why and the earlier attempts only.
+  assert.deepEqual(line((files) => { files[`${checks}/task-A1.4.json`] = ''; }), [
+    '- checked before its commit: no result [unavailable] - the file is empty: reserved, never written;'
+    + ` 3 earlier attempt(s): 1 passed, 1 failed, 1 without a result (${checks}/task-A1.4.json)`]);
 });
 
 test('the task-check lines without a file, for older engines and for files that match no task', () => {

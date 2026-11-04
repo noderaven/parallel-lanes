@@ -70,8 +70,7 @@ before 1.6.0 committed and the files that match no task), never copying a
 check file's error, tail, log or checkout; and its verified line says what
 the containment covers ('its last commit <sha7> is in the head the
 delivered verify passed at, <sha7>'). The task check needs no --repo. The
-Bottom line adds 'task checks: <k> committed after a failed check' when
-k > 0.
+Bottom line adds 'task checks: <k> whose last check failed' when k > 0.
 The summary's tasks line counts as the Bottom line does. For accepted by
 user, the Bottom line names audit's verdict without the override when it
 differs from the run's own (acceptance.verdict_without_override and
