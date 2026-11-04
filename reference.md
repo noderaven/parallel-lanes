@@ -1916,8 +1916,9 @@ text, because a command may carry a secret.
   turn that came at or before its own result. Claude Code returns a turn's results in order, so a fast call queued
   behind a slow one is charged only its own time.
 
-**Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and
-`evidence`):
+**Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind`,
+`evidence`, `span_s` (the cost before charging, below), `merged` (how many detections the row
+holds, 1 for a lone one) and `contains` (the kinds folded into it, sorted)):
 
 | Kind | Detects |
 |---|---|
@@ -1934,13 +1935,32 @@ text, because a command may carry a secret.
 | `idle_gap` | over 60 s with no agent of the launch running |
 | `check_rerun` | the same check command ran twice (both `ran`) with only read-only calls between |
 
+**One second, one row:** each second of an agent's time is charged to at most one row.
+- **Merging:** rows of one kind and one agent whose spans overlap or touch are one row: `at`
+  the earliest start, the span their union, `cost_kind` the weakest (`bound` over `measured`),
+  `evidence` the earliest row's, and `merged` the number of detections.
+- **Charging:** per agent, the rows take its time in four tiers, in this order: `timeout` and
+  `background_check` (Claude Code's notice about a call, and the wait for it);
+  `long_tool_call` and `check_rerun` (one call's own time); `repeated_failure`,
+  `heredoc_failure` and `edit_retry` (a window from a failure to its recovery, which may hold
+  other work); `retry`, `escalation` and `extra_review_round` (a whole agent). Within a tier the
+  shorter row goes first (its `span_s`), then the earlier one. Each row takes only the parts of
+  its span that no row before it took: `cost_s` is their length and `span_s` its length before
+  charging, so an `edit_retry` inside a `heredoc_failure`'s window keeps its own time and the
+  heredoc row the rest.
+- **Folding:** a row left with nothing is removed, and its kind goes into `contains` of the row
+  that took most of its span (the earliest on a tie). A row of zero length folds into the
+  earliest row whose time, ends included, holds its instant; with none it stays at 0 s.
+- Run-wide rows (`relaunch`, `idle_gap`) and rows of unknown cost are never merged, charged or
+  folded.
+
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
 exit code when known, the matched marker string, and the program name (in the first simple
 command that is not `cd DIR`, `export ...`, a loop header or a closing keyword, the first word
 that is not a `NAME=value` assignment or a prefix such as `env` or `timeout DURATION`, as a
 basename; null when it still holds `=`, `@` or `:`). Markers in command output, files read or
-other tools' results never count. A suggestion's `stake_s` counts time that overlapping
-slowdowns of its kind share once. No command text, tool output or prompt text reaches
+other tools' results never count. A suggestion's `stake_s` is the sum of its kind's charged
+time (One second, one row). No command text, tool output or prompt text reaches
 `autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names a check id (or
 `run-checks`), never the command line or the configured command.
 

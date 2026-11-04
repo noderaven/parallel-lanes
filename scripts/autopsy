@@ -111,10 +111,14 @@ That time is an upper bound on the real finish. Notification-shaped text
 in a user line or in any tool result never counts: an agent can read such
 text from a file.
 
-slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence}], largest
-cost_s first. agent is the label, or null for a run-wide kind (relaunch,
-idle_gap). cost_kind is measured, bound when the end is an upper limit,
-or unavailable when the end is not known (cost_s is then "unavailable").
+slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence, span_s, merged,
+contains}], largest cost_s first. agent is the label, or null for a
+run-wide kind (relaunch, idle_gap). cost_kind is measured, bound when the
+end is an upper limit, or unavailable when the end is not known (cost_s is
+then "unavailable"). cost_s is the row's charged time and span_s its time
+before charging; merged counts the detections the row holds (1 for a lone
+one) and contains lists the kinds folded into it, sorted (see One second,
+one row below).
 evidence is {tool, exit, marker, program}: the tool name, the exit code a
 result reports (or null), the marker string matched (from the table in
 _autopsy.py, or null) and the program a Bash command runs (in the first
@@ -164,6 +168,23 @@ an 'Exit code N' line with N not 0. The kinds:
   configured helpers). The second run's span.
 A cost that cannot be timed is "unavailable".
 
+One second, one row: each second of an agent's time is charged to at most
+one row. Rows of one kind and one agent whose spans overlap or touch merge
+into one: at the earliest start, the span their union, cost_kind the
+weakest, evidence the earliest row's. Then, per agent, the rows take its
+time in tiers: timeout and background_check; long_tool_call and
+check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
+escalation and extra_review_round. Within a tier the shorter row (span_s)
+goes first, then the earlier. A row takes only the parts of its span that
+no row before it took: cost_s is their length. A row left with nothing is
+dropped and its kind goes into contains of the row that took most of its
+span (the earliest on a tie); a row of zero length goes to the earliest
+row whose time, ends included, holds its instant, and with none it stays
+at 0. Run-wide rows and rows of unknown cost (span_s "unavailable") are
+never merged, charged or folded. autopsy.md shows a merged row's kind as
+'<kind> xN', a cost below its span as '<cost> (of <span_s> s)' and the
+folded kinds as 'contains <kind>, ...' in its Evidence cell.
+
 detectors: {<kind>: ok | partial | not_available}. A detector is
 not_available when its inputs are missing (no timed tool events, no
 labels, no models, no timed launch); it then adds no slowdown. The tool
@@ -173,10 +194,9 @@ partial (see time): their slowdowns are kept, but they may miss some.
 autopsy.md lists the partial detectors apart from those without data.
 
 suggestions: [{kind, text, stake_s, count, slowdowns}], one per kind with a
-slowdown, worded as a likely cause and a change to try; stake_s is the time
-its slowdowns with a known cost cover, per agent, with overlapping spans
-counted once (so it can be less than the sum of their cost_s), and
-slowdowns lists their indexes. Ranked by stake_s. When acceptance reports checks_unclean, an unclean_checks
+slowdowns, worded as a likely cause and a change to try; stake_s is the time
+its slowdowns with a known cost cover, per agent: the sum of their charged
+cost_s (One second, one row), and slowdowns lists their indexes. Ranked by stake_s. When acceptance reports checks_unclean, an unclean_checks
 suggestion (stake_s 0, no slowdowns) names the untracked files from the
 saved verify evidence (<ledger>/checks/verify-*.json) by path and says to
 commit any file a check needs and gitignore only known generated output.

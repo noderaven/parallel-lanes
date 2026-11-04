@@ -493,7 +493,8 @@ test('each detector finds its slowdown with its cost', () => {
   assert.deepEqual(S.detectors, Object.fromEntries(KINDS.map((k) => [k, 'ok'])));
   const expected = {
     background_check: ['A1 implement', T('09:00:10'), 90, 'bound'],
-    heredoc_failure: ['A1 implement', T('09:01:50'), 32, 'bound'],
+    // Its window to the next write (32 s) holds the edit_retry, charged first.
+    heredoc_failure: ['A1 implement', T('09:01:50'), 10, 'bound'],
     edit_retry: ['A1 implement', T('09:02:00'), 22, 'measured'],
     repeated_failure: ['A1 implement', T('09:02:30'), 20, 'measured'],
     check_rerun: ['A1 implement', T('09:03:40'), 40, 'measured'],
@@ -513,6 +514,7 @@ test('each detector finds its slowdown with its cost', () => {
     [byKind[kind]] = found;
     const s = byKind[kind];
     assert.deepEqual([s.agent, s.at, s.cost_s, s.cost_kind], expected[kind], kind);
+    assert.deepEqual([s.span_s, s.merged, s.contains], [kind === 'heredoc_failure' ? 32 : s.cost_s, 1, []], kind);
   }
   // The largest cost comes first.
   const costs = S.slowdowns.map((s) => s.cost_s);
@@ -639,9 +641,10 @@ function detect(events, notes = [], notices = []) {
       + ` "notices": json.loads(${JSON.stringify(JSON.stringify(notices))})}`,
     '_autopsy.span_agent(agent)',
     'found = _autopsy.tool_slowdowns(agent, _autopsy.configured_checks({"commands": {"test": ["npm test"]}}))',
+    'settled = _autopsy.settle_slowdowns(found)',
     'calls = _autopsy._calls(agent)',
-    'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in found],',
-    '                  "suggestions": _autopsy.suggestions_section(found, None),',
+    'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in settled],',
+    '                  "suggestions": _autopsy.suggestions_section(settled, None),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
     '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
@@ -872,7 +875,7 @@ test('slowdowns that overlap in time are counted once in the stake', () => {
   // Three Edits sent together while a long Bash call runs; each fails as
   // unread when its result comes back, queued behind the Bash call (so they
   // start at 123, 124 and 125). The retries, sent together, succeed at 130,
-  // 131 and 132: the spans overlap.
+  // 131 and 132: the spans overlap, so they are one row from 123 to 132.
   const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
   const events = [use(0, 'b1', 'Bash', { command: 'npm run build' })];
   for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }));
@@ -882,10 +885,153 @@ test('slowdowns that overlap in time are counted once in the stake', () => {
   ['a', 'b', 'c'].forEach((f, i) => events.push(res(130 + i, `f${f}`, 'Edit', 'ok')));
   const out = detect(events);
   const retries = out.slowdowns.filter((s) => s.kind === 'edit_retry');
-  assert.deepEqual(retries.map((s) => s.cost_s), [7, 7, 7]);
+  assert.deepEqual(retries.map((s) => [s.at, s.cost_s, s.span_s, s.merged]), [[at(123), 9, 9, 3]]);
   const g = out.suggestions.find((s) => s.kind === 'edit_retry');
-  assert.deepEqual([g.count, g.stake_s], [3, 9]);
+  assert.deepEqual([g.count, g.stake_s], [1, 9]);
+  // The long call's span ends at 123, where the retries start: they touch and
+  // share no time.
   assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 123);
+});
+
+// The public rows settle_slowdowns leaves of internal rows built with
+// _slowdown, each {kind, start, end}: of agent X unless runWide, and with an
+// unknown cost (its covers kept) when unknown. Each row comes back as [kind,
+// at, cost_s, span_s, merged, contains]; inputs is whether the input rows are
+// unchanged.
+function settle(rows) {
+  return python([
+    'import _autopsy',
+    'X = {"entry": {"label": "X"}}',
+    'rows = []',
+    `for r in json.loads(${JSON.stringify(JSON.stringify(rows))}):`,
+    '    sd = _autopsy._slowdown(r["kind"], None if r.get("runWide") else X, r["start"], r["end"],',
+    '                            "unavailable" if r.get("unknown") else "measured")',
+    '    if r.get("unknown"):',
+    '        sd["_cost"] = None',
+    '    rows.append(sd)',
+    'before = repr(rows)',
+    'out = [_autopsy.public_slowdown(s) for s in _autopsy.settle_slowdowns(rows)]',
+    'print(json.dumps({"rows": [[s["kind"], s["at"], s["cost_s"], s["span_s"], s["merged"], s["contains"]]',
+    '                           for s in out], "inputs": repr(rows) == before}))',
+  ]);
+}
+
+test('overlapping rows of one kind and one agent are one row', () => {
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const events = [];
+  for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }, 'm1'));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(1 + i / 10, `e${f}`, 'Edit', unread, true)));
+  events.push(use(2, 'fa', 'Edit', { file_path: 'a.js' }, 'm2'), res(20, 'fa', 'Edit', 'ok'));
+  events.push(use(20.5, 'fb', 'Edit', { file_path: 'b.js' }, 'm3'), res(21, 'fb', 'Edit', 'ok'));
+  events.push(use(22, 'fc', 'Edit', { file_path: 'c.js' }, 'm4'), res(25, 'fc', 'Edit', 'ok'));
+  const out = detect(events);
+  // 0-20, 1-21 and 1.1-25 merge: the earliest start, the union's length.
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.merged, s.contains]),
+    [['edit_retry', at(0), 25, 25, 3, []]]);
+  assert.equal(out.slowdowns[0].evidence.marker, 'has not been read yet');
+  const g = out.suggestions.find((s) => s.kind === 'edit_retry');
+  assert.deepEqual([g.count, g.stake_s, g.slowdowns], [1, 25, [0]]);
+});
+
+test('each second of an agent is charged to one row, by tier', () => {
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const out = detect([
+    use(0, 'b1', 'Bash', { command: 'npm run e2e' }, 'm1'),
+    use(100, 'e1', 'Edit', { file_path: 'a.js' }, 'm2'),
+    res(101, 'e1', 'Edit', unread, true),
+    res(120, 'b1', 'Bash', 'Command timed out after 2m 0s'),
+    use(150, 'e2', 'Edit', { file_path: 'a.js' }, 'm3'),
+    res(160, 'e2', 'Edit', 'ok'),
+  ]);
+  // The timeout (tier 1) keeps 0-120; the edit_retry's window 100-160 keeps
+  // only 120-160.
+  const rows = out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s]);
+  assert.deepEqual(rows, [['timeout', at(0), 120, 120], ['edit_retry', at(100), 40, 60]]);
+  // The agent's row costs add up to the union of their spans, 0-160.
+  assert.equal(rows.reduce((n, r) => n + r[2], 0), 160);
+  assert.deepEqual(out.suggestions.map((g) => [g.kind, g.stake_s]), [['timeout', 120], ['edit_retry', 40]]);
+});
+
+test('a tier 3 window inside a whole-agent row keeps its own time', () => {
+  // The r150 H3 implement shape (r162's extra_review_round with an
+  // edit_retry is the same pair of tiers).
+  assert.deepEqual(settle([
+    { kind: 'escalation', start: 0, end: 300 },
+    { kind: 'edit_retry', start: 40, end: 80 },
+  ]).rows, [
+    ['escalation', at(0), 260, 300, 1, []],
+    ['edit_retry', at(40), 40, 40, 1, []],
+  ]);
+});
+
+test('a zero-length row folds into the row that holds its instant', () => {
+  const out = settle([
+    { kind: 'timeout', start: 0, end: 120 },
+    { kind: 'edit_retry', start: 50, end: 50 },
+    { kind: 'check_rerun', start: 120, end: 120 },
+    { kind: 'edit_retry', start: 200, end: 200 },
+  ]);
+  // The instant may sit on the edge of the row's time (120).
+  assert.deepEqual(out.rows, [
+    ['timeout', at(0), 120, 120, 1, ['check_rerun', 'edit_retry']],
+    ['edit_retry', at(200), 0, 0, 1, []],
+  ]);
+  assert.equal(out.inputs, true);
+});
+
+test('within a tier the shorter row is charged first', () => {
+  // The run2 shape: an edit_retry inside a heredoc failure's window to its
+  // recovery.
+  assert.deepEqual(settle([
+    { kind: 'heredoc_failure', start: 0, end: 32 },
+    { kind: 'edit_retry', start: 10, end: 32 },
+  ]).rows, [
+    ['heredoc_failure', at(0), 10, 32, 1, []],
+    ['edit_retry', at(10), 22, 22, 1, []],
+  ]);
+});
+
+test('a row inside a higher row is folded into it', () => {
+  assert.deepEqual(settle([
+    { kind: 'timeout', start: 0, end: 120 },
+    { kind: 'long_tool_call', start: 10, end: 100 },
+  ]).rows, [['timeout', at(0), 120, 120, 1, ['long_tool_call']]]);
+  // A whole-agent row (tier 4) yields to the long call (tier 2).
+  assert.deepEqual(settle([
+    { kind: 'retry', start: 0, end: 300 },
+    { kind: 'long_tool_call', start: 50, end: 180 },
+  ]).rows, [
+    ['retry', at(0), 170, 300, 1, []],
+    ['long_tool_call', at(50), 130, 130, 1, []],
+  ]);
+});
+
+test('a row of unknown cost is never merged, charged or folded', () => {
+  // Review focus 3: a background run without an observed completion, beside
+  // a known one of the same kind over the same time.
+  assert.deepEqual(settle([
+    { kind: 'background_check', start: 10, end: 60, unknown: true },
+    { kind: 'background_check', start: 0, end: 50 },
+  ]).rows, [
+    ['background_check', at(10), 'unavailable', 'unavailable', 1, []],
+    ['background_check', at(0), 50, 50, 1, []],
+  ]);
+});
+
+test('run-wide rows are never merged, charged or folded', () => {
+  // Review focus 5: a relaunch over an agent's edit_retry, and two idle gaps
+  // that touch.
+  assert.deepEqual(settle([
+    { kind: 'relaunch', start: 0, end: 300, runWide: true },
+    { kind: 'edit_retry', start: 40, end: 80 },
+    { kind: 'idle_gap', start: 300, end: 400, runWide: true },
+    { kind: 'idle_gap', start: 400, end: 500, runWide: true },
+  ]).rows, [
+    ['relaunch', at(0), 300, 300, 1, []],
+    ['edit_retry', at(40), 40, 40, 1, []],
+    ['idle_gap', at(300), 100, 100, 1, []],
+    ['idle_gap', at(400), 100, 100, 1, []],
+  ]);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {
@@ -1208,8 +1354,32 @@ test('autopsy.md has every section in order', () => {
   assert.match(md, /^\| 1 \| relaunch \|/m);
   assert.ok(!/^\| 0 \|/m.test(md));
   assert.match(md, /^1\. relaunch \(stake 300\.0 s, 1 time; slowdown row #1\):/m);
+  // A row charged less than its span shows both.
+  assert.match(md, /^\| \d+ \| heredoc_failure \| A1 implement \| 2026-10-10 09:01:50Z \| 10\.0 s \(upper bound\) \(of 32\.0 s\) \| tool Bash, exit 2, marker '<<', program cat \|$/m);
+  assert.match(md, /^\| \d+ \| edit_retry \| A1 implement \| 2026-10-10 09:02:00Z \| 22\.0 s \| /m);
   // Paths are relative to the run folder.
   assert.ok(!md.includes(TMP));
+});
+
+test('autopsy.md shows how many detections a row holds and the kinds folded into it', () => {
+  const row = (kind, cost, span, merged, contains) => ({
+    kind, agent: 'X', at: at(0), cost_s: cost, cost_kind: 'measured', span_s: span, merged, contains,
+    evidence: { tool: 'Bash', exit: null, marker: null, program: 'npm' },
+  });
+  const lines = python([
+    'import _autopsy',
+    `a = {"slowdowns": json.loads(${JSON.stringify(JSON.stringify([
+      row('timeout', 120, 120, 1, ['edit_retry', 'long_tool_call']),
+      row('edit_retry', 25, 25, 3, []),
+      row('background_check', 'unavailable', 'unavailable', 1, []),
+    ]))}), "detectors": {}}`,
+    'print(json.dumps(_autopsy._md_slowdowns(a)))',
+  ]);
+  assert.deepEqual(lines.slice(2), [
+    '| 1 | timeout | X | 1970-01-01 00:00:00Z | 120.0 s | tool Bash, program npm, contains edit_retry, long_tool_call |',
+    '| 2 | edit_retry x3 | X | 1970-01-01 00:00:00Z | 25.0 s | tool Bash, program npm |',
+    '| 3 | background_check | X | 1970-01-01 00:00:00Z | unavailable | tool Bash, program npm |',
+  ]);
 });
 
 test('a lane outside the launch axis keeps its own span in the timeline', () => {

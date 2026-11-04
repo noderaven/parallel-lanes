@@ -34,9 +34,9 @@
 //   The Edits queued behind the Bash call, so each is charged from the
 //   result it waited for (06:34:08.275), not from its own tool_use: the
 //   three edit_retry spans are 10.2, 10.2 and 13.8 s, overlapping from
-//   06:34:08.275 to 06:34:22.083 (stake 13.8 s). Before 1.6.11 they were
-//   charged from their tool_use (union 137.9 s, sum 401.5 s), which counted
-//   the Bash call's timeout again.
+//   06:34:08.275 to 06:34:22.083, so they are one row of 13.8 s (merged 3).
+//   Before 1.6.11 they were three rows charged from their tool_use (union
+//   137.9 s, sum 401.5 s), which counted the Bash call's timeout again.
 //
 // queued-timeout (r140, integrate, 02:31:13.6-02:35:44Z):
 //   Bash 02:31:16.772-02:33:17.603  the run-checks call blocks for its 120 s
@@ -107,23 +107,18 @@ test('real r150 case: a failing script after a successful heredoc write is no he
 test('real r142 case: overlapping edit retries count their shared time once', () => {
   const a = autopsy('overlapping-slowdowns');
   assert.equal(a.detectors.edit_retry, 'ok');
-  // Each failed Edit is still its own slowdown, with its own cost.
+  // The three failed Edits overlap: one row over their union (06:34:08.275
+  // to 06:34:22.083), not the sum of their spans.
   const retries = ofKind(a, 'edit_retry')
-    .map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool, s.evidence.marker])
-    .sort((x, y) => x[1].localeCompare(y[1]));
+    .map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool, s.evidence.marker]);
   assert.deepEqual(retries, [
-    ['A1 implement', T('06:34:08.275'), 10.2, 'measured', 'Edit', 'has not been read yet'],
-    ['A1 implement', T('06:34:08.283'), 10.2, 'measured', 'Edit', 'has not been read yet'],
-    ['A1 implement', T('06:34:08.287'), 13.8, 'measured', 'Edit', 'has not been read yet'],
+    ['A1 implement', T('06:34:08.275'), 13.8, 'measured', 'Edit', 'has not been read yet'],
   ]);
-  // The suggestion's stake is their union (06:34:08.275 to 06:34:22.083),
-  // not the sum.
+  assert.equal(ofKind(a, 'edit_retry')[0].merged, 3);
   const g = suggestion(a, 'edit_retry');
   assert.ok(g, 'an edit_retry suggestion');
-  assert.equal(g.count, 3);
+  assert.equal(g.count, 1);
   close(g.stake_s, 13.8, 'edit_retry stake');
-  const sum = retries.reduce((n, r) => n + r[2], 0);
-  assert.ok(g.stake_s < sum, `stake ${g.stake_s} is below the sum ${sum}`);
   // The Bash call that held the Edits back really did time out.
   const timeouts = ofKind(a, 'timeout').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool]);
   assert.deepEqual(timeouts, [['A1 implement', T('06:32:01.950'), 126.3, 'measured', 'Bash']]);

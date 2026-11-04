@@ -1298,22 +1298,139 @@ def detector_status(run):
     return status
 
 
+# The order an agent's slowdown rows take its time in (settle_slowdowns):
+# Claude Code's own notice about a call and the wait for it; one call's own
+# time; a window from a failure to its recovery, which may hold other work;
+# a whole agent (retry first: an agent ended by an API error also reads as
+# an escalation).
+CHARGE_TIERS = (("timeout", "background_check"), ("long_tool_call", "check_rerun"),
+                ("repeated_failure", "heredoc_failure", "edit_retry"),
+                ("retry", "escalation", "extra_review_round"))
+_CHARGE_ORDER = {kind: (tier, place) for tier, kinds in enumerate(CHARGE_TIERS)
+                 for place, kind in enumerate(kinds)}
+_COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
+
+
+def _charged(s):
+    """Whether settle_slowdowns charges a row: a known cost over agents' own
+    time only (no run-wide cover)."""
+    return s["_cost"] is not None and bool(s["_covers"]) and all(o is not None for o, _s, _e in s["_covers"])
+
+
+def _touches(a, b):
+    """Whether two rows cover the same agent at overlapping or touching
+    times."""
+    return any(oa is ob and sa <= eb and sb <= ea
+               for oa, sa, ea in a["_covers"] for ob, sb, eb in b["_covers"])
+
+
+def _merge_rows(rows):
+    """One row for rows of one kind (in input order): the union of their
+    covers per agent, the earliest start with its row's evidence, the
+    weakest cost_kind and the summed detection count."""
+    first = min(rows, key=lambda s: s["_at"])
+    spans = {}
+    owners = []
+    for s in rows:
+        for owner, start, end in s["_covers"]:
+            if id(owner) not in spans:
+                owners.append(owner)
+                spans[id(owner)] = []
+            spans[id(owner)].append((start, end))
+    covers = [(o, start, end) for o in owners for start, end in merged(spans[id(o)])]
+    cost = sum(end - start for _o, start, end in covers)
+    return dict(first, _cost=cost, _span_cost=cost, _covers=covers,
+                cost_kind=min((s["cost_kind"] for s in rows), key=_COST_KINDS.index),
+                _merged=sum(s["_merged"] for s in rows), _contains=set())
+
+
+def settle_slowdowns(slowdowns):
+    """The rows left when each second of an agent is charged to at most one
+    row; the input is not changed. Each row gains _span_cost (its cost
+    before charging), _merged (the detections it holds) and _contains (the
+    kinds folded into it).
+    1. Merge: rows of one kind that cover the same agent at overlapping or
+       touching times are one row (_merge_rows).
+    2. Charge: in CHARGE_TIERS order, within a tier the shorter row
+       (_span_cost) first, then the earlier, then the order in the tier,
+       each row takes the parts of its covers that no row before it took;
+       those become its _covers and their length its _cost.
+    3. Fold: a row that took nothing is removed and its kind added to the
+       _contains of the row that took most of its span (the earliest on a
+       tie). A row of zero length goes to the earliest row whose taken
+       parts, ends included, hold its instant; with none it stays at 0.
+    Rows of unknown cost and run-wide rows (an owner None: relaunch,
+    idle_gap) are neither merged, charged nor folded."""
+    rows = [dict(s, _span_cost=s["_cost"], _merged=1, _contains=set()) for s in slowdowns]
+    # 1. Merge: group[i] is the index of the group row i joins.
+    group = list(range(len(rows)))
+    charged = [i for i, s in enumerate(rows) if _charged(s)]
+    for n, i in enumerate(charged):
+        for j in charged[:n]:
+            if rows[i]["kind"] == rows[j]["kind"] and _touches(rows[i], rows[j]):
+                old, new = group[i], group[j]
+                group = [new if g == old else g for g in group]
+    groups = {}
+    for i, s in enumerate(rows):
+        groups.setdefault(group[i], []).append(s)
+    rows = [g[0] if len(g) == 1 else _merge_rows(g) for g in groups.values()]
+
+    # 2. Charge.
+    order = sorted((s for s in rows if _charged(s)),
+                   key=lambda s: (_CHARGE_ORDER[s["kind"]][0], s["_span_cost"], s["_at"],
+                                  _CHARGE_ORDER[s["kind"]][1]))
+    taken = {}  # id(owner) -> [(start, end, the row that took it)]
+    spans = {}  # id(row) -> its covers before charging
+    for s in order:
+        spans[id(s)] = s["_covers"]
+        parts = []
+        for owner, start, end in s["_covers"]:
+            mine = taken.setdefault(id(owner), [])
+            for a, b in _uncovered(start, end, merged([(x, y) for x, y, _r in mine])):
+                parts.append((owner, a, b))
+                mine.append((a, b, s))
+        s["_covers"] = parts
+        s["_cost"] = sum(b - a for _o, a, b in parts)
+
+    # 3. Fold.
+    folded = set()
+    for s in order:
+        if s["_cost"] > 0:
+            continue
+        zero = s["_span_cost"] == 0
+        share = {}  # id(row) -> [row, the part of s's span it took]
+        for owner, start, end in spans[id(s)]:
+            for a, b, r in taken.get(id(owner), []):
+                if (a <= start <= b) if zero else (min(b, end) > max(a, start)):
+                    share.setdefault(id(r), [r, 0.0])[1] += max(0.0, min(b, end) - max(a, start))
+        most = max([t for _r, t in share.values()], default=0.0)
+        holders = [r for r, t in share.values() if t == most]
+        if holders:
+            into = min(holders, key=lambda r: r["_at"])
+            into["_contains"] |= {s["kind"]} | s["_contains"]
+            folded.add(id(s))
+    return [s for s in rows if id(s) not in folded]
+
+
 def find_slowdowns(run, detectors):
-    """Internal slowdowns of every ok or partial detector, largest cost
-    first (unknown costs last), then by time and kind."""
+    """Internal slowdowns of every ok or partial detector, settled
+    (settle_slowdowns), largest cost first (unknown costs last), then by
+    time and kind."""
     checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
         found += tool_slowdowns(a, checks)
-    found = [s for s in found if detectors[s["kind"]] in ("ok", "partial")]
+    found = settle_slowdowns([s for s in found if detectors[s["kind"]] in ("ok", "partial")])
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
     return found
 
 
 def public_slowdown(s):
+    """A settled internal row as autopsy.json lists it."""
     return {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
-            "cost_kind": s["cost_kind"], "evidence": s["evidence"]}
+            "cost_kind": s["cost_kind"], "evidence": s["evidence"], "span_s": seconds(s["_span_cost"]),
+            "merged": s["_merged"], "contains": sorted(s["_contains"])}
 
 
 # ---- checks ----
@@ -2398,9 +2515,10 @@ def unclean_suggestion(run_folder, done):
 def stake(slowdowns):
     """The time a group of slowdowns stands for: per agent (and once for
     the run-wide ones), the length of the union of the spans the slowdowns
-    with a known cost cover, summed. Slowdowns that overlap in time (three
-    parallel Edits failing together) count their shared time once. None
-    when no cost is known."""
+    with a known cost cover, summed. Slowdowns that overlap in time count
+    their shared time once; settled rows (settle_slowdowns) share no time
+    of an agent, so for them it is the sum of their costs. None when no
+    cost is known."""
     known = [s for s in slowdowns if s["_cost"] is not None]
     if not known:
         return None
@@ -2810,10 +2928,12 @@ def _slowdown_cost(s):
     cost = _secs(s["cost_s"])
     if _is_num(s["cost_s"]) and s["cost_kind"] == "bound":
         cost += " (upper bound)"
+    if _is_num(s["span_s"]) and s["span_s"] != s["cost_s"]:
+        cost += " (of %s)" % _secs(s["span_s"])
     return cost
 
 
-def _evidence_text(evidence):
+def _evidence_text(evidence, contains=()):
     parts = []
     if evidence.get("tool"):
         parts.append("tool %s" % evidence["tool"])
@@ -2823,6 +2943,8 @@ def _evidence_text(evidence):
         parts.append("marker '%s'" % evidence["marker"])
     if evidence.get("program"):
         parts.append("program %s" % evidence["program"])
+    if contains:
+        parts.append("contains %s" % ", ".join(contains))
     return ", ".join(parts) if parts else "-"
 
 
@@ -3130,8 +3252,9 @@ def _md_slowdowns(a):
         lines = ["No slowdowns found."]
     else:
         lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
-                       [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
-                         _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"], 1)])
+                       [[i, s["kind"] + (" x%d" % s["merged"] if s["merged"] > 1 else ""),
+                         s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
+                         _evidence_text(s["evidence"], s["contains"])] for i, s in enumerate(a["slowdowns"], 1)])
     partial = [k for k, v in a["detectors"].items() if v == "partial"]
     if partial:
         lines += ["", "Detectors with partial data (they may miss slowdowns): %s." % ", ".join(partial)]
