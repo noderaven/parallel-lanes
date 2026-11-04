@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "run_id": "r140",
+  "plan": "C:/u/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/u/project",
+    "branch": "release",
+    "base": "main",
+    "worktree_root": "C:/u/project-wt",
+    "ledger_dir": "C:/u/plans/p.r140.ledger"
+  },
+  "commands": {
+    "setup": [],
+    "test": [
+      "node --test tests/"
+    ],
+    "lint": [],
+    "build": []
+  },
+  "prelude": [],
+  "lanes": [
+    {
+      "id": "checks",
+      "name": "Lane checks",
+      "tasks": [
+        {
+          "id": "B1",
+          "title": "Checks",
+          "tier": "sonnet"
+        }
+      ]
+    }
+  ],
+  "join": []
+}

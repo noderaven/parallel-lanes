@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "run_id": "r140",
+  "plan": "C:/u/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/u/project",
+    "branch": "release",
+    "base": "main",
+    "worktree_root": "C:/u/project-wt",
+    "ledger_dir": "C:/u/plans/p.r140.ledger"
+  },
+  "commands": {
+    "setup": [],
+    "test": [
+      "node --test tests/"
+    ],
+    "lint": [],
+    "build": []
+  },
+  "prelude": [],
+  "lanes": [],
+  "join": [
+    {
+      "id": "J1",
+      "title": "Document 1.4.0 behaviour",
+      "tier": "sonnet"
+    }
+  ]
+}

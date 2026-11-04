@@ -1,0 +1,22 @@
+{
+  "runId": "wf_1",
+  "workflowName": "parallel-lanes",
+  "status": "completed",
+  "startTime": 1791599888000,
+  "durationMs": 768555,
+  "result": {
+    "status": "complete",
+    "run_id": "r140",
+    "tasks": {
+      "J1": {
+        "status": "done",
+        "rounds": 0,
+        "tier_used": "sonnet",
+        "commits": [
+          "7cf3473",
+          "89a7f22"
+        ]
+      }
+    }
+  }
+}

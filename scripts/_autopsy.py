@@ -27,7 +27,17 @@ Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
 agent's polls and stops of the task (_completion_after); notification-
 shaped text in a user line or any tool result never counts, since an
-agent can read such text from a file.
+agent can read such text from a file. A background_check costs only the
+agent's waiting inside the window from the call to that completion
+(background_waiting); a window it did not wait in is no slowdown, and
+checks.waits counts it as background_not_waited.
+
+Queued calls. The calls of one model turn share its message id and run one
+after the other; Claude Code returns their results in order. A call's own
+time starts at its own start (_calls' own_start): the later of its
+tool_use and the latest result of an earlier call of its turn that came at
+or before its own result. A fast call queued behind a slow one is charged only its own time. A
+procedure's times, span_agent and unexplained_section use the raw times.
 
 Checks. configured_checks gives each configured command an id: test#1 is
 commands.test[0], <lane>.test#1 is lane_commands.<lane>.test[0] and
@@ -99,7 +109,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 7
+AUTOPSY_VERSION = 8
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -193,9 +203,9 @@ def _text_of(content):
     return "\n".join(parts)
 
 
-def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None):
+def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None, msg=None):
     return {"ts": ts, "kind": kind, "name": name, "id": id_, "is_error": is_error,
-            "text": text, "input": input_}
+            "text": text, "input": input_, "msg": msg}
 
 
 def read_events_counted(jsonl_path):
@@ -277,7 +287,8 @@ def read_transcript(jsonl_path):
                 if id_ is not None and name is not None:
                     names[id_] = name
                 events.append(_event(ts, "tool_use", name=name, id_=id_,
-                                     input_=b.get("input") if isinstance(b.get("input"), dict) else None))
+                                     input_=b.get("input") if isinstance(b.get("input"), dict) else None,
+                                     msg=msg.get("id") if isinstance(msg.get("id"), str) else None))
         elif obj.get("type") == "user":
             if not any(b.get("type") == "tool_result" for b in blocks):
                 text = _text_of(content)
@@ -295,7 +306,9 @@ def read_transcript(jsonl_path):
 
 def read_events(jsonl_path):
     """The timed events of one transcript, in file order:
-    {ts, kind: assistant|tool_use|tool_result, name, id, is_error, text, input}.
+    {ts, kind: assistant|tool_use|tool_result, name, id, is_error, text, input,
+    msg}; msg is the message id of a tool_use event's assistant line (the
+    calls of one model turn share it), else None.
 
     The file is read as bytes and each line decoded strictly; a line that is
     not valid UTF-8 or not valid JSON is skipped (read_events_counted counts
@@ -732,8 +745,9 @@ KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "
 
 # One suggestion per kind: a likely cause, then a change to try.
 SUGGESTIONS = {
-    "background_check": "A check likely went to the background and the agent waited for it. Try running "
-                        "checks in the foreground with a timeout long enough for the suite.",
+    "background_check": "A command likely went to the background and the agent waited for it. For a check, "
+                        "try the long-check procedure (run-checks --out with await-checks wait); otherwise a "
+                        "foreground run with a timeout long enough for it.",
     "timeout": "A tool call likely hit its time limit. Try a longer timeout for slow commands, or a "
                "narrower command while iterating.",
     "repeated_failure": "The same command likely failed again with nothing changed in between. Try "
@@ -772,6 +786,18 @@ _FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
 _LEAD_WORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "{", "time")
 _NOT_PROGRAMS = ("cd", "pushd", "popd", "for", "case", "select", "function", "fi", "done", "esac", "}",
                  "export", "set", "unset", "shopt", "trap", "umask", "ulimit", "local", "declare", "readonly")
+# Programs that read, test, move or wait around the work of a line: the
+# program of a line is the first that is none of these (program_of).
+PLUMBING = ("cat", "head", "tail", "grep", "ls", "wc", "echo", "pwd", "which", "true", "false", "printf",
+            "test", "[", "[[", "]]", "seq", "read", "break", "continue", "sort", "uniq", "cut", "tr", "tee",
+            "sed", "awk", "rm", "mv", "cp", "mkdir", "mktemp", "touch", "date", "git", "sleep")
+_LOOP_WORDS = ("for", "while", "until")
+_SCRIPT_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".sh", ".ps1")
+# A word that is only a variable, $NAME or ${NAME} (its quotes removed).
+_BARE_VARIABLE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$")
+# A glob character: a word holding one (a case pattern such as *.meta) is
+# never a program.
+_GLOB = "*?"
 
 
 def _marker(kind, text):
@@ -810,17 +836,47 @@ def exit_code(text):
     return int(m.group(1)) if m else None
 
 
-def program_of(command):
-    """The program a Bash command runs: in the first simple command that runs
-    one (not 'cd DIR', 'export ...', a loop header or a closing keyword;
-    leading keywords such as 'if' or 'do' are skipped), its first word that
-    is not a NAME=value assignment or a prefix such as env, nohup or
-    'timeout DURATION', reduced to its basename. None when there is none,
-    or when that word still holds '=', '@' or ':' (it may carry a secret or
-    a URL)."""
+def program_of(command, checks=None):
+    """The program a Bash command line ran, as a basename, or None. checks
+    is configured_checks(manifest), or None. The line is read as
+    match_check reads it (_simple_commands), and the first rule that
+    applies names the program:
+    1. with checks, when match_check finds a check in the line: the program
+       of the simple command that runs it;
+    2. when the line holds a loop (for, while or until) and a simple command
+       runs sleep: sleep (a wait loop);
+    3. the program of the first simple command whose program is not
+       PLUMBING, else of the first one.
+    Only simple commands that run a program count (not 'cd DIR', 'export
+    ...', a loop header, a closing keyword, assignments alone or a case
+    pattern); each one's program is _program's. None when no simple command
+    runs one. A line whose quoting does not parse is _plain_program's."""
     if not isinstance(command, str):
         return None
-    for words in _segments(without_heredoc_bodies(command)):
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return _plain_program(command)
+    if checks is not None:
+        found = _match(command, checks)
+        if found is not None:
+            return _first_program(found["words"])
+    commands = [(lead, words) for _ops, lead, words in simple]
+    loop = any(w in _LOOP_WORDS for lead, words in commands for w in lead + words[:1])
+    if loop and any(_program(words) == "sleep" for _lead, words in commands if _runs_program(words)):
+        return "sleep"
+    return _first_program([words for _lead, words in commands])
+
+
+def _plain_program(command):
+    """program_of for a line whose quoting does not parse, read as the
+    plain words of each piece between separators (_plain_segments), which
+    may split quoted text: so only the first simple command that runs a
+    program counts (past leading keywords, 'cd DIR', 'export ...', a loop
+    header, a closing keyword, prefixes and case patterns), and no check,
+    wait-loop or plumbing rule applies. Its program word as a basename;
+    None when there is none, or when that still holds '=', '@' or ':'."""
+    for words in _plain_segments(without_heredoc_bodies(command)):
         i = 0
         while i < len(words) and words[i] in _LEAD_WORDS:
             i += 1
@@ -828,12 +884,71 @@ def program_of(command):
         if not words or words[0] in _NOT_PROGRAMS or words[0].startswith("-"):
             continue
         i = _skip_prefixes(words)
-        if i >= len(words):
+        if i >= len(words) or any(c in words[i] for c in _GLOB):
             continue
         name = _basename(words[i])
         if not name or any(c in name for c in "=@:"):
             return None
         return name
+    return None
+
+
+def _runs_program(words):
+    """Whether a simple command's words (leading keywords and prefixes
+    skipped) run a program: not none, not 'cd DIR', 'export ...', a loop
+    header or a closing keyword (_NOT_PROGRAMS), not an option, and not a
+    word with a glob character (a case pattern such as *.meta)."""
+    return (bool(words) and words[0] not in _NOT_PROGRAMS and not words[0].startswith("-")
+            and not any(c in words[0] for c in _GLOB))
+
+
+def _first_program(commands):
+    """Rule 3 of program_of over the words of simple commands: the program
+    of the first that runs one and whose program is not PLUMBING, else of
+    the first that runs one; None when none does."""
+    programs = [_program(words) for words in commands if _runs_program(words)]
+    return next((p for p in programs if p not in PLUMBING), programs[0] if programs else None)
+
+
+def _program(words):
+    """The program of a simple command's words (leading keywords and
+    prefixes skipped): the basename of its first word. An interpreter
+    (python*, py, bash or sh, with .exe) followed by a script word, past
+    its options, runs that script: the script's basename; followed by -c,
+    -m or - (inline code), or by no script word, it is the interpreter
+    itself. A bare variable ($NAME or ${NAME}, such as "$python") names
+    the basename of a script word after it in the same way, else None; a
+    word that starts with a variable and holds a path ($VENV/bin/x) is a
+    path like any other. None also when the name holds '=', '@' or ':' (it
+    may carry a secret or a URL)."""
+    name = _basename(words[0])
+    variable = _BARE_VARIABLE.match(words[0]) is not None
+    if variable or _INTERPRETER.match(name):
+        script = _script_word_after(words)
+        if script is not None:
+            name = _basename(script)
+        elif variable:
+            return None
+    if not name or any(c in name for c in "=@:"):
+        return None
+    return name
+
+
+def _script_word_after(words):
+    """The script word an interpreter's words (words[0] the interpreter)
+    run: the first word past its options when it holds '/' or '\\' or ends
+    in a _SCRIPT_SUFFIXES suffix, and no glob character; None when there is
+    none, or when an option for inline code (-c, -m or -) comes first."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] == "-" or _INLINE_FLAG.match(words[i]):
+            return None
+        i += 2 if words[i] in _ARG_FLAGS else 1
+    if i >= len(words) or any(c in words[i] for c in _GLOB):
+        return None
+    word = words[i]
+    if "/" in word or "\\" in word or word.lower().endswith(_SCRIPT_SUFFIXES):
+        return word
     return None
 
 
@@ -955,21 +1070,48 @@ def _basename(word):
 
 
 def _calls(agent):
-    """An agent's tool calls in call order: {name, input, start, end,
-    result_i, is_error, text}; end is None when no result answers it."""
+    """An agent's tool calls in call order: {name, input, start, own_start,
+    end, result_i, is_error, text}; end is None when no result answers it.
+
+    own_start is when the call's own time begins. The calls of one model
+    turn (the same message id; a tool_use without one joins the tool_use
+    right before it) run one after the other and their results come back in order, so
+    a call queued behind an earlier one of its turn starts at that call's
+    result: own_start is the latest end among the earlier calls of its turn
+    that ended no later than the call, and at least start. A call without a
+    result, or an earlier call without one, leaves own_start at start."""
     calls = []
     waiting = {}
+    turns = []  # per call: its turn's number
+    by_msg = {}  # message id -> its turn's number
+    turn = -1
+    prev = None  # the kind of the event before
     for i, e in enumerate(agent["events"]):
         if e["kind"] == "tool_use":
-            call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "end": None,
-                    "result_i": None, "is_error": False, "text": ""}
+            call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "own_start": e["ts"],
+                    "end": None, "result_i": None, "is_error": False, "text": ""}
             calls.append(call)
+            msg = e.get("msg")
+            if msg is not None and msg in by_msg:
+                turn = by_msg[msg]
+            elif msg is not None or prev != "tool_use":
+                turn += 1  # a new message id, or no tool_use right before
+            if msg is not None:
+                by_msg[msg] = turn
+            turns.append(turn)
             if e["id"] is not None:
                 waiting[e["id"]] = call
         elif e["kind"] == "tool_result" and e["id"] in waiting:
             call = waiting.pop(e["id"])
             if e["ts"] >= call["start"]:
                 call.update(end=e["ts"], result_i=i, is_error=e["is_error"], text=e["text"])
+        prev = e["kind"]
+    for k, call in enumerate(calls):
+        if call["end"] is None:
+            continue
+        earlier = [c["end"] for c, t in zip(calls[:k], turns[:k])
+                   if t == turns[k] and c["end"] is not None and c["end"] <= call["end"]]
+        call["own_start"] = max([call["start"]] + earlier)
     return calls
 
 
@@ -1027,13 +1169,20 @@ def _reads_only(call):
     return call["name"] == "Bash" and _read_only_bash(_command(call))
 
 
-def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
+def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None, checks=None):
     """An internal slowdown: the public fields, plus _cost (seconds or None),
     _at and _covers [(agent or None, start, end)], the spans it explains (an
-    agent's own time, or any agent's time for None)."""
+    agent's own time, or any agent's time for None). checks is
+    configured_checks(manifest): with it, the evidence of a Bash call names
+    the check id the call ran (match_check), else check is None, and its
+    program is program_of's with checks."""
     cost = None if start is None or end is None else end - start
     if covers is None:
         covers = [] if cost is None else [(agent, start, end)]
+    command = _command(call) if call is not None else None
+    if call is None or call["name"] != "Bash":
+        checks = None
+    found = match_check(command, checks, _call_exit(call)) if checks is not None else None
     return {
         "kind": kind,
         "agent": agent["entry"]["label"] if agent is not None else None,
@@ -1044,7 +1193,8 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
             "tool": call["name"] if call is not None else None,
             "exit": exit_code(call["text"]) if call is not None else None,
             "marker": marker,
-            "program": program_of(_command(call)) if call is not None else None,
+            "program": program_of(command, checks) if call is not None else None,
+            "check": found["check"] if found is not None else None,
         },
         "_covers": covers,
     }
@@ -1092,13 +1242,74 @@ def _completion_after(agent, call):
     return min(later, key=lambda f: f[0]) if later else None
 
 
+def _background_window(agent, call):
+    """(start, end) of a backgrounded call's window: from its own start (from
+    its result, after a timeout, which covers the call itself) to its
+    observed completion (_completion_after); end is None without one."""
+    start = call["end"] if notice("timeout", call) else call["own_start"]
+    done = _completion_after(agent, call)
+    return start, None if done is None else done[0]
+
+
+# The tools that wait by design: a poll of a background task, and Monitor,
+# which waits on a condition (on the archived runs it fails at once, as 'No
+# such tool available').
+WAIT_TOOLS = ("BashOutput", "TaskOutput", "Monitor")
+
+
+def _is_wait_call(call):
+    """Whether a call waits for something: a WAIT_TOOLS call, an
+    'await-checks wait' call (wait_file), a Bash call that runs sleep in a
+    simple command (past leading keywords and prefixes), or a Bash or Read
+    call that names a harness tasks/<id>.output file."""
+    if call["name"] in WAIT_TOOLS or wait_file(call) is not None or _names_harness_output(call):
+        return True
+    return any(words and _basename(words[0]) == "sleep" for words in _bash_words(call))
+
+
+def background_waiting(agent, calls, i, start, end):
+    """The agent's waiting inside the background window [start, end] of
+    calls[i], as sorted, disjoint (start, end) pieces: the union, clipped to
+    the window, of
+    (a) each later wait call (_is_wait_call), from its own start to its
+        result (to end without one);
+    (b) the gap from a call's result to the next call's own start, when the
+        next is a wait call and the call is a wait call or calls[i] (the
+        model turns of a poll loop are part of the loop);
+    (c) the stretch from the agent's last event before end (at or after
+        start) to end, when it is over IDLE_GAP_S and no call is open across
+        it (own start before end, and a result after that event or none):
+        the agent sat idle until the notice.
+    The backgrounded call's own time is no waiting. Empty when the agent
+    did not wait (a window of length 0 included)."""
+    waits = {j: _is_wait_call(calls[j]) for j in range(i + 1, len(calls))}
+    pieces = []
+    for j in range(i + 1, len(calls)):
+        if not waits[j]:
+            continue
+        c, prev = calls[j], calls[j - 1]
+        pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
+        if prev["end"] is not None and (j - 1 == i or waits[j - 1]):
+            pieces.append((prev["end"], c["own_start"]))
+    last = max((e["ts"] for e in agent["events"] if start <= e["ts"] < end), default=None)
+    if last is not None and end - last > IDLE_GAP_S and not any(
+            c["own_start"] < end and (c["end"] is None or c["end"] > last) for c in calls):
+        pieces.append((last, end))
+    clipped = [(max(a, start), min(b, end)) for a, b in pieces]
+    return [(a, b) for a, b in merged([p for p in clipped if p[0] < p[1]])]
+
+
 def tool_slowdowns(agent, checks):
     """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
     configured_checks(manifest). A procedure execution's start and its wait
     calls (_procedures) are no timeout, background_check or long_tool_call:
     they are one check execution (checks_section). An await-checks call that
     exits non-zero reports a status (still running, stopped, busy), so it is
-    no repeated_failure either."""
+    no repeated_failure either. A background_check with an observed
+    completion covers only the agent's waiting in its window
+    (background_waiting), and _background is the window's length (None
+    without a completion); a window without waiting adds no row, and its
+    call is still no long_tool_call."""
     calls = _calls(agent)
     out = []
     procedures = _procedures(calls)
@@ -1108,7 +1319,7 @@ def tool_slowdowns(agent, checks):
     procedure_calls = set(counted)
 
     def add(kind, indexes, start, end, cost_kind, call, marker=None):
-        out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker))
+        out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker, checks=checks))
         counted.update(indexes)
 
     for i, c in enumerate(calls):
@@ -1116,17 +1327,23 @@ def tool_slowdowns(agent, checks):
             continue
         timeout = notice("timeout", c)
         if timeout:
-            add("timeout", [i], c["start"], c["end"], "measured", c, timeout)
+            add("timeout", [i], c["own_start"], c["end"], "measured", c, timeout)
         marker = notice("background_check", c)
         if marker:
-            # A call moved to the background at its timeout: the timeout
-            # covers the call, the background wait starts at its result.
-            start = c["end"] if timeout else c["start"]
-            done = _completion_after(agent, c)
-            if done is not None:
-                add("background_check", [i], start, done[0], "bound", c, marker)
-            else:
-                add("background_check", [i], start, None, "unavailable", c, marker)
+            counted.add(i)
+            start, end = _background_window(agent, c)
+            if end is None:
+                sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker, checks=checks)
+                sd["_background"] = None
+                out.append(sd)
+                continue
+            waiting = background_waiting(agent, calls, i, start, end)
+            if waiting:  # else no slowdown: waits_section counts it as not waited
+                sd = _slowdown("background_check", agent, start, end, "bound", c, marker,
+                               covers=[(agent, a, b) for a, b in waiting], checks=checks)
+                sd["_cost"] = sum(b - a for a, b in waiting)
+                sd["_background"] = end - start
+                out.append(sd)
 
     failures = {}
     for i, c in enumerate(calls):
@@ -1135,7 +1352,7 @@ def tool_slowdowns(agent, checks):
     for indexes in failures.values():
         if len(indexes) >= 2:
             first, last = calls[indexes[0]], calls[indexes[-1]]
-            add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
+            add("repeated_failure", indexes, first["own_start"], last["end"], "measured", first)
 
     # Only a failing line that is nothing but a heredoc file write (cat > f
     # <<EOF, after cd DIR or assignments) counts: a failing inline script
@@ -1147,14 +1364,14 @@ def tool_slowdowns(agent, checks):
     for i, c in enumerate(calls):
         if not _bash_failed(c) or not _only_heredoc_write(_command(c)):
             continue
-        if until is not None and c["start"] < until:
+        if until is not None and c["own_start"] < until:
             continue  # a retry inside the previous heredoc failure's span
         write = next((w for w in calls[i + 1:] if _wrote(w) or _bash_wrote(w)), None)
         if write is None:
-            add("heredoc_failure", [i], c["start"], c["end"], "measured", c, HEREDOC)
+            add("heredoc_failure", [i], c["own_start"], c["end"], "measured", c, HEREDOC)
             until = c["end"]
         else:
-            add("heredoc_failure", [i], c["start"], write["end"], "bound", c, HEREDOC)
+            add("heredoc_failure", [i], c["own_start"], write["end"], "bound", c, HEREDOC)
             until = write["end"]
 
     until = {}
@@ -1165,11 +1382,11 @@ def tool_slowdowns(agent, checks):
         path = c["input"].get("file_path")
         if not marker or not isinstance(path, str):
             continue
-        if path in until and c["start"] < until[path]:
+        if path in until and c["own_start"] < until[path]:
             continue  # a retry inside the previous retry's span
         fixed = next((w for w in calls[i + 1:] if _wrote(w) and w["input"].get("file_path") == path), None)
         end = c["end"] if fixed is None else fixed["end"]
-        add("edit_retry", [i], c["start"], end, "measured", c, marker)
+        add("edit_retry", [i], c["own_start"], end, "measured", c, marker)
         until[path] = end
 
     # A rerun needs proof that nothing changed: both runs certainly ran the
@@ -1187,12 +1404,12 @@ def tool_slowdowns(agent, checks):
         if prev is None or not prev[1] or not ran or c["end"] is None:
             continue
         if all(_reads_only(b) for b in calls[prev[0] + 1:i]):
-            add("check_rerun", [i], c["start"], c["end"], "measured", c,
+            add("check_rerun", [i], c["own_start"], c["end"], "measured", c,
                 RUN_CHECKS if match["check"] == RUN_CHECKS else None)
 
     for i, c in enumerate(calls):
-        if i not in counted and c["end"] is not None and c["end"] - c["start"] > LONG_CALL_S:
-            add("long_tool_call", [i], c["start"], c["end"], "measured", c)
+        if i not in counted and c["end"] is not None and c["end"] - c["own_start"] > LONG_CALL_S:
+            add("long_tool_call", [i], c["own_start"], c["end"], "measured", c)
     return out
 
 
@@ -1261,22 +1478,148 @@ def detector_status(run):
     return status
 
 
+# The order an agent's slowdown rows take its time in (settle_slowdowns):
+# Claude Code's own notice about a call and the wait for it; one call's own
+# time; a window from a failure to its recovery, which may hold other work;
+# a whole agent (retry first: an agent ended by an API error also reads as
+# an escalation).
+CHARGE_TIERS = (("timeout", "background_check"), ("long_tool_call", "check_rerun"),
+                ("repeated_failure", "heredoc_failure", "edit_retry"),
+                ("retry", "escalation", "extra_review_round"))
+_CHARGE_ORDER = {kind: (tier, place) for tier, kinds in enumerate(CHARGE_TIERS)
+                 for place, kind in enumerate(kinds)}
+_COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
+
+
+def _charged(s):
+    """Whether settle_slowdowns charges a row: a known cost over agents' own
+    time only (no run-wide cover)."""
+    return s["_cost"] is not None and bool(s["_covers"]) and all(o is not None for o, _s, _e in s["_covers"])
+
+
+def _touches(a, b):
+    """Whether two rows cover the same agent at overlapping or touching
+    times."""
+    return any(oa is ob and sa <= eb and sb <= ea
+               for oa, sa, ea in a["_covers"] for ob, sb, eb in b["_covers"])
+
+
+def _merge_rows(rows):
+    """One row for rows of one kind (in input order): the union of their
+    covers per agent, the earliest start with its row's evidence, the
+    weakest cost_kind and the summed detection count. Background rows get
+    the length of the union of their windows (from _at, _background long)."""
+    first = min(rows, key=lambda s: s["_at"])
+    spans = {}
+    owners = []
+    for s in rows:
+        for owner, start, end in s["_covers"]:
+            if id(owner) not in spans:
+                owners.append(owner)
+                spans[id(owner)] = []
+            spans[id(owner)].append((start, end))
+    covers = [(o, start, end) for o in owners for start, end in merged(spans[id(o)])]
+    cost = sum(end - start for _o, start, end in covers)
+    out = dict(first, _cost=cost, _span_cost=cost, _covers=covers,
+               cost_kind=min((s["cost_kind"] for s in rows), key=_COST_KINDS.index),
+               _merged=sum(s["_merged"] for s in rows), _contains=set())
+    windows = [(s["_at"], s["_at"] + s["_background"]) for s in rows if s.get("_background") is not None]
+    if windows:
+        out["_background"] = union_length(windows)
+    return out
+
+
+def settle_slowdowns(slowdowns):
+    """The rows left when each second of an agent is charged to at most one
+    row; the input is not changed. Each row gains _span_cost (its cost
+    before charging), _merged (the detections it holds) and _contains (the
+    kinds folded into it).
+    1. Merge: rows of one kind that cover the same agent at overlapping or
+       touching times are one row (_merge_rows).
+    2. Charge: in CHARGE_TIERS order, within a tier the shorter row
+       (_span_cost) first, then the earlier, then the order in the tier,
+       each row takes the parts of its covers that no row before it took;
+       those become its _covers and their length its _cost.
+    3. Fold: a row that took nothing is removed and its kind added to the
+       _contains of the row that took most of its span (the earliest on a
+       tie). A row of zero length goes to the earliest row whose taken
+       parts, ends included, hold its instant; with none it stays at 0.
+    Rows of unknown cost and run-wide rows (an owner None: relaunch,
+    idle_gap) are neither merged, charged nor folded."""
+    rows = [dict(s, _span_cost=s["_cost"], _merged=1, _contains=set()) for s in slowdowns]
+    # 1. Merge: group[i] is the index of the group row i joins.
+    group = list(range(len(rows)))
+    charged = [i for i, s in enumerate(rows) if _charged(s)]
+    for n, i in enumerate(charged):
+        for j in charged[:n]:
+            if rows[i]["kind"] == rows[j]["kind"] and _touches(rows[i], rows[j]):
+                old, new = group[i], group[j]
+                group = [new if g == old else g for g in group]
+    groups = {}
+    for i, s in enumerate(rows):
+        groups.setdefault(group[i], []).append(s)
+    rows = [g[0] if len(g) == 1 else _merge_rows(g) for g in groups.values()]
+
+    # 2. Charge.
+    order = sorted((s for s in rows if _charged(s)),
+                   key=lambda s: (_CHARGE_ORDER[s["kind"]][0], s["_span_cost"], s["_at"],
+                                  _CHARGE_ORDER[s["kind"]][1]))
+    taken = {}  # id(owner) -> [(start, end, the row that took it)]
+    spans = {}  # id(row) -> its covers before charging
+    for s in order:
+        spans[id(s)] = s["_covers"]
+        parts = []
+        for owner, start, end in s["_covers"]:
+            mine = taken.setdefault(id(owner), [])
+            for a, b in _uncovered(start, end, merged([(x, y) for x, y, _r in mine])):
+                parts.append((owner, a, b))
+                mine.append((a, b, s))
+        s["_covers"] = parts
+        s["_cost"] = sum(b - a for _o, a, b in parts)
+
+    # 3. Fold.
+    folded = set()
+    for s in order:
+        if s["_cost"] > 0:
+            continue
+        zero = s["_span_cost"] == 0
+        share = {}  # id(row) -> [row, the part of s's span it took]
+        for owner, start, end in spans[id(s)]:
+            for a, b, r in taken.get(id(owner), []):
+                if (a <= start <= b) if zero else (min(b, end) > max(a, start)):
+                    share.setdefault(id(r), [r, 0.0])[1] += max(0.0, min(b, end) - max(a, start))
+        most = max([t for _r, t in share.values()], default=0.0)
+        holders = [r for r, t in share.values() if t == most]
+        if holders:
+            into = min(holders, key=lambda r: r["_at"])
+            into["_contains"] |= {s["kind"]} | s["_contains"]
+            folded.add(id(s))
+    return [s for s in rows if id(s) not in folded]
+
+
 def find_slowdowns(run, detectors):
-    """Internal slowdowns of every ok or partial detector, largest cost
-    first (unknown costs last), then by time and kind."""
+    """Internal slowdowns of every ok or partial detector, settled
+    (settle_slowdowns), largest cost first (unknown costs last), then by
+    time and kind."""
     checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
         found += tool_slowdowns(a, checks)
-    found = [s for s in found if detectors[s["kind"]] in ("ok", "partial")]
+    found = settle_slowdowns([s for s in found if detectors[s["kind"]] in ("ok", "partial")])
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
     return found
 
 
 def public_slowdown(s):
-    return {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
-            "cost_kind": s["cost_kind"], "evidence": s["evidence"]}
+    """A settled internal row as autopsy.json lists it; a background_check
+    row also has background_s, its window's length."""
+    row = {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
+           "cost_kind": s["cost_kind"], "evidence": s["evidence"], "span_s": seconds(s["_span_cost"]),
+           "merged": s["_merged"], "contains": sorted(s["_contains"])}
+    if s["kind"] == "background_check":
+        row["background_s"] = seconds(s.get("_background"))
+    return row
 
 
 # ---- checks ----
@@ -1389,25 +1732,9 @@ def _merge_redirections(tokens):
     return out
 
 
-def _segments(command):
-    """The simple commands of a line as word lists: shell words split at
-    ; & | ( ) and newlines (a & inside a redirection such as 2>&1 is no
-    separator), or, when the quoting does not parse, plain whitespace words
-    of each piece between those characters."""
-    try:
-        tokens = _merge_redirections(_shell_tokens(command, _SEPARATORS))
-    except ValueError:
-        return _plain_segments(command)
-    out = [[]]
-    for token in tokens:
-        if _is_operator(token):
-            out.append([])
-        else:
-            out[-1].append(token)
-    return [s for s in out if s]
-
-
 def _plain_segments(command):
+    """The plain whitespace words of each piece of a line between ; & | ( )
+    and newlines, for a line whose quoting does not parse."""
     out = []
     for piece in _SEGMENT_SPLIT.split(command):
         words = [w.strip("'\"") for w in piece.split()]
@@ -1668,8 +1995,9 @@ def _at_least(version, wanted):
 
 
 def waits_section(run):
-    """{checks_via_procedure, wait_calls, stopped, improvised} over every
-    agent's calls; unavailable without any tool event in the run.
+    """{checks_via_procedure, wait_calls, stopped, improvised, unwaited,
+    left_running, background_not_waited} over every agent's calls;
+    unavailable without any tool event in the run.
 
     checks_via_procedure counts the procedure executions (_procedures) with
     an 'await-checks reserve' call of the same agent before the start: the
@@ -1688,10 +2016,16 @@ def waits_section(run):
     'await-checks wait' on their file followed, and left_running those whose
     last wait said the check was still running (exit 4): the agent stopped
     waiting before the check ended (1.6.4: Claude Code 2.1.300 discourages
-    waiting on background commands). Each is {agent, file}."""
+    waiting on background commands). Each is {agent, file}, file the
+    result file's name only: the path holds the user's config dir.
+
+    background_not_waited counts the calls Claude Code moved to the
+    background, outside a procedure, whose completion was observed and in
+    whose window the agent did not wait (background_waiting is empty): no
+    background_check slowdown."""
     if not _has_tool_events(run):
         return UNAVAILABLE
-    via = waits = stopped = 0
+    via = waits = stopped = not_waited = 0
     seen = False
     improvised = {"monitor_errors": 0, "sleep_blocked": 0, "harness_output_reads": 0}
     unwaited, left_running = [], []
@@ -1699,15 +2033,23 @@ def waits_section(run):
         calls = _calls(a)
         procedures = _procedures(calls)
         label = a["entry"]["label"]
+        procedure_calls = set(procedures).union(*procedures.values())
+        for i, c in enumerate(calls):
+            if i in procedure_calls or not notice("background_check", c):
+                continue
+            start, end = _background_window(a, c)
+            if end is not None and not background_waiting(a, calls, i, start, end):
+                not_waited += 1
         for i, c in enumerate(calls):
             path = procedure_file(c)
             if path is None:
                 continue
-            after = _wait_indexes(calls, i, _basename(path))
+            name = _basename(path)
+            after = _wait_indexes(calls, i, name)
             if not after:
-                unwaited.append({"agent": label, "file": path})
+                unwaited.append({"agent": label, "file": name})
             elif calls[after[-1]]["end"] is not None and exit_code(calls[after[-1]]["text"]) == STILL_RUNNING_EXIT:
-                left_running.append({"agent": label, "file": path})
+                left_running.append({"agent": label, "file": name})
         reserved = False
         for i, c in enumerate(calls):
             found = _await_call(c)
@@ -1729,7 +2071,7 @@ def waits_section(run):
     if not seen and not _at_least(_engine_version(run), PROCEDURE_VERSION):
         via = UNAVAILABLE
     return {"checks_via_procedure": via, "wait_calls": waits, "stopped": stopped, "improvised": improvised,
-            "unwaited": unwaited, "left_running": left_running}
+            "unwaited": unwaited, "left_running": left_running, "background_not_waited": not_waited}
 
 
 # A backslash before a path character (a Windows path separator); shlex
@@ -1897,7 +2239,10 @@ def _match(command, checks, exit_code=None):
     """match_check's result plus project_test: the certainty that the line
     ran an exact commands.test entry (a run-checks '--cmd test CMD' pair
     whose CMD is one, or a simple command that exactly matches one), else
-    None; always None for a task-checks call."""
+    None; always None for a task-checks call; and words: the words of the
+    simple commands that named the match, as a list (the first run-checks
+    or task-checks command, or the simple commands of the first match of
+    the configured command that names the execution), for program_of."""
     if not isinstance(command, str):
         return None
     try:
@@ -1918,13 +2263,13 @@ def _match(command, checks, exit_code=None):
             if any(p and p[0] in project for p in pairs):
                 exact.append(certainty[i])
         return {"check": RUN_CHECKS, "certainty": _surest([certainty[i] for i, _args in runs]),
-                "full_suite": _surest(tests), "project_test": _surest(exact)}
+                "full_suite": _surest(tests), "project_test": _surest(exact), "words": [simple[runs[0][0]][2]]}
     tasks = [i for i, args in enumerate(_task_checks_args(words) for _ops, _lead, words in simple)
              if args is not None]
     if tasks:
         return {"check": TASK_CHECKS, "certainty": _surest([certainty[i] for i in tasks]), "full_suite": None,
-                "project_test": None}
-    best = None  # (word count, check_id, certainties)
+                "project_test": None, "words": [simple[tasks[0]][2]]}
+    best = None  # (word count, check_id, certainties, words of its first match)
     full = []
     for check_id, configured, is_full in checks:
         parts = _check_words(configured)
@@ -1938,7 +2283,7 @@ def _match(command, checks, exit_code=None):
                 continue
             sure = RAN if all(c == RAN for c in certainty[k:k + len(parts)]) else INFERRED
             if best is None or size > best[0]:
-                best = (size, check_id, [sure])
+                best = (size, check_id, [sure], [words for _ops, _lead, words in simple[k:k + len(parts)]])
             elif best[1] == check_id:
                 best[2].append(sure)
             if is_full and here[last] == parts[last]:
@@ -1946,7 +2291,7 @@ def _match(command, checks, exit_code=None):
     if best is None:
         return None
     return {"check": best[1], "certainty": _surest(best[2]), "full_suite": _surest(full),
-            "project_test": _surest(full)}
+            "project_test": _surest(full), "words": best[3]}
 
 
 def _call_exit(call):
@@ -1974,7 +2319,7 @@ def _execution_times(agent, call, ledger=None):
             start, end, timing = _procedure_times(calls, i, waits, ledger)
             return True, start, end, timing
     background, end, timing = _call_end(agent, call)
-    return background, call["start"], end, timing
+    return background, call["own_start"], end, timing
 
 
 def _execution_end(agent, call, ledger=None):
@@ -2361,9 +2706,10 @@ def unclean_suggestion(run_folder, done):
 def stake(slowdowns):
     """The time a group of slowdowns stands for: per agent (and once for
     the run-wide ones), the length of the union of the spans the slowdowns
-    with a known cost cover, summed. Slowdowns that overlap in time (three
-    parallel Edits failing together) count their shared time once. None
-    when no cost is known."""
+    with a known cost cover, summed. Slowdowns that overlap in time count
+    their shared time once; settled rows (settle_slowdowns) share no time
+    of an agent, so for them it is the sum of their costs. None when no
+    cost is known."""
     known = [s for s in slowdowns if s["_cost"] is not None]
     if not known:
         return None
@@ -2773,10 +3119,12 @@ def _slowdown_cost(s):
     cost = _secs(s["cost_s"])
     if _is_num(s["cost_s"]) and s["cost_kind"] == "bound":
         cost += " (upper bound)"
+    if _is_num(s["span_s"]) and s["span_s"] != s["cost_s"]:
+        cost += " (of %s)" % _secs(s["span_s"])
     return cost
 
 
-def _evidence_text(evidence):
+def _evidence_text(evidence, contains=()):
     parts = []
     if evidence.get("tool"):
         parts.append("tool %s" % evidence["tool"])
@@ -2786,6 +3134,10 @@ def _evidence_text(evidence):
         parts.append("marker '%s'" % evidence["marker"])
     if evidence.get("program"):
         parts.append("program %s" % evidence["program"])
+    if evidence.get("check"):
+        parts.append("check %s" % evidence["check"])
+    if contains:
+        parts.append("contains %s" % ", ".join(contains))
     return ", ".join(parts) if parts else "-"
 
 
@@ -3042,6 +3394,13 @@ def _md_waits(waits):
                      "whose last wait said still running (exit 4): the agent did not wait for the result the "
                      "procedure way (it may still have read it another way).")
         lines.append("")
+        not_waited = waits.get("background_not_waited")
+        if isinstance(not_waited, int) and not_waited > 0:
+            lines.append("Background commands not waited for: %d." % not_waited)
+            lines.append("  Commands Claude Code moved to the background that completed while the agent kept "
+                         "working (no wait call, poll loop or idle stretch before the completion notice): no "
+                         "slowdown.")
+            lines.append("")
     improvised = waits.get("improvised") if isinstance(waits, dict) else None
     if isinstance(improvised, dict):
         lines.append("Improvised waits: Monitor errors %d, blocked sleeps %d, harness output reads %d" % (
@@ -3093,8 +3452,9 @@ def _md_slowdowns(a):
         lines = ["No slowdowns found."]
     else:
         lines = _table(["#", "Kind", "Agent", "At", "Cost", "Evidence"],
-                       [[i, s["kind"], s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
-                         _evidence_text(s["evidence"])] for i, s in enumerate(a["slowdowns"], 1)])
+                       [[i, s["kind"] + (" x%d" % s["merged"] if s["merged"] > 1 else ""),
+                         s["agent"] or "(run-wide)", _when(s["at"]), _slowdown_cost(s),
+                         _evidence_text(s["evidence"], s["contains"])] for i, s in enumerate(a["slowdowns"], 1)])
     partial = [k for k, v in a["detectors"].items() if v == "partial"]
     if partial:
         lines += ["", "Detectors with partial data (they may miss slowdowns): %s." % ", ".join(partial)]

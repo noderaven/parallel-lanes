@@ -191,7 +191,7 @@ test('a procedure check is one measured execution timed from its report', () => 
   // that exit 4 are no repeated failure.
   assert.deepEqual(kinds(json), []);
   assert.deepEqual(json.checks.waits, { checks_via_procedure: 1, wait_calls: 3, stopped: 0, improvised: NOTHING,
-    unwaited: [], left_running: [] });
+    unwaited: [], left_running: [], background_not_waited: 0 });
   // The waits are the check execution's time (checks section), not open
   // questions: d1a listed five 541.6 s waits as unexplained.
   assert.deepEqual(json.unexplained, []);
@@ -300,7 +300,7 @@ test('waits counts procedure checks, wait calls and stops', () => {
   });
   const { json, md } = autopsy(dir);
   assert.deepEqual(json.checks.waits, { checks_via_procedure: 2, wait_calls: 4, stopped: 1, improvised: NOTHING,
-    unwaited: [{ agent: 'final fix', file: lone }], left_running: [] });
+    unwaited: [{ agent: 'final fix', file: 'long.3.json' }], left_running: [], background_not_waited: 0 });
   assert.deepEqual(json.checks.executions.map((x) => [x.agent, x.timing, x.s]), [
     // --exact reuses its path: the stopped start has no report of its own.
     ['verify', 'unavailable', 'unavailable'],
@@ -376,7 +376,8 @@ test('an older run says checks_via_procedure unavailable', () => {
   for (const version of ['1.6.0', '1.5.1', 'unavailable']) {
     const { json, md } = autopsy(buildRun({ agents, files, version }));
     assert.deepEqual(json.checks.waits, { checks_via_procedure: 'unavailable', wait_calls: 0, stopped: 0,
-      improvised: { ...NOTHING, monitor_errors: 1 }, unwaited: [], left_running: [] }, version);
+      improvised: { ...NOTHING, monitor_errors: 1 }, unwaited: [], left_running: [], background_not_waited: 0 },
+    version);
     assert.match(md, /^Checks via the procedure: unavailable; 0 wait calls; 0 stopped$/m);
   }
   // From 1.6.1 on, no procedure call is a count of 0.
@@ -398,10 +399,10 @@ test('an older run says checks_via_procedure unavailable', () => {
   assert.match(autopsy(untimed).md, /^Checks via the procedure: unavailable$/m);
 });
 
-test('the version is 7', () => {
-  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 7);
+test('the version is 8', () => {
+  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 8);
   const dir = buildRun({ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 7);
+  assert.equal(autopsy(dir).json.autopsy_version, 8);
 });
 
 test('checks.waits lists background checks never waited on, and checks left running when the waits stopped', () => {
@@ -421,8 +422,12 @@ test('checks.waits lists background checks never waited on, and checks left runn
     ],
   });
   const { json, md } = autopsy(dir);
-  assert.deepEqual(json.checks.waits.unwaited, [{ agent: 'integrate', file: out }]);
-  assert.deepEqual(json.checks.waits.left_running, [{ agent: 'A1 implement', file: late }]);
+  // A file is its name only: the path the agent passed would name the user and the config dir.
+  assert.deepEqual(json.checks.waits.unwaited, [{ agent: 'integrate', file: 'integrate.1.json' }]);
+  assert.deepEqual(json.checks.waits.left_running, [{ agent: 'A1 implement', file: 'task-A1.1.json' }]);
+  for (const item of [...json.checks.waits.unwaited, ...json.checks.waits.left_running]) {
+    assert.ok(!/[/\\]/.test(item.file), item.file);
+  }
   assert.ok(md.includes('Background checks never waited on: 1 (integrate)'), md);
   assert.ok(md.includes('Checks left running when the waits stopped: 1 (A1 implement)'), md);
   // The evidence shows no await-checks wait followed, not that the agent never got the result

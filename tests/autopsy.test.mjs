@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 7);
+  assert.equal(A.autopsy_version, 8);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -442,7 +442,7 @@ test('read_events gives timed events in file order and skips damaged lines', () 
   assert.deepEqual(events[1].input, { file_path: 'src/b.js' });
   assert.equal(events[0].ts, Date.parse(T('07:01:00')) / 1000);
   for (const e of events) {
-    assert.deepEqual(Object.keys(e).sort(), ['id', 'input', 'is_error', 'kind', 'name', 'text', 'ts']);
+    assert.deepEqual(Object.keys(e).sort(), ['id', 'input', 'is_error', 'kind', 'msg', 'name', 'text', 'ts']);
   }
   const dir = join(TMP, 'damaged-events');
   mkdirSync(dir, { recursive: true });
@@ -492,8 +492,11 @@ test('each detector finds its slowdown with its cost', () => {
   assert.equal(run2.code, 0, run2.stderr);
   assert.deepEqual(S.detectors, Object.fromEntries(KINDS.map((k) => [k, 'ok'])));
   const expected = {
-    background_check: ['A1 implement', T('09:00:10'), 90, 'bound'],
-    heredoc_failure: ['A1 implement', T('09:01:50'), 32, 'bound'],
+    // The agent sat idle from the call's result (09:00:12) to the notice
+    // (09:01:40): 88 s of waiting inside the 90 s background window.
+    background_check: ['A1 implement', T('09:00:10'), 88, 'bound'],
+    // Its window to the next write (32 s) holds the edit_retry, charged first.
+    heredoc_failure: ['A1 implement', T('09:01:50'), 10, 'bound'],
     edit_retry: ['A1 implement', T('09:02:00'), 22, 'measured'],
     repeated_failure: ['A1 implement', T('09:02:30'), 20, 'measured'],
     check_rerun: ['A1 implement', T('09:03:40'), 40, 'measured'],
@@ -513,19 +516,31 @@ test('each detector finds its slowdown with its cost', () => {
     [byKind[kind]] = found;
     const s = byKind[kind];
     assert.deepEqual([s.agent, s.at, s.cost_s, s.cost_kind], expected[kind], kind);
+    assert.deepEqual([s.span_s, s.merged, s.contains], [kind === 'heredoc_failure' ? 32 : s.cost_s, 1, []], kind);
+    assert.equal('background_s' in s, kind === 'background_check', kind);
   }
+  assert.equal(byKind.background_check.background_s, 90);
   // The largest cost comes first.
   const costs = S.slowdowns.map((s) => s.cost_s);
   assert.deepEqual(costs, [...costs].sort((x, y) => y - x));
+  // The background call and the rerun run the manifest's test command
+  // (node tests/run-tests.mjs): check test#1. No other row runs a check.
   assert.deepEqual(byKind.background_check.evidence,
-    { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node' });
+    { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node', check: 'test#1' });
+  assert.deepEqual(byKind.check_rerun.evidence,
+    { tool: 'Bash', exit: null, marker: null, program: 'node', check: 'test#1' });
   assert.deepEqual(byKind.timeout.evidence,
-    { tool: 'Bash', exit: null, marker: 'Command timed out after', program: 'npm' });
-  assert.deepEqual(byKind.repeated_failure.evidence, { tool: 'Bash', exit: 6, marker: null, program: 'curl' });
-  assert.deepEqual(byKind.heredoc_failure.evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'cat' });
+    { tool: 'Bash', exit: null, marker: 'Command timed out after', program: 'npm', check: null });
+  assert.deepEqual(byKind.repeated_failure.evidence,
+    { tool: 'Bash', exit: 6, marker: null, program: 'curl', check: null });
+  assert.deepEqual(byKind.heredoc_failure.evidence,
+    { tool: 'Bash', exit: 2, marker: '<<', program: 'cat', check: null });
   assert.deepEqual(byKind.edit_retry.evidence,
-    { tool: 'Edit', exit: null, marker: 'has not been read yet', program: null });
-  assert.deepEqual(byKind.idle_gap.evidence, { tool: null, exit: null, marker: null, program: null });
+    { tool: 'Edit', exit: null, marker: 'has not been read yet', program: null, check: null });
+  assert.deepEqual(byKind.idle_gap.evidence, { tool: null, exit: null, marker: null, program: null, check: null });
+  for (const s of S.slowdowns) {
+    assert.equal(s.evidence.check, ['background_check', 'check_rerun'].includes(s.kind) ? 'test#1' : null, s.kind);
+  }
 });
 
 test('suggestions rank by time at stake', () => {
@@ -604,11 +619,16 @@ test('evidence holds structured fields only', () => {
     assert.ok(!run2.text.includes(marker), `autopsy.json holds ${marker}`);
   }
   for (const s of S.slowdowns) {
-    assert.deepEqual(Object.keys(s.evidence).sort(), ['exit', 'marker', 'program', 'tool']);
+    assert.deepEqual(Object.keys(s.evidence).sort(), ['check', 'exit', 'marker', 'program', 'tool']);
   }
   const program = (command) => python([
     'import _autopsy',
     `print(json.dumps(_autopsy.program_of(${JSON.stringify(command)})))`,
+  ]);
+  const programWith = (command) => python([
+    'import _autopsy',
+    'checks = _autopsy.configured_checks({"commands": {"test": ["node tests/run-tests.mjs"]}})',
+    `print(json.dumps(_autopsy.program_of(${JSON.stringify(command)}, checks)))`,
   ]);
   assert.equal(program('API_KEY=abc123 PATH=/x env node a.js'), 'node');
   assert.equal(program('"C:/Program Files/nodejs/node.exe" a.js'), 'node.exe');
@@ -621,13 +641,48 @@ test('evidence holds structured fields only', () => {
   assert.equal(program("cd /w && cat > f <<'EOF'\ncurl x\nEOF"), 'cat');
   assert.equal(program('cd /w'), null);
   assert.equal(program('export PATH=/x:$PATH; timeout 600 npm test'), 'npm');
+  // 1. A simple command that runs a check names the program: an
+  // interpreter's script, as a basename.
+  assert.equal(programWith('git status && node tests/run-tests.mjs'), 'node');
+  assert.equal(programWith('grep -c x f; C:/u/py/python.exe C:/u/skill/scripts/run-checks --cmd test x'), 'run-checks');
+  assert.equal(programWith('python3 C:/u/skill/scripts/task-checks a b'), 'task-checks');
+  // 2. A loop that runs sleep is a wait loop.
+  assert.equal(program('for i in $(seq 1 60); do grep -q done f && break; sleep 5; done'), 'sleep');
+  assert.equal(program('until grep -q x f; do sleep 5; done'), 'sleep');
+  // 3. Else the first program that is not plumbing, else the first one.
+  assert.equal(program('sleep 30; python3 long.py'), 'long.py');
+  assert.equal(program('sed -i s/a/b/ f && node a.js'), 'node');
+  assert.equal(program('rm -rf x; mkdir x'), 'rm');
+  assert.equal(program('git commit -m x'), 'git');
+  // A case pattern (a word with * or ?) is never a program, and [[ ... ]]
+  // is plumbing like [.
+  assert.equal(program('case "$f" in\n*.meta) rm "$f";;\nesac'), 'rm');
+  assert.equal(program('[[ -f a ]] && node a.js'), 'node');
+  // A line whose quoting does not parse is read as plain words, which may
+  // split quoted text: only the first simple command's program counts.
+  assert.equal(program("sleep 5; node a.js 'open"), 'sleep');
+  assert.equal(program('cd /w && grep -c "TODO|someuser" f; echo it\'s done'), 'grep');
+  // An interpreter runs a script word (a path, or a script suffix), or
+  // inline code (-c, -m, -), which names the interpreter itself; a bare
+  // variable names only the script it runs.
+  assert.equal(program('bash /tmp/task-checks-x.sh'), 'task-checks-x.sh');
+  assert.equal(program('python3 -c "print(1)"'), 'python3');
+  assert.equal(program(`python='C:/u/py/python.exe'; "$python" C:/u/skill/scripts/run-checks --out f`), 'run-checks');
+  assert.equal(program('"$python" -m pytest'), null);
+  assert.equal(program('"$GIT" status'), null);
+  // A word that starts with a variable and holds a path is a path.
+  assert.equal(program('"$ROOT/node_modules/.bin/playwright" test'), 'playwright');
+  assert.equal(program('$VENV/bin/skein serve'), 'skein');
+  assert.equal(program('$X/counts.sh'), 'counts.sh');
+  assert.equal(programWith('"$SKILL/scripts/run-checks" C:/u/project-wt/lane-a --cmd test x'), 'run-checks');
 });
 
 // ---- detector cases on synthetic events (tool_slowdowns) ----
 
 // Events of one agent, labelled X: use() is a tool call, res() its result;
 // times are seconds.
-const use = (ts, id, name, input) => ({ ts, kind: 'tool_use', name, id, is_error: false, text: '', input });
+const use = (ts, id, name, input, msg = null) => (
+  { ts, kind: 'tool_use', name, id, is_error: false, text: '', input, msg });
 const res = (ts, id, name, text, isError = false) => (
   { ts, kind: 'tool_result', name, id, is_error: isError, text, input: null });
 function detect(events, notes = [], notices = []) {
@@ -638,15 +693,82 @@ function detect(events, notes = [], notices = []) {
       + ` "notices": json.loads(${JSON.stringify(JSON.stringify(notices))})}`,
     '_autopsy.span_agent(agent)',
     'found = _autopsy.tool_slowdowns(agent, _autopsy.configured_checks({"commands": {"test": ["npm test"]}}))',
+    'settled = _autopsy.settle_slowdowns(found)',
     'calls = _autopsy._calls(agent)',
-    'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in found],',
-    '                  "suggestions": _autopsy.suggestions_section(found, None),',
+    'run = {"folder": None, "manifest": {}, "launches": [{"wf": "wf_1", "result": {"version": "1.6.10"},',
+    '                                                    "agents": [agent]}]}',
+    'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in settled],',
+    '                  "suggestions": _autopsy.suggestions_section(settled, None),',
+    '                  "waits": _autopsy.waits_section(run),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
+    '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
   ]);
 }
 const at = (ts) => new Date(ts * 1000).toISOString();
 const brief = (out) => out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.cost_kind, s.evidence.marker]);
+
+test('a call queued behind an earlier call of its turn starts at that call\'s result', () => {
+  const NOT_READ = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const serial = (m) => [
+    use(0, 'b1', 'Bash', { command: 'npm run build' }, m),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, m),
+    use(2, 'e2', 'Edit', { file_path: 'b.js' }, m),
+    res(130, 'b1', 'Bash', 'built'),
+    res(130.1, 'e1', 'Edit', NOT_READ, true),
+    res(130.2, 'e2', 'Edit', NOT_READ, true),
+  ];
+  let out = detect(serial('m1'));
+  assert.deepEqual(out.own_starts, [0, 130, 130.1]);
+  // Only the build is a long call; the queued Edits are charged their own time.
+  assert.deepEqual(brief(out).filter((s) => s[0] === 'long_tool_call'), [['long_tool_call', at(0), 130, 'measured', null]]);
+  // Without message ids, consecutive tool_use events are one turn.
+  assert.deepEqual(detect(serial(null)).own_starts, [0, 130, 130.1]);
+  // A result line between the uses ends the turn when there are no ids ...
+  const twoTurns = (m1, m2) => [
+    use(0, 'b1', 'Bash', { command: 'npm run build' }, m1),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, m1),
+    res(1.5, 'b1', 'Bash', 'built'),
+    use(2, 'e2', 'Edit', { file_path: 'b.js' }, m2),
+    res(3, 'e1', 'Edit', 'ok'),
+    res(4, 'e2', 'Edit', 'ok'),
+  ];
+  assert.deepEqual(detect(twoTurns(null, null)).own_starts, [0, 1.5, 2]);
+  // ... and so does a different message id.
+  assert.deepEqual(detect(twoTurns('m1', 'm2')).own_starts, [0, 1.5, 2]);
+  // Review focus 1: one turn by message id although a result lies between the
+  // uses; e1 started at 3, after b1 ended at 2.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 2' }, 'm1'),
+    res(2, 'b1', 'Bash', 'ok'),
+    use(3, 'e1', 'Edit', { file_path: 'a.js' }, 'm1'),
+    res(5, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 3]);
+  // A tool_use without a message id right after one with an id joins its turn.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 9' }, 'm1'),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, null),
+    res(9, 'b1', 'Bash', 'ok'),
+    res(9.1, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 9]);
+  // A tool_use with another id right after an id-less one starts its own turn.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 9' }, null),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, 'm2'),
+    res(9, 'b1', 'Bash', 'ok'),
+    res(9.1, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 1]);
+  // Review focus 2: an earlier call without a result is ignored.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 99' }, 'm1'),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, 'm1'),
+    res(10, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 1]);
+});
 
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
   const moved = 'Command did not complete within its 600s timeout and was moved to the background '
@@ -699,7 +821,9 @@ test('a poll that says running does not end a background run', () => {
   let out = detect(polled, [], notices);
   assert.deepEqual(out.ends[0], [true, 130, 'bound']);
   assert.deepEqual(out.completions[0], [130, 'completed']);
-  assert.deepEqual(brief(out), [['background_check', at(0), 130, 'bound', 'Command running in background with ID']]);
+  // The waiting: the turn up to the poll, the poll, and the idle stretch to
+  // the notice (1-130); the call's own second is not waiting.
+  assert.deepEqual(brief(out), [['background_check', at(0), 129, 'bound', 'Command running in background with ID']]);
   // A poll whose result says completed ends it first.
   out = detect([...polled,
     use(60, 'o2', 'TaskOutput', { task_id: 'bx1' }),
@@ -713,6 +837,102 @@ test('a poll that says running does not end a background run', () => {
   [], notices);
   assert.deepEqual(out.ends[0], [true, 130, 'bound']);
   assert.deepEqual(out.completions[0], [130, 'completed']);
+});
+
+// A call of one second at ts, and its result.
+const call1 = (ts, id, name, input, text = 'ok') => [use(ts, id, name, input), res(ts + 1, id, name, text)];
+const RUNNING_POLL = '<status>running</status>';
+
+test('a background check costs only the time the agent waited', () => {
+  const notices = [{ ts: 300, task_id: 'bx1', status: 'completed' }];
+  const rows = (out) => out.slowdowns.filter((s) => s.kind === 'background_check')
+    .map((s) => [s.at, s.cost_s, s.span_s, s.cost_kind, s.background_s]);
+  // Waits: (b) 1-10, (a) 10-11, (b) 11-40, (a) 40-41, (c) 41-300.
+  let out = detect([...bxRun, ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(40, 'o2', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL)], [], notices);
+  assert.deepEqual(rows(out), [[at(0), 299, 299, 'bound', 300]]);
+  assert.equal(out.waits.background_not_waited, 0);
+  assert.equal(out.suggestions.find((g) => g.kind === 'background_check').text,
+    'A command likely went to the background and the agent waited for it. For a check, try the long-check '
+    + 'procedure (run-checks --out with await-checks wait); otherwise a foreground run with a timeout long '
+    + 'enough for it.');
+  // Working: only the poll at 290 is waiting; 291 to the notice is 9 s, no
+  // idle stretch.
+  out = detect([...bxRun, ...call1(10, 'r1', 'Read', { file_path: 'a.js' }),
+    ...call1(20, 'e1', 'Edit', { file_path: 'a.js' }, 'The file a.js has been updated.'),
+    ...call1(30, 'g1', 'Bash', { command: 'git status' }),
+    ...call1(290, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL)], [], notices);
+  assert.deepEqual(rows(out), [[at(0), 1, 1, 'bound', 300]]);
+  // Idle: nothing until the notice, (c) 1-300.
+  out = detect(bxRun, [], notices);
+  assert.deepEqual(rows(out), [[at(0), 299, 299, 'bound', 300]]);
+  // Not waited: a Read every 20 s until the notice is no slowdown, and is
+  // counted.
+  const reads = [];
+  for (let ts = 10; ts <= 290; ts += 20) reads.push(...call1(ts, `r${ts}`, 'Read', { file_path: 'a.js' }));
+  out = detect([...bxRun, ...reads], [], notices);
+  assert.deepEqual(out.slowdowns, []);
+  assert.equal(out.waits.background_not_waited, 1);
+  const mdWaits = (waits) => python(['import _autopsy',
+    `print(json.dumps(_autopsy._md_waits(json.loads(${JSON.stringify(JSON.stringify(waits))}))))`]);
+  assert.ok(mdWaits(out.waits).includes('Background commands not waited for: 1.'));
+  // Without an observed completion the row stays unavailable, not counted.
+  out = detect([...bxRun, ...reads]);
+  assert.deepEqual(rows(out), [[at(0), 'unavailable', 'unavailable', 'unavailable', 'unavailable']]);
+  assert.equal(out.waits.background_not_waited, 0);
+  assert.ok(!mdWaits(out.waits).some((l) => l.startsWith('Background commands not waited for')));
+  // The wait calls.
+  const calls = [
+    { name: 'Bash', input: { command: 'until grep -q done x; do sleep 5; done' } },
+    { name: 'Bash', input: { command: "tail -5 'C:/u/tmp/tasks/bx1.output'" } },
+    { name: 'Read', input: { file_path: 'C:\\u\\tmp\\tasks\\bx1.output' } },
+    { name: 'Monitor', input: { command: 'until grep -q done x; do sleep 5; done' } },
+    { name: 'BashOutput', input: { bash_id: 'bx1' } },
+    { name: 'TaskOutput', input: { task_id: 'bx1' } },
+    { name: 'Bash', input: { command: "'python3' '/skill/scripts/await-checks' wait '/l/checks/a.json'" } },
+    { name: 'Bash', input: { command: 'npm test' } },
+    { name: 'Bash', input: { command: 'echo sleep 5 > notes.txt' } },
+    { name: 'Read', input: { file_path: 'src/tasks.js' } },
+  ];
+  assert.deepEqual(python([
+    'import _autopsy',
+    `print(json.dumps([_autopsy._is_wait_call(c) for c in json.loads(${JSON.stringify(JSON.stringify(calls))})]))`,
+  ]), [true, true, true, true, true, true, true, false, false, false]);
+});
+
+test('a background window without waiting is no slowdown, and its call no long call', () => {
+  // Review focus 4: a call moved to the background at its timeout whose
+  // completion notice comes at that same result (a window of length 0).
+  const moved = 'Command did not complete within its 120s timeout and was moved to the background (ID: bx1).';
+  let out = detect([use(0, 'b1', 'Bash', { command: 'npm test' }), res(120, 'b1', 'Bash', moved)], [],
+    [{ ts: 120, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.contains]),
+    [['timeout', at(0), 120, []]]);
+  assert.equal(out.waits.background_not_waited, 1);
+  // A backgrounded call that took 130 s to return, then only short calls
+  // that do not wait.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'npm test', run_in_background: true }),
+    res(130, 'b1', 'Bash', 'Command running in background with ID: bx1'),
+    ...call1(140, 'r1', 'Read', { file_path: 'a.js' }),
+    ...call1(150, 'g1', 'Bash', { command: 'git status' }),
+  ], [], [{ ts: 160, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns, []);
+  assert.equal(out.waits.background_not_waited, 1);
+});
+
+test('two background checks waited on together are one row over both windows', () => {
+  // bx1 runs 0-50 and bx2 2-80; the polls wait for both: 10-21 for bx1,
+  // 3-21 for bx2 (from its own result). One row of 18 s; its window is the
+  // union of the two, 0-80.
+  const out = detect([...bxRun,
+    use(2, 'b2', 'Bash', { command: 'npm run e2e', run_in_background: true }),
+    res(3, 'b2', 'Bash', 'Command running in background with ID: bx2'),
+    ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(20, 'o2', 'BashOutput', { bash_id: 'bx2' }, RUNNING_POLL),
+  ], [], [{ ts: 50, task_id: 'bx1', status: 'completed' }, { ts: 80, task_id: 'bx2', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.merged, s.background_s]),
+    [['background_check', at(0), 18, 18, 2, 80]]);
 });
 
 test('notification text read from a file is not a completion', () => {
@@ -804,20 +1024,166 @@ test('a rerun needs proof that nothing changed', () => {
 });
 
 test('slowdowns that overlap in time are counted once in the stake', () => {
-  // Three Edits sent together while a long Bash call runs; all three fail
-  // as unread when the Bash call returns.
+  // Three Edits sent together while a long Bash call runs; each fails as
+  // unread when its result comes back, queued behind the Bash call (so they
+  // start at 123, 124 and 125). The retries, sent together, succeed at 130,
+  // 131 and 132: the spans overlap, so they are one row from 123 to 132.
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
   const events = [use(0, 'b1', 'Bash', { command: 'npm run build' })];
   for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }));
-  for (const f of ['a', 'b', 'c']) {
-    events.push(res(124, `e${f}`, 'Edit', '<tool_use_error>File has not been read yet.</tool_use_error>', true));
-  }
-  events.push(res(126, 'b1', 'Bash', 'built'));
+  events.push(res(123, 'b1', 'Bash', 'built'));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(124 + i, `e${f}`, 'Edit', unread, true)));
+  for (const f of ['a', 'b', 'c']) events.push(use(126, `f${f}`, 'Edit', { file_path: `${f}.js` }));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(130 + i, `f${f}`, 'Edit', 'ok')));
   const out = detect(events);
   const retries = out.slowdowns.filter((s) => s.kind === 'edit_retry');
-  assert.deepEqual(retries.map((s) => s.cost_s), [124, 124, 124]);
+  assert.deepEqual(retries.map((s) => [s.at, s.cost_s, s.span_s, s.merged]), [[at(123), 9, 9, 3]]);
   const g = out.suggestions.find((s) => s.kind === 'edit_retry');
-  assert.deepEqual([g.count, g.stake_s], [3, 124]);
-  assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 126);
+  assert.deepEqual([g.count, g.stake_s], [1, 9]);
+  // The long call's span ends at 123, where the retries start: they touch and
+  // share no time.
+  assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 123);
+});
+
+// The public rows settle_slowdowns leaves of internal rows built with
+// _slowdown, each {kind, start, end}: of agent X unless runWide, and with an
+// unknown cost (its covers kept) when unknown. Each row comes back as [kind,
+// at, cost_s, span_s, merged, contains]; inputs is whether the input rows are
+// unchanged.
+function settle(rows) {
+  return python([
+    'import _autopsy',
+    'X = {"entry": {"label": "X"}}',
+    'rows = []',
+    `for r in json.loads(${JSON.stringify(JSON.stringify(rows))}):`,
+    '    sd = _autopsy._slowdown(r["kind"], None if r.get("runWide") else X, r["start"], r["end"],',
+    '                            "unavailable" if r.get("unknown") else "measured")',
+    '    if r.get("unknown"):',
+    '        sd["_cost"] = None',
+    '    rows.append(sd)',
+    'before = repr(rows)',
+    'out = [_autopsy.public_slowdown(s) for s in _autopsy.settle_slowdowns(rows)]',
+    'print(json.dumps({"rows": [[s["kind"], s["at"], s["cost_s"], s["span_s"], s["merged"], s["contains"]]',
+    '                           for s in out], "inputs": repr(rows) == before}))',
+  ]);
+}
+
+test('overlapping rows of one kind and one agent are one row', () => {
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const events = [];
+  for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }, 'm1'));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(1 + i / 10, `e${f}`, 'Edit', unread, true)));
+  events.push(use(2, 'fa', 'Edit', { file_path: 'a.js' }, 'm2'), res(20, 'fa', 'Edit', 'ok'));
+  events.push(use(20.5, 'fb', 'Edit', { file_path: 'b.js' }, 'm3'), res(21, 'fb', 'Edit', 'ok'));
+  events.push(use(22, 'fc', 'Edit', { file_path: 'c.js' }, 'm4'), res(25, 'fc', 'Edit', 'ok'));
+  const out = detect(events);
+  // 0-20, 1-21 and 1.1-25 merge: the earliest start, the union's length.
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.merged, s.contains]),
+    [['edit_retry', at(0), 25, 25, 3, []]]);
+  assert.equal(out.slowdowns[0].evidence.marker, 'has not been read yet');
+  const g = out.suggestions.find((s) => s.kind === 'edit_retry');
+  assert.deepEqual([g.count, g.stake_s, g.slowdowns], [1, 25, [0]]);
+});
+
+test('each second of an agent is charged to one row, by tier', () => {
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const out = detect([
+    use(0, 'b1', 'Bash', { command: 'npm run e2e' }, 'm1'),
+    use(100, 'e1', 'Edit', { file_path: 'a.js' }, 'm2'),
+    res(101, 'e1', 'Edit', unread, true),
+    res(120, 'b1', 'Bash', 'Command timed out after 2m 0s'),
+    use(150, 'e2', 'Edit', { file_path: 'a.js' }, 'm3'),
+    res(160, 'e2', 'Edit', 'ok'),
+  ]);
+  // The timeout (tier 1) keeps 0-120; the edit_retry's window 100-160 keeps
+  // only 120-160.
+  const rows = out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s]);
+  assert.deepEqual(rows, [['timeout', at(0), 120, 120], ['edit_retry', at(100), 40, 60]]);
+  // The agent's row costs add up to the union of their spans, 0-160.
+  assert.equal(rows.reduce((n, r) => n + r[2], 0), 160);
+  assert.deepEqual(out.suggestions.map((g) => [g.kind, g.stake_s]), [['timeout', 120], ['edit_retry', 40]]);
+});
+
+test('a tier 3 window inside a whole-agent row keeps its own time', () => {
+  // The r150 H3 implement shape (r162's extra_review_round with an
+  // edit_retry is the same pair of tiers).
+  assert.deepEqual(settle([
+    { kind: 'escalation', start: 0, end: 300 },
+    { kind: 'edit_retry', start: 40, end: 80 },
+  ]).rows, [
+    ['escalation', at(0), 260, 300, 1, []],
+    ['edit_retry', at(40), 40, 40, 1, []],
+  ]);
+});
+
+test('a zero-length row folds into the row that holds its instant', () => {
+  const out = settle([
+    { kind: 'timeout', start: 0, end: 120 },
+    { kind: 'edit_retry', start: 50, end: 50 },
+    { kind: 'check_rerun', start: 120, end: 120 },
+    { kind: 'edit_retry', start: 200, end: 200 },
+  ]);
+  // The instant may sit on the edge of the row's time (120).
+  assert.deepEqual(out.rows, [
+    ['timeout', at(0), 120, 120, 1, ['check_rerun', 'edit_retry']],
+    ['edit_retry', at(200), 0, 0, 1, []],
+  ]);
+  assert.equal(out.inputs, true);
+});
+
+test('within a tier the shorter row is charged first', () => {
+  // The run2 shape: an edit_retry inside a heredoc failure's window to its
+  // recovery.
+  assert.deepEqual(settle([
+    { kind: 'heredoc_failure', start: 0, end: 32 },
+    { kind: 'edit_retry', start: 10, end: 32 },
+  ]).rows, [
+    ['heredoc_failure', at(0), 10, 32, 1, []],
+    ['edit_retry', at(10), 22, 22, 1, []],
+  ]);
+});
+
+test('a row inside a higher row is folded into it', () => {
+  assert.deepEqual(settle([
+    { kind: 'timeout', start: 0, end: 120 },
+    { kind: 'long_tool_call', start: 10, end: 100 },
+  ]).rows, [['timeout', at(0), 120, 120, 1, ['long_tool_call']]]);
+  // A whole-agent row (tier 4) yields to the long call (tier 2).
+  assert.deepEqual(settle([
+    { kind: 'retry', start: 0, end: 300 },
+    { kind: 'long_tool_call', start: 50, end: 180 },
+  ]).rows, [
+    ['retry', at(0), 170, 300, 1, []],
+    ['long_tool_call', at(50), 130, 130, 1, []],
+  ]);
+});
+
+test('a row of unknown cost is never merged, charged or folded', () => {
+  // Review focus 3: a background run without an observed completion, beside
+  // a known one of the same kind over the same time.
+  assert.deepEqual(settle([
+    { kind: 'background_check', start: 10, end: 60, unknown: true },
+    { kind: 'background_check', start: 0, end: 50 },
+  ]).rows, [
+    ['background_check', at(10), 'unavailable', 'unavailable', 1, []],
+    ['background_check', at(0), 50, 50, 1, []],
+  ]);
+});
+
+test('run-wide rows are never merged, charged or folded', () => {
+  // Review focus 5: a relaunch over an agent's edit_retry, and two idle gaps
+  // that touch.
+  assert.deepEqual(settle([
+    { kind: 'relaunch', start: 0, end: 300, runWide: true },
+    { kind: 'edit_retry', start: 40, end: 80 },
+    { kind: 'idle_gap', start: 300, end: 400, runWide: true },
+    { kind: 'idle_gap', start: 400, end: 500, runWide: true },
+  ]).rows, [
+    ['relaunch', at(0), 300, 300, 1, []],
+    ['edit_retry', at(40), 40, 40, 1, []],
+    ['idle_gap', at(300), 100, 100, 1, []],
+    ['idle_gap', at(400), 100, 100, 1, []],
+  ]);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {
@@ -1140,8 +1506,34 @@ test('autopsy.md has every section in order', () => {
   assert.match(md, /^\| 1 \| relaunch \|/m);
   assert.ok(!/^\| 0 \|/m.test(md));
   assert.match(md, /^1\. relaunch \(stake 300\.0 s, 1 time; slowdown row #1\):/m);
+  // A row charged less than its span shows both.
+  assert.match(md, /^\| \d+ \| heredoc_failure \| A1 implement \| 2026-10-10 09:01:50Z \| 10\.0 s \(upper bound\) \(of 32\.0 s\) \| tool Bash, exit 2, marker '<<', program cat \|$/m);
+  assert.match(md, /^\| \d+ \| edit_retry \| A1 implement \| 2026-10-10 09:02:00Z \| 22\.0 s \| /m);
+  // A row whose call ran a check names the check id.
+  assert.match(md, /^\| \d+ \| check_rerun \| A1 implement \| 2026-10-10 09:03:40Z \| 40\.0 s \| tool Bash, program node, check test#1 \|$/m);
   // Paths are relative to the run folder.
   assert.ok(!md.includes(TMP));
+});
+
+test('autopsy.md shows how many detections a row holds and the kinds folded into it', () => {
+  const row = (kind, cost, span, merged, contains) => ({
+    kind, agent: 'X', at: at(0), cost_s: cost, cost_kind: 'measured', span_s: span, merged, contains,
+    evidence: { tool: 'Bash', exit: null, marker: null, program: 'npm' },
+  });
+  const lines = python([
+    'import _autopsy',
+    `a = {"slowdowns": json.loads(${JSON.stringify(JSON.stringify([
+      row('timeout', 120, 120, 1, ['edit_retry', 'long_tool_call']),
+      row('edit_retry', 25, 25, 3, []),
+      row('background_check', 'unavailable', 'unavailable', 1, []),
+    ]))}), "detectors": {}}`,
+    'print(json.dumps(_autopsy._md_slowdowns(a)))',
+  ]);
+  assert.deepEqual(lines.slice(2), [
+    '| 1 | timeout | X | 1970-01-01 00:00:00Z | 120.0 s | tool Bash, program npm, contains edit_retry, long_tool_call |',
+    '| 2 | edit_retry x3 | X | 1970-01-01 00:00:00Z | 25.0 s | tool Bash, program npm |',
+    '| 3 | background_check | X | 1970-01-01 00:00:00Z | unavailable | tool Bash, program npm |',
+  ]);
 });
 
 test('a lane outside the launch axis keeps its own span in the timeline', () => {

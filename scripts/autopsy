@@ -111,23 +111,63 @@ That time is an upper bound on the real finish. Notification-shaped text
 in a user line or in any tool result never counts: an agent can read such
 text from a file.
 
-slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence}], largest
-cost_s first. agent is the label, or null for a run-wide kind (relaunch,
-idle_gap). cost_kind is measured, bound when the end is an upper limit,
-or unavailable when the end is not known (cost_s is then "unavailable").
-evidence is {tool, exit, marker, program}: the tool name, the exit code a
-result reports (or null), the marker string matched (from the table in
-_autopsy.py, or null) and the program a Bash command runs (in the first
-simple command that is not 'cd DIR', 'export ...', a loop header or a
-closing keyword, the first word that is not a NAME=value assignment or a
-prefix such as env or 'timeout DURATION', as a basename;
-null when that still holds '=', '@' or ':'). No command, output or prompt
-text is written. A call fails when its result is an error or starts with
-an 'Exit code N' line with N not 0. The kinds:
+slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence, span_s, merged,
+contains}, and background_s for a background_check], largest cost_s
+first. agent is the label, or null for a
+run-wide kind (relaunch, idle_gap). cost_kind is measured, bound when the
+end is an upper limit, or unavailable when the end is not known (cost_s is
+then "unavailable"). cost_s is the row's charged time and span_s its time
+before charging (for a background_check, the agent's waiting); merged
+counts the detections the row holds (1 for a lone one) and contains lists
+the kinds folded into it, sorted (see One second, one row below).
+evidence is {tool, exit, marker, program, check}: the tool name, the exit
+code a result reports (or null), the marker string matched (from the table
+in _autopsy.py, or null), the program a Bash command ran, as a basename,
+and the id of the check the call's line runs, as checks names it (such as
+test#1, <lane>.test#1, run-checks or task-checks), or null; the call may
+not have reached it (see certainty in checks). The line is read in
+simple commands as check matching reads it (leading keywords, NAME=value
+assignments and prefixes such as env, 'timeout DURATION' or npx skipped;
+'cd DIR', 'export ...', a loop header, a closing keyword, assignments alone
+or a case pattern run no program), and the program is, by the first rule
+that applies: (1) when the line runs a check, the program of the simple
+command that runs it; (2) when the line holds a loop (for, while or until)
+and a simple command runs sleep, sleep (a wait loop); (3) the first program
+that is not plumbing (cat head tail grep ls wc echo pwd which true false
+printf test [ [[ ]] seq read break continue sort uniq cut tr tee sed awk rm
+mv cp mkdir mktemp touch date git sleep), else the first program. A
+program is its simple command's first word; an interpreter (python*, py,
+bash, sh, with .exe) followed by a script word, past its options, gives the
+script's basename, and followed by -c, -m or - (or no script word) is the
+interpreter itself; a bare variable ($NAME or ${NAME}) followed by a script
+word gives the script's basename, else null, and a word that starts with a
+variable and holds a path ($VENV/bin/x) is a path like any other. A script
+word holds '/' or '\\', or ends in .py, .js, .mjs, .cjs, .sh or .ps1. A word
+with '*' or '?' (a case pattern) is never a program or a script word. The
+program is null when it holds '=', '@' or ':'. A line whose quoting does
+not parse is read as plain words, which may split quoted text: its program
+is the first simple command's, with none of the rules above. No command,
+output or prompt text is written. A call fails when its result is an error or starts with
+an 'Exit code N' line with N not 0. A call's time starts at its own start:
+the later of its tool_use and the latest result of an earlier call of its
+model turn that came at or before its own result. The kinds:
 - background_check: a Bash call went to the background (see Background
-  runs); from the call (from its result, after a timeout) to its observed
-  completion (bound). Without an observed completion its cost_s and
-  cost_kind are "unavailable".
+  runs); the time the agent waited inside the background window, from the
+  call (from its result, after a timeout) to its observed completion
+  (bound); background_s is the window's length. A wait call is an
+  'await-checks wait' call, a BashOutput, TaskOutput or Monitor call, a
+  Bash call that runs sleep in a simple command, or a Bash or Read call
+  that names a harness tasks/<id>.output file. The waiting is the union,
+  clipped to the window, of (a) each later wait call, from its own start
+  to its result; (b) the gap between two calls next to each other when the
+  second is a wait call and the first is a wait call or the backgrounded
+  call (the model turns of a poll loop); (c) the stretch from the agent's
+  last event to the completion when it is over 60 s and no call is open
+  across it (the agent sat idle until the notice). The backgrounded call's
+  own time is no waiting. A window without waiting is no slowdown (the
+  agent kept working; checks.waits.background_not_waited counts it), and
+  its call is no long_tool_call either. Without an observed completion
+  its cost_s, cost_kind and background_s are "unavailable".
 - timeout: Claude Code's notice starts a Bash result ('Command did not
   complete within its ...', 'Command timed out after'); the call's span.
   Text in command output, files read or other tools never counts.
@@ -164,6 +204,26 @@ an 'Exit code N' line with N not 0. The kinds:
   configured helpers). The second run's span.
 A cost that cannot be timed is "unavailable".
 
+One second, one row: each second of an agent's time is charged to at most
+one row. A background_check's span is the agent's waiting, not its whole
+window. Rows of one kind and one agent whose spans overlap or touch merge
+into one: at the earliest start, the span their union, cost_kind the
+weakest, evidence the earliest row's (and background_s the length of the
+union of the windows). Then, per agent, the rows take its
+time in tiers: timeout and background_check; long_tool_call and
+check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
+escalation and extra_review_round. Within a tier the shorter row (span_s)
+goes first, then the earlier. A row takes only the parts of its span that
+no row before it took: cost_s is their length. A row left with nothing is
+dropped and its kind goes into contains of the row that took most of its
+span (the earliest on a tie); a row of zero length goes to the earliest
+row whose time, ends included, holds its instant, and with none it stays
+at 0. Run-wide rows and rows of unknown cost (span_s "unavailable") are
+never merged, charged or folded. autopsy.md shows a merged row's kind as
+'<kind> xN', a cost below its span as '<cost> (of <span_s> s)', and the
+check id as 'check <id>' and the folded kinds as 'contains <kind>, ...' in
+its Evidence cell.
+
 detectors: {<kind>: ok | partial | not_available}. A detector is
 not_available when its inputs are missing (no timed tool events, no
 labels, no models, no timed launch); it then adds no slowdown. The tool
@@ -173,10 +233,9 @@ partial (see time): their slowdowns are kept, but they may miss some.
 autopsy.md lists the partial detectors apart from those without data.
 
 suggestions: [{kind, text, stake_s, count, slowdowns}], one per kind with a
-slowdown, worded as a likely cause and a change to try; stake_s is the time
-its slowdowns with a known cost cover, per agent, with overlapping spans
-counted once (so it can be less than the sum of their cost_s), and
-slowdowns lists their indexes. Ranked by stake_s. When acceptance reports checks_unclean, an unclean_checks
+slowdowns, worded as a likely cause and a change to try; stake_s is the time
+its slowdowns with a known cost cover, per agent: the sum of their charged
+cost_s (One second, one row), and slowdowns lists their indexes. Ranked by stake_s. When acceptance reports checks_unclean, an unclean_checks
 suggestion (stake_s 0, no slowdowns) names the untracked files from the
 saved verify evidence (<ledger>/checks/verify-*.json) by path and says to
 commit any file a check needs and gitignore only known generated output.
@@ -246,9 +305,16 @@ unavailable}, failed, reasons: {<code>: n}}, project_test_runs {total,
 by_role: {<role>: n}, unavailable}, repairs {attempts, eligible,
 by_status: {<status>: n}}, setup {skipped, no_setup_commands} and waits
 {checks_via_procedure, wait_calls, stopped, improvised: {monitor_errors,
-sleep_blocked, harness_output_reads}} (the long-check procedure;
+sleep_blocked, harness_output_reads}, unwaited, left_running,
+background_not_waited} (the long-check procedure;
 checks_via_procedure is unavailable for a run that could not have used it,
-and waits is unavailable for a run without tool events).
+and waits is unavailable for a run without tool events). unwaited and
+left_running are [{agent, file}], file the result file's name only, never
+its path.
+background_not_waited counts the calls that went to the background, with
+an observed completion, in whose window the agent did not wait (see
+background_check): no slowdown, so the run still shows work it sent to
+the background.
 - A check id names a configured command: <group>#<n> is
   commands.<group>[n - 1] (test#1 is commands.test[0]),
   <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1] and

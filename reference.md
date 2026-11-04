@@ -1834,7 +1834,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 7, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 8, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1856,15 +1856,18 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     evidence (`<ledger>/checks/task-<unit>.<n>.json`): a call with `--evidence` by its file's
     basename, any other call by unit and `policy.started`; a call with missing or malformed
     evidence is `unavailable`, never a default.
-  - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`) counts the long-check
+  - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`, `unwaited`,
+    `left_running`, `background_not_waited`) counts the long-check
     procedure ("Long checks"): executions that reserved, started and waited, the `await-checks wait`
     calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
-    `harness_output_reads`); `unavailable` for a run without tool events. `unwaited` lists the
+    `harness_output_reads`); `unavailable` for a run without tool events. `background_not_waited`
+    counts the commands that went to the background, with an observed completion, that the agent
+    did not wait for (see "Background waits" below): no slowdown. `unwaited` lists the
     background check starts no `await-checks wait` on their file followed, and `left_running` those
-    whose last wait said still running (exit 4), each `{agent, file}`: no await-checks wait on its
-    file followed to the end (the agent may still have read the result another way, after a
-    completion notice). Claude Code 2.1.300 discourages waiting on background commands, so a
-    run on it is worth checking here.
+    whose last wait said still running (exit 4), each `{agent, file}` with the file's name only
+    (never its path): no await-checks wait on its file followed to the end (the agent may still
+    have read the result another way, after a completion notice). Claude Code 2.1.300
+    discourages waiting on background commands, so a run on it is worth checking here.
   - `commands` (1.6.4, `checks.commands`): check time per configured command, from every file in the ledger's
     `checks/` with a results list (task checks, integrate, verify, final fix, accept): one entry
     `{check, group, runs, total_s, median_s, project_suite}` per configured command that ran, in
@@ -1908,16 +1911,36 @@ text, because a command may carry a secret.
   have finished earlier. Without a completion notice or such a result the end and the seconds
   are `unavailable`; the agent's last event is not a bound. Text an agent reads, in a file or
   another result, never counts.
+- **Background waits:** a `background_check` costs only the time the agent waited inside the
+  background window (from the call, or from its result after a timeout, to the observed
+  completion); `background_s` is the window's length. A wait call is an `await-checks wait`
+  call, a `BashOutput`, `TaskOutput` or `Monitor` call, a Bash call that runs `sleep` in a
+  simple command, or a Bash or Read call that names a harness `tasks/<id>.output` file. The
+  waiting is the union, clipped to the window, of (a) each later wait call, from its own start
+  to its result; (b) the gap between two calls next to each other when the second is a wait
+  call and the first is a wait call or the backgrounded call (the model turns of a poll loop);
+  (c) the stretch from the agent's last event to the completion when it is over 60 s and no
+  call is open across it (the agent sat idle until the notice). The backgrounded call's own
+  time is no waiting. A background command the agent did not wait for (it kept working until
+  the completion notice) is no slowdown: `checks.waits.background_not_waited` counts it, and
+  its call is no `long_tool_call` either. Without an observed completion the row's cost and
+  `background_s` stay `unavailable`.
 - **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
   heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
   reading calls between them; an `inferred` run never proves a rerun.
+- **Queued calls:** calls sent in one model turn share its message id. A call's time starts at
+  its own start: the later of its tool_use and the latest result of an earlier call of its
+  turn that came at or before its own result. Claude Code returns a turn's results in order, so a fast call queued
+  behind a slow one is charged only its own time.
 
-**Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and
-`evidence`):
+**Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind`,
+`evidence`, `span_s` (the cost before charging, below), `merged` (how many detections the row
+holds, 1 for a lone one) and `contains` (the kinds folded into it, sorted); a `background_check`
+also has `background_s`, its background window's length):
 
 | Kind | Detects |
 |---|---|
-| `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background |
+| `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background; the cost is the time the agent waited inside the background window (Background waits, above) |
 | `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
 | `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
@@ -1930,13 +1953,57 @@ text, because a command may carry a secret.
 | `idle_gap` | over 60 s with no agent of the launch running |
 | `check_rerun` | the same check command ran twice (both `ran`) with only read-only calls between |
 
-**Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
-exit code when known, the matched marker string, and the program name (in the first simple
-command that is not `cd DIR`, `export ...`, a loop header or a closing keyword, the first word
-that is not a `NAME=value` assignment or a prefix such as `env` or `timeout DURATION`, as a
-basename; null when it still holds `=`, `@` or `:`). Markers in command output, files read or
-other tools' results never count. A suggestion's `stake_s` counts time that overlapping
-slowdowns of its kind share once. No command text, tool output or prompt text reaches
+**One second, one row:** each second of an agent's time is charged to at most one row.
+- **Merging:** rows of one kind and one agent whose spans overlap or touch are one row: `at`
+  the earliest start, the span their union, `cost_kind` the weakest (`bound` over `measured`),
+  `evidence` the earliest row's, and `merged` the number of detections. A `background_check`'s
+  span is its waiting; a merged one's `background_s` is the length of the union of its windows.
+- **Charging:** per agent, the rows take its time in four tiers, in this order: `timeout` and
+  `background_check` (Claude Code's notice about a call, and the wait for it);
+  `long_tool_call` and `check_rerun` (one call's own time); `repeated_failure`,
+  `heredoc_failure` and `edit_retry` (a window from a failure to its recovery, which may hold
+  other work); `retry`, `escalation` and `extra_review_round` (a whole agent). Within a tier the
+  shorter row goes first (its `span_s`), then the earlier one. Each row takes only the parts of
+  its span that no row before it took: `cost_s` is their length and `span_s` its length before
+  charging, so an `edit_retry` inside a `heredoc_failure`'s window keeps its own time and the
+  heredoc row the rest.
+- **Folding:** a row left with nothing is removed, and its kind goes into `contains` of the row
+  that took most of its span (the earliest on a tie). A row of zero length folds into the
+  earliest row whose time, ends included, holds its instant; with none it stays at 0 s.
+- Run-wide rows (`relaunch`, `idle_gap`) and rows of unknown cost are never merged, charged or
+  folded.
+
+**Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
+name, the exit code when known, the matched marker string, the program that ran, and the id of
+the check the call's line runs, as `checks` names it (such as `test#1`, `<lane>.test#1`,
+`run-checks` or `task-checks`), or null; the call may not have reached it (see "`ran` versus
+`inferred`" under Checks). A Bash line is read as check matching reads it, in simple commands
+(leading keywords, `NAME=value` assignments and prefixes such as `env`, `timeout DURATION` or
+`npx` skipped; a simple command that is `cd DIR`, `export ...`, a loop header, a closing
+keyword, assignments alone or a case pattern runs no program). The program is, by the first
+rule that applies:
+1. when the line runs a check: the program of the simple command that runs it;
+2. when the line holds a loop (`for`, `while` or `until`) and a simple command runs `sleep`:
+   `sleep` (a wait loop);
+3. the first program that is not plumbing, else the first program. Plumbing: `cat head tail
+   grep ls wc echo pwd which true false printf test [ [[ ]] seq read break continue sort uniq
+   cut tr tee sed awk rm mv cp mkdir mktemp touch date git sleep` (`sleep 30; python3 long.py`
+   names `long.py`).
+
+A program is the basename of the simple command's first word. An interpreter (`python*`, `py`,
+`bash`, `sh`, with `.exe`) followed by a script word, past its options, gives the script's
+basename; followed by `-c`, `-m` or `-` (or no script word) it is the interpreter itself. A bare
+variable (`$NAME` or `${NAME}`, quoted or not, such as `"$python"`) followed by a script word
+gives the script's basename, else the program is null (`"$GIT" status`); a word that starts with
+a variable and holds a path (`$VENV/bin/skein`) is a path like any other (`skein`). A script
+word holds `/` or `\`, or ends in `.py`, `.js`, `.mjs`, `.cjs`, `.sh` or `.ps1`. A word with `*`
+or `?` (a case pattern such as `*.meta)`) is never a program or a script word. The program is
+also null when it holds `=`, `@` or `:`. Check matching does not read a variable as an
+interpreter, so `"$python" .../run-checks` names the program `run-checks` with check null. A
+line whose quoting does not parse is read as plain words, which may split quoted text, so its
+program is only the first simple command's (past the same words), with no rule above and no
+check. Markers in command output, files read or other tools' results never count. A suggestion's `stake_s` is the sum of its kind's charged
+time (One second, one row). No command text, tool output or prompt text reaches
 `autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names a check id (or
 `run-checks`), never the command line or the configured command.
 
