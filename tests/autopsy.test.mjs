@@ -945,6 +945,24 @@ test('a background check costs only the time the agent waited', () => {
   ]), [true, true, true, true, true, true, true, false, false, false]);
 });
 
+test('the scan stops at the first call past the window but keeps that call\'s gap', () => {
+  // bx1 runs from 0; a running poll 10-11; a poll at 150, after the notice.
+  // The poll at 150 starts past the window's end, so the scan stops there,
+  // but its gap (b) from the poll before (11-150) still counts, clipped.
+  const polls = [...bxRun, ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(150, 'o2', 'BashOutput', { bash_id: 'bx1' }, '<status>completed</status>')];
+  const rows = (out) => out.slowdowns.filter((s) => s.kind === 'background_check')
+    .map((s) => [s.at, s.cost_s, s.span_s, s.cost_kind, s.background_s]);
+  // Notice at 100: gap 1-10, poll 10-11, gap 11-150 clipped to 11-100 (the
+  // idle stretch (c) from 11 covers 11-100 too): 99 s.
+  assert.deepEqual(rows(detect(polls, [], [{ ts: 100, task_id: 'bx1', status: 'completed' }])),
+    [[at(0), 99, 99, 'bound', 100]]);
+  // Notice at 50: 11-50 is 39 s, no idle stretch, so only the gap before the
+  // poll at 150 covers it: 49 s, not 10.
+  assert.deepEqual(rows(detect(polls, [], [{ ts: 50, task_id: 'bx1', status: 'completed' }])),
+    [[at(0), 49, 49, 'bound', 50]]);
+});
+
 test('a background window without waiting is no slowdown, and its call no long call', () => {
   // Review focus 4: a call moved to the background at its timeout whose
   // completion notice comes at that same result (a window of length 0).
@@ -1288,7 +1306,8 @@ test('idle gaps, the only run-wide rows, are never merged, charged or folded', (
 // agents: [{label, phase, start, end}]}], s the launch's wall time, and a
 // manifest listing the task ids. An agent's transcript is its prompt at start
 // and a last assistant line at end; an agent given neither has lines without
-// a timestamp (untimed).
+// a timestamp (untimed). An agent's model tier (sonnet unless given as model)
+// is requested in its meta and resolved in its assistant line.
 function buildLaunches(launches, tasks = ['A1', 'B1', 'C1']) {
   copies += 1;
   const dir = join(TMP, `launches${copies}`);
@@ -1315,12 +1334,13 @@ function buildLaunches(launches, tasks = ['A1', 'B1', 'C1']) {
     mkdirSync(join(dir, wf));
     launch.agents.forEach((a, k) => {
       const id = `${i + 1}x${k + 1}`;
+      const model = a.model || 'sonnet';
       writeFileSync(join(dir, wf, `agent-${id}.meta.json`), JSON.stringify({
-        agentType: 'workflow-subagent', description: a.label, workflowPhase: a.phase || 'Lane a', model: 'sonnet' }));
+        agentType: 'workflow-subagent', description: a.label, workflowPhase: a.phase || 'Lane a', model }));
       const lines = [
         { type: 'user', timestamp: a.start && T(a.start), message: { role: 'user', content: 'Do the task.' } },
         { type: 'assistant', timestamp: a.end && T(a.end), message: {
-          id: `m_${id}`, role: 'assistant', model: 'claude-sonnet-4-6', stop_reason: 'end_turn',
+          id: `m_${id}`, role: 'assistant', model: `claude-${model}-4-6`, stop_reason: 'end_turn',
           content: [{ type: 'text', text: 'Done.' }], usage } },
       ];
       writeFileSync(join(dir, wf, `agent-${id}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
@@ -1450,6 +1470,25 @@ test('an extra review round with an untimed fix or re-review costs unavailable',
   assert.deepEqual(roundRow(round(FIX, RE_REVIEW)), [[160, 'measured', 160]]);
   assert.deepEqual(roundRow(round({}, RE_REVIEW)), [['unavailable', 'unavailable', 'unavailable']]);
   assert.deepEqual(roundRow(round(FIX, {})), [['unavailable', 'unavailable', 'unavailable']]);
+});
+
+test('a retry or escalation of an untimed agent costs unavailable', () => {
+  // One launch: B1 implement at sonnet, then again at opus (an escalation),
+  // and a B1 review retry. Untimed, every agent lacks timestamps, so they
+  // keep their file order.
+  const at = (timed, start, end) => (timed ? { start, end } : {});
+  const launch = (timed) => autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents: [
+    { label: 'B1 implement', ...at(timed, '10:00:05', '10:05:00') },
+    { label: 'B1 implement', model: 'opus', ...at(timed, '10:05:10', '10:08:00') },
+    { label: 'B1 review retry', ...at(timed, '10:08:10', '10:09:00') },
+  ] }])).json;
+  const rows = (D) => ['escalation', 'retry'].map((kind) => ofKind(D, kind).map(rowOf));
+  assert.deepEqual(rows(launch(true)), [
+    [['B1 implement', T('10:05:10'), 170, 'measured', 170, 1, []]],
+    [['B1 review retry', T('10:08:10'), 50, 'measured', 50, 1, []]],
+  ]);
+  const NONE = ['unavailable', 'unavailable', 'unavailable', 'unavailable', 1, []];
+  assert.deepEqual(rows(launch(false)), [[['B1 implement', ...NONE]], [['B1 review retry', ...NONE]]]);
 });
 
 test('a run with one launch keeps all its agents and shows no launches table', () => {

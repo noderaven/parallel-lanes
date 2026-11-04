@@ -1977,8 +1977,8 @@ also has `background_s`, its background window's length):
 | `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
 | `extra_review_round` | a task's fix and re-review rounds; `unavailable` when one of them is untimed |
-| `escalation` | an agent re-run at another model tier |
-| `retry` | a retried agent |
+| `escalation` | an agent re-run at another model tier; `unavailable` when it is untimed |
+| `retry` | a retried agent; `unavailable` when it is untimed |
 | `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
 | `long_tool_call` | a tool call over 120 s that no other kind counted |
 | `idle_gap` | over 60 s with no agent of the launch running |

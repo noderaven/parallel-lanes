@@ -1553,11 +1553,13 @@ def run_slowdowns(run):
         # Retries and escalations exactly as run-report counts them, per
         # launch (_transcripts.escalations).
         entries = [a["entry"] for a in launch["agents"]]
+        # An untimed agent's row costs unavailable, cost_kind too.
         for a, earlier in zip(launch["agents"], _transcripts.escalations(entries)):
+            kind = UNAVAILABLE if a["start"] is None or a["end"] is None else "measured"
             if a["entry"]["retried"]:
-                out.append(_slowdown("retry", a, a["start"], a["end"], "measured"))
+                out.append(_slowdown("retry", a, a["start"], a["end"], kind))
             if earlier is not None:
-                out.append(_slowdown("escalation", a, a["start"], a["end"], "measured"))
+                out.append(_slowdown("escalation", a, a["start"], a["end"], kind))
     redone = redone_agents(run)
     for launch in run["launches"][:-1]:
         out.append(relaunch_slowdown(launch, redone))

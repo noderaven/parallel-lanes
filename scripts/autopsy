@@ -226,7 +226,7 @@ model turn that came at or before its own result. The kinds:
   untimed.
 - escalation and retry: an agent run-report counts as one (the same label
   again at another model tier in the same launch; a label ending ' retry');
-  that agent's wall time.
+  that agent's wall time, "unavailable" (cost_kind too) when it is untimed.
 - relaunch: every launch but the last, at its start; the summed wall
   times of its redone agents (see launches), "unavailable" (cost_kind
   too) when one of them is untimed, never 0 or a part, and 0 (listed,
