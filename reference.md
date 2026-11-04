@@ -2206,16 +2206,18 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
   tasks, open and declined findings, `cannot_verify` entries and stopped lanes; when `ledger
   status` fails, `ledger_state` is `unavailable` with its error, since the ledger's blocked and
-  deferred tasks are then unknown. `open_work.final` also holds `task_minors_open` (the result's
-  task minors no final lens raised, quoted; `null` when the result has no such list, as before
-  1.3.1) and `carried_minors_open` (the carried minor ids no final lens raised; `null` before
-  1.6.3). The summary's open work line and the Open work header read `<N> open or declined final
-  finding(s), <M> open task minor(s)`: M is the open task minors plus the carried ones,
-  `at least M` when the result's `cannot_verify` holds the engine's note that some minors "did
-  not reach the final lenses or task_minors_open" (a resume whose earlier tasks no carried
-  snapshot covers), and `unavailable` when the result has neither list, never 0; N and M read
-  `unavailable` when the final review is. Under the header the open task minors are listed, then
-  each carried id as `<id> open (carried minor)`.
+  deferred tasks are then unknown, and the summary's open work line gives their count as `unknown
+  (ledger status unavailable)` and Open work as `- blocked or deferred tasks: unknown`, never 0 or
+  none. `open_work.final` also holds `task_minors_open` (the result's task minors no final lens
+  raised, quoted; `null` when the result has no such list, as before 1.3.1) and
+  `carried_minors_open` (the carried minor ids no final lens raised; `null` before 1.6.3). The
+  summary's open work line and the Open work header read `<N> open or declined final finding(s),
+  <M> open task minor(s)`: M is the open task minors plus the carried ones, `at least M` when the
+  result's `cannot_verify` holds the engine's note that some minors "did not reach the final
+  lenses or task_minors_open" (a resume whose earlier tasks no carried snapshot covers), and
+  `unavailable` when the result has neither list, never 0; N and M read `unavailable` when the
+  final review is. Under the header the open task minors are listed, then each carried id as `<id>
+  open (carried minor)`.
 - **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
   placement, changes (rulings, events, escalations), commits and review (reviews, each with its
   brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
@@ -2225,7 +2227,7 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
   verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
   settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
-  a task that is not done, settled or blocked stays `false`.
+  a task that is not done, or is settled or blocked, stays `false`.
 - **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
   (counted as archive-run counts them, see "Run history") with the archived ones.
   `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one
@@ -2240,16 +2242,20 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   text: the verdict with what made it so (audit's own rule when it disagrees with the engine, else
   the engine's reason kinds for the engine's own verdict, as Acceptance lists them, for example
   `Verdict: unverified (checks_stale, final_fix_unreviewed).`), or why it is `unavailable`;
-  `accepted by the user at the delivered head` when an override at the delivered sha is in effect
-  and the verdict is not already `accepted by user` (never the override's text); the tasks
-  `committed C, reviewed R, verified V, accepted A of N`, each counting `true` values with
-  `(k settled)`, `(k not required)` and `(k unavailable)` where a task has such a value, then the
-  blocked and deferred counts above 0 (`blocked and deferred unknown` when `ledger status`
-  failed); the final findings
-  (`N open or declined`, or `Final review unavailable`), the open task minors as above and the
-  cannot-verify items; the code outside recorded task ranges and how many lack review evidence;
-  the launches missing from the archive when the ledger records more; and `G evidence gap(s)
-  (cannot-verify items and inferred lines are not gaps)`. Nothing else.
+  `accepted by user` with what the user overrode, the run's own verdict and reason kinds as
+  Acceptance's `overrode` gives them (`Verdict: accepted by user (over unverified:
+  checks_failed).`), and `accepted (gate unavailable)` with check-verify's reason code inside its
+  parenthesis (`Verdict: accepted (gate unavailable: verify_evidence_time_untrusted).`), each only
+  when there is one; `accepted by the user at the delivered head` when an override at the
+  delivered sha is in effect and the verdict is not already `accepted by user` (never the
+  override's text); the tasks `committed C, reviewed R, verified V, accepted A of N`, each
+  counting `true` values with `(k settled)`, `(k not required)` and `(k unavailable)` where a task
+  has such a value, then the blocked and deferred counts above 0 (`blocked and deferred unknown`
+  when `ledger status` failed); the final findings (`N open or declined`, or `Final review
+  unavailable`), the open task minors as above and the cannot-verify items; the code outside
+  recorded task ranges and how many lack review evidence; the launches missing from the archive
+  when the ledger records more; and `G evidence gap(s) (cannot-verify items and inferred lines are
+  not gaps)`. Nothing else.
 - **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
   states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
   validity's), round(s), task rulings and run-end rulings, gate, carry and context added by

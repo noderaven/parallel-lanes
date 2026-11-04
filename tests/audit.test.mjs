@@ -366,11 +366,17 @@ test('late evidence gives accepted (gate unavailable)', () => {
   assert.equal(md.split('\n').filter((l) => l.startsWith(line)).length, 2, md);
   // The summary counts only accepted tasks, as before.
   assert.ok(stdout.includes('accepted 0'), stdout);
-  // The bottom line names the unknown ones.
+  // The bottom line names check-verify's reason and the unknown ones.
   assert.deepEqual(mdSection(md, 'Bottom line').slice(0, 2), [
-    'Verdict: accepted (gate unavailable).',
+    'Verdict: accepted (gate unavailable: verify_evidence_time_untrusted).',
     'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2.',
   ]);
+  // A gate unavailable without a reason from check-verify (no ledger in the
+  // archive, so check-verify was not run) keeps the bare verdict.
+  const noLedger = view(makeRun(acceptedSpec(r, { run: { ledger: null, files: {}, mtimes: {} } })), ['--repo', r.dir]);
+  assert.deepEqual([noLedger.json.run.acceptance.verdict.value, noLedger.json.run.checks.gate_reason],
+    ['accepted (gate unavailable)', null]);
+  assert.equal(mdSection(noLedger.md, 'Bottom line')[0], 'Verdict: accepted (gate unavailable).');
 });
 
 // A verify head before the delivered sha, saved as evidence that matches the
@@ -583,6 +589,16 @@ test('the bottom line says what is unavailable and invents nothing', () => {
   assert.equal(broken.json.run.open_work.ledger_state.state, 'unavailable');
   assert.equal(mdSection(broken.md, 'Bottom line')[1],
     'Tasks: committed 0, reviewed 0, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2; blocked and deferred unknown.');
+  // The Summary, stdout and Open work give no 0 and no none for them.
+  const neither = 'unavailable open or declined final finding(s), unavailable open task minor(s)';
+  const openLine = `open work: unknown (ledger status unavailable), ${neither}`;
+  assert.ok(mdSection(broken.md, 'Summary').includes(`- ${openLine}`), broken.md);
+  assert.ok(broken.stdout.split('\n').includes(openLine), broken.stdout);
+  const held = mdSection(broken.md, 'Open work').filter((l) => l.startsWith('- blocked or deferred tasks: '));
+  assert.deepEqual(held, ['- blocked or deferred tasks: unknown']);
+  // A ledger status that worked keeps the count and none.
+  assert.ok(unordered.stdout.split('\n').includes(`open work: 0 task(s), ${neither}`), unordered.stdout);
+  assert.ok(mdSection(unordered.md, 'Open work').includes('- blocked or deferred tasks: none'), unordered.md);
 });
 
 test('the bottom line gives the engine\'s reasons for its own verdict', () => {
@@ -607,15 +623,32 @@ test('the bottom line names a user override at the delivered head, never its tex
     results: [{ group: 'test', command: 'npm test zqcmd', exit: 1, log: '/tmp/pl/1.log', tail: 'FAIL zqtail' }],
   });
   const accept = (head) => ({ task: '_run', event: 'accepted', head, text: 'ship it zqoverride' });
-  const { json, md } = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.fix)] })), ['--repo', r.dir]);
+  const unverified = {
+    status: 'unverified', delivered_sha: r.fix, warnings: [],
+    reasons: [{ kind: 'checks_failed', class: 'failed', detail: 'failing zqdetail' }],
+  };
+  const overridden = makeRun(acceptedSpec(r, { verify: failing, result: { acceptance: unverified }, runEvents: [accept(r.fix)] }));
+  const { json, md } = view(overridden, ['--repo', r.dir]);
   assert.equal(json.run.acceptance.verdict.value, 'accepted by user');
+  assert.equal(json.run.acceptance.overrides[0].overrode, 'unverified: checks_failed');
   const bottom = mdSection(md, 'Bottom line');
-  // The verdict already says it; the override's text is never shown.
+  // The verdict already says it and names what the user overrode (the run's
+  // verdict and reason kinds); the override's text is never shown.
   assert.deepEqual(bottom.slice(0, 2), [
-    'Verdict: accepted by user.',
+    'Verdict: accepted by user (over unverified: checks_failed).',
     'Tasks: committed 2, reviewed 2, verified 0, accepted 2 of 2.',
   ]);
-  assert.doesNotMatch(bottom.join('\n'), /zqoverride/);
+  assert.doesNotMatch(bottom.join('\n'), /zqoverride|zqdetail/);
+  // Without what it overrode, the verdict stands alone.
+  const bare = pythonJSON([
+    'import _audit',
+    'a = _audit.build(sys.argv[1], repo=sys.argv[2])',
+    'for o in a["run"]["acceptance"]["overrides"]:',
+    '    o["overrode"] = None',
+    'md = _audit.render_md(a).split("\\n")',
+    'print(json.dumps(md[md.index("## Bottom line") + 2]))',
+  ], [overridden, r.dir]);
+  assert.equal(bare, 'Verdict: accepted by user.');
   // A result without an acceptance object: the verdict is unavailable, the
   // override at the delivered sha still in effect. Its note has its own
   // parenthesis, so it follows '; '.

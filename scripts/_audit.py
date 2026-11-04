@@ -31,32 +31,37 @@ task), Code outside recorded task ranges, Checks, After delivery (only with
 --head), Open work, Evidence gaps and Terms (TERMS, fixed text). The Bottom
 line is one paragraph, each part from one value audit computed and none
 from recorded text: the verdict with why (_verdict_line: its verdict_rule,
-else the engine's reason kinds for the engine's own verdict, else,
-unavailable, its note), ACCEPTED_BY_USER when an override's head is present
-(at the delivered sha) and the verdict is not already accepted by user,
-the tasks' committed, reviewed, verified and accepted counts of true values
-(each with '(<k> settled, <k> not required, <k> unavailable)' for the kinds
-there are) and the blocked and deferred counts above 0 ('blocked and
-deferred unknown' when open_work.ledger_state is set), the final findings,
-open task minors and cannot-verify items, the
-code outside recorded task ranges, the launches missing from the archive,
-and the gap count with NOT_GAPS. The Summary's open work line and the Open
-work header read '<N> open or declined final finding(s), <M> open task
-minor(s)': M is open_work.final's task_minors_open plus its
-carried_minors_open (_autopsy.open_task_minors), 'at least M' when a
-cannot_verify quote holds _autopsy.MINORS_NOT_REACHED, and unavailable when
-both lists are null; N and M are unavailable when the final review is.
-Under the header come the open task minors, then each carried id as
-'<id> open (carried minor)'. A value is shown as '<value> [<state>]', with its
-note after ' - ' and its sources in parentheses; a review verdict read from
-the journal shows its state as '[inferred: read from the transcript]'
-(TRANSCRIPT_INFERRED; other inferred values keep '[inferred]'). Evidence
-validity invalid by checks_failed reads 'failed checks' (FAILED_CHECKS) on
-the Acceptance and Checks lines, while audit.json keeps 'invalid' and the
-rule. A ruling without by reads 'ruling by implementer (no role recorded)'
-(NO_ROLE), the ledger's own rule. Recorded text appears only as Markdown
-quote lines ('> '), under a line naming where it was quoted from;
-configured commands in it are already check ids.
+else, unavailable, its note, else, accepted by user, 'over <overrode>'
+(the run's own verdict and reason kinds, as Acceptance computes them),
+else the engine's reason kinds for the engine's own verdict; accepted (gate
+unavailable) carries run.checks.gate_reason inside its parenthesis),
+ACCEPTED_BY_USER when an override's head is present (at the delivered sha)
+and the verdict is not already accepted by user, the tasks' committed,
+reviewed, verified and accepted counts of true values (each with '(<k>
+settled, <k> not required, <k> unavailable)' for the kinds there are) and
+the blocked and deferred counts above 0 ('blocked and deferred unknown'
+when open_work.ledger_state is set), the final findings, open task minors
+and cannot-verify items, the code outside recorded task ranges, the
+launches missing from the archive, and the gap count with NOT_GAPS. The
+Summary's open work line and the Open work header read '<N> open or
+declined final finding(s), <M> open task minor(s)': M is open_work.final's
+task_minors_open plus its carried_minors_open (_autopsy.open_task_minors),
+'at least M' when a cannot_verify quote holds _autopsy.MINORS_NOT_REACHED,
+and unavailable when both lists are null; N and M are unavailable when the
+final review is. Under the header come the open task minors, then each
+carried id as '<id> open (carried minor)'. When open_work.ledger_state is
+set, the open work line's task count is OPEN_TASKS_UNKNOWN and Open work's
+blocked or deferred tasks read unknown rather than none. A value is shown as
+'<value> [<state>]', with its note after ' - ' and its sources in
+parentheses; a review verdict read from the journal shows its state as
+'[inferred: read from the transcript]' (TRANSCRIPT_INFERRED; other inferred
+values keep '[inferred]'). Evidence validity invalid by checks_failed reads
+'failed checks' (FAILED_CHECKS) on the Acceptance and Checks lines, while
+audit.json keeps 'invalid' and the rule. A ruling without by reads 'ruling
+by implementer (no role recorded)' (NO_ROLE), the ledger's own rule.
+Recorded text appears only as Markdown quote lines ('> '), under a line
+naming where it was quoted from; configured commands in it are already
+check ids.
 
 render_summary(audit, md_path) is at most 10 lines, the last 'full report:
 <md_path>'.
@@ -82,6 +87,8 @@ TRANSCRIPT_INFERRED = "inferred: read from the transcript"
 # A ruling without by, as the ledger counts it (ledger ruling_records).
 NO_ROLE = "implementer (no role recorded)"
 FAILED_CHECKS = "failed checks"
+# The summary's open task count when ledger status failed.
+OPEN_TASKS_UNKNOWN = "unknown (ledger status unavailable)"
 # The bottom line's last sentence, after the gap count.
 NOT_GAPS = "(cannot-verify items and inferred lines are not gaps)"
 # The Terms section: (term, definition), fixed text in this order.
@@ -99,9 +106,10 @@ TERMS = (
     ("[%s]" % TRANSCRIPT_INFERRED, "a review verdict and its count of findings, read from the reviewer's "
                                    "structured result in the launch's journal; the ledger records no verdict. "
                                    "Not a gap."),
-    ("invalid", "as the gate, check-verify found the result's acceptance, its verify report or the saved "
-                "evidence malformed (verify_invalid); as evidence validity, the verify result breaks the "
-                "acceptance rule named beside it (checks that ran and failed read failed checks)."),
+    ("invalid", "as the gate, check-verify found the result's acceptance, its verify report, the saved "
+                "evidence or a recorded sha or time malformed (verify_invalid); as evidence validity, the "
+                "verify result breaks the acceptance rule named beside it (checks that ran and failed read "
+                "failed checks)."),
     ("round(s)", "the fix rounds a task's review took, as its reviewed event records them, each a fix and a "
                  "re-review; 0 means the review approved with no fix round."),
     ("task rulings", "the ruling events the ledger records under a task: what an agent decided on the user's "
@@ -312,6 +320,8 @@ def _counts(audit):
         "outside_note": outside.get("note"),
         "unreviewed": sum(1 for c in commits or [] if c["coverage"]["state"] == "missing"),
         "open_tasks": len(open_work.get("tasks") or []),
+        # ledger status failed: the ledger's blocked and deferred tasks are unknown.
+        "held_unknown": open_work.get("ledger_state") is not None,
         "final": _final_counts(open_work.get("final")),
         "gaps": len(audit["gaps"]),
     }
@@ -336,7 +346,8 @@ def _summary_lines(audit):
     lines.append("tasks: %d; committed %d, reviewed %d, verified %d, accepted %d"
                  % (c["tasks"], c["committed"], c["reviewed"], c["verified"], c["accepted"]))
     lines.append("code outside recorded task ranges: %s" % _outside_text(c))
-    lines.append("open work: %d task(s), %s" % (c["open_tasks"], _open_counts(c["final"])))
+    held = OPEN_TASKS_UNKNOWN if c["held_unknown"] else "%d task(s)" % c["open_tasks"]
+    lines.append("open work: %s, %s" % (held, _open_counts(c["final"])))
     lines.append("evidence gaps: %d" % c["gaps"])
     return lines
 
@@ -363,20 +374,30 @@ def _task_count(tasks, field):
     return "%d (%s)" % (n, ", ".join(extra)) if extra else str(n)
 
 
-def _verdict_line(a):
+def _verdict_line(a, gate_reason=None):
     """'Verdict: <verdict>' with why: the verdict_rule (audit's own reason),
-    else, for the engine's own verdict, its reason kinds (unquoted, as
-    Acceptance prints them), else, unavailable, the verdict's note; in
-    parentheses, or after '; ' when the text has its own. ACCEPTED_BY_USER
-    follows when an override is in effect (its head present, at the
-    delivered sha) and the verdict does not already say so: only a verdict
-    unavailable for want of an acceptance object can be one."""
+    else, unavailable, the verdict's note, else, accepted by user, 'over
+    <overrode>' (the in-effect override's overrode: the run's own verdict
+    and reason kinds, as Acceptance computes them; nothing when there is
+    none), else, for the engine's own verdict, its reason kinds (unquoted,
+    as Acceptance prints them); in parentheses, or after '; ' when the text
+    has its own. For accepted (gate unavailable), gate_reason
+    (run.checks.gate_reason, check-verify's fixed reason code) goes inside
+    the verdict's parenthesis: 'accepted (gate unavailable: <reason>)'.
+    ACCEPTED_BY_USER follows when an override is in effect (its head
+    present, at the delivered sha) and the verdict does not already say so:
+    only a verdict unavailable for want of an acceptance object can be
+    one."""
     verdict = a["verdict"]
     value = verdict.get("value")
     why = a.get("verdict_rule")
     run_verdict = a.get("run_verdict")
+    overrides = a.get("overrides") or []
     if not why and verdict.get("state") == "unavailable":
         why = verdict.get("note")
+    elif not why and value == "accepted by user":
+        overrode = [o["overrode"] for o in overrides if isinstance(o.get("overrode"), str) and o["overrode"]]
+        why = "over %s" % overrode[0] if overrode else None
     elif not why and _is_ref(run_verdict) and value == run_verdict.get("value"):
         kinds = []
         for r in a.get("reasons") or []:
@@ -384,11 +405,14 @@ def _verdict_line(a):
             if isinstance(kind, str) and kind and kind not in kinds:
                 kinds.append(kind)
         why = ", ".join(kinds)
-    line = "Verdict: %s" % _scalar(value)
+    text = _scalar(value)
+    if value == _audit_tasks.GATE_UNAVAILABLE_VERDICT and isinstance(gate_reason, str) and gate_reason:
+        text = "%s: %s)" % (value[:-1], gate_reason)
+    line = "Verdict: %s" % text
     if why:
         line += ("; %s" if "(" in why else " (%s)") % why
     # An override counts only at the delivered sha; its text is never shown.
-    in_effect = any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in a.get("overrides") or [])
+    in_effect = any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in overrides)
     if in_effect and value != "accepted by user":
         line += "; " + _autopsy.ACCEPTED_BY_USER
     return line + "."
@@ -399,13 +423,13 @@ def _md_bottom_line(audit, out):
     text."""
     run = audit["run"]
     c = _counts(audit)
-    lines = [_verdict_line(run["acceptance"])]
+    lines = [_verdict_line(run["acceptance"], run["checks"].get("gate_reason"))]
     tasks = audit["tasks"]
     line = "Tasks: committed %s, reviewed %s, verified %s, accepted %s of %d" % (
         _task_count(tasks, "committed"), _task_count(tasks, "reviewed"), _task_count(tasks, "verified"),
         _task_count(tasks, "accepted"), len(tasks))
     open_work = run["open_work"]
-    if open_work.get("ledger_state") is not None:
+    if c["held_unknown"]:
         # ledger status failed: the ledger's blocked and deferred tasks are
         # unknown, so no count is given.
         held = ["blocked and deferred unknown"]
@@ -721,7 +745,8 @@ def _md_finding(f, out, indent=""):
 def _md_open(o, out):
     out += ["## Open work", ""]
     if not o["tasks"]:
-        out.append("- blocked or deferred tasks: none")
+        # Unknown, not none, when ledger status failed (ledger_state is set).
+        out.append("- blocked or deferred tasks: %s" % ("unknown" if o.get("ledger_state") is not None else "none"))
     for t in o["tasks"]:
         out.append(_with_sources("- task %s: %s" % (t["task"], t["status"]), t.get("sources")))
         if t.get("reason") is not None:

@@ -67,7 +67,8 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                the verdict is "accepted (gate unavailable)", accepted is
                unavailable, "the acceptance gate is unavailable", for a task
                the result reports done that is neither settled nor blocked;
-               such a task that is not done, settled or blocked stays false.
+               a task that is not done, or is settled or blocked, stays
+               false.
 
 spec_match compares a review's spec_sha256 with the sha256 of the archived
 spec copy, else with the spec_sha256 of a setup run_started event: the
