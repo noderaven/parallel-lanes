@@ -1124,6 +1124,9 @@ test('a heredoc line too long for the Bash tool is a heredoc failure', () => {
     ["cd /w && cat > a.txt <<'EOF'\nx\nEOF\nnode a.js", "Exit code 2\n/usr/bin/bash: -c: line 4: unexpected EOF while looking for matching `''"],
     // An inner shell's EOF after the write: it names itself bash, not by path.
     [longWrite(9023, "bash -c \"echo 'x\""), "Exit code 2\nbash: -c: line 1: unexpected EOF while looking for matching `''"],
+    // The EOF line and the syntax error line of two shells: the outer one,
+    // named by its path, and an inner bash.
+    [command, `Exit code 2\n${OUTER_EOF}\nbash: -c: line 1: syntax error: unexpected end of file`],
     // More output than the shell's message, another exit code, or a line
     // without a heredoc write.
     [command, `Exit code 2\n${OUTER_EOF}\nnot ok 1 - a`],
