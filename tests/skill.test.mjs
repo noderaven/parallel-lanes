@@ -657,6 +657,9 @@ test('reference.md documents the audit', () => {
     'check ids', 'quoted as written', 'local-only',
     // output and exit codes
     'UTF-8', 'exit 0', 'exit 2', 'exit 3', '--audit-exit',
+    // the open counts, the bottom line and the terms (1.6.15)
+    'open task minor(s)', 'carried_minors_open', '## Bottom line', '## Terms',
+    '(cannot-verify items and inferred lines are not gaps)',
   ];
   for (const word of wants) {
     assert.ok(audit.includes(word), `the Audit section lacks ${word}`);

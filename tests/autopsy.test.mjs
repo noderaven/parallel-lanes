@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 11);
+  assert.equal(A.autopsy_version, 12);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   // commits counts the ledger's commits (A1 one, B1 two in one round); range
@@ -116,7 +116,10 @@ test('done lists each task and the acceptance', () => {
     status: 'unverified', reasons: [{ kind: 'checks_stale', class: 'missing' }], warnings: 1,
     accepted_by_user: false,
   });
-  assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
+  // run1's result has neither task_minors_open nor carried_minors_open.
+  assert.deepEqual(A.done.final, {
+    fixed: 1, declined: 0, open: 0, task_minors_open: 'unavailable', task_minors_open_min: 'unavailable',
+  });
   assert.equal(A.done.e2e, 'pass');
   // A1 implement and verify each run the test command once.
   assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.check, x.certainty, x.s]),
@@ -127,6 +130,49 @@ test('done lists each task and the acceptance', () => {
     'E2E-EVIDENCE-1', 'PROMPT-MARKER-1', 'TOOL-OUTPUT-1', 'Reading the brief']) {
     assert.ok(!base.text.includes(marker), `autopsy.json holds ${marker}`);
   }
+});
+
+test('done.final counts the open task minors and the carried ones', () => {
+  // A copy of run1 whose final review result edit changes; returns
+  // done.final, the md's Final review line and autopsy.json's text.
+  const run = (edit) => {
+    const dir = copyRun();
+    const path = join(dir, 'wf_1.json');
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    edit(data.result.final, data.result);
+    writeFileSync(path, JSON.stringify(data));
+    const out = autopsy(dir);
+    assert.equal(out.code, 0, out.stderr);
+    const md = readFileSync(join(dir, 'autopsy.md'), 'utf8').split('\n');
+    return { final: out.json.done.final, line: md.find((l) => l.startsWith('- Final review:')), text: out.text };
+  };
+  const minor = (id) => ({ id, severity: 'minor', file: 'src/a.js', line: 1, issue: 'MINOR-TEXT-1', fix: 'x' });
+  const earlier = 'the minor findings of the task reviews an earlier launch approved (A1) did not reach the final'
+    + " lenses or task_minors_open: no carried snapshot covers them; read those tasks' approved reviews in the"
+    + " earlier launch's report";
+  const counts = (final) => ({ fixed: 1, declined: 0, open: 0, ...final });
+  const head = '- Final review: 1 fixed, 0 declined, 0 open; task minors open: ';
+
+  const both = run((f) => { f.task_minors_open = [minor('A1-1'), minor('B1-1')]; f.carried_minors_open = ['T9-1']; });
+  assert.deepEqual(both.final, counts({ task_minors_open: 3, task_minors_open_min: false }));
+  assert.equal(both.line, `${head}3`);
+  assert.ok(!both.text.includes('MINOR-TEXT-1'));
+  // The engine's note makes the count a lower bound.
+  const lower = run((f) => { f.task_minors_open = [minor('B1-1')]; f.carried_minors_open = []; f.cannot_verify = [earlier]; });
+  assert.deepEqual(lower.final, counts({ task_minors_open: 1, task_minors_open_min: true }));
+  assert.equal(lower.line, `${head}at least 1`);
+  // An engine before carried minors counts its task minors alone.
+  const older = run((f) => { f.task_minors_open = [minor('A1-1')]; });
+  assert.deepEqual(older.final, counts({ task_minors_open: 1, task_minors_open_min: false }));
+  assert.equal(older.line, `${head}1`);
+  // Neither key: unavailable, never 0, the note or not; the bound with it.
+  const none = run((f) => { f.cannot_verify = [earlier]; });
+  assert.deepEqual(none.final, counts({ task_minors_open: 'unavailable', task_minors_open_min: 'unavailable' }));
+  assert.equal(none.line, `${head}unavailable`);
+  // No final review keeps its line.
+  const noFinal = run((f, result) => { delete result.final; });
+  assert.equal(noFinal.final, 'unavailable');
+  assert.equal(noFinal.line, '- Final review: unavailable');
 });
 
 test('phase and lane times come from agent timestamps', () => {

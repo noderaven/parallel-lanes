@@ -1850,7 +1850,7 @@ appends that summary to the hand-back report.
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 11, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 12, so `history` runs autopsy again on an older `autopsy.json`.
 - `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
   redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
   ran an agent for the same work: an agent with a task when a later one has the same task and
@@ -1889,6 +1889,15 @@ appends that summary to the hand-back report.
   What got done `- Acceptance:` line and its Summary's both end with
   `; accepted by the user at the delivered head`, and the chat summary has the `acceptance:`
   line above (it has no acceptance line otherwise).
+- `done.final` is `{fixed, declined, open, task_minors_open, task_minors_open_min}` (counts;
+  `unavailable` when the last launch's result has no final review object). `task_minors_open`
+  (1.6.15) is the open task minors: the result's `final.task_minors_open` findings plus its
+  `final.carried_minors_open` ids, `unavailable` when it has neither list, never 0.
+  `task_minors_open_min` is `true` when a `final.cannot_verify` string holds the engine's note
+  that some minors "did not reach the final lenses or task_minors_open" (the count is then a lower
+  bound), `false` otherwise, and `unavailable` with the count. autopsy.md's What got done prints
+  `- Final review: N fixed, N declined, N open; task minors open: M` (or `at least M`, or
+  `unavailable`).
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -2176,26 +2185,49 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
 - **Evidence validity.** The audit judges evidence validity from `result.verify` against the manifest's
   configured checks, with each failed rule named: `checks_missing`, `checks_stale`,
   `checks_incomplete`, `checks_failed`, `checks_unclean`, or `integrity_not_recorded` (older
-  engines, shown as a gap).
+  engines, shown as a gap). Checks that ran and failed (`invalid` by `checks_failed`) read
+  `failed checks` in `audit.md`: the Acceptance line `- evidence: failed checks (checks_failed)`,
+  the Checks line `evidence validity: failed checks [present] - checks_failed` and each task's
+  verified note `the verify at <sha7> failed (checks_failed)`; `audit.json` keeps `invalid` and
+  the rule. The e2e entry is `stale` only when the check's `checked_sha` and the delivered sha are
+  both recorded and differ; when one is not recorded it is `unavailable`, its note naming what is
+  missing (`the end-to-end check recorded no sha`, `the run recorded no delivered sha`, or both).
 - **Code outside recorded task ranges** needs `--repo`, a known latest launch and a 40 or 64 digit
   `delivered_sha`; else it is `unavailable` with the reason. It lists the commits reachable from
   the delivered sha but not from the run's start point that no task's recorded range holds
-  (integration merges and the final fix). Each is `present` when a final lens head contains it,
-  `inferred` when the final re-review's head contains it (or, for engines from 1.2.1 on when no
-  re-review head was recorded, when `final.head` does, differs from every lens head, and
-  `final.unreviewed_fix` is absent), and `missing` otherwise, with `final.unreviewed_fix` quoted
-  when it is set. When `ledger status` fails on the archived ledger, the section names that
-  failure.
+  (integration merges and the final fix). Each is `present` when a final lens head contains it
+  (note `contained in the final review's head <sha7>`), `inferred` when the final re-review's
+  head contains it (or, for engines from 1.2.1 on when no re-review head was recorded, when
+  `final.head` does, differs from every lens head, and `final.unreviewed_fix` is absent), and
+  `missing` otherwise, with `final.unreviewed_fix` quoted when it is set. When `ledger status`
+  fails on the archived ledger, the section names that failure.
 - **After delivery** (with `--head`): the commits between the delivered sha and the head,
   `unavailable` (no run evidence); with none, it is `present` and adds no gap, so a clean run
   audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
   tasks, open and declined findings, `cannot_verify` entries and stopped lanes; when `ledger
   status` fails, `ledger_state` is `unavailable` with its error, since the ledger's blocked and
-  deferred tasks are then unknown.
+  deferred tasks are then unknown, and the summary's open work line gives their count as `unknown
+  (ledger status unavailable)` and Open work as `- blocked or deferred tasks: unknown`, never 0 or
+  none. `open_work.final` also holds `task_minors_open` (the result's task minors no final lens
+  raised, quoted; `null` when the result has no such list, as before 1.3.1) and
+  `carried_minors_open` (the carried minor ids no final lens raised; `null` before 1.6.3). The
+  summary's open work line and the Open work header read `<N> open or declined final finding(s),
+  <M> open task minor(s)`: M is the open task minors plus the carried ones, `at least M` when the
+  result's `cannot_verify` holds the engine's note that some minors "did not reach the final
+  lenses or task_minors_open" (a resume whose earlier tasks no carried snapshot covers), and
+  `unavailable` when the result has neither list, never 0; N and M read `unavailable` when the
+  final review is. Under the header the open task minors are listed, then each carried id as `<id>
+  open (carried minor)`.
 - **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
   placement, changes (rulings, events, escalations), commits and review (reviews, each with its
   brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
-  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`.
+  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`. Review verdicts come
+  from the journal and are `inferred`; `audit.md` shows them as
+  `[inferred: read from the transcript]` (other `inferred` values keep `[inferred]`). A ruling
+  without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
+  verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
+  settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
+  a task that is not done, or is settled or blocked, stays `false`.
 - **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
   (counted as archive-run counts them, see "Run history") with the archived ones.
   `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one
@@ -2205,6 +2237,29 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   are recorded than archived the summary line reads `launches: 1 archived, 2 recorded, latest
   <wf>`; equal counts add no gap and leave the line as it was. Without an archived ledger the
   recorded count is `unavailable` (one gap) and nothing is listed missing.
+- **Bottom line** (1.6.15): `audit.md` opens, after its title, with `## Bottom line`, one
+  paragraph in which each part comes from one value the audit computed and none from recorded
+  text: the verdict with what made it so (audit's own rule when it disagrees with the engine, else
+  the engine's reason kinds for the engine's own verdict, as Acceptance lists them, for example
+  `Verdict: unverified (checks_stale, final_fix_unreviewed).`), or why it is `unavailable`;
+  `accepted by user` with what the user overrode, the run's own verdict and reason kinds as
+  Acceptance's `overrode` gives them (`Verdict: accepted by user (over unverified:
+  checks_failed).`), and `accepted (gate unavailable)` with check-verify's reason code inside its
+  parenthesis (`Verdict: accepted (gate unavailable: verify_evidence_time_untrusted).`), each only
+  when there is one; `accepted by the user at the delivered head` when an override at the
+  delivered sha is in effect and the verdict is not already `accepted by user` (never the
+  override's text); the tasks `committed C, reviewed R, verified V, accepted A of N`, each
+  counting `true` values with `(k settled)`, `(k not required)` and `(k unavailable)` where a task
+  has such a value, then the blocked and deferred counts above 0 (`blocked and deferred unknown`
+  when `ledger status` failed); the final findings (`N open or declined`, or `Final review
+  unavailable`), the open task minors as above and the cannot-verify items; the code outside
+  recorded task ranges and how many lack review evidence; the launches missing from the archive
+  when the ledger records more; and `G evidence gap(s) (cannot-verify items and inferred lines are
+  not gaps)`. Nothing else.
+- **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
+  states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
+  validity's), round(s), task rulings and run-end rulings, gate, carry and context added by
+  pre-flight.
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
 <run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from

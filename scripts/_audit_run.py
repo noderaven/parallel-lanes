@@ -14,8 +14,9 @@ and returns {"launches", "code_outside_ranges", "checks", "acceptance",
 "after_delivery", "open_work", "facts"}. Every derived value is an
 _audit_core.ref; recorded text is an _audit_core.quote with configured
 commands replaced by <check:<id>>. facts ({"verdict", "gate", "evidence",
-"verify_head", "accepted_run", "order_known"}) are the run facts the
-per-task sections take.
+"evidence_rule", "verify_head", "accepted_run", "order_known"}) are the run
+facts the per-task sections take; evidence_rule is evidence_validity's rule
+(None when no rule decided it).
 
 launches also compares the launches the archived ledger records
 (_launches.recorded_launches) with the ones archived: recorded is a ref of
@@ -41,6 +42,13 @@ rules (src/acceptance.js) to the archived verify result, and the verdict
 (derive_verdict) combines the run verdict, the gate, the evidence and the
 user's override, in the order the audit spec gives.
 
+checks.e2e is stale only when the end-to-end check's checked_sha and the
+delivered sha are both recorded (non-empty strings) and differ; when one is
+missing it is unavailable, its note naming what is missing (E2E_NO_CHECKED,
+E2E_NO_DELIVERED, or both joined by "; "). A commit outside the task ranges
+that a final lens head contains is present with the note LENS_NOTE (that
+head's first 7 digits).
+
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
 in manifest run order, with a recorded range; with its ledger source. When
@@ -48,6 +56,12 @@ in manifest run order, with a recorded range; with its ledger source. When
 failure instead of "no start point recorded", and open_work.ledger_state is
 unavailable with it (else ledger_state is None), so the tasks the ledger
 lists as blocked or deferred count as a gap rather than as absent.
+
+open_work.final, from the latest launch's final review result, is a ref of
+{"findings" (open and declined), "cannot_verify", "task_minors_open" (the
+result's findings, quoted; None when the result has no such list, as before
+1.3.1), "carried_minors_open" (the result's carried minor ids, its strings;
+None when it has none, as before 1.6.3)}.
 
 after_delivery (with --head) lists the commits reachable from the head but
 not from the delivered sha: unavailable, "no run evidence", when there are
@@ -70,6 +84,11 @@ import _launches as launch_counts  # noqa: E402  (the name _launches is the sect
 
 SCRIPTS = os.path.dirname(os.path.realpath(__file__))
 MISSING_LAUNCH = "the ledger records this launch; its transcripts are not archived"
+# The note of a commit outside the task ranges that a final lens head contains.
+LENS_NOTE = "contained in the final review's head %s"
+# What an e2e entry without both shas lacks (both, joined by "; ").
+E2E_NO_CHECKED = "the end-to-end check recorded no sha"
+E2E_NO_DELIVERED = "the run recorded no delivered sha"
 
 GATES = ("match", "not_required", "missing", "stale", "mismatch", "invalid", "unavailable", "checker_error")
 # What check-verify itself prints; checker_error is audit's own.
@@ -568,7 +587,8 @@ def _code_outside(run, git, git_note, launch, why, pairs):
         entry = {"commit": sha}
         lens_hit = next(((head, source) for head, source in lens if git.is_ancestor(sha, head)), None)
         if lens_hit is not None:
-            entry["coverage"] = c.ref("final review", "present", [lens_hit[1], c.src("git:" + lens_hit[0])])
+            entry["coverage"] = c.ref("final review", "present", [lens_hit[1], c.src("git:" + lens_hit[0])],
+                                      LENS_NOTE % lens_hit[0][:7])
         elif rr and git.is_ancestor(sha, rr[0]):
             entry["coverage"] = c.ref("final re-review", "inferred", [rr[1]])
         elif no_head_rule and git.is_ancestor(sha, final_head):
@@ -694,13 +714,19 @@ def _e2e(run, launch, result):
         return c.ref(None, "missing", [source], "the end-to-end check returned no result") if configured else None
     items = e2e.get("items")
     items = items if isinstance(items, list) else []
-    value = {"checked_sha": e2e.get("checked_sha"), "items": len(items),
+    checked = e2e.get("checked_sha")
+    value = {"checked_sha": checked, "items": len(items),
              "failed": sum(1 for i in items if not (isinstance(i, dict) and i.get("result") == "PASS"))}
     delivered = result.get("delivered_sha")
-    if isinstance(delivered, str) and e2e.get("checked_sha") == delivered:
+    # stale needs two recorded shas that differ; a missing one is unavailable.
+    lacking = [note for sha, note in ((checked, E2E_NO_CHECKED), (delivered, E2E_NO_DELIVERED))
+               if not (isinstance(sha, str) and sha)]
+    if lacking:
+        return c.ref(value, "unavailable", [source], "; ".join(lacking))
+    if checked == delivered:
         return c.ref(value, "present", [source])
     return c.ref(value, "stale", [source], "the end-to-end check covered %s, not the delivered %s"
-                 % (e2e.get("checked_sha"), delivered))
+                 % (checked, delivered))
 
 
 # ---- acceptance ----
@@ -899,10 +925,15 @@ def _open_work(run, launch, why, pairs):
     cannot = final.get("cannot_verify")
     cannot = [_cannot_verify(item, _wf_src(launch, "final", "cannot_verify", i), pairs)
               for i, item in enumerate(cannot if isinstance(cannot, list) else [])]
+    # Each minors list is None when the result has no such list (older
+    # engines), never [].
     minors = final.get("task_minors_open")
     minors = [_finding(f, "open", [_wf_src(launch, "final", "task_minors_open", i)], pairs)
-              for i, f in enumerate(minors if isinstance(minors, list) else [])]
-    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors}
+              for i, f in enumerate(minors)] if isinstance(minors, list) else None
+    carried = final.get("carried_minors_open")
+    carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
+    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
+             "carried_minors_open": carried}
     out["final"] = c.ref(value, "present", [_wf_src(launch, "final")])
     return out
 
@@ -939,6 +970,7 @@ def run_sections(run, git, head=None, check_verify=run_check_verify, git_note=No
         "verdict": verdict,
         "gate": gate["status"],
         "evidence": evidence,
+        "evidence_rule": rule,
         "verify_head": verify_head if isinstance(verify_head, str) else None,
         "accepted_run": verdict in ("accepted", "accepted by user"),
         "order_known": order_known,
