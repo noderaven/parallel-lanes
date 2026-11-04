@@ -26,9 +26,24 @@ The document holds no timestamp of its own and no absolute path, so the same
 inputs give the same bytes wherever the run folder lies.
 
 render_md(audit) is audit.md: its first line is FIRST_LINE, then the
-sections Summary, Acceptance, Launches, Tasks (one block per task), Code
-outside recorded task ranges, Checks, After delivery (only with --head), Open
-work and Evidence gaps. A value is shown as '<value> [<state>]', with its
+sections Bottom line, Summary, Acceptance, Launches, Tasks (one block per
+task), Code outside recorded task ranges, Checks, After delivery (only with
+--head), Open work, Evidence gaps and Terms (TERMS, fixed text). The Bottom
+line is one paragraph, each part from one value audit computed and none
+from recorded text: the verdict with its verdict_rule (or, unavailable, its
+note), ACCEPTED_BY_USER when an override's head is present (at the
+delivered sha), the tasks' committed, reviewed, verified and accepted
+counts of true values (each with '(<k> settled, <k> not required, <k>
+unavailable)' for the kinds there are) and the blocked and deferred counts
+above 0, the final findings, open task minors and cannot-verify items, the
+code outside recorded task ranges, the launches missing from the archive,
+and the gap count with NOT_GAPS. The Summary's open work line and the Open
+work header read '<N> open or declined final finding(s), <M> open task
+minor(s)': M is open_work.final's task_minors_open plus its
+carried_minors_open (_autopsy.open_task_minors), 'at least M' when a
+cannot_verify quote holds _autopsy.MINORS_NOT_REACHED, and unavailable when
+both lists are null; N and M are unavailable when the final review is.
+A value is shown as '<value> [<state>]', with its
 note after ' - ' and its sources in parentheses; a review verdict read from
 the journal shows its state as '[inferred: read from the transcript]'
 (TRANSCRIPT_INFERRED; other inferred values keep '[inferred]'). Evidence
@@ -53,6 +68,7 @@ import _audit_core as core  # noqa: E402
 import _audit_git  # noqa: E402
 import _audit_run  # noqa: E402
 import _audit_tasks  # noqa: E402
+import _autopsy  # noqa: E402
 
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
 NO_REPO = "no --repo"
@@ -62,6 +78,39 @@ TRANSCRIPT_INFERRED = "inferred: read from the transcript"
 # A ruling without by, as the ledger counts it (ledger ruling_records).
 NO_ROLE = "implementer (no role recorded)"
 FAILED_CHECKS = "failed checks"
+# The bottom line's last sentence, after the gap count.
+NOT_GAPS = "(cannot-verify items and inferred lines are not gaps)"
+# The Terms section: (term, definition), fixed text in this order.
+TERMS = (
+    ("[present]", "the value is established from the sources named after it. Not a gap."),
+    ("[missing]", "evidence the value needs should be in the archive (or the repo) and is not. An evidence gap."),
+    ("[stale]", "the evidence is for another revision or an earlier state than the one that counts, such as "
+                "checks run before the delivered sha. An evidence gap."),
+    ("[conflicting]", "two records of the same fact disagree, such as the result and the ledger. An evidence gap."),
+    ("[unavailable]", "the value cannot be read or derived from what audit was given (an older engine, no --repo, "
+                      "no launch or an unknown launch order); it is unknown, never 0 or false. An evidence gap."),
+    ("[inferred]", "derived from other evidence rather than recorded, such as a commit outside the task ranges "
+                   "that the final re-review's head contains. Not a gap."),
+    ("[%s]" % TRANSCRIPT_INFERRED, "a review verdict and its count of findings, read from the reviewer's "
+                                   "structured result in the launch's journal; the ledger records no verdict. "
+                                   "Not a gap."),
+    ("invalid", "as the gate, check-verify found the result's acceptance, its verify report or the saved "
+                "evidence malformed (verify_invalid); as evidence validity, the verify result breaks the "
+                "acceptance rule named beside it (checks that ran and failed read failed checks)."),
+    ("round(s)", "the fix rounds a task's review took, as its reviewed event records them, each a fix and a "
+                 "re-review; 0 means the review approved with no fix round."),
+    ("task rulings", "the ruling events the ledger records under a task: what an agent decided on the user's "
+                     "behalf, quoted, with its role (a ruling without one is the implementer's)."),
+    ("run-end rulings", "the rulings a run_ended event counts: the adjudications that ran in that launch, not "
+                        "the task rulings."),
+    ("gate", "check-verify's archive-mode outcome for the verify evidence: match, not_required, missing, stale, "
+             "mismatch, invalid or unavailable, or checker_error when check-verify itself failed."),
+    ("carry", "for a task the adjudicator unblocked, the text of its last adjudicator ruling, which the next "
+              "launch passes to the task as its note."),
+    ("context added by pre-flight", "a producer pre-flight found the task relies on without naming it in its "
+                                    "Consumes (the result's preflight.undeclared): its Produces block went into "
+                                    "the task's brief; it does not order the task after the producer."),
+)
 
 
 # ---- build ----
@@ -199,6 +248,39 @@ def _time(seconds):
 
 # ---- counts shared by the summary and audit.md ----
 
+def _final_counts(final):
+    """{"findings", "minors", "at_least", "cannot_verify"} of
+    open_work.final: findings the open and declined final findings, minors
+    the open task minors plus the carried ones (_autopsy.open_task_minors
+    over the quotes' text), at_least True when that is a lower bound. Each
+    count is None when the final review is unavailable, and minors also
+    when the result records neither list."""
+    value = final.get("value") if _is_ref(final) and isinstance(final.get("value"), dict) else None
+    if value is None:
+        return {"findings": None, "minors": None, "at_least": False, "cannot_verify": None}
+    cannot = value.get("cannot_verify") or []
+    minors, at_least = _autopsy.open_task_minors(value.get("task_minors_open"), value.get("carried_minors_open"),
+                                                 [x.get("quote") for x in cannot if isinstance(x, dict)])
+    return {"findings": len(value["findings"]), "minors": minors, "at_least": at_least, "cannot_verify": len(cannot)}
+
+
+def _number(n):
+    return "unavailable" if n is None else str(n)
+
+
+def _minors_text(counts):
+    """M as audit.md and the summary print it: a number, 'at least M' or
+    'unavailable'."""
+    if counts["minors"] is None:
+        return "unavailable"
+    return ("at least %d" if counts["at_least"] else "%d") % counts["minors"]
+
+
+def _open_counts(counts):
+    return "%s open or declined final finding(s), %s open task minor(s)" % (_number(counts["findings"]),
+                                                                          _minors_text(counts))
+
+
 def _counts(audit):
     run = audit["run"]
     tasks = audit["tasks"]
@@ -208,8 +290,6 @@ def _counts(audit):
     outside = run["code_outside_ranges"]
     commits = outside["value"]["commits"] if isinstance(outside.get("value"), dict) else None
     open_work = run["open_work"]
-    final = open_work.get("final")
-    findings = final["value"]["findings"] if _is_ref(final) and isinstance(final.get("value"), dict) else []
     recorded = run["launches"].get("recorded")
     recorded = recorded.get("value") if _is_ref(recorded) and isinstance(recorded.get("value"), dict) else None
     return {
@@ -227,9 +307,15 @@ def _counts(audit):
         "outside_note": outside.get("note"),
         "unreviewed": sum(1 for c in commits or [] if c["coverage"]["state"] == "missing"),
         "open_tasks": len(open_work.get("tasks") or []),
-        "findings": len(findings),
+        "final": _final_counts(open_work.get("final")),
         "gaps": len(audit["gaps"]),
     }
+
+
+def _outside_text(c):
+    if c["outside"] is None:
+        return "unavailable (%s)" % c["outside_note"]
+    return "%d commit(s), %d without review evidence" % (len(c["outside"]), c["unreviewed"])
 
 
 def _summary_lines(audit):
@@ -244,12 +330,8 @@ def _summary_lines(audit):
         lines.append("launches: %s, latest unknown (%s)" % (count, c["order"]))
     lines.append("tasks: %d; committed %d, reviewed %d, verified %d, accepted %d"
                  % (c["tasks"], c["committed"], c["reviewed"], c["verified"], c["accepted"]))
-    if c["outside"] is None:
-        lines.append("code outside recorded task ranges: unavailable (%s)" % c["outside_note"])
-    else:
-        lines.append("code outside recorded task ranges: %d commit(s), %d without review evidence"
-                     % (len(c["outside"]), c["unreviewed"]))
-    lines.append("open work: %d task(s), %d open or declined finding(s)" % (c["open_tasks"], c["findings"]))
+    lines.append("code outside recorded task ranges: %s" % _outside_text(c))
+    lines.append("open work: %d task(s), %s" % (c["open_tasks"], _open_counts(c["final"])))
     lines.append("evidence gaps: %d" % c["gaps"])
     return lines
 
@@ -259,6 +341,63 @@ def render_summary(audit, md_path):
 
 
 # ---- audit.md sections ----
+
+def _task_count(tasks, field):
+    """'<n>' tasks whose status field is true, then '(<k> settled, <k> not
+    required, <k> unavailable)' for the ones of each kind there are."""
+    refs = [t["status"][field] for t in tasks]
+    n = sum(1 for r in refs if r.get("value") is True)
+    kinds = (("settled", lambda r: r.get("value") == "settled"),
+             ("not required", lambda r: r.get("value") == "not_required"),
+             ("unavailable", lambda r: r.get("state") == "unavailable"))
+    extra = []
+    for label, test in kinds:
+        k = sum(1 for r in refs if test(r))
+        if k:
+            extra.append("%d %s" % (k, label))
+    return "%d (%s)" % (n, ", ".join(extra)) if extra else str(n)
+
+
+def _md_bottom_line(audit, out):
+    """One paragraph, each part from one value audit computed; no recorded
+    text."""
+    run = audit["run"]
+    a = run["acceptance"]
+    c = _counts(audit)
+    verdict = a["verdict"]
+    why = a.get("verdict_rule") or (verdict.get("note") if verdict.get("state") == "unavailable" else None)
+    line = "Verdict: %s%s" % (_scalar(verdict.get("value")), " (%s)" % why if why else "")
+    # An override counts only at the delivered sha; its text is never shown.
+    if any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in a.get("overrides") or []):
+        line += "; " + _autopsy.ACCEPTED_BY_USER
+    lines = [line + "."]
+    tasks = audit["tasks"]
+    line = "Tasks: committed %s, reviewed %s, verified %s, accepted %s of %d" % (
+        _task_count(tasks, "committed"), _task_count(tasks, "reviewed"), _task_count(tasks, "verified"),
+        _task_count(tasks, "accepted"), len(tasks))
+    held = [(state, len(set(t["task"] for t in run["open_work"]["tasks"] if t["status"] == state)))
+            for state in ("blocked", "deferred")]
+    held = ["%d %s" % (n, state) for state, n in held if n]
+    lines.append(line + ("; " + ", ".join(held) if held else "") + ".")
+    f = c["final"]
+    if f["findings"] is None:
+        lines.append("Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.")
+    else:
+        lines.append("Final findings: %d open or declined; open task minors: %s; cannot-verify items: %d."
+                     % (f["findings"], _minors_text(f), f["cannot_verify"]))
+    lines.append("Code outside recorded task ranges: %s." % _outside_text(c))
+    missing = len(run["launches"].get("missing") or [])
+    if missing and c["recorded"] is not None:
+        lines.append("Launches missing from the archive: %d of %d recorded." % (missing, c["recorded"]))
+    lines.append("%d evidence gap(s) %s." % (c["gaps"], NOT_GAPS))
+    out += ["## Bottom line", ""] + lines + [""]
+
+
+def _md_terms(out):
+    out += ["## Terms", ""]
+    out += ["- %s: %s" % (term, text) for term, text in TERMS]
+    out.append("")
+
 
 def _md_summary(audit, out):
     out += ["## Summary", ""]
@@ -573,10 +712,8 @@ def _md_open(o, out):
         out.append(_ref("stopped lanes", stopped, value="none" if isinstance(lanes, list) else None))
     final = o["final"]
     value = final.get("value")
-    if not isinstance(value, dict):
-        out.append(_ref("final review", final))
-    else:
-        out.append(_ref("final review", final, value="%d open or declined finding(s)" % len(value["findings"])))
+    out.append(_ref("final review", final, value=_open_counts(_final_counts(final))))
+    if isinstance(value, dict):
         for f in value["findings"]:
             _md_finding(f, out, "  ")
         for item in value["cannot_verify"]:
@@ -586,7 +723,7 @@ def _md_open(o, out):
                 out.append(_with_sources("  - cannot verify:", item.get("sources")))
                 for key in sorted(k for k in item if k != "sources"):
                     out += _quote(key, item[key], "    ")
-        for f in value["task_minors_open"]:
+        for f in value["task_minors_open"] or []:
             _md_finding(f, out, "  ")
     out.append("")
 
@@ -610,6 +747,7 @@ def _md_gaps(gaps, out):
 def render_md(audit):
     out = [FIRST_LINE, "", "# Audit of run %s" % (audit.get("run_id") or "unknown"), ""]
     run = audit["run"]
+    _md_bottom_line(audit, out)
     _md_summary(audit, out)
     _md_acceptance(run["acceptance"], run["checks"].get("rule"), out)
     _md_launches(run["launches"], out)
@@ -624,6 +762,7 @@ def render_md(audit):
         _md_after(run["after_delivery"], out)
     _md_open(run["open_work"], out)
     _md_gaps(audit["gaps"], out)
+    _md_terms(out)
     while out and out[-1] == "":
         out.pop()
     return "\n".join(out) + "\n"

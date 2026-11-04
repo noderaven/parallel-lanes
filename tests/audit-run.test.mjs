@@ -667,6 +667,8 @@ test('open work is listed', () => {
   assert.equal(f.cannot_verify[0].quote, 'superpowers: cannot run <check:setup#1>');
   assert.equal(f.cannot_verify[1].why.quote, 'w');
   assert.deepEqual(f.task_minors_open.map((x) => [x.id, x.issue.quote]), [['A1-1', 'nit']]);
+  // A result without carried_minors_open (before 1.6.3) has none recorded.
+  assert.equal(f.carried_minors_open, null);
   assert.deepEqual(ow.excluded.map((x) => [x.id, x.reason.quote]), [['X9', 'manual step']]);
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);

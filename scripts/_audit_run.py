@@ -57,6 +57,12 @@ failure instead of "no start point recorded", and open_work.ledger_state is
 unavailable with it (else ledger_state is None), so the tasks the ledger
 lists as blocked or deferred count as a gap rather than as absent.
 
+open_work.final, from the latest launch's final review result, is a ref of
+{"findings" (open and declined), "cannot_verify", "task_minors_open" (the
+result's findings, quoted; None when the result has no such list, as before
+1.3.1), "carried_minors_open" (the result's carried minor ids, its strings;
+None when it has none, as before 1.6.3)}.
+
 after_delivery (with --head) lists the commits reachable from the head but
 not from the delivered sha: unavailable, "no run evidence", when there are
 any, present with an empty list ("no commits after the delivered sha") when
@@ -919,10 +925,15 @@ def _open_work(run, launch, why, pairs):
     cannot = final.get("cannot_verify")
     cannot = [_cannot_verify(item, _wf_src(launch, "final", "cannot_verify", i), pairs)
               for i, item in enumerate(cannot if isinstance(cannot, list) else [])]
+    # Each minors list is None when the result has no such list (older
+    # engines), never [].
     minors = final.get("task_minors_open")
     minors = [_finding(f, "open", [_wf_src(launch, "final", "task_minors_open", i)], pairs)
-              for i, f in enumerate(minors if isinstance(minors, list) else [])]
-    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors}
+              for i, f in enumerate(minors)] if isinstance(minors, list) else None
+    carried = final.get("carried_minors_open")
+    carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
+    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
+             "carried_minors_open": carried}
     out["final"] = c.ref(value, "present", [_wf_src(launch, "final")])
     return out
 

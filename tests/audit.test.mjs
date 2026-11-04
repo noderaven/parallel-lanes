@@ -173,6 +173,22 @@ function acceptedSpec(r, o = {}) {
 
 const byTask = (json) => Object.fromEntries(json.tasks.map((t) => [t.id, t]));
 
+// The lines of an audit.md section (from its heading to the next), blank
+// lines left out.
+function mdSection(md, heading) {
+  const lines = md.split('\n');
+  const start = lines.indexOf(`## ${heading}`);
+  assert.ok(start >= 0, `no ## ${heading}: ${md}`);
+  const next = lines.findIndex((l, i) => i > start && l.startsWith('## '));
+  return lines.slice(start + 1, next < 0 ? lines.length : next).filter((l) => l !== '');
+}
+
+// audit.md before its Terms section, the fixed text that names every label.
+function beforeTerms(md) {
+  const at = md.indexOf('\n## Terms\n');
+  return at < 0 ? md : md.slice(0, at + 1);
+}
+
 // ---- the source walker ----
 
 function jsonPointer(doc, pointer) {
@@ -282,9 +298,20 @@ test('an accepted run with a repo', () => {
   }
   assert.deepEqual(json.gaps, []);
   assert.equal(md.split('\n')[0], FIRST_LINE);
-  for (const heading of ['Summary', 'Acceptance', 'Launches', 'Tasks', 'Code outside recorded task ranges', 'Checks', 'Open work', 'Evidence gaps']) {
-    assert.match(md, new RegExp(`^## ${heading}$`, 'm'), heading);
-  }
+  // The Bottom line follows the title; Terms ends the file.
+  assert.deepEqual(md.split('\n').filter((l) => l.startsWith('## ')), ['## Bottom line', '## Summary', '## Acceptance',
+    '## Launches', '## Tasks', '## Code outside recorded task ranges', '## Checks', '## Open work', '## Evidence gaps',
+    '## Terms']);
+  assert.deepEqual(md.split('\n').slice(2, 5), ['# Audit of run t1', '', '## Bottom line']);
+  assert.deepEqual(mdSection(md, 'Bottom line'), [
+    'Verdict: accepted.',
+    'Tasks: committed 2, reviewed 2, verified 2, accepted 2 of 2.',
+    'Final findings: 0 open or declined; open task minors: 0; cannot-verify items: 0.',
+    'Code outside recorded task ranges: 1 commit(s), 0 without review evidence.',
+    '0 evidence gap(s) (cannot-verify items and inferred lines are not gaps).',
+  ]);
+  assert.ok(stdout.split('\n').includes('open work: 0 task(s), 0 open or declined final finding(s), 0 open task minor(s)'),
+    stdout);
   assert.doesNotMatch(md, /^## After delivery$/m);
   assert.match(md, /^### Task A1/m);
   assert.match(md, /^### Task A2/m);
@@ -339,6 +366,11 @@ test('late evidence gives accepted (gate unavailable)', () => {
   assert.equal(md.split('\n').filter((l) => l.startsWith(line)).length, 2, md);
   // The summary counts only accepted tasks, as before.
   assert.ok(stdout.includes('accepted 0'), stdout);
+  // The bottom line names the unknown ones.
+  assert.deepEqual(mdSection(md, 'Bottom line').slice(0, 2), [
+    'Verdict: accepted (gate unavailable).',
+    'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2.',
+  ]);
 });
 
 // A verify head before the delivered sha, saved as evidence that matches the
@@ -365,7 +397,8 @@ test('a match over bad evidence is unverified', () => {
   assert.ok(lines.includes('- evidence: invalid'), md);
   assert.ok(lines.some((l) => l.startsWith('- evidence validity: invalid [stale] - checks_stale')), md);
   assert.ok(lines.includes('- verified: false [present] - the verify evidence is invalid'), md);
-  assert.doesNotMatch(md, /failed checks/);
+  assert.doesNotMatch(beforeTerms(md), /failed checks/);
+  assert.equal(mdSection(md, 'Bottom line')[0], 'Verdict: unverified (checks_stale).');
 });
 
 test('a verify whose checks failed reads failed checks in audit.md', () => {
@@ -389,6 +422,7 @@ test('a verify whose checks failed reads failed checks in audit.md', () => {
   for (const t of json.tasks) assert.deepEqual([t.status.verified.value, t.status.verified.note], [false, note], t.id);
   assert.equal(lines.filter((l) => l === `- verified: false [present] - ${note}`).length, 2, md);
   assert.doesNotMatch(md, /evidence is invalid|evidence: invalid|validity: invalid/);
+  assert.equal(mdSection(md, 'Bottom line')[0], 'Verdict: unverified (checks_failed).');
 });
 
 test('audit.md labels transcript verdicts, rulings without a role and lens-covered commits', () => {
@@ -400,7 +434,7 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
     ],
   }));
   const { json, md } = view(folder, ['--repo', r.dir]);
-  const lines = md.split('\n');
+  const lines = beforeTerms(md).split('\n');
   // Review verdicts come from the journal.
   const label = '[inferred: read from the transcript]';
   assert.deepEqual(lines.filter((l) => l.includes(label)), [
@@ -427,6 +461,166 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
   assert.deepEqual([entry.coverage.value, entry.coverage.state, entry.coverage.note], ['final review', 'present', note]);
   assert.ok(lens.md.split('\n').includes(
     `- ${r.fix}: final review [present] - ${note} (wf_aaaaaa.json #/result/final/lens_heads/0/head; git:${r.fix})`), lens.md);
+});
+
+test('open counts add the open task minors and the carried ones', () => {
+  const r = repoRun();
+  const minor = (id) => ({ id, task: id.split('-')[0], severity: 'minor', file: 'a1.txt', line: 1, issue: 'nit', fix: 'x' });
+  // The engine's note on a resume whose earlier tasks' minors no snapshot covers.
+  const earlier = 'the minor findings of the task reviews an earlier launch approved (A1) did not reach the final'
+    + " lenses or task_minors_open: no carried snapshot covers them; read those tasks' approved reviews in the"
+    + " earlier launch's report";
+  const finalWith = (extra) => ({
+    findings: [], fixed: [], declined: [], cannot_verify: [], missing_lenses: [], head: r.fix,
+    lens_heads: [{ lens: 'superpowers', head: r.a2 }],
+    open: [{ id: 'F1', lens: 'security', severity: 'important', file: 'a1.txt', line: 1, issue: 'bad' }],
+    ...extra,
+  });
+  // The final value in audit.json, the Summary's and stdout's open work
+  // lines, the Open work header and the bottom line's final review line.
+  const counts = (final) => {
+    const { json, md, stdout } = view(makeRun(acceptedSpec(r, { result: { final } })), ['--repo', r.dir]);
+    return {
+      final: json.run.open_work.final.value,
+      summary: md.split('\n').find((l) => l.startsWith('- open work: ')),
+      stdout: stdout.split('\n').find((l) => l.startsWith('open work: ')),
+      header: mdSection(md, 'Open work').find((l) => l.startsWith('- final review: ')),
+      bottom: mdSection(md, 'Bottom line').find((l) => /^Final (findings|review)/.test(l)),
+    };
+  };
+
+  // The task minors no final lens raised plus the carried ones.
+  const both = counts(finalWith({ task_minors_open: [minor('A1-1'), minor('A2-1')], carried_minors_open: ['T9-1'] }));
+  assert.deepEqual(both.final.task_minors_open.map((f) => f.id), ['A1-1', 'A2-1']);
+  assert.deepEqual(both.final.carried_minors_open, ['T9-1']);
+  const three = '1 open or declined final finding(s), 3 open task minor(s)';
+  assert.equal(both.summary, `- open work: 0 task(s), ${three}`);
+  assert.equal(both.stdout, `open work: 0 task(s), ${three}`);
+  assert.equal(both.header, `- final review: ${three} [present] (wf_aaaaaa.json #/result/final)`);
+  assert.equal(both.bottom, 'Final findings: 1 open or declined; open task minors: 3; cannot-verify items: 0.');
+
+  // The engine's note makes the count a lower bound.
+  const lower = counts(finalWith({ task_minors_open: [minor('A2-1')], carried_minors_open: [], cannot_verify: [earlier] }));
+  const atLeast = '1 open or declined final finding(s), at least 1 open task minor(s)';
+  assert.equal(lower.summary, `- open work: 0 task(s), ${atLeast}`);
+  assert.equal(lower.stdout, `open work: 0 task(s), ${atLeast}`);
+  assert.equal(lower.header, `- final review: ${atLeast} [present] (wf_aaaaaa.json #/result/final)`);
+  assert.equal(lower.bottom, 'Final findings: 1 open or declined; open task minors: at least 1; cannot-verify items: 1.');
+
+  // An engine before carried minors counts its task minors alone.
+  const older = counts(finalWith({ task_minors_open: [minor('A1-1')] }));
+  assert.equal(older.final.carried_minors_open, null);
+  assert.equal(older.stdout, 'open work: 0 task(s), 1 open or declined final finding(s), 1 open task minor(s)');
+
+  // Neither key: unavailable, never 0.
+  const none = counts(finalWith({}));
+  assert.deepEqual([none.final.task_minors_open, none.final.carried_minors_open], [null, null]);
+  const unknown = '1 open or declined final finding(s), unavailable open task minor(s)';
+  assert.equal(none.summary, `- open work: 0 task(s), ${unknown}`);
+  assert.equal(none.stdout, `open work: 0 task(s), ${unknown}`);
+  assert.equal(none.header, `- final review: ${unknown} [present] (wf_aaaaaa.json #/result/final)`);
+  assert.equal(none.bottom, 'Final findings: 1 open or declined; open task minors: unavailable; cannot-verify items: 0.');
+
+  // No final review: both counts are unavailable.
+  const noFinal = counts(undefined);
+  const neither = 'unavailable open or declined final finding(s), unavailable open task minor(s)';
+  assert.equal(noFinal.summary, `- open work: 0 task(s), ${neither}`);
+  assert.equal(noFinal.stdout, `open work: 0 task(s), ${neither}`);
+  assert.equal(noFinal.header,
+    `- final review: ${neither} [unavailable] - the latest launch has no final review result (wf_aaaaaa.json #/result)`);
+  assert.equal(noFinal.bottom, 'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.');
+});
+
+test('the bottom line says what is unavailable and invents nothing', () => {
+  // Like sh1: the ledger records a launch the archive lacks; A1 was
+  // committed and reviewed, A2 is blocked.
+  const ended = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
+  const folder = makeRun({
+    ledger: {
+      '_run.jsonl': [setup(S('0')), ended],
+      'a.jsonl': [
+        { task: 'A1', event: 'started', base: S('0') },
+        { task: 'A1', event: 'committed', commits: [S('1')], base: S('0'), head: S('1') },
+        reviewed('A1', S('1')),
+        { task: 'A2', event: 'blocked', reason: 'stuck zqblocked' },
+      ],
+    },
+  });
+  const { json, md } = view(folder);
+  const bottom = mdSection(md, 'Bottom line');
+  assert.deepEqual(bottom, [
+    'Verdict: unavailable (no launch).',
+    'Tasks: committed 1, reviewed 1, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2; 1 blocked.',
+    'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.',
+    'Code outside recorded task ranges: unavailable (no --repo).',
+    'Launches missing from the archive: 1 of 1 recorded.',
+    `${json.gaps.length} evidence gap(s) (cannot-verify items and inferred lines are not gaps).`,
+  ]);
+  assert.ok(json.gaps.length > 0);
+  assert.doesNotMatch(bottom.join('\n'), /zqblocked/);
+
+  // A launch without a start: the launch order is unknown.
+  const unordered = view(makeRun({
+    launches: [{ wf: 'wf_a', durationMs: DURATION, result: {
+      acceptance: { status: 'accepted', reasons: [], warnings: [] },
+      final: { open: [], declined: [], cannot_verify: [], task_minors_open: [] },
+    } }],
+  }));
+  assert.deepEqual(mdSection(unordered.md, 'Bottom line').slice(0, 4), [
+    'Verdict: unavailable (launch order unknown).',
+    'Tasks: committed 0, reviewed 0, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2.',
+    'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.',
+    'Code outside recorded task ranges: unavailable (no --repo).',
+  ]);
+});
+
+test('the bottom line names a user override at the delivered head, never its text', () => {
+  const r = repoRun();
+  const failing = verifyAt(r.fix, {
+    ok: false,
+    results: [{ group: 'test', command: 'npm test zqcmd', exit: 1, log: '/tmp/pl/1.log', tail: 'FAIL zqtail' }],
+  });
+  const accept = (head) => ({ task: '_run', event: 'accepted', head, text: 'ship it zqoverride' });
+  const { json, md } = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.fix)] })), ['--repo', r.dir]);
+  assert.equal(json.run.acceptance.verdict.value, 'accepted by user');
+  const bottom = mdSection(md, 'Bottom line');
+  assert.deepEqual(bottom.slice(0, 2), [
+    'Verdict: accepted by user; accepted by the user at the delivered head.',
+    'Tasks: committed 2, reviewed 2, verified 0, accepted 2 of 2.',
+  ]);
+  assert.doesNotMatch(bottom.join('\n'), /zqoverride/);
+  // An override at another head is not in effect.
+  const stale = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.a2)] })), ['--repo', r.dir]);
+  assert.equal(stale.json.run.acceptance.verdict.value, 'unverified');
+  assert.equal(mdSection(stale.md, 'Bottom line')[0], 'Verdict: unverified (checks_failed).');
+});
+
+test('audit.md ends with its terms', () => {
+  const r = repoRun();
+  const accepted = view(makeRun(acceptedSpec(r)), ['--repo', r.dir]).md;
+  const empty = view(makeRun({})).md;
+  const terms = mdSection(accepted, 'Terms');
+  // Fixed text, the last section of every audit.md.
+  assert.deepEqual(mdSection(empty, 'Terms'), terms);
+  for (const md of [accepted, empty]) {
+    assert.equal(md.split('\n').filter((l) => l.startsWith('## ')).at(-1), '## Terms');
+    assert.ok(md.endsWith(`${terms.at(-1)}\n`));
+  }
+  const named = terms.map((l) => {
+    const m = /^- (\[[^\]]+\]|[^:[]+): \S/.exec(l);
+    assert.ok(m, l);
+    return m[1];
+  });
+  assert.deepEqual(named, [
+    '[present]', '[missing]', '[stale]', '[conflicting]', '[unavailable]', '[inferred]',
+    '[inferred: read from the transcript]', 'invalid', 'round(s)', 'task rulings', 'run-end rulings', 'gate', 'carry',
+    'context added by pre-flight',
+  ]);
+  // The four gap states say they are gaps; the others say they are not.
+  for (const l of terms.slice(0, 7)) {
+    const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
+    assert.ok(l.endsWith(gap ? 'An evidence gap.' : 'Not a gap.'), l);
+  }
 });
 
 test('a verify head that is not delivered is stale', () => {

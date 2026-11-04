@@ -143,7 +143,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 11
+AUTOPSY_VERSION = 12
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -515,6 +515,30 @@ def _count(value):
     return len(value) if isinstance(value, list) else UNAVAILABLE
 
 
+# The engine's cannot_verify note (from 1.3.1) on a resume whose earlier
+# tasks' minor findings no carried snapshot covers: those minors are in
+# neither the final lenses nor task_minors_open.
+MINORS_NOT_REACHED = "did not reach the final lenses or task_minors_open"
+
+
+def open_task_minors(task_minors, carried, cannot_verify):
+    """(count, at_least) of a final review's open task minors: the
+    task_minors_open findings plus the carried_minors_open ids (its
+    strings), each counted when it is a list. count is None when neither is;
+    at_least is True when count is a number and a cannot_verify string holds
+    MINORS_NOT_REACHED (the count is then a lower bound). audit passes its
+    quotes' text, so both count alike."""
+    counts = []
+    if isinstance(task_minors, list):
+        counts.append(len(task_minors))
+    if isinstance(carried, list):
+        counts.append(sum(1 for x in carried if isinstance(x, str)))
+    if not counts:
+        return None, False
+    notes = cannot_verify if isinstance(cannot_verify, list) else []
+    return sum(counts), any(isinstance(n, str) and MINORS_NOT_REACHED in n for n in notes)
+
+
 ACCEPTED_BY_USER = "accepted by the user at the delivered head"
 
 
@@ -648,8 +672,15 @@ def done_section(result, run_folder):
     else:
         acceptance = UNAVAILABLE
     fin = result.get("final")
-    final = {k: _count(fin.get(k)) for k in ("fixed", "declined", "open")} \
-        if isinstance(fin, dict) else UNAVAILABLE
+    if isinstance(fin, dict):
+        final = {k: _count(fin.get(k)) for k in ("fixed", "declined", "open")}
+        minors, at_least = open_task_minors(fin.get("task_minors_open"), fin.get("carried_minors_open"),
+                                            fin.get("cannot_verify"))
+        final["task_minors_open"] = UNAVAILABLE if minors is None else minors
+        if at_least:
+            final["task_minors_open_min"] = True
+    else:
+        final = UNAVAILABLE
     if "e2e" not in result:
         e2e = UNAVAILABLE
     elif result["e2e"] is None:
@@ -3618,7 +3649,9 @@ def _md_done(a):
         lines.append("- Acceptance: unavailable")
     fin = done["final"]
     if isinstance(fin, dict):
-        lines.append("- Final review: %s fixed, %s declined, %s open" % (fin["fixed"], fin["declined"], fin["open"]))
+        lines.append("- Final review: %s fixed, %s declined, %s open; task minors open: %s%s" % (
+            fin["fixed"], fin["declined"], fin["open"], "at least " if fin.get("task_minors_open_min") else "",
+            fin["task_minors_open"]))
     else:
         lines.append("- Final review: unavailable")
     lines.append("- End-to-end checks: %s" % done["e2e"])
