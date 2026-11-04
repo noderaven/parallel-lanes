@@ -191,7 +191,7 @@ test('a procedure check is one measured execution timed from its report', () => 
   // that exit 4 are no repeated failure.
   assert.deepEqual(kinds(json), []);
   assert.deepEqual(json.checks.waits, { checks_via_procedure: 1, wait_calls: 3, stopped: 0, improvised: NOTHING,
-    unwaited: [], left_running: [] });
+    unwaited: [], left_running: [], background_not_waited: 0 });
   // The waits are the check execution's time (checks section), not open
   // questions: d1a listed five 541.6 s waits as unexplained.
   assert.deepEqual(json.unexplained, []);
@@ -300,7 +300,7 @@ test('waits counts procedure checks, wait calls and stops', () => {
   });
   const { json, md } = autopsy(dir);
   assert.deepEqual(json.checks.waits, { checks_via_procedure: 2, wait_calls: 4, stopped: 1, improvised: NOTHING,
-    unwaited: [{ agent: 'final fix', file: lone }], left_running: [] });
+    unwaited: [{ agent: 'final fix', file: lone }], left_running: [], background_not_waited: 0 });
   assert.deepEqual(json.checks.executions.map((x) => [x.agent, x.timing, x.s]), [
     // --exact reuses its path: the stopped start has no report of its own.
     ['verify', 'unavailable', 'unavailable'],
@@ -376,7 +376,8 @@ test('an older run says checks_via_procedure unavailable', () => {
   for (const version of ['1.6.0', '1.5.1', 'unavailable']) {
     const { json, md } = autopsy(buildRun({ agents, files, version }));
     assert.deepEqual(json.checks.waits, { checks_via_procedure: 'unavailable', wait_calls: 0, stopped: 0,
-      improvised: { ...NOTHING, monitor_errors: 1 }, unwaited: [], left_running: [] }, version);
+      improvised: { ...NOTHING, monitor_errors: 1 }, unwaited: [], left_running: [], background_not_waited: 0 },
+    version);
     assert.match(md, /^Checks via the procedure: unavailable; 0 wait calls; 0 stopped$/m);
   }
   // From 1.6.1 on, no procedure call is a count of 0.

@@ -112,13 +112,14 @@ in a user line or in any tool result never counts: an agent can read such
 text from a file.
 
 slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence, span_s, merged,
-contains}], largest cost_s first. agent is the label, or null for a
+contains}, and background_s for a background_check], largest cost_s
+first. agent is the label, or null for a
 run-wide kind (relaunch, idle_gap). cost_kind is measured, bound when the
 end is an upper limit, or unavailable when the end is not known (cost_s is
 then "unavailable"). cost_s is the row's charged time and span_s its time
-before charging; merged counts the detections the row holds (1 for a lone
-one) and contains lists the kinds folded into it, sorted (see One second,
-one row below).
+before charging (for a background_check, the agent's waiting); merged
+counts the detections the row holds (1 for a lone one) and contains lists
+the kinds folded into it, sorted (see One second, one row below).
 evidence is {tool, exit, marker, program}: the tool name, the exit code a
 result reports (or null), the marker string matched (from the table in
 _autopsy.py, or null) and the program a Bash command runs (in the first
@@ -129,9 +130,22 @@ null when that still holds '=', '@' or ':'). No command, output or prompt
 text is written. A call fails when its result is an error or starts with
 an 'Exit code N' line with N not 0. The kinds:
 - background_check: a Bash call went to the background (see Background
-  runs); from the call (from its result, after a timeout) to its observed
-  completion (bound). Without an observed completion its cost_s and
-  cost_kind are "unavailable".
+  runs); the time the agent waited inside the background window, from the
+  call (from its result, after a timeout) to its observed completion
+  (bound); background_s is the window's length. A wait call is an
+  'await-checks wait' call, a BashOutput, TaskOutput or Monitor call, a
+  Bash call that runs sleep in a simple command, or a Bash or Read call
+  that names a harness tasks/<id>.output file. The waiting is the union,
+  clipped to the window, of (a) each later wait call, from its own start
+  to its result; (b) the gap between two calls next to each other when the
+  second is a wait call and the first is a wait call or the backgrounded
+  call (the model turns of a poll loop); (c) the stretch from the agent's
+  last event to the completion when it is over 60 s and no call is open
+  across it (the agent sat idle until the notice). The backgrounded call's
+  own time is no waiting. A window without waiting is no slowdown (the
+  agent kept working; checks.waits.background_not_waited counts it), and
+  its call is no long_tool_call either. Without an observed completion
+  its cost_s, cost_kind and background_s are "unavailable".
 - timeout: Claude Code's notice starts a Bash result ('Command did not
   complete within its ...', 'Command timed out after'); the call's span.
   Text in command output, files read or other tools never counts.
@@ -169,9 +183,11 @@ an 'Exit code N' line with N not 0. The kinds:
 A cost that cannot be timed is "unavailable".
 
 One second, one row: each second of an agent's time is charged to at most
-one row. Rows of one kind and one agent whose spans overlap or touch merge
+one row. A background_check's span is the agent's waiting, not its whole
+window. Rows of one kind and one agent whose spans overlap or touch merge
 into one: at the earliest start, the span their union, cost_kind the
-weakest, evidence the earliest row's. Then, per agent, the rows take its
+weakest, evidence the earliest row's (and background_s the length of the
+union of the windows). Then, per agent, the rows take its
 time in tiers: timeout and background_check; long_tool_call and
 check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
 escalation and extra_review_round. Within a tier the shorter row (span_s)
@@ -266,9 +282,14 @@ unavailable}, failed, reasons: {<code>: n}}, project_test_runs {total,
 by_role: {<role>: n}, unavailable}, repairs {attempts, eligible,
 by_status: {<status>: n}}, setup {skipped, no_setup_commands} and waits
 {checks_via_procedure, wait_calls, stopped, improvised: {monitor_errors,
-sleep_blocked, harness_output_reads}} (the long-check procedure;
+sleep_blocked, harness_output_reads}, unwaited, left_running,
+background_not_waited} (the long-check procedure;
 checks_via_procedure is unavailable for a run that could not have used it,
 and waits is unavailable for a run without tool events).
+background_not_waited counts the calls that went to the background, with
+an observed completion, in whose window the agent did not wait (see
+background_check): no slowdown, so the run still shows work it sent to
+the background.
 - A check id names a configured command: <group>#<n> is
   commands.<group>[n - 1] (test#1 is commands.test[0]),
   <lane>.<group>#<n> is lane_commands.<lane>.<group>[n - 1] and

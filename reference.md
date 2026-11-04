@@ -1856,10 +1856,13 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
     evidence (`<ledger>/checks/task-<unit>.<n>.json`): a call with `--evidence` by its file's
     basename, any other call by unit and `policy.started`; a call with missing or malformed
     evidence is `unavailable`, never a default.
-  - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`) counts the long-check
+  - `waits` (`checks_via_procedure`, `wait_calls`, `stopped`, `improvised`, `unwaited`,
+    `left_running`, `background_not_waited`) counts the long-check
     procedure ("Long checks"): executions that reserved, started and waited, the `await-checks wait`
     calls, those that exited 5, and the improvised waits (`monitor_errors`, `sleep_blocked`,
-    `harness_output_reads`); `unavailable` for a run without tool events. `unwaited` lists the
+    `harness_output_reads`); `unavailable` for a run without tool events. `background_not_waited`
+    counts the commands that went to the background, with an observed completion, that the agent
+    did not wait for (see "Background waits" below): no slowdown. `unwaited` lists the
     background check starts no `await-checks wait` on their file followed, and `left_running` those
     whose last wait said still running (exit 4), each `{agent, file}`: no await-checks wait on its
     file followed to the end (the agent may still have read the result another way, after a
@@ -1908,6 +1911,20 @@ text, because a command may carry a secret.
   have finished earlier. Without a completion notice or such a result the end and the seconds
   are `unavailable`; the agent's last event is not a bound. Text an agent reads, in a file or
   another result, never counts.
+- **Background waits:** a `background_check` costs only the time the agent waited inside the
+  background window (from the call, or from its result after a timeout, to the observed
+  completion); `background_s` is the window's length. A wait call is an `await-checks wait`
+  call, a `BashOutput`, `TaskOutput` or `Monitor` call, a Bash call that runs `sleep` in a
+  simple command, or a Bash or Read call that names a harness `tasks/<id>.output` file. The
+  waiting is the union, clipped to the window, of (a) each later wait call, from its own start
+  to its result; (b) the gap between two calls next to each other when the second is a wait
+  call and the first is a wait call or the backgrounded call (the model turns of a poll loop);
+  (c) the stretch from the agent's last event to the completion when it is over 60 s and no
+  call is open across it (the agent sat idle until the notice). The backgrounded call's own
+  time is no waiting. A background command the agent did not wait for (it kept working until
+  the completion notice) is no slowdown: `checks.waits.background_not_waited` counts it, and
+  its call is no `long_tool_call` either. Without an observed completion the row's cost and
+  `background_s` stay `unavailable`.
 - **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
   heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
   reading calls between them; an `inferred` run never proves a rerun.
@@ -1918,11 +1935,12 @@ text, because a command may carry a secret.
 
 **Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind`,
 `evidence`, `span_s` (the cost before charging, below), `merged` (how many detections the row
-holds, 1 for a lone one) and `contains` (the kinds folded into it, sorted)):
+holds, 1 for a lone one) and `contains` (the kinds folded into it, sorted); a `background_check`
+also has `background_s`, its background window's length):
 
 | Kind | Detects |
 |---|---|
-| `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background |
+| `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background; the cost is the time the agent waited inside the background window (Background waits, above) |
 | `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
 | `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
@@ -1938,7 +1956,8 @@ holds, 1 for a lone one) and `contains` (the kinds folded into it, sorted)):
 **One second, one row:** each second of an agent's time is charged to at most one row.
 - **Merging:** rows of one kind and one agent whose spans overlap or touch are one row: `at`
   the earliest start, the span their union, `cost_kind` the weakest (`bound` over `measured`),
-  `evidence` the earliest row's, and `merged` the number of detections.
+  `evidence` the earliest row's, and `merged` the number of detections. A `background_check`'s
+  span is its waiting; a merged one's `background_s` is the length of the union of its windows.
 - **Charging:** per agent, the rows take its time in four tiers, in this order: `timeout` and
   `background_check` (Claude Code's notice about a call, and the wait for it);
   `long_tool_call` and `check_rerun` (one call's own time); `repeated_failure`,

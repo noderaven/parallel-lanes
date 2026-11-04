@@ -492,7 +492,9 @@ test('each detector finds its slowdown with its cost', () => {
   assert.equal(run2.code, 0, run2.stderr);
   assert.deepEqual(S.detectors, Object.fromEntries(KINDS.map((k) => [k, 'ok'])));
   const expected = {
-    background_check: ['A1 implement', T('09:00:10'), 90, 'bound'],
+    // The agent sat idle from the call's result (09:00:12) to the notice
+    // (09:01:40): 88 s of waiting inside the 90 s background window.
+    background_check: ['A1 implement', T('09:00:10'), 88, 'bound'],
     // Its window to the next write (32 s) holds the edit_retry, charged first.
     heredoc_failure: ['A1 implement', T('09:01:50'), 10, 'bound'],
     edit_retry: ['A1 implement', T('09:02:00'), 22, 'measured'],
@@ -515,7 +517,9 @@ test('each detector finds its slowdown with its cost', () => {
     const s = byKind[kind];
     assert.deepEqual([s.agent, s.at, s.cost_s, s.cost_kind], expected[kind], kind);
     assert.deepEqual([s.span_s, s.merged, s.contains], [kind === 'heredoc_failure' ? 32 : s.cost_s, 1, []], kind);
+    assert.equal('background_s' in s, kind === 'background_check', kind);
   }
+  assert.equal(byKind.background_check.background_s, 90);
   // The largest cost comes first.
   const costs = S.slowdowns.map((s) => s.cost_s);
   assert.deepEqual(costs, [...costs].sort((x, y) => y - x));
@@ -643,8 +647,11 @@ function detect(events, notes = [], notices = []) {
     'found = _autopsy.tool_slowdowns(agent, _autopsy.configured_checks({"commands": {"test": ["npm test"]}}))',
     'settled = _autopsy.settle_slowdowns(found)',
     'calls = _autopsy._calls(agent)',
+    'run = {"folder": None, "manifest": {}, "launches": [{"wf": "wf_1", "result": {"version": "1.6.10"},',
+    '                                                    "agents": [agent]}]}',
     'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in settled],',
     '                  "suggestions": _autopsy.suggestions_section(settled, None),',
+    '                  "waits": _autopsy.waits_section(run),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
     '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
@@ -767,7 +774,9 @@ test('a poll that says running does not end a background run', () => {
   let out = detect(polled, [], notices);
   assert.deepEqual(out.ends[0], [true, 130, 'bound']);
   assert.deepEqual(out.completions[0], [130, 'completed']);
-  assert.deepEqual(brief(out), [['background_check', at(0), 130, 'bound', 'Command running in background with ID']]);
+  // The waiting: the turn up to the poll, the poll, and the idle stretch to
+  // the notice (1-130); the call's own second is not waiting.
+  assert.deepEqual(brief(out), [['background_check', at(0), 129, 'bound', 'Command running in background with ID']]);
   // A poll whose result says completed ends it first.
   out = detect([...polled,
     use(60, 'o2', 'TaskOutput', { task_id: 'bx1' }),
@@ -781,6 +790,102 @@ test('a poll that says running does not end a background run', () => {
   [], notices);
   assert.deepEqual(out.ends[0], [true, 130, 'bound']);
   assert.deepEqual(out.completions[0], [130, 'completed']);
+});
+
+// A call of one second at ts, and its result.
+const call1 = (ts, id, name, input, text = 'ok') => [use(ts, id, name, input), res(ts + 1, id, name, text)];
+const RUNNING_POLL = '<status>running</status>';
+
+test('a background check costs only the time the agent waited', () => {
+  const notices = [{ ts: 300, task_id: 'bx1', status: 'completed' }];
+  const rows = (out) => out.slowdowns.filter((s) => s.kind === 'background_check')
+    .map((s) => [s.at, s.cost_s, s.span_s, s.cost_kind, s.background_s]);
+  // Waits: (b) 1-10, (a) 10-11, (b) 11-40, (a) 40-41, (c) 41-300.
+  let out = detect([...bxRun, ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(40, 'o2', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL)], [], notices);
+  assert.deepEqual(rows(out), [[at(0), 299, 299, 'bound', 300]]);
+  assert.equal(out.waits.background_not_waited, 0);
+  assert.equal(out.suggestions.find((g) => g.kind === 'background_check').text,
+    'A command likely went to the background and the agent waited for it. For a check, try the long-check '
+    + 'procedure (run-checks --out with await-checks wait); otherwise a foreground run with a timeout long '
+    + 'enough for it.');
+  // Working: only the poll at 290 is waiting; 291 to the notice is 9 s, no
+  // idle stretch.
+  out = detect([...bxRun, ...call1(10, 'r1', 'Read', { file_path: 'a.js' }),
+    ...call1(20, 'e1', 'Edit', { file_path: 'a.js' }, 'The file a.js has been updated.'),
+    ...call1(30, 'g1', 'Bash', { command: 'git status' }),
+    ...call1(290, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL)], [], notices);
+  assert.deepEqual(rows(out), [[at(0), 1, 1, 'bound', 300]]);
+  // Idle: nothing until the notice, (c) 1-300.
+  out = detect(bxRun, [], notices);
+  assert.deepEqual(rows(out), [[at(0), 299, 299, 'bound', 300]]);
+  // Not waited: a Read every 20 s until the notice is no slowdown, and is
+  // counted.
+  const reads = [];
+  for (let ts = 10; ts <= 290; ts += 20) reads.push(...call1(ts, `r${ts}`, 'Read', { file_path: 'a.js' }));
+  out = detect([...bxRun, ...reads], [], notices);
+  assert.deepEqual(out.slowdowns, []);
+  assert.equal(out.waits.background_not_waited, 1);
+  const mdWaits = (waits) => python(['import _autopsy',
+    `print(json.dumps(_autopsy._md_waits(json.loads(${JSON.stringify(JSON.stringify(waits))}))))`]);
+  assert.ok(mdWaits(out.waits).includes('Background commands not waited for: 1.'));
+  // Without an observed completion the row stays unavailable, not counted.
+  out = detect([...bxRun, ...reads]);
+  assert.deepEqual(rows(out), [[at(0), 'unavailable', 'unavailable', 'unavailable', 'unavailable']]);
+  assert.equal(out.waits.background_not_waited, 0);
+  assert.ok(!mdWaits(out.waits).some((l) => l.startsWith('Background commands not waited for')));
+  // The wait calls.
+  const calls = [
+    { name: 'Bash', input: { command: 'until grep -q done x; do sleep 5; done' } },
+    { name: 'Bash', input: { command: "tail -5 'C:/u/tmp/tasks/bx1.output'" } },
+    { name: 'Read', input: { file_path: 'C:\\u\\tmp\\tasks\\bx1.output' } },
+    { name: 'Monitor', input: { command: 'until grep -q done x; do sleep 5; done' } },
+    { name: 'BashOutput', input: { bash_id: 'bx1' } },
+    { name: 'TaskOutput', input: { task_id: 'bx1' } },
+    { name: 'Bash', input: { command: "'python3' '/skill/scripts/await-checks' wait '/l/checks/a.json'" } },
+    { name: 'Bash', input: { command: 'npm test' } },
+    { name: 'Bash', input: { command: 'echo sleep 5 > notes.txt' } },
+    { name: 'Read', input: { file_path: 'src/tasks.js' } },
+  ];
+  assert.deepEqual(python([
+    'import _autopsy',
+    `print(json.dumps([_autopsy._is_wait_call(c) for c in json.loads(${JSON.stringify(JSON.stringify(calls))})]))`,
+  ]), [true, true, true, true, true, true, true, false, false, false]);
+});
+
+test('a background window without waiting is no slowdown, and its call no long call', () => {
+  // Review focus 4: a call moved to the background at its timeout whose
+  // completion notice comes at that same result (a window of length 0).
+  const moved = 'Command did not complete within its 120s timeout and was moved to the background (ID: bx1).';
+  let out = detect([use(0, 'b1', 'Bash', { command: 'npm test' }), res(120, 'b1', 'Bash', moved)], [],
+    [{ ts: 120, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.contains]),
+    [['timeout', at(0), 120, []]]);
+  assert.equal(out.waits.background_not_waited, 1);
+  // A backgrounded call that took 130 s to return, then only short calls
+  // that do not wait.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'npm test', run_in_background: true }),
+    res(130, 'b1', 'Bash', 'Command running in background with ID: bx1'),
+    ...call1(140, 'r1', 'Read', { file_path: 'a.js' }),
+    ...call1(150, 'g1', 'Bash', { command: 'git status' }),
+  ], [], [{ ts: 160, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns, []);
+  assert.equal(out.waits.background_not_waited, 1);
+});
+
+test('two background checks waited on together are one row over both windows', () => {
+  // bx1 runs 0-50 and bx2 2-80; the polls wait for both: 10-21 for bx1,
+  // 3-21 for bx2 (from its own result). One row of 18 s; its window is the
+  // union of the two, 0-80.
+  const out = detect([...bxRun,
+    use(2, 'b2', 'Bash', { command: 'npm run e2e', run_in_background: true }),
+    res(3, 'b2', 'Bash', 'Command running in background with ID: bx2'),
+    ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(20, 'o2', 'BashOutput', { bash_id: 'bx2' }, RUNNING_POLL),
+  ], [], [{ ts: 50, task_id: 'bx1', status: 'completed' }, { ts: 80, task_id: 'bx2', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.merged, s.background_s]),
+    [['background_check', at(0), 18, 18, 2, 80]]);
 });
 
 test('notification text read from a file is not a completion', () => {

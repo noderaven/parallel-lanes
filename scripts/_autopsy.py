@@ -27,7 +27,10 @@ Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
 agent's polls and stops of the task (_completion_after); notification-
 shaped text in a user line or any tool result never counts, since an
-agent can read such text from a file.
+agent can read such text from a file. A background_check costs only the
+agent's waiting inside the window from the call to that completion
+(background_waiting); a window it did not wait in is no slowdown, and
+checks.waits counts it as background_not_waited.
 
 Queued calls. The calls of one model turn share its message id and run one
 after the other; Claude Code returns their results in order. A call's own
@@ -742,8 +745,9 @@ KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "
 
 # One suggestion per kind: a likely cause, then a change to try.
 SUGGESTIONS = {
-    "background_check": "A check likely went to the background and the agent waited for it. Try running "
-                        "checks in the foreground with a timeout long enough for the suite.",
+    "background_check": "A command likely went to the background and the agent waited for it. For a check, "
+                        "try the long-check procedure (run-checks --out with await-checks wait); otherwise a "
+                        "foreground run with a timeout long enough for it.",
     "timeout": "A tool call likely hit its time limit. Try a longer timeout for slow commands, or a "
                "narrower command while iterating.",
     "repeated_failure": "The same command likely failed again with nothing changed in between. Try "
@@ -1129,13 +1133,74 @@ def _completion_after(agent, call):
     return min(later, key=lambda f: f[0]) if later else None
 
 
+def _background_window(agent, call):
+    """(start, end) of a backgrounded call's window: from its own start (from
+    its result, after a timeout, which covers the call itself) to its
+    observed completion (_completion_after); end is None without one."""
+    start = call["end"] if notice("timeout", call) else call["own_start"]
+    done = _completion_after(agent, call)
+    return start, None if done is None else done[0]
+
+
+# The tools that wait by design: a poll of a background task, and Monitor,
+# which waits on a condition (on the archived runs it fails at once, as 'No
+# such tool available').
+WAIT_TOOLS = ("BashOutput", "TaskOutput", "Monitor")
+
+
+def _is_wait_call(call):
+    """Whether a call waits for something: a WAIT_TOOLS call, an
+    'await-checks wait' call (wait_file), a Bash call that runs sleep in a
+    simple command (past leading keywords and prefixes), or a Bash or Read
+    call that names a harness tasks/<id>.output file."""
+    if call["name"] in WAIT_TOOLS or wait_file(call) is not None or _names_harness_output(call):
+        return True
+    return any(words and _basename(words[0]) == "sleep" for words in _bash_words(call))
+
+
+def background_waiting(agent, calls, i, start, end):
+    """The agent's waiting inside the background window [start, end] of
+    calls[i], as sorted, disjoint (start, end) pieces: the union, clipped to
+    the window, of
+    (a) each later wait call (_is_wait_call), from its own start to its
+        result (to end without one);
+    (b) the gap from a call's result to the next call's own start, when the
+        next is a wait call and the call is a wait call or calls[i] (the
+        model turns of a poll loop are part of the loop);
+    (c) the stretch from the agent's last event before end (at or after
+        start) to end, when it is over IDLE_GAP_S and no call is open across
+        it (own start before end, and a result after that event or none):
+        the agent sat idle until the notice.
+    The backgrounded call's own time is no waiting. Empty when the agent
+    did not wait (a window of length 0 included)."""
+    waits = {j: _is_wait_call(calls[j]) for j in range(i + 1, len(calls))}
+    pieces = []
+    for j in range(i + 1, len(calls)):
+        if not waits[j]:
+            continue
+        c, prev = calls[j], calls[j - 1]
+        pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
+        if prev["end"] is not None and (j - 1 == i or waits[j - 1]):
+            pieces.append((prev["end"], c["own_start"]))
+    last = max((e["ts"] for e in agent["events"] if start <= e["ts"] < end), default=None)
+    if last is not None and end - last > IDLE_GAP_S and not any(
+            c["own_start"] < end and (c["end"] is None or c["end"] > last) for c in calls):
+        pieces.append((last, end))
+    clipped = [(max(a, start), min(b, end)) for a, b in pieces]
+    return [(a, b) for a, b in merged([p for p in clipped if p[0] < p[1]])]
+
+
 def tool_slowdowns(agent, checks):
     """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
     configured_checks(manifest). A procedure execution's start and its wait
     calls (_procedures) are no timeout, background_check or long_tool_call:
     they are one check execution (checks_section). An await-checks call that
     exits non-zero reports a status (still running, stopped, busy), so it is
-    no repeated_failure either."""
+    no repeated_failure either. A background_check with an observed
+    completion covers only the agent's waiting in its window
+    (background_waiting), and _background is the window's length (None
+    without a completion); a window without waiting adds no row, and its
+    call is still no long_tool_call."""
     calls = _calls(agent)
     out = []
     procedures = _procedures(calls)
@@ -1156,14 +1221,20 @@ def tool_slowdowns(agent, checks):
             add("timeout", [i], c["own_start"], c["end"], "measured", c, timeout)
         marker = notice("background_check", c)
         if marker:
-            # A call moved to the background at its timeout: the timeout
-            # covers the call, the background wait starts at its result.
-            start = c["end"] if timeout else c["own_start"]
-            done = _completion_after(agent, c)
-            if done is not None:
-                add("background_check", [i], start, done[0], "bound", c, marker)
-            else:
-                add("background_check", [i], start, None, "unavailable", c, marker)
+            counted.add(i)
+            start, end = _background_window(agent, c)
+            if end is None:
+                sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker)
+                sd["_background"] = None
+                out.append(sd)
+                continue
+            waiting = background_waiting(agent, calls, i, start, end)
+            if waiting:  # else no slowdown: waits_section counts it as not waited
+                sd = _slowdown("background_check", agent, start, end, "bound", c, marker,
+                               covers=[(agent, a, b) for a, b in waiting])
+                sd["_cost"] = sum(b - a for a, b in waiting)
+                sd["_background"] = end - start
+                out.append(sd)
 
     failures = {}
     for i, c in enumerate(calls):
@@ -1327,7 +1398,8 @@ def _touches(a, b):
 def _merge_rows(rows):
     """One row for rows of one kind (in input order): the union of their
     covers per agent, the earliest start with its row's evidence, the
-    weakest cost_kind and the summed detection count."""
+    weakest cost_kind and the summed detection count. Background rows get
+    the length of the union of their windows (from _at, _background long)."""
     first = min(rows, key=lambda s: s["_at"])
     spans = {}
     owners = []
@@ -1339,9 +1411,13 @@ def _merge_rows(rows):
             spans[id(owner)].append((start, end))
     covers = [(o, start, end) for o in owners for start, end in merged(spans[id(o)])]
     cost = sum(end - start for _o, start, end in covers)
-    return dict(first, _cost=cost, _span_cost=cost, _covers=covers,
-                cost_kind=min((s["cost_kind"] for s in rows), key=_COST_KINDS.index),
-                _merged=sum(s["_merged"] for s in rows), _contains=set())
+    out = dict(first, _cost=cost, _span_cost=cost, _covers=covers,
+               cost_kind=min((s["cost_kind"] for s in rows), key=_COST_KINDS.index),
+               _merged=sum(s["_merged"] for s in rows), _contains=set())
+    windows = [(s["_at"], s["_at"] + s["_background"]) for s in rows if s.get("_background") is not None]
+    if windows:
+        out["_background"] = union_length(windows)
+    return out
 
 
 def settle_slowdowns(slowdowns):
@@ -1427,10 +1503,14 @@ def find_slowdowns(run, detectors):
 
 
 def public_slowdown(s):
-    """A settled internal row as autopsy.json lists it."""
-    return {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
-            "cost_kind": s["cost_kind"], "evidence": s["evidence"], "span_s": seconds(s["_span_cost"]),
-            "merged": s["_merged"], "contains": sorted(s["_contains"])}
+    """A settled internal row as autopsy.json lists it; a background_check
+    row also has background_s, its window's length."""
+    row = {"kind": s["kind"], "agent": s["agent"], "at": iso(s["_at"]), "cost_s": seconds(s["_cost"]),
+           "cost_kind": s["cost_kind"], "evidence": s["evidence"], "span_s": seconds(s["_span_cost"]),
+           "merged": s["_merged"], "contains": sorted(s["_contains"])}
+    if s["kind"] == "background_check":
+        row["background_s"] = seconds(s.get("_background"))
+    return row
 
 
 # ---- checks ----
@@ -1822,8 +1902,9 @@ def _at_least(version, wanted):
 
 
 def waits_section(run):
-    """{checks_via_procedure, wait_calls, stopped, improvised} over every
-    agent's calls; unavailable without any tool event in the run.
+    """{checks_via_procedure, wait_calls, stopped, improvised, unwaited,
+    left_running, background_not_waited} over every agent's calls;
+    unavailable without any tool event in the run.
 
     checks_via_procedure counts the procedure executions (_procedures) with
     an 'await-checks reserve' call of the same agent before the start: the
@@ -1842,10 +1923,15 @@ def waits_section(run):
     'await-checks wait' on their file followed, and left_running those whose
     last wait said the check was still running (exit 4): the agent stopped
     waiting before the check ended (1.6.4: Claude Code 2.1.300 discourages
-    waiting on background commands). Each is {agent, file}."""
+    waiting on background commands). Each is {agent, file}.
+
+    background_not_waited counts the calls Claude Code moved to the
+    background, outside a procedure, whose completion was observed and in
+    whose window the agent did not wait (background_waiting is empty): no
+    background_check slowdown."""
     if not _has_tool_events(run):
         return UNAVAILABLE
-    via = waits = stopped = 0
+    via = waits = stopped = not_waited = 0
     seen = False
     improvised = {"monitor_errors": 0, "sleep_blocked": 0, "harness_output_reads": 0}
     unwaited, left_running = [], []
@@ -1853,6 +1939,13 @@ def waits_section(run):
         calls = _calls(a)
         procedures = _procedures(calls)
         label = a["entry"]["label"]
+        procedure_calls = set(procedures).union(*procedures.values())
+        for i, c in enumerate(calls):
+            if i in procedure_calls or not notice("background_check", c):
+                continue
+            start, end = _background_window(a, c)
+            if end is not None and not background_waiting(a, calls, i, start, end):
+                not_waited += 1
         for i, c in enumerate(calls):
             path = procedure_file(c)
             if path is None:
@@ -1883,7 +1976,7 @@ def waits_section(run):
     if not seen and not _at_least(_engine_version(run), PROCEDURE_VERSION):
         via = UNAVAILABLE
     return {"checks_via_procedure": via, "wait_calls": waits, "stopped": stopped, "improvised": improvised,
-            "unwaited": unwaited, "left_running": left_running}
+            "unwaited": unwaited, "left_running": left_running, "background_not_waited": not_waited}
 
 
 # A backslash before a path character (a Windows path separator); shlex
@@ -3201,6 +3294,13 @@ def _md_waits(waits):
                      "whose last wait said still running (exit 4): the agent did not wait for the result the "
                      "procedure way (it may still have read it another way).")
         lines.append("")
+        not_waited = waits.get("background_not_waited")
+        if isinstance(not_waited, int) and not_waited > 0:
+            lines.append("Background commands not waited for: %d." % not_waited)
+            lines.append("  Commands Claude Code moved to the background that completed while the agent kept "
+                         "working (no wait call, poll loop or idle stretch before the completion notice): no "
+                         "slowdown.")
+            lines.append("")
     improvised = waits.get("improvised") if isinstance(waits, dict) else None
     if isinstance(improvised, dict):
         lines.append("Improvised waits: Monitor errors %d, blocked sleeps %d, harness output reads %d" % (
