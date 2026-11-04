@@ -14,9 +14,11 @@ those two files) and prints a summary of at most 15 lines to stdout:
 the wall time, for a run with more than one launch the line 'earlier
 launches: kept <N> agents, redid <M> (<X> of agent time)' (the earlier
 launches' kept_agents, redone_agents and redone_agent_s summed, X
-unavailable if any is; see launches), the slowest phase, the top three
-slowdowns with their cost, when a recorded launch has a warned, failed or
-unread check the line
+unavailable if any is; see launches), when the user accepted the
+delivered head and the run's own verdict is not accepted the line
+'acceptance: <status>; accepted by the user at the delivered head' (see
+done), the slowest phase, the top three slowdowns with their cost, when
+a recorded launch has a warned, failed or unread check the line
 'launch conditions: <n> check(s) warned or failed before launch[, <k> could
 not be read]; <m> possible contributor(s)' (see launch_conditions), the
 full-suite runs, the total tokens (a minimum when some usage is missing,
@@ -24,10 +26,14 @@ unavailable when no agent has usage), the top suggestion and the absolute
 path of autopsy.md. --quiet prints nothing.
 
 autopsy.md is plain ASCII with these sections, in order: Summary (with
-the earlier launches line as '- Earlier launches: ...'), What got done,
-Where time went (for a run with more than one launch, first a launches
-table '| Launch | Status | Wall | Kept agents | Kept | Redone agents |
-Redone |' with Kept and Redone the kept_s and redone_s; then a phase
+the earlier launches line as '- Earlier launches: ...' and the acceptance
+as '- Acceptance: <status>'), What got done (its '- Acceptance: <status>
+(<kind>: <class>, ...); warnings <n>' line and the Summary's both end with
+'; accepted by the user at the delivered head' when accepted_by_user is
+true and the status is not accepted), Where time went (for a run with
+more than one launch, first a launches table '| Launch | Status | Wall |
+Kept agents | Kept | Redone agents | Redone |' with Kept and Redone the
+kept_s and redone_s; then a phase
 table, a 40-column text timeline per lane and the critical path, marked
 as an estimate), Launch conditions, Checks, Slowdowns, Tokens, Suggestions
 and Open questions (one line per unexplained entry). It holds no free text
@@ -74,9 +80,17 @@ redone agents' summed wall times (the relaunch row's span_s); each is
 
 done (from the last launch's result): tasks {<id>: {status, commits,
 rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
-warnings: <count>}, final {fixed, declined, open} (counts) and e2e
-(pass, fail or none). Free text (notes, reason details, warnings,
-findings, evidence) is never copied.
+warnings: <count>, accepted_by_user}, final {fixed, declined, open}
+(counts) and e2e (pass, fail or none). Free text (notes, reason details,
+warnings, findings, evidence) is never copied.
+- acceptance.status stays the run's own verdict. accepted_by_user is true
+  when the ledger's _run.jsonl holds an accepted event (what 'ledger
+  accept' appends) whose head equals the result's delivered_sha exactly,
+  as audit compares; with several events, when any does. It is false when
+  none is at that head, and "unavailable" without a ledger dir, without a
+  _run.jsonl in it, or without a delivered_sha of 7-64 hex digits. Lines
+  that are not JSON objects are skipped. Only the boolean is copied, never
+  the event's text (it names a person) or its head.
 
 time: wall_s (the launches' sum), phases [{phase, launch, start, end,
 wall_s, agents}], lanes [{lane, launch, start, end, busy_s, idle_s}],

@@ -22,6 +22,9 @@ slowdown's evidence holds only the tool name, an exit code, a marker string
 from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
 check execution is named by a check id or 'run-checks', never by the
 command line or the configured command (which may carry a secret).
+The ledger's accepted events give only a boolean,
+done.acceptance.accepted_by_user (user_accepted): their text names a
+person and is never written out.
 
 Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
@@ -489,7 +492,43 @@ def _count(value):
     return len(value) if isinstance(value, list) else UNAVAILABLE
 
 
-def done_section(result):
+ACCEPTED_BY_USER = "accepted by the user at the delivered head"
+
+
+def user_accepted(run_folder, result):
+    """done.acceptance.accepted_by_user: True when the run's ledger
+    _run.jsonl holds an accepted event (what ledger accept appends) whose
+    head equals result's delivered_sha exactly, as audit's
+    _matching_override compares; False when it holds none at that head;
+    UNAVAILABLE without a ledger dir, without a _run.jsonl in it, or
+    without a delivered_sha of 7-64 hex digits. Several events: True when
+    any matches. Lines that are not JSON objects are skipped. Only the
+    boolean comes out: never an event's text (it names a person) or head."""
+    delivered = result.get("delivered_sha") if isinstance(result, dict) else None
+    if not isinstance(delivered, str) or not _SHA.fullmatch(delivered):
+        return UNAVAILABLE
+    ledger = find_ledger(run_folder)
+    path = os.path.join(ledger, "_run.jsonl") if ledger else None
+    if path is None or not os.path.isfile(path):
+        return UNAVAILABLE
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return UNAVAILABLE
+    for raw in data.splitlines():
+        try:
+            event = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "accepted" and event.get("head") == delivered:
+            return True
+    return False
+
+
+def done_section(result, run_folder):
+    """The done section from the last launch's result; run_folder gives the
+    ledger that accepted_by_user reads."""
     if not isinstance(result, dict):
         result = {}
     tasks = result.get("tasks")
@@ -518,6 +557,7 @@ def done_section(result):
                         for r in reasons if isinstance(r, dict)]
             if isinstance(reasons, list) else UNAVAILABLE,
             "warnings": _count(acc.get("warnings")),
+            "accepted_by_user": user_accepted(run_folder, result),
         }
     else:
         acceptance = UNAVAILABLE
@@ -3089,7 +3129,7 @@ def analyze(run_folder):
     launches = [launch_entry(launch, redone) for launch in run["launches"]]
     last = run["launches"][-1]["result"] if run["launches"] else None
     run_id = run["manifest"].get("run_id")
-    done = done_section(last)
+    done = done_section(last, run_folder)
     detectors = detector_status(run)
     found = find_slowdowns(run, detectors)
     slowdowns = [public_slowdown(s) for s in found]
@@ -3226,6 +3266,16 @@ def _earlier_launches(a):
         _secs(total))
 
 
+def _by_user(acceptance):
+    """'; accepted by the user at the delivered head' when the user accepted
+    the delivered head (accepted_by_user true) and the run's own verdict is
+    not accepted, else ''."""
+    if isinstance(acceptance, dict) and acceptance.get("accepted_by_user") is True \
+            and acceptance.get("status") != "accepted":
+        return "; " + ACCEPTED_BY_USER
+    return ""
+
+
 def _md_summary(a):
     launches = _launch_names(a)
     detail = ", ".join("%s %s" % (l["wf"], l["status"]) for l in launches) or "none"
@@ -3237,7 +3287,8 @@ def _md_summary(a):
     earlier = _earlier_launches(a)
     if earlier is not None:
         lines.append("- Earlier launches: %s" % earlier)
-    lines.append("- Acceptance: %s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE))
+    lines.append("- Acceptance: %s%s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE,
+                                         _by_user(acceptance)))
     slowest = _slowest_phase(a)
     if slowest is not None:
         lines.append("- Slowest phase: %s (%s)" % (slowest["phase"], _secs(slowest["wall_s"])))
@@ -3269,7 +3320,7 @@ def _md_done(a):
         reasons = acc["reasons"]
         why = "" if not isinstance(reasons, list) or not reasons else \
             " (" + ", ".join("%s: %s" % (r["kind"], r["class"]) for r in reasons) + ")"
-        lines.append("- Acceptance: %s%s; warnings %s" % (acc["status"], why, acc["warnings"]))
+        lines.append("- Acceptance: %s%s; warnings %s%s" % (acc["status"], why, acc["warnings"], _by_user(acc)))
     else:
         lines.append("- Acceptance: unavailable")
     fin = done["final"]
@@ -3650,6 +3701,9 @@ def render_summary(analysis, md_path):
     earlier = _earlier_launches(a)
     if earlier is not None:
         lines.append("earlier launches: %s" % earlier)
+    by_user = _by_user(a["done"]["acceptance"])
+    if by_user:
+        lines.append("acceptance: %s%s" % (a["done"]["acceptance"]["status"], by_user))
     slowest = _slowest_phase(a)
     lines.append("slowest phase: %s" % ("unavailable" if slowest is None else
                                         "%s (%s)" % (slowest["phase"], _secs(slowest["wall_s"]))))

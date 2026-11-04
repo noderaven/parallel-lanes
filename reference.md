@@ -1823,7 +1823,9 @@ acquired.
 `autopsy.json` and `autopsy.md` into it, and prints a summary of at most 15 lines: the wall time,
 for a run with more than one launch `earlier launches: kept N agents, redid M (X of agent time)`
 (the earlier launches' `kept_agents`, `redone_agents` and `redone_agent_s` summed, X
-`unavailable` if any is), the slowest phase, the top three slowdowns with their cost, the
+`unavailable` if any is), when the user accepted the delivered head and the run's own verdict
+is not `accepted` the line `acceptance: <status>; accepted by the user at the delivered head`
+(see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
 full-suite runs, total tokens, the top suggestion and the path of `autopsy.md`. The session
 appends that summary to the hand-back report.
 
@@ -1851,6 +1853,18 @@ appends that summary to the hand-back report.
   untimed. With more than one launch, autopsy.md's "Where time went" opens with a launches table
   (`| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |`) and its Summary
   has an `Earlier launches:` line, as the chat summary has.
+- `done.acceptance` is `{status, reasons: [{kind, class}], warnings, accepted_by_user}` from the
+  last launch's result (`unavailable` when the result has no acceptance object). `status` stays
+  the run's own verdict. `accepted_by_user` is `true` when the ledger's `_run.jsonl` holds an
+  `accepted` event (what `ledger accept` appends) whose `head` equals the result's
+  `delivered_sha` exactly, as audit compares it ("accepted by user"); with several events, when
+  any does. It is `false` when none is at that head, and `unavailable` without a ledger dir,
+  without a `_run.jsonl` in it, or without a `delivered_sha` of 7-64 hex digits. Lines that are
+  not JSON objects are skipped. Only the boolean is copied: never the event's text, which names
+  a person, nor its head. When it is `true` and the status is not `accepted`, autopsy.md's
+  What got done `- Acceptance:` line and its Summary's both end with
+  `; accepted by the user at the delivered head`, and the chat summary has the `acceptance:`
+  line above (it has no acceptance line otherwise).
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.

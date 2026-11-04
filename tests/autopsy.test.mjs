@@ -109,8 +109,10 @@ test('done lists each task and the acceptance', () => {
     A1: { status: 'done', commits: ['1'.repeat(40)], rounds: 1, tier_used: 'standard' },
     B1: { status: 'done', commits: ['2'.repeat(40), '3'.repeat(40)], rounds: 0, tier_used: 'standard' },
   });
+  // run1's ledger has no accepted event at its delivered head.
   assert.deepEqual(A.done.acceptance, {
     status: 'unverified', reasons: [{ kind: 'checks_stale', class: 'missing' }], warnings: 1,
+    accepted_by_user: false,
   });
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
@@ -1392,6 +1394,124 @@ test('unclean checks are explained without suggesting to ignore source', () => {
   assert.match(g.text, /never ignore a file a check reads/i);
   assert.doesNotMatch(g.text, /ignore (all|every|these|them|the listed|the files|coverage)/i);
   assert.ok(!res.text.includes('REASON-DETAIL-2'));
+});
+
+// ---- acceptance by the user ----
+// ledger accept appends {"task": "_run", "event": "accepted", "head": <full
+// sha>, "text": TEXT} to the ledger's _run.jsonl. run1 delivers 3333...3333
+// and its _run.jsonl holds only a run_started event.
+
+const DELIVERED = '3'.repeat(40);
+const BY_USER = 'accepted by the user at the delivered head';
+
+// A copy of run1 whose last result has acceptance status `status` (its one
+// reason, checks_stale, kept) and delivers `delivered` (no delivered_sha when
+// null), with `lines` appended to the ledger's _run.jsonl.
+function acceptanceRun({ status = 'rejected', delivered = DELIVERED, lines = [] } = {}) {
+  const dir = copyRun();
+  const wfPath = join(dir, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  wf.result.acceptance.status = status;
+  if (delivered === null) delete wf.result.delivered_sha;
+  else wf.result.delivered_sha = delivered;
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  editLines(join(dir, 'p.f1.ledger', '_run.jsonl'), (ls) => [...ls, ...lines]);
+  return dir;
+}
+
+const acceptedAt = (head) => JSON.stringify({ task: '_run', event: 'accepted', head, text: 'ACCEPT-TEXT-9 by Someone' });
+
+function byUser(dir) {
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  return res.json.done.acceptance.accepted_by_user;
+}
+
+test('a user acceptance in the ledger is reported, its text never', () => {
+  const dir = acceptanceRun({ lines: [acceptedAt(DELIVERED)] });
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const json = readFileSync(join(dir, 'autopsy.json'), 'utf8');
+  // status stays the run's own verdict; only the boolean is added.
+  assert.deepEqual(JSON.parse(json).done.acceptance, {
+    status: 'rejected', reasons: [{ kind: 'checks_stale', class: 'missing' }], warnings: 1, accepted_by_user: true,
+  });
+  const done = res.md.split('## What got done\n\n')[1].split('\n## ')[0];
+  assert.ok(done.split('\n').includes(`- Acceptance: rejected (checks_stale: missing); warnings 1; ${BY_USER}`), done);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0];
+  assert.ok(summary.split('\n').includes(`- Acceptance: rejected; ${BY_USER}`), summary);
+  assert.ok(res.stdout.split('\n').includes(`acceptance: rejected; ${BY_USER}`), res.stdout);
+  assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
+  // The event's text names a person: it never reaches any output.
+  for (const [name, text] of [['autopsy.json', json], ['autopsy.md', res.md], ['summary', res.stdout]]) {
+    for (const marker of ['ACCEPT-TEXT-9', 'Someone']) assert.ok(!text.includes(marker), `${name} holds ${marker}`);
+  }
+});
+
+test('accepted_by_user needs an accepted event at the delivered head exactly', () => {
+  // Review focus 4. An event at another head changes nothing, nor one whose
+  // head is a prefix or another case of the delivered sha.
+  for (const [delivered, head] of [[DELIVERED, '4'.repeat(40)], [DELIVERED, DELIVERED.slice(0, 7)],
+    ['a'.repeat(40), 'A'.repeat(40)], [DELIVERED, null]]) {
+    assert.equal(byUser(acceptanceRun({ delivered, lines: [acceptedAt(head)] })), false, String(head));
+  }
+  // Several events: true when any is at the delivered head, in either order.
+  assert.equal(byUser(acceptanceRun({ lines: [acceptedAt(DELIVERED), acceptedAt('4'.repeat(40))] })), true);
+  assert.equal(byUser(acceptanceRun({ lines: [acceptedAt('4'.repeat(40)), acceptedAt(DELIVERED)] })), true);
+  // Lines that are not JSON objects are skipped; other events never count.
+  assert.equal(byUser(acceptanceRun({ lines: ['not json {', '[1]', '"accepted"', 'null',
+    JSON.stringify({ task: '_run', event: 'run_ended', head: DELIVERED }), acceptedAt(DELIVERED)] })), true);
+  assert.equal(byUser(acceptanceRun({ lines: ['not json {',
+    JSON.stringify({ task: '_run', event: 'run_ended', head: DELIVERED })] })), false);
+  // No accepted event (run1 as archived): false, and nothing is added.
+  const none = acceptanceRun();
+  const res = runCli(none);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(readFileSync(join(none, 'autopsy.json'), 'utf8')).done.acceptance.accepted_by_user, false);
+  assert.ok(!res.md.includes(BY_USER), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: rejected'), res.md);
+  assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
+});
+
+test('accepted_by_user is unavailable without a ledger, its _run.jsonl or a delivered sha', () => {
+  const noLedger = acceptanceRun();
+  rmSync(join(noLedger, 'p.f1.ledger'), { recursive: true });
+  assert.equal(byUser(noLedger), 'unavailable');
+  const noRunFile = acceptanceRun();
+  rmSync(join(noRunFile, 'p.f1.ledger', '_run.jsonl'));
+  assert.equal(byUser(noRunFile), 'unavailable');
+  // A delivered sha must be 7-64 hex digits (l131's is see-below).
+  for (const delivered of [null, 'see-below', '', 'abc123', 42]) {
+    const dir = acceptanceRun({ delivered, lines: [acceptedAt(delivered)] });
+    const res = runCli(dir);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).done.acceptance.accepted_by_user,
+      'unavailable', String(delivered));
+    assert.ok(!res.md.includes(BY_USER), res.md);
+    assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
+  }
+  // Without an acceptance object there is no field to add.
+  const noAcceptance = copyRun();
+  const wfPath = join(noAcceptance, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  delete wf.result.acceptance;
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  editLines(join(noAcceptance, 'p.f1.ledger', '_run.jsonl'), (ls) => [...ls, acceptedAt(DELIVERED)]);
+  const D = autopsy(noAcceptance);
+  assert.equal(D.code, 0, D.stderr);
+  assert.equal(D.json.done.acceptance, 'unavailable');
+});
+
+test('a run the engine accepted adds nothing for a user acceptance', () => {
+  const dir = acceptanceRun({ status: 'accepted', lines: [acceptedAt(DELIVERED)] });
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const acc = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).done.acceptance;
+  assert.deepEqual([acc.status, acc.accepted_by_user], ['accepted', true]);
+  assert.ok(!res.md.includes(BY_USER), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: accepted (checks_stale: missing); warnings 1'), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: accepted'), res.md);
+  assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
 });
 
 const run3 = autopsy(copyRun(RUN3));
