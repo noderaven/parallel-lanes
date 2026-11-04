@@ -654,16 +654,27 @@ test('evidence holds structured fields only', () => {
   assert.equal(program('sed -i s/a/b/ f && node a.js'), 'node');
   assert.equal(program('rm -rf x; mkdir x'), 'rm');
   assert.equal(program('git commit -m x'), 'git');
-  // A line whose quoting does not parse is read as plain words, by the same rules.
-  assert.equal(program("sleep 5; node a.js 'open"), 'node');
+  // A case pattern (a word with * or ?) is never a program, and [[ ... ]]
+  // is plumbing like [.
+  assert.equal(program('case "$f" in\n*.meta) rm "$f";;\nesac'), 'rm');
+  assert.equal(program('[[ -f a ]] && node a.js'), 'node');
+  // A line whose quoting does not parse is read as plain words, which may
+  // split quoted text: only the first simple command's program counts.
+  assert.equal(program("sleep 5; node a.js 'open"), 'sleep');
+  assert.equal(program('cd /w && grep -c "TODO|someuser" f; echo it\'s done'), 'grep');
   // An interpreter runs a script word (a path, or a script suffix), or
-  // inline code (-c, -m, -), which names the interpreter itself; a variable
-  // names only the script it runs.
+  // inline code (-c, -m, -), which names the interpreter itself; a bare
+  // variable names only the script it runs.
   assert.equal(program('bash /tmp/task-checks-x.sh'), 'task-checks-x.sh');
   assert.equal(program('python3 -c "print(1)"'), 'python3');
   assert.equal(program(`python='C:/u/py/python.exe'; "$python" C:/u/skill/scripts/run-checks --out f`), 'run-checks');
   assert.equal(program('"$python" -m pytest'), null);
   assert.equal(program('"$GIT" status'), null);
+  // A word that starts with a variable and holds a path is a path.
+  assert.equal(program('"$ROOT/node_modules/.bin/playwright" test'), 'playwright');
+  assert.equal(program('$VENV/bin/skein serve'), 'skein');
+  assert.equal(program('$X/counts.sh'), 'counts.sh');
+  assert.equal(programWith('"$SKILL/scripts/run-checks" C:/u/project-wt/lane-a --cmd test x'), 'run-checks');
 });
 
 // ---- detector cases on synthetic events (tool_slowdowns) ----

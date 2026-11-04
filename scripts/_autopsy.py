@@ -789,10 +789,15 @@ _NOT_PROGRAMS = ("cd", "pushd", "popd", "for", "case", "select", "function", "fi
 # Programs that read, test, move or wait around the work of a line: the
 # program of a line is the first that is none of these (program_of).
 PLUMBING = ("cat", "head", "tail", "grep", "ls", "wc", "echo", "pwd", "which", "true", "false", "printf",
-            "test", "[", "seq", "read", "break", "continue", "sort", "uniq", "cut", "tr", "tee", "sed", "awk",
-            "rm", "mv", "cp", "mkdir", "mktemp", "touch", "date", "git", "sleep")
+            "test", "[", "[[", "]]", "seq", "read", "break", "continue", "sort", "uniq", "cut", "tr", "tee",
+            "sed", "awk", "rm", "mv", "cp", "mkdir", "mktemp", "touch", "date", "git", "sleep")
 _LOOP_WORDS = ("for", "while", "until")
 _SCRIPT_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".sh", ".ps1")
+# A word that is only a variable, $NAME or ${NAME} (its quotes removed).
+_BARE_VARIABLE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$")
+# A glob character: a word holding one (a case pattern such as *.meta) is
+# never a program.
+_GLOB = "*?"
 
 
 def _marker(kind, text):
@@ -834,8 +839,8 @@ def exit_code(text):
 def program_of(command, checks=None):
     """The program a Bash command line ran, as a basename, or None. checks
     is configured_checks(manifest), or None. The line is read as
-    match_check reads it (_simple_commands; plain words when its quoting
-    does not parse), and the first rule that applies names the program:
+    match_check reads it (_simple_commands), and the first rule that
+    applies names the program:
     1. with checks, when match_check finds a check in the line: the program
        of the simple command that runs it;
     2. when the line holds a loop (for, while or until) and a simple command
@@ -843,46 +848,58 @@ def program_of(command, checks=None):
     3. the program of the first simple command whose program is not
        PLUMBING, else of the first one.
     Only simple commands that run a program count (not 'cd DIR', 'export
-    ...', a loop header, a closing keyword or assignments alone); each
-    one's program is _program's. None when no simple command runs one."""
+    ...', a loop header, a closing keyword, assignments alone or a case
+    pattern); each one's program is _program's. None when no simple command
+    runs one. A line whose quoting does not parse is _plain_program's."""
     if not isinstance(command, str):
         return None
+    try:
+        simple, _every = _simple_commands(command)
+    except ValueError:
+        return _plain_program(command)
     if checks is not None:
         found = _match(command, checks)
         if found is not None:
             return _first_program(found["words"])
-    commands = _program_commands(command)
+    commands = [(lead, words) for _ops, lead, words in simple]
     loop = any(w in _LOOP_WORDS for lead, words in commands for w in lead + words[:1])
     if loop and any(_program(words) == "sleep" for _lead, words in commands if _runs_program(words)):
         return "sleep"
     return _first_program([words for _lead, words in commands])
 
 
-def _program_commands(command):
-    """(lead, words) of each simple command of a line, as _simple_commands
-    gives them; when the quoting does not parse, the plain words of each
-    piece between separators, with leading keywords and prefixes split off
-    the same way."""
-    try:
-        simple, _every = _simple_commands(command)
-        return [(lead, words) for _ops, lead, words in simple]
-    except ValueError:
-        pass
-    out = []
+def _plain_program(command):
+    """program_of for a line whose quoting does not parse, read as the
+    plain words of each piece between separators (_plain_segments), which
+    may split quoted text: so only the first simple command that runs a
+    program counts (past leading keywords, 'cd DIR', 'export ...', a loop
+    header, a closing keyword, prefixes and case patterns), and no check,
+    wait-loop or plumbing rule applies. Its program word as a basename;
+    None when there is none, or when that still holds '=', '@' or ':'."""
     for words in _plain_segments(without_heredoc_bodies(command)):
         i = 0
         while i < len(words) and words[i] in _LEAD_WORDS:
             i += 1
-        rest = words[i:]
-        out.append((words[:i], rest[_skip_prefixes(rest):]))
-    return out
+        words = words[i:]
+        if not words or words[0] in _NOT_PROGRAMS or words[0].startswith("-"):
+            continue
+        i = _skip_prefixes(words)
+        if i >= len(words) or any(c in words[i] for c in _GLOB):
+            continue
+        name = _basename(words[i])
+        if not name or any(c in name for c in "=@:"):
+            return None
+        return name
+    return None
 
 
 def _runs_program(words):
     """Whether a simple command's words (leading keywords and prefixes
     skipped) run a program: not none, not 'cd DIR', 'export ...', a loop
-    header or a closing keyword (_NOT_PROGRAMS), and not an option."""
-    return bool(words) and words[0] not in _NOT_PROGRAMS and not words[0].startswith("-")
+    header or a closing keyword (_NOT_PROGRAMS), not an option, and not a
+    word with a glob character (a case pattern such as *.meta)."""
+    return (bool(words) and words[0] not in _NOT_PROGRAMS and not words[0].startswith("-")
+            and not any(c in words[0] for c in _GLOB))
 
 
 def _first_program(commands):
@@ -899,12 +916,13 @@ def _program(words):
     (python*, py, bash or sh, with .exe) followed by a script word, past
     its options, runs that script: the script's basename; followed by -c,
     -m or - (inline code), or by no script word, it is the interpreter
-    itself. A word that starts with '$' (a variable such as "$python")
-    names the basename of a script word after it in the same way, else
-    None. None also when the name holds '=', '@' or ':' (it may carry a
-    secret or a URL)."""
+    itself. A bare variable ($NAME or ${NAME}, such as "$python") names
+    the basename of a script word after it in the same way, else None; a
+    word that starts with a variable and holds a path ($VENV/bin/x) is a
+    path like any other. None also when the name holds '=', '@' or ':' (it
+    may carry a secret or a URL)."""
     name = _basename(words[0])
-    variable = words[0].startswith("$")
+    variable = _BARE_VARIABLE.match(words[0]) is not None
     if variable or _INTERPRETER.match(name):
         script = _script_word_after(words)
         if script is not None:
@@ -919,14 +937,14 @@ def _program(words):
 def _script_word_after(words):
     """The script word an interpreter's words (words[0] the interpreter)
     run: the first word past its options when it holds '/' or '\\' or ends
-    in a _SCRIPT_SUFFIXES suffix; None when there is none, or when an
-    option for inline code (-c, -m or -) comes first."""
+    in a _SCRIPT_SUFFIXES suffix, and no glob character; None when there is
+    none, or when an option for inline code (-c, -m or -) comes first."""
     i = 1
     while i < len(words) and words[i].startswith("-"):
         if words[i] == "-" or _INLINE_FLAG.match(words[i]):
             return None
         i += 2 if words[i] in _ARG_FLAGS else 1
-    if i >= len(words):
+    if i >= len(words) or any(c in words[i] for c in _GLOB):
         return None
     word = words[i]
     if "/" in word or "\\" in word or word.lower().endswith(_SCRIPT_SUFFIXES):

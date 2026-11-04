@@ -124,24 +124,29 @@ evidence is {tool, exit, marker, program, check}: the tool name, the exit
 code a result reports (or null), the marker string matched (from the table
 in _autopsy.py, or null), the program a Bash command ran, as a basename,
 and the id of the check the call ran, as checks names it (such as test#1,
-<lane>.test#1, run-checks or task-checks), or null. The line is read in simple commands
-as check matching reads it (leading keywords, NAME=value assignments and
-prefixes such as env, 'timeout DURATION' or npx skipped; 'cd DIR',
-'export ...', a loop header, a closing keyword or assignments alone run no
-program), and the program is, by the first rule that applies: (1) when the
-line runs a check, the program of the simple command that runs it; (2)
-when the line holds a loop (for, while or until) and a simple command runs
-sleep, sleep (a wait loop); (3) the first program that is not plumbing
-(cat head tail grep ls wc echo pwd which true false printf test [ seq read
-break continue sort uniq cut tr tee sed awk rm mv cp mkdir mktemp touch
-date git sleep), else the first program. A program is its simple command's
-first word; an interpreter (python*, py, bash, sh, with .exe) followed by
-a script word, past its options, gives the script's basename, and followed
-by -c, -m or - (or no script word) is the interpreter itself; a word that
-starts with '$' (a variable) followed by a script word gives the script's
-basename, else null. A script word holds '/' or '\\', or ends in .py, .js,
-.mjs, .cjs, .sh or .ps1. The program is null when it holds '=', '@' or
-':'. No command, output or prompt text is written. A call fails when its result is an error or starts with
+<lane>.test#1, run-checks or task-checks), or null. The line is read in
+simple commands as check matching reads it (leading keywords, NAME=value
+assignments and prefixes such as env, 'timeout DURATION' or npx skipped;
+'cd DIR', 'export ...', a loop header, a closing keyword, assignments alone
+or a case pattern run no program), and the program is, by the first rule
+that applies: (1) when the line runs a check, the program of the simple
+command that runs it; (2) when the line holds a loop (for, while or until)
+and a simple command runs sleep, sleep (a wait loop); (3) the first program
+that is not plumbing (cat head tail grep ls wc echo pwd which true false
+printf test [ [[ ]] seq read break continue sort uniq cut tr tee sed awk rm
+mv cp mkdir mktemp touch date git sleep), else the first program. A
+program is its simple command's first word; an interpreter (python*, py,
+bash, sh, with .exe) followed by a script word, past its options, gives the
+script's basename, and followed by -c, -m or - (or no script word) is the
+interpreter itself; a bare variable ($NAME or ${NAME}) followed by a script
+word gives the script's basename, else null, and a word that starts with a
+variable and holds a path ($VENV/bin/x) is a path like any other. A script
+word holds '/' or '\\', or ends in .py, .js, .mjs, .cjs, .sh or .ps1. A word
+with '*' or '?' (a case pattern) is never a program or a script word. The
+program is null when it holds '=', '@' or ':'. A line whose quoting does
+not parse is read as plain words, which may split quoted text: its program
+is the first simple command's, with none of the rules above. No command,
+output or prompt text is written. A call fails when its result is an error or starts with
 an 'Exit code N' line with N not 0. The kinds:
 - background_check: a Bash call went to the background (see Background
   runs); the time the agent waited inside the background window, from the
