@@ -1878,8 +1878,9 @@ appends that summary to the hand-back report.
   least tool time that can be shown, a minimum and not the total.
 - `checks` lists every execution of a configured project command or of `run-checks` (agent,
   phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
-  critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), and the
-  full-suite runs in total, inferred and per role. See "Checks" below.
+  critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), the
+  check calls with a test group (the legacy `full_suite_runs`, in total, inferred and per role)
+  and the project test runs. See "Checks" below.
   - `full_suite_runs` keeps its 1.5 meaning, check calls with a test group: a `run-checks`
     call passing `--cmd test`, whatever the command, a configured `commands.test` line, or a
     `task-checks` call whose evidence shows a test group ran.
@@ -1933,8 +1934,9 @@ text, because a command may carry a secret.
   counts. A full-suite run is a command that exactly matches a `commands.test` entry, or
   `run-checks` with `--cmd test`.
 - **Helpers:** `run-checks`, `task-checks` and `await-checks` run where a simple command's
-  program word has the helper's basename, or the script word of an interpreter (`python*`,
-  `py`, `bash`, `sh`) past its options does, not after `-c` or `-m`. From 1.6.13 a bare
+  program word has the helper's basename, or where the word after an interpreter's options
+  (`python*`, `py`, `bash`, `sh`), or after a bare variable, with or without a path, has the
+  helper's basename; not after `-c` or `-m`. From 1.6.13 a bare
   variable (`$NAME` or `${NAME}`, quoted or not) is read as an interpreter, since it holds one:
   `python='<py>'; "$python" '<skill>/scripts/run-checks' ...` is a `run-checks` call.
   `"$GIT" status` or `"$PY" -c x` runs no helper.

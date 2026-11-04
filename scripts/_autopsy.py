@@ -2380,11 +2380,11 @@ def match_check(command, checks, exit_code=None):
     ; & | && || ( ) and newlines; a & inside a redirection (2>&1, >&2, &>f)
     is no separator. A line whose quoting does not parse runs nothing.
 
-    A line with a simple command that runs run-checks (as the program, or as
-    an interpreter's script, after prefixes such as env or timeout DURATION;
-    not an interpreter given -c or -m) is a run-checks call: check
-    'run-checks', and full_suite is the certainty of the run-checks command
-    passing '--cmd test', or None.
+    A line with a simple command that runs run-checks (as the program, as
+    an interpreter's script, or after a bare $NAME; past prefixes such as
+    env or timeout DURATION; not an interpreter given -c or -m) is a
+    run-checks call: check 'run-checks', and full_suite is the certainty of
+    the run-checks command passing '--cmd test', or None.
 
     Otherwise a line with a simple command that runs task-checks (in the
     same ways) is a task-checks call: check 'task-checks', and full_suite

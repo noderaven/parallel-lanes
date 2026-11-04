@@ -446,10 +446,10 @@ the background.
 - full_suite_runs (autopsy.md's 'Check calls with a test group' and the
   summary's, the legacy count): total and by_role (run-report's roles)
   count the executions whose full_suite is ran, inferred those whose
-  full_suite is inferred. A test group may be narrower than the project suite (a
-  focused run-checks --cmd test, a targeted task check). total is a lower
-  bound: runs through a wrapper (bash -c, a script) are not seen, and
-  inferred runs may not have happened.
+  full_suite is inferred. A test group may be narrower than the project
+  suite (a focused run-checks --cmd test, a targeted task check). total
+  is a lower bound: runs through a wrapper (bash -c, a script) are not
+  seen, and inferred runs may not have happened.
 - task_check_calls: total counts the task-checks executions; by_selected
   splits them by selected; failed counts those whose evidence has ok
   false; reasons tallies the reason codes of the matched evidence
