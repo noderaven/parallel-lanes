@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 8);
+  assert.equal(A.autopsy_version, 9);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -127,7 +127,8 @@ test('done lists each task and the acceptance', () => {
 
 test('phase and lane times come from agent timestamps', () => {
   assert.deepEqual(A.launches, [
-    { wf: 'wf_1', start: T('07:00:00'), end: T('07:10:00'), wall_s: 600, status: 'complete' },
+    { wf: 'wf_1', start: T('07:00:00'), end: T('07:10:00'), wall_s: 600, status: 'complete', kept_agents: 4,
+      redone_agents: 0, kept_s: 455, redone_s: 0, redone_agent_s: 0 },
   ]);
   assert.equal(A.time.wall_s, 600);
   const phases = Object.fromEntries(A.time.phases.map((p) => [p.phase, p]));
@@ -273,9 +274,11 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.equal(D.done.e2e, 'unavailable');
   assert.equal(D.engine_version, 'unavailable');
   assert.equal(D.run_id, 'f1');
-  // Without wf_1.json the launch is timed from its agents' first and last events.
+  // Without wf_1.json the launch is timed from its agents' first and last events;
+  // B1 implement is untimed, so the time its kept agents covered is unavailable.
   assert.deepEqual(D.launches, [
-    { wf: 'wf_1', start: T('07:00:05'), end: T('07:09:50'), wall_s: 585, status: 'unavailable' },
+    { wf: 'wf_1', start: T('07:00:05'), end: T('07:09:50'), wall_s: 585, status: 'unavailable', kept_agents: 4,
+      redone_agents: 0, kept_s: 'unavailable', redone_s: 0, redone_agent_s: 0 },
   ]);
   // B1 implement may have run in what looks like a gap (its 07:01:00 to
   // 07:04:00 holds no other agent), so no gap is listed and the detector
@@ -505,7 +508,8 @@ test('each detector finds its slowdown with its cost', () => {
     escalation: ['B1 implement', T('09:02:10'), 170, 'measured'],
     retry: ['B1 review retry', T('09:05:40'), 60, 'measured'],
     extra_review_round: ['A1 fix 1', T('09:13:30'), 140, 'measured'],
-    relaunch: [null, T('08:00:00'), 300, 'measured'],
+    // wf_1's A1 implement (08:00:10-08:04:50), which wf_2 ran again.
+    relaunch: [null, T('08:00:00'), 280, 'measured'],
     idle_gap: [null, T('09:16:00'), 240, 'measured'],
   };
   assert.equal(S.slowdowns.length, KINDS.length);
@@ -598,9 +602,11 @@ test('a detector without data is not_available, not zero', () => {
   for (const kind of ['extra_review_round', 'escalation', 'retry', 'relaunch']) {
     assert.equal(D.detectors[kind], 'ok', kind);
   }
-  // The launch times still come from wf_1.json.
+  // The launch times still come from wf_1.json, but wf_1's A1 implement,
+  // which wf_2 ran again, is untimed: the relaunch cost is unknown, never 0.
   const relaunch = D.slowdowns.find((s) => s.kind === 'relaunch');
-  assert.equal(relaunch.cost_s, 300);
+  assert.deepEqual([relaunch.at, relaunch.cost_s, relaunch.cost_kind], [T('08:00:00'), 'unavailable', 'unavailable']);
+  assert.deepEqual([D.launches[0].redone_s, D.launches[0].redone_agent_s], ['unavailable', 'unavailable']);
   // Agents without timestamps have no wall time to cost.
   const retry = D.slowdowns.find((s) => s.kind === 'retry');
   assert.deepEqual([retry.agent, retry.at, retry.cost_s], ['B1 review retry', 'unavailable', 'unavailable']);
@@ -1170,20 +1176,195 @@ test('a row of unknown cost is never merged, charged or folded', () => {
   ]);
 });
 
-test('run-wide rows are never merged, charged or folded', () => {
-  // Review focus 5: a relaunch over an agent's edit_retry, and two idle gaps
-  // that touch.
+test('idle gaps, the only run-wide rows, are never merged, charged or folded', () => {
+  // A run-wide row over an agent's edit_retry, and two idle gaps that touch.
+  // Relaunch rows are not run-wide: they cover the redone agents' own time.
   assert.deepEqual(settle([
-    { kind: 'relaunch', start: 0, end: 300, runWide: true },
+    { kind: 'idle_gap', start: 0, end: 300, runWide: true },
     { kind: 'edit_retry', start: 40, end: 80 },
     { kind: 'idle_gap', start: 300, end: 400, runWide: true },
     { kind: 'idle_gap', start: 400, end: 500, runWide: true },
   ]).rows, [
-    ['relaunch', at(0), 300, 300, 1, []],
+    ['idle_gap', at(0), 300, 300, 1, []],
     ['edit_retry', at(40), 40, 40, 1, []],
     ['idle_gap', at(300), 100, 100, 1, []],
     ['idle_gap', at(400), 100, 100, 1, []],
   ]);
+});
+
+// ---- relaunches: the work a later launch ran again ----
+
+// A run folder of several launches, laid out as buildRun in
+// tests/autopsy-check-policy.test.mjs lays one out: launches [{start, s,
+// agents: [{label, phase, start, end}]}], s the launch's wall time, and a
+// manifest listing the task ids. An agent's transcript is its prompt at start
+// and a last assistant line at end; an agent given neither has lines without
+// a timestamp (untimed).
+function buildLaunches(launches, tasks = ['A1', 'B1', 'C1']) {
+  copies += 1;
+  const dir = join(TMP, `launches${copies}`);
+  mkdirSync(join(dir, 'p.f9.ledger'), { recursive: true });
+  writeFileSync(join(dir, 'p.f9.ledger', '_run.jsonl'), `${JSON.stringify({ event: 'run_started', run_id: 'f9' })}\n`);
+  writeFileSync(join(dir, 'p.lanes.json'), JSON.stringify({
+    version: 1, run_id: 'f9', plan: 'C:/src/plans/p.md', spec: null,
+    repo: { mode: 'git', root: 'C:/src/proj', branch: 'feat', base: 'main', worktree_root: 'C:/src/proj-wt',
+      ledger_dir: 'C:/src/plans/p.f9.ledger' },
+    commands: { setup: [], test: ['npm test'], lint: [], build: [] },
+    prelude: [],
+    lanes: [{ id: 'a', name: 'Lane a', tasks: tasks.map((id) => ({ id, title: id, tier: 'standard' })) }],
+    join: [],
+  }, null, 2));
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  launches.forEach((launch, i) => {
+    const wf = `wf_${i + 1}`;
+    const last = i === launches.length - 1;
+    writeFileSync(join(dir, `${wf}.json`), JSON.stringify({
+      runId: wf, workflowName: 'parallel-lanes', status: last ? 'completed' : 'stopped',
+      startTime: Date.parse(T(launch.start)), durationMs: launch.s * 1000,
+      result: { status: last ? 'complete' : 'stopped', run_id: 'f9', version: '1.6.11' },
+    }));
+    mkdirSync(join(dir, wf));
+    launch.agents.forEach((a, k) => {
+      const id = `${i + 1}x${k + 1}`;
+      writeFileSync(join(dir, wf, `agent-${id}.meta.json`), JSON.stringify({
+        agentType: 'workflow-subagent', description: a.label, workflowPhase: a.phase || 'Lane a', model: 'sonnet' }));
+      const lines = [
+        { type: 'user', timestamp: a.start && T(a.start), message: { role: 'user', content: 'Do the task.' } },
+        { type: 'assistant', timestamp: a.end && T(a.end), message: {
+          id: `m_${id}`, role: 'assistant', model: 'claude-sonnet-4-6', stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'Done.' }], usage } },
+      ];
+      writeFileSync(join(dir, wf, `agent-${id}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
+    });
+  });
+  return dir;
+}
+
+// Launch 1 (10:00:00-10:12:15): pre-flight 120 s, A1 implement 600 s and
+// B1 implement 480 s side by side, then B1 review 100 s. Launch 2
+// (11:00:00-11:02:45): pre-flight 60 s and B1 review 90 s.
+const PRE_FLIGHT = { label: 'pre-flight', phase: 'Pre-flight', start: '10:00:05', end: '10:02:05' };
+const A1_IMPLEMENT = { label: 'A1 implement', start: '10:02:10', end: '10:12:10' };
+const B1_IMPLEMENT = { label: 'B1 implement', start: '10:02:10', end: '10:10:10' };
+const B1_REVIEW = { label: 'B1 review', start: '10:10:20', end: '10:12:00' };
+const firstLaunch = (agents = [PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, B1_REVIEW]) => (
+  { start: '10:00:00', s: 735, agents });
+const secondLaunch = (agents = [
+  { label: 'pre-flight', phase: 'Pre-flight', start: '11:00:05', end: '11:01:05' },
+  { label: 'B1 review', start: '11:01:10', end: '11:02:40' },
+]) => ({ start: '11:00:00', s: 165, agents });
+const LAUNCH_KEYS = ['kept_agents', 'redone_agents', 'kept_s', 'redone_s', 'redone_agent_s'];
+const counts = (launch) => LAUNCH_KEYS.map((k) => launch[k]);
+const rowOf = (s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.span_s, s.merged, s.contains];
+const ofKind = (analysis, kind) => analysis.slowdowns.filter((s) => s.kind === kind);
+
+test('a relaunch costs only the agent time a later launch ran again', () => {
+  // run2: wf_2 runs A1 implement again, so wf_1's only agent was redone.
+  assert.deepEqual(ofKind(S, 'relaunch').map(rowOf), [[null, T('08:00:00'), 280, 'measured', 280, 1, []]]);
+  assert.deepEqual(counts(S.launches[0]), [0, 1, 0, 280, 280]);
+  assert.deepEqual(counts(S.launches[1]), [9, 0, 985, 0, 0]);
+  // It still has the largest stake (idle_gap's is 240 s).
+  assert.deepEqual(S.suggestions.slice(0, 2).map((g) => [g.kind, g.stake_s]), [['relaunch', 280], ['idle_gap', 240]]);
+});
+
+test('an agent is redone when a later launch ran its task and role, or its role without a task', () => {
+  const D = autopsy(buildLaunches([firstLaunch(), secondLaunch()])).json;
+  // pre-flight and B1 review ran again; A1 implement did not, and B1
+  // implement did not either (launch 2 ran only B1's review).
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 220, 'measured', 220, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 220, 220]);
+  assert.deepEqual(counts(D.launches[1]), [2, 0, 150, 0, 0]);
+  // A task done earlier and run again later is redone; redone_s is the wall
+  // time the redone agents covered, redone_agent_s and the cost their sum.
+  const again = autopsy(buildLaunches([firstLaunch(), secondLaunch([
+    { label: 'pre-flight', phase: 'Pre-flight', start: '11:00:05', end: '11:01:05' },
+    { label: 'A1 implement', start: '11:01:10', end: '11:05:00' },
+    { label: 'B1 implement', start: '11:01:10', end: '11:04:00' },
+  ])])).json;
+  assert.deepEqual(counts(again.launches[0]), [1, 3, 100, 720, 1200]);
+  assert.deepEqual(ofKind(again, 'relaunch').map(rowOf), [[null, T('10:00:00'), 1200, 'measured', 1200, 1, []]]);
+});
+
+test('a redone agent without timestamps makes the relaunch cost unavailable, never 0', () => {
+  // Review focus 1.
+  const dir = buildLaunches([firstLaunch([PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, { label: 'B1 review' }]),
+    secondLaunch()]);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf),
+    [[null, T('10:00:00'), 'unavailable', 'unavailable', 'unavailable', 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 'unavailable', 'unavailable']);
+  assert.equal(D.suggestions.find((g) => g.kind === 'relaunch').stake_s, 'unavailable');
+  assert.match(res.md, /^- Earlier launches: kept 2 agents, redid 2 \(unavailable of agent time\)$/m);
+  assert.match(res.stdout, /^earlier launches: kept 2 agents, redid 2 \(unavailable of agent time\)$/m);
+});
+
+test('an earlier launch with nothing redone keeps its relaunch row at 0', () => {
+  // Review focus 2: launch 2 runs only a new task, C1.
+  const dir = buildLaunches([firstLaunch(), { start: '11:00:00', s: 100,
+    agents: [{ label: 'C1 implement', start: '11:00:05', end: '11:01:35' }] }]);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 0, 'measured', 0, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [4, 0, 720, 0, 0]);
+  assert.deepEqual(D.suggestions.filter((g) => g.kind === 'relaunch').map((g) => [g.stake_s, g.count]), [[0, 1]]);
+  assert.match(res.md, /^- Earlier launches: kept 4 agents, redid 0 \(0\.0 s of agent time\)$/m);
+});
+
+test('an agent both retried and redone is charged to the retry first', () => {
+  // Review focus 3: launch 1's B1 review is a retry, and launch 2 runs B1
+  // review again. The retry keeps the agent's 100 s; the relaunch the rest.
+  const retried = { ...B1_REVIEW, label: 'B1 review retry' };
+  const D = autopsy(buildLaunches([firstLaunch([PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, retried]),
+    secondLaunch()])).json;
+  assert.deepEqual(ofKind(D, 'retry').map(rowOf), [['B1 review retry', T('10:10:20'), 100, 'measured', 100, 1, []]]);
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 120, 'measured', 220, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 220, 220]);
+  // With nothing else redone the relaunch takes nothing: it folds into the
+  // retry row (as its own tier, after the whole-agent rows, though its at,
+  // the launch start, is earlier and its span the same).
+  const folded = autopsy(buildLaunches([firstLaunch([{ ...A1_IMPLEMENT, start: '10:00:05' }, retried]),
+    secondLaunch([{ label: 'B1 review', start: '11:00:05', end: '11:02:40' }])])).json;
+  assert.deepEqual(ofKind(folded, 'retry').map(rowOf),
+    [['B1 review retry', T('10:10:20'), 100, 'measured', 100, 1, ['relaunch']]]);
+  assert.deepEqual(ofKind(folded, 'relaunch'), []);
+  assert.deepEqual(counts(folded.launches[0]), [1, 1, 725, 100, 100]);
+});
+
+test('relaunch is the fifth charging tier, after the whole-agent rows', () => {
+  const tiers = python(['import _autopsy', 'print(json.dumps(_autopsy.CHARGE_TIERS))']);
+  assert.equal(tiers.length, 5);
+  assert.deepEqual(tiers[3], ['retry', 'escalation', 'extra_review_round']);
+  assert.deepEqual(tiers[4], ['relaunch']);
+});
+
+test('a run with one launch keeps all its agents and shows no launches table', () => {
+  // Review focus 5: run1.
+  assert.deepEqual(ofKind(A, 'relaunch'), []);
+  assert.deepEqual([A.launches[0].kept_agents, A.launches[0].redone_agents], [A.time.agents.length, 0]);
+  const res = runCli(copyRun(RUN1));
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(!res.md.includes('| Launch | Status |'), res.md);
+  assert.ok(!/earlier launches/i.test(res.md), res.md);
+  assert.ok(!/earlier launches/i.test(res.stdout), res.stdout);
+});
+
+test('autopsy.md opens Where time went with the launches table, and the summaries say what was redone', () => {
+  const res = runCli(copyRun(RUN2));
+  assert.equal(res.code, 0, res.stderr);
+  const time = res.md.split('## Where time went\n\n')[1].split('\n## ')[0];
+  assert.deepEqual(time.split('\n').slice(0, 4), [
+    '| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+    '| wf_1 | stopped | 300.0 s | 0 | 0.0 s | 1 | 280.0 s |',
+    '| wf_2 | complete | 1290.0 s | 9 | 985.0 s | 0 | 0.0 s |',
+  ]);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0];
+  assert.match(summary, /^- Earlier launches: kept 0 agents, redid 1 \(280\.0 s of agent time\)$/m);
+  assert.match(res.stdout, /^earlier launches: kept 0 agents, redid 1 \(280\.0 s of agent time\)$/m);
+  assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {
@@ -1505,7 +1686,7 @@ test('autopsy.md has every section in order', () => {
   // Slowdown rows are numbered from 1, and each suggestion names its rows.
   assert.match(md, /^\| 1 \| relaunch \|/m);
   assert.ok(!/^\| 0 \|/m.test(md));
-  assert.match(md, /^1\. relaunch \(stake 300\.0 s, 1 time; slowdown row #1\):/m);
+  assert.match(md, /^1\. relaunch \(stake 280\.0 s, 1 time; slowdown row #1\):/m);
   // A row charged less than its span shows both.
   assert.match(md, /^\| \d+ \| heredoc_failure \| A1 implement \| 2026-10-10 09:01:50Z \| 10\.0 s \(upper bound\) \(of 32\.0 s\) \| tool Bash, exit 2, marker '<<', program cat \|$/m);
   assert.match(md, /^\| \d+ \| edit_retry \| A1 implement \| 2026-10-10 09:02:00Z \| 22\.0 s \| /m);

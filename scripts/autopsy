@@ -11,19 +11,27 @@ the *.ledger dir and the run report (the first of *.report.json,
 live path from the manifest, so imported runs and runs from another OS work.
 It writes RUN_FOLDER/autopsy.json and RUN_FOLDER/autopsy.md (replacing only
 those two files) and prints a summary of at most 15 lines to stdout:
-the wall time and slowest phase, the top three slowdowns with their cost,
-when a recorded launch has a warned, failed or unread check the line
+the wall time, for a run with more than one launch the line 'earlier
+launches: kept <N> agents, redid <M> (<X> of agent time)' (the earlier
+launches' kept_agents, redone_agents and redone_agent_s summed, X
+unavailable if any is; see launches), the slowest phase, the top three
+slowdowns with their cost, when a recorded launch has a warned, failed or
+unread check the line
 'launch conditions: <n> check(s) warned or failed before launch[, <k> could
 not be read]; <m> possible contributor(s)' (see launch_conditions), the
 full-suite runs, the total tokens (a minimum when some usage is missing,
 unavailable when no agent has usage), the top suggestion and the absolute
 path of autopsy.md. --quiet prints nothing.
 
-autopsy.md is plain ASCII with these sections, in order: Summary, What got
-done, Where time went (a phase table, a 40-column text timeline per lane
-and the critical path, marked as an estimate), Launch conditions, Checks,
-Slowdowns, Tokens, Suggestions and Open questions (one line per unexplained
-entry). It holds no free text from the transcripts or doctor's details.
+autopsy.md is plain ASCII with these sections, in order: Summary (with
+the earlier launches line as '- Earlier launches: ...'), What got done,
+Where time went (for a run with more than one launch, first a launches
+table '| Launch | Status | Wall | Kept agents | Kept | Redone agents |
+Redone |' with Kept and Redone the kept_s and redone_s; then a phase
+table, a 40-column text timeline per lane and the critical path, marked
+as an estimate), Launch conditions, Checks, Slowdowns, Tokens, Suggestions
+and Open questions (one line per unexplained entry). It holds no free text
+from the transcripts or doctor's details.
 Launch conditions opens with 'Observed before each launch. A condition may
 not have lasted through the run, and a warning beside a slowdown is a
 possible contributor, not a cause.' A recorded launch gets 'Observed before
@@ -38,7 +46,8 @@ in this archive: <wf>'.
 autopsy.json:
 
   {autopsy_version, inputs_fingerprint, run_id, engine_version,
-   launches: [{wf, start, end, wall_s, status}],
+   launches: [{wf, start, end, wall_s, status, kept_agents, redone_agents,
+               kept_s, redone_s, redone_agent_s}],
    done, time, tokens, checks, slowdowns, detectors, suggestions,
    unexplained, launch_conditions, orphan_snapshots}
 
@@ -49,6 +58,19 @@ ledger files); it changes when any input changes.
 launches: one per wf_* dir, in startTime order. start and end come from the
 result file's startTime and durationMs; without them, from the launch's
 agents' first timed line and last event. status is the result's status.
+An agent of a launch but the last is redone when a later launch ran an
+agent for the same work: an agent with a task (time.agents' task not
+null), when a later agent has the same task and the same role; one
+without a task (pre-flight, integrate, verify, final review <lens>, merge
+agents and the like), when a later agent without a task has the same
+role. Else it is kept, as is every agent of the last launch. Matching is
+exact on the labels' task and role: a batch unit (A1-A3) a later launch
+runs as another unit (A2-A3) never matches, and neither do launch 1's
+'wave 1 merge' and a later 'recovery merge'. kept_agents and
+redone_agents count them; kept_s and redone_s are the wall time the kept
+or redone agents covered (the union of their spans), redone_agent_s the
+redone agents' summed wall times (the relaunch row's span_s); each is
+"unavailable" when one of its agents is untimed, and 0 with no agent.
 
 done (from the last launch's result): tasks {<id>: {status, commits,
 rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
@@ -113,8 +135,8 @@ text from a file.
 
 slowdowns: [{kind, agent, at, cost_s, cost_kind, evidence, span_s, merged,
 contains}, and background_s for a background_check], largest cost_s
-first. agent is the label, or null for a
-run-wide kind (relaunch, idle_gap). cost_kind is measured, bound when the
+first. agent is the label, or null for idle_gap (run-wide) and relaunch
+(a launch's row, over its redone agents). cost_kind is measured, bound when the
 end is an upper limit, or unavailable when the end is not known (cost_s is
 then "unavailable"). cost_s is the row's charged time and span_s its time
 before charging (for a background_check, the agent's waiting); merged
@@ -189,7 +211,10 @@ model turn that came at or before its own result. The kinds:
 - escalation and retry: an agent run-report counts as one (the same label
   again at another model tier in the same launch; a label ending ' retry');
   that agent's wall time.
-- relaunch: every launch but the last; its wall time.
+- relaunch: every launch but the last, at its start; the summed wall
+  times of its redone agents (see launches), "unavailable" (cost_kind
+  too) when one of them is untimed, never 0 or a part, and 0 (listed,
+  never folded) when no agent was redone.
 - long_tool_call: a tool call over 120 s that no kind above counted.
 - idle_gap: each time.idle_gaps entry.
 - check_rerun: the same Bash command (whitespace-normalised) runs again in
@@ -210,16 +235,20 @@ window. Rows of one kind and one agent whose spans overlap or touch merge
 into one: at the earliest start, the span their union, cost_kind the
 weakest, evidence the earliest row's (and background_s the length of the
 union of the windows). Then, per agent, the rows take its
-time in tiers: timeout and background_check; long_tool_call and
+time in five tiers: timeout and background_check; long_tool_call and
 check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
-escalation and extra_review_round. Within a tier the shorter row (span_s)
+escalation and extra_review_round; relaunch (a launch's redone agents, so
+an agent both retried and redone goes to the retry first, and a relaunch
+row covers each launch's own agents, so it never merges with another).
+Within a tier the shorter row (span_s)
 goes first, then the earlier. A row takes only the parts of its span that
 no row before it took: cost_s is their length. A row left with nothing is
 dropped and its kind goes into contains of the row that took most of its
 span (the earliest on a tie); a row of zero length goes to the earliest
 row whose time, ends included, holds its instant, and with none it stays
-at 0. Run-wide rows and rows of unknown cost (span_s "unavailable") are
-never merged, charged or folded. autopsy.md shows a merged row's kind as
+at 0. Run-wide rows (idle_gap), a relaunch row with nothing redone (no
+span) and rows of unknown cost (span_s "unavailable") are never merged,
+charged or folded. autopsy.md shows a merged row's kind as
 '<kind> xN', a cost below its span as '<cost> (of <span_s> s)', and the
 check id as 'check <id>' and the folded kinds as 'contains <kind>, ...' in
 its Evidence cell.
@@ -242,8 +271,8 @@ commit any file a check needs and gitignore only known generated output.
 
 unexplained: [{start, end, s, agent}], the five largest spans over 60 s of
 an agent's time, cut at its events (a model turn, a tool call), that no
-slowdown covers. A slowdown covers its own agent's time; one without an
-agent covers any agent's.
+slowdown covers. A slowdown covers its own agent's time (a relaunch row,
+its redone agents'), and an idle gap any agent's.
 
 launch_conditions: one entry per launch, in launches order: {wf, state,
 reason, observed_at, before_start_s, doctor_version, status, checks:

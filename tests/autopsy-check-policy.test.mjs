@@ -430,13 +430,13 @@ test('legacy full_suite_runs is unchanged on the existing fixtures', () => {
   assert.ok(existsSync(join(dir, 'autopsy.md')));
 });
 
-test('AUTOPSY_VERSION is 8', () => {
+test('AUTOPSY_VERSION is 9', () => {
   assert.deepEqual(python(['print(json.dumps([_autopsy.AUTOPSY_VERSION, _autopsy.SUGGESTIONS["long_tool_call"]]))']), [
-    8, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
+    9, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
       + 'checks once before committing.',
   ]);
   const dir = buildRun({ launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 8);
+  assert.equal(autopsy(dir).json.autopsy_version, 9);
 });
 
 test('autopsy counts an empty task evidence file as malformed and unmatched', () => {

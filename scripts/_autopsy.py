@@ -93,6 +93,14 @@ execution, recognised by the script names and the flag, never by prose:
   none; calls without --evidence keep the unit and start-time matching.
 checks.waits (waits_section) counts the executions whose agent reserved a
 path first, the wait calls, the stops and the improvised waits.
+
+Relaunches. An agent of a launch but the last is redone when a later launch
+ran an agent for the same work (redone_agents): the same task and role, or,
+for an agent without a task, the same role; else it is kept, as is every
+agent of the last launch. Each launch but the last has one relaunch row over
+its redone agents' own time (agent-owned covers, so settle_slowdowns charges
+them, as the last tier), and each launch reports its kept and redone agents
+and time.
 """
 import functools
 import glob
@@ -109,7 +117,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 8
+AUTOPSY_VERSION = 9
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -558,6 +566,17 @@ def _span(agents):
     if not timed:
         return None, None
     return min(a["start"] for a in timed), max(a["end"] for a in timed)
+
+
+def _wall_of(agents):
+    """The wall time the agents covered (the union of their spans), or None
+    when one of them is untimed."""
+    return union_length([(a["start"], a["end"]) for a in agents]) if len(_timed(agents)) == len(agents) else None
+
+
+def _agent_time(agents):
+    """The agents' summed wall times, or None when one of them is untimed."""
+    return sum((a["end"] - a["start"] for a in agents), 0.0) if len(_timed(agents)) == len(agents) else None
 
 
 def launch_idle_gaps(launch):
@@ -1416,6 +1435,40 @@ def tool_slowdowns(agent, checks):
 _model = _transcripts.agent_model
 
 
+def redone_agents(run):
+    """{id(agent): True when redone, False when kept} for every agent of
+    every launch. An agent of a launch but the last is redone when a later
+    launch has an agent for the same work: with a task (entry task not None),
+    one with the same task and the same role; without a task (pre-flight,
+    integrate, verify, final review <lens>, merge agents and the like), one
+    without a task with the same role. Matching is exact on run-report's
+    strings, so a batch unit (A1-A3) a later launch runs as another unit
+    (A2-A3) never matches, and neither do 'wave 1 merge' and a later
+    'recovery merge'. Every agent of the last launch is kept."""
+    out = {}
+    later = set()
+    for launch in reversed(run["launches"]):
+        work = [(a["entry"]["task"], a["entry"]["role"]) for a in launch["agents"]]
+        for a, key in zip(launch["agents"], work):
+            out[id(a)] = key in later
+        later.update(work)
+    return out
+
+
+def relaunch_slowdown(launch, redone):
+    """The relaunch row of a launch but the last: at the launch's start, over
+    its redone agents' own time (each its own owner), costing the sum of
+    their spans; unavailable when a redone agent is untimed (never 0 or a
+    part), and 0 with no cover when no agent was redone."""
+    agents = [a for a in launch["agents"] if redone[id(a)]]
+    sd = _slowdown("relaunch", None, launch["start"], None, "measured",
+                   covers=[(a, a["start"], a["end"]) for a in _timed(agents)])
+    sd["_cost"] = _agent_time(agents)
+    if sd["_cost"] is None:
+        sd["cost_kind"] = UNAVAILABLE
+    return sd
+
+
 def run_slowdowns(run):
     """The slowdowns found in roles, launches and idle gaps."""
     out = []
@@ -1440,8 +1493,9 @@ def run_slowdowns(run):
                 out.append(_slowdown("retry", a, a["start"], a["end"], "measured"))
             if earlier is not None:
                 out.append(_slowdown("escalation", a, a["start"], a["end"], "measured"))
+    redone = redone_agents(run)
     for launch in run["launches"][:-1]:
-        out.append(_slowdown("relaunch", None, launch["start"], launch["end"], "measured"))
+        out.append(relaunch_slowdown(launch, redone))
     for launch in run["launches"]:
         for start, end in launch_idle_gaps(launch) or []:
             out.append(_slowdown("idle_gap", None, start, end, "measured"))
@@ -1482,10 +1536,13 @@ def detector_status(run):
 # Claude Code's own notice about a call and the wait for it; one call's own
 # time; a window from a failure to its recovery, which may hold other work;
 # a whole agent (retry first: an agent ended by an API error also reads as
-# an escalation).
+# an escalation); a launch's redone agents, last and in a tier of its own, so
+# that a whole-agent row over one of them (a retry, say) takes it first: in
+# the fourth tier the relaunch row could go first, being shorter or, with the
+# same span, earlier (its _at is the launch start, before any agent's).
 CHARGE_TIERS = (("timeout", "background_check"), ("long_tool_call", "check_rerun"),
                 ("repeated_failure", "heredoc_failure", "edit_retry"),
-                ("retry", "escalation", "extra_review_round"))
+                ("retry", "escalation", "extra_review_round"), ("relaunch",))
 _CHARGE_ORDER = {kind: (tier, place) for tier, kinds in enumerate(CHARGE_TIERS)
                  for place, kind in enumerate(kinds)}
 _COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
@@ -1493,7 +1550,8 @@ _COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
 
 def _charged(s):
     """Whether settle_slowdowns charges a row: a known cost over agents' own
-    time only (no run-wide cover)."""
+    time only (no run-wide cover, as an idle gap has, and at least one
+    cover: a relaunch row with nothing redone has none)."""
     return s["_cost"] is not None and bool(s["_covers"]) and all(o is not None for o, _s, _e in s["_covers"])
 
 
@@ -1544,8 +1602,11 @@ def settle_slowdowns(slowdowns):
        _contains of the row that took most of its span (the earliest on a
        tie). A row of zero length goes to the earliest row whose taken
        parts, ends included, hold its instant; with none it stays at 0.
-    Rows of unknown cost and run-wide rows (an owner None: relaunch,
-    idle_gap) are neither merged, charged nor folded."""
+    Rows of unknown cost, rows without a cover (a relaunch row with nothing
+    redone) and run-wide rows (an owner None: idle_gap) are neither merged,
+    charged nor folded. A relaunch row covers its launch's redone agents, so
+    it is charged like any agent's row (CHARGE_TIERS' last tier) and never
+    merges with another launch's."""
     rows = [dict(s, _span_cost=s["_cost"], _merged=1, _contains=set()) for s in slowdowns]
     # 1. Merge: group[i] is the index of the group row i joins.
     group = list(range(len(rows)))
@@ -2774,10 +2835,10 @@ def _procedure_spans(agent):
 def unexplained_section(run, slowdowns):
     """The largest TOP_UNEXPLAINED spans over IDLE_GAP_S that no slowdown
     covers. Each agent's time is cut at its events (a model turn, a tool
-    call); a slowdown covers its own agent's time, and one without an agent
-    (relaunch, idle gap) covers any agent's. A procedure execution's start
-    and wait calls (_procedures) cover their own time: it is check time,
-    counted in the checks section."""
+    call); a slowdown covers its own agent's time (a relaunch row, its
+    redone agents'), and an idle gap any agent's. A procedure
+    execution's start and wait calls (_procedures) cover their own time: it
+    is check time, counted in the checks section."""
     found = []
     for a in _timed(_all_agents(run)):
         covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
@@ -3008,15 +3069,24 @@ def _engine_version(run):
     return UNAVAILABLE
 
 
+def launch_entry(launch, redone):
+    """A launches[] entry: the launch's times and status, its kept and
+    redone agents (redone_agents) and the time each covered."""
+    result = launch["result"] or {}
+    wall = None if launch["start"] is None else launch["end"] - launch["start"]
+    kept = [a for a in launch["agents"] if not redone[id(a)]]
+    again = [a for a in launch["agents"] if redone[id(a)]]
+    return {"wf": launch["wf"], "start": iso(launch["start"]), "end": iso(launch["end"]),
+            "wall_s": seconds(wall), "status": _str_or_unavailable(result.get("status")),
+            "kept_agents": len(kept), "redone_agents": len(again), "kept_s": seconds(_wall_of(kept)),
+            "redone_s": seconds(_wall_of(again)), "redone_agent_s": seconds(_agent_time(again))}
+
+
 def analyze(run_folder):
     """The autopsy.json object for a history run folder."""
     run = load(run_folder)
-    launches = []
-    for launch in run["launches"]:
-        result = launch["result"] or {}
-        wall = None if launch["start"] is None else launch["end"] - launch["start"]
-        launches.append({"wf": launch["wf"], "start": iso(launch["start"]), "end": iso(launch["end"]),
-                         "wall_s": seconds(wall), "status": _str_or_unavailable(result.get("status"))})
+    redone = redone_agents(run)
+    launches = [launch_entry(launch, redone) for launch in run["launches"]]
     last = run["launches"][-1]["result"] if run["launches"] else None
     run_id = run["manifest"].get("run_id")
     done = done_section(last)
@@ -3141,6 +3211,21 @@ def _evidence_text(evidence, contains=()):
     return ", ".join(parts) if parts else "-"
 
 
+def _earlier_launches(a):
+    """'kept N agents, redid M (X of agent time)' over the launches but the
+    last, X the sum of their redone_agent_s (unavailable if any is); None for
+    a run with one launch or none."""
+    launches = _launch_names(a)
+    if len(launches) < 2:
+        return None
+    earlier = launches[:-1]
+    times = [l["redone_agent_s"] for l in earlier]
+    total = round(sum(times), 1) if all(_is_num(t) for t in times) else UNAVAILABLE
+    return "kept %s, redid %d (%s of agent time)" % (
+        _count_word(sum(l["kept_agents"] for l in earlier), "agent"), sum(l["redone_agents"] for l in earlier),
+        _secs(total))
+
+
 def _md_summary(a):
     launches = _launch_names(a)
     detail = ", ".join("%s %s" % (l["wf"], l["status"]) for l in launches) or "none"
@@ -3148,8 +3233,11 @@ def _md_summary(a):
     lines = [
         "- Run: %s (engine %s)" % (a["run_id"], a["engine_version"]),
         "- Wall time: %s over %s: %s" % (_wall(a["time"]["wall_s"]), _count_word(len(launches), "launch"), detail),
-        "- Acceptance: %s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE),
     ]
+    earlier = _earlier_launches(a)
+    if earlier is not None:
+        lines.append("- Earlier launches: %s" % earlier)
+    lines.append("- Acceptance: %s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE))
     slowest = _slowest_phase(a)
     if slowest is not None:
         lines.append("- Slowest phase: %s (%s)" % (slowest["phase"], _secs(slowest["wall_s"])))
@@ -3239,9 +3327,22 @@ def _timeline(a):
     return out
 
 
+def _md_launches(a):
+    """The launches table and its note, or nothing for a run with one
+    launch or none."""
+    launches = _launch_names(a)
+    if len(launches) < 2:
+        return []
+    return _table(["Launch", "Status", "Wall", "Kept agents", "Kept", "Redone agents", "Redone"],
+                  [[l["wf"], l["status"], _secs(l["wall_s"]), l["kept_agents"], _secs(l["kept_s"]),
+                    l["redone_agents"], _secs(l["redone_s"])] for l in launches]) + [
+        "", "An agent is redone when a later launch ran the same task and role (the same role, for an agent "
+            "without a task); Kept and Redone are the wall time the launch's kept or redone agents covered.", ""]
+
+
 def _md_time(a):
     t = a["time"]
-    lines = ["Wall time: %s." % _wall(t["wall_s"]), ""]
+    lines = _md_launches(a) + ["Wall time: %s." % _wall(t["wall_s"]), ""]
     if t["phases"]:
         lines += _table(["Phase", "Launch", "Start", "End", "Wall", "Agents"],
                         [[p["phase"], p["launch"], _when(p["start"]), _when(p["end"]), _secs(p["wall_s"]),
@@ -3546,6 +3647,9 @@ def render_summary(analysis, md_path):
     a = analysis
     lines = ["autopsy %s: wall %s over %s" % (a["run_id"], _wall(a["time"]["wall_s"]),
                                               _count_word(len(_launch_names(a)), "launch"))]
+    earlier = _earlier_launches(a)
+    if earlier is not None:
+        lines.append("earlier launches: %s" % earlier)
     slowest = _slowest_phase(a)
     lines.append("slowest phase: %s" % ("unavailable" if slowest is None else
                                         "%s (%s)" % (slowest["phase"], _secs(slowest["wall_s"]))))

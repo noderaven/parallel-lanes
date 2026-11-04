@@ -1,0 +1,71 @@
+{
+  "startTime": 1792195892144,
+  "durationMs": 2955186,
+  "status": "completed",
+  "result": {
+    "status": "complete",
+    "run_id": "r167",
+    "version": "1.6.6",
+    "delivered_sha": "784c38b6b3289361f0ace5aff418a2ab635d7325",
+    "tasks": {
+      "1": {
+        "status": "skipped",
+        "commits": [
+          "225c65a",
+          "4cbcf97"
+        ]
+      },
+      "2": {
+        "status": "skipped",
+        "commits": [
+          "225c65a",
+          "67daa8f"
+        ]
+      },
+      "3": {
+        "status": "skipped",
+        "commits": [
+          "225c65a",
+          "409704a"
+        ]
+      },
+      "4": {
+        "status": "skipped",
+        "commits": [
+          "acf6e82",
+          "efd35f8"
+        ]
+      },
+      "5": {
+        "status": "done",
+        "commits": [
+          "04dc041",
+          "696c08a"
+        ]
+      },
+      "6": {
+        "status": "done",
+        "commits": [
+          "696c08a",
+          "bc62606"
+        ]
+      },
+      "7": {
+        "status": "skipped",
+        "commits": [
+          "acf6e82",
+          "0d5dcfe"
+        ]
+      }
+    },
+    "acceptance": {
+      "status": "accepted",
+      "reasons": [],
+      "warnings": [
+        "warning",
+        "warning",
+        "warning"
+      ]
+    }
+  }
+}
