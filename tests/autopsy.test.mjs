@@ -1083,6 +1083,88 @@ test('a failure after a successful heredoc write is not a heredoc failure', () =
   assert.deepEqual(brief(out), [['heredoc_failure', at(0), 2, 'measured', '<<']]);
 });
 
+// A heredoc write of `size` characters in all, then a test command on the
+// line after it (the r150 D2 shape), and `tail` after that.
+const longWrite = (size, tail = 'node --test tests/a.test.mjs 2>&1 | tail -5') => {
+  const head = "cd '/w' && cat >> tests/a.test.mjs <<'EOF'\n";
+  const end = `\nEOF\n${tail}`;
+  const fill = size - head.length - end.length;
+  const body = Array.from({ length: Math.ceil(fill / 40) }, () => `// ${'x'.repeat(36)}`).join('\n').slice(0, fill);
+  const command = head + body + end;
+  assert.equal(command.length, size);
+  return command;
+};
+const OUTER_EOF = "/usr/bin/bash: -c: line 147: unexpected EOF while looking for matching `''";
+const heredocRows = (command, text) => brief(detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', text, true),
+  ...call1(10, 'e1', 'Edit', { file_path: 'tests/a.test.mjs' }, 'The file tests/a.test.mjs has been updated.')]));
+const HEREDOC_ROW = [['heredoc_failure', at(0), 11, 'bound', '<<']];
+
+test('a heredoc line too long for the Bash tool is a heredoc failure', () => {
+  // W1: a line of 6,000 characters or more holding a heredoc write, whose
+  // result after 'Exit code 2' is only the outer shell's unexpected EOF
+  // (bash 5.1 and older add a syntax error line). The tool cut the line, so
+  // the shell ran none of it: the write failed.
+  const command = longWrite(9023);
+  const syntax = '/usr/bin/bash: -c: line 188: syntax error: unexpected end of file';
+  for (const text of [`Exit code 2\n${OUTER_EOF}`, `Exit code 2\n${OUTER_EOF}\n${syntax}`, `Exit code 2\n${OUTER_EOF}\n`]) {
+    assert.deepEqual(heredocRows(command, text), HEREDOC_ROW, text);
+  }
+  const out = detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', `Exit code 2\n${OUTER_EOF}`, true)]);
+  assert.deepEqual(out.slowdowns[0].evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'node', check: null });
+  // 6,000 characters is the least; a Windows shell path counts too.
+  assert.deepEqual(heredocRows(longWrite(6000), `Exit code 2\n${OUTER_EOF}`), HEREDOC_ROW);
+  assert.deepEqual(heredocRows(command,
+    "Exit code 2\nC:\\Program Files\\Git\\usr\\bin\\bash.exe: -c: line 9: unexpected EOF while looking for matching `\"'"),
+  HEREDOC_ROW);
+  // Review focus 3: none of these says the write failed.
+  for (const [line, text] of [
+    // One character short.
+    [longWrite(5999), `Exit code 2\n${OUTER_EOF}`],
+    // A short line with the same message (its write ran first).
+    ["cd /w && cat > a.txt <<'EOF'\nx\nEOF\nnode a.js", "Exit code 2\n/usr/bin/bash: -c: line 4: unexpected EOF while looking for matching `''"],
+    // An inner shell's EOF after the write: it names itself bash, not by path.
+    [longWrite(9023, "bash -c \"echo 'x\""), "Exit code 2\nbash: -c: line 1: unexpected EOF while looking for matching `''"],
+    // More output than the shell's message, another exit code, or a line
+    // without a heredoc write.
+    [command, `Exit code 2\n${OUTER_EOF}\nnot ok 1 - a`],
+    [command, `Exit code 1\n${OUTER_EOF}`],
+    [command, `${OUTER_EOF}`],
+    [command.replace("cat >> tests/a.test.mjs <<'EOF'", "python3 - <<'EOF'"), `Exit code 2\n${OUTER_EOF}`],
+  ]) {
+    assert.deepEqual(heredocRows(line, text), [], `${line.slice(-40)}: ${text}`);
+  }
+});
+
+test('a heredoc write to a missing folder is a heredoc failure', () => {
+  // W2: the shell's redirect error names the heredoc write's own target.
+  assert.deepEqual(heredocRows("cd /w && cat > src/x/a.ts <<'EOF'\nexport const a = 1;\nEOF\ngit add src/x/a.ts",
+    "Exit code 128\n/usr/bin/bash: line 1: src/x/a.ts: No such file or directory\nfatal: pathspec 'src/x/a.ts' did not match any files"),
+  HEREDOC_ROW);
+  // A target holding $ or ~ matches on its basename: the shell prints the
+  // expanded path.
+  assert.deepEqual(heredocRows("S=/c/u/tmp/gone && cat > \"$S/probe.py\" <<'EOF'\nprint(1)\nEOF\npython3 \"$S/probe.py\"",
+    "Exit code 2\n/usr/bin/bash: line 1: /c/u/tmp/gone/probe.py: No such file or directory\n"
+    + "python3: can't open file '/c/u/tmp/gone/probe.py': [Errno 2] No such file or directory"), HEREDOC_ROW);
+  assert.deepEqual(heredocRows("cat > ~/notes/a.md <<'EOF'\nx\nEOF\nwc -l ~/notes/a.md",
+    "Exit code 1\n/usr/bin/bash: line 1: /home/u/notes/a.md: No such file or directory\nwc: /home/u/notes/a.md: No such file or directory"),
+  HEREDOC_ROW);
+  // Review focus 3: another file's error, or a message that is not the
+  // shell's redirect error, is no heredoc failure.
+  for (const [line, text] of [
+    // The write ran; source fails on a path that is not the target.
+    ["cat > /tmp/a.sh <<'EOF'\necho hi\nEOF\nsource ./a.sh", 'Exit code 1\n/usr/bin/bash: line 4: ./a.sh: No such file or directory'],
+    // cat names its own file, not the shell.
+    ["cd /w && cat > src/a.ts <<'EOF'\nx\nEOF\ncat src/a.ts", 'Exit code 1\ncat: src/a.ts: No such file or directory'],
+    ["cat > \"$D/a.ts\" <<'EOF'\nx\nEOF\ncat src/a.ts", 'Exit code 1\ncat: src/a.ts: No such file or directory'],
+    // An exact target needs the whole path.
+    ["cat > src/x/a.ts <<'EOF'\nx\nEOF\nnode b.js", 'Exit code 1\n/usr/bin/bash: line 1: lib/src/x/a.ts: No such file or directory'],
+    // An inline script's output file is not a heredoc write.
+    ["python3 - <<'EOF' > out/r.json\nprint(1)\nEOF", 'Exit code 1\n/usr/bin/bash: line 1: out/r.json: No such file or directory'],
+  ]) {
+    assert.deepEqual(heredocRows(line, text), [], `${line}: ${text}`);
+  }
+});
+
 test('a rerun needs proof that nothing changed', () => {
   const bash = (ts, id, command, text = 'ok', isError = false) => [
     use(ts, id, 'Bash', { command }), res(ts + 5, id, 'Bash', text, isError)];
@@ -1624,6 +1706,36 @@ test('an agent ended by an API error and retried at its own tier is no escalatio
   ]);
   assert.equal(res.json.detectors.escalation, 'ok');
   assert.ok(!res.text.includes('<synthetic>'), res.text);
+});
+
+test('an escalation row covers the review the engine runs again after it', () => {
+  // After a review's changes the engine reruns implement at standard and
+  // reviews the task again (rerunAtStandard): B1 review, B1 implement at
+  // opus (the escalation), then B1 review once more, which joins the row.
+  const B1 = { label: 'B1 implement', start: '10:00:05', end: '10:05:00' };
+  const REVIEW = { label: 'B1 review', start: '10:05:10', end: '10:06:00' };
+  const ESCALATED = { label: 'B1 implement', model: 'opus', start: '10:06:10', end: '10:09:00' };
+  const SECOND = { label: 'B1 review', start: '10:09:10', end: '10:10:00' };
+  const rows = (agents) => ofKind(autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents }])).json, 'escalation')
+    .map(rowOf);
+  // 170 s of the escalated implement and 50 s of the second review.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, SECOND]), [['B1 implement', T('10:06:10'), 220, 'measured', 220, 1, []]]);
+  // An untimed second review makes the cost unknown, never a part.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'B1 review' }]),
+    [['B1 implement', T('10:06:10'), 'unavailable', 'unavailable', 'unavailable', 1, []]]);
+  // The task's next agent is an adjudicate: the review after it is not the
+  // escalation's.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'B1 adjudicate', start: '10:09:10', end: '10:09:40' },
+    { ...SECOND, start: '10:09:50', end: '10:10:30' }]), [['B1 implement', T('10:06:10'), 170, 'measured', 170, 1, []]]);
+  // Another task's agent between them changes nothing.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'A1 implement', start: '10:09:05', end: '10:09:08' }, SECOND]),
+    [['B1 implement', T('10:06:10'), 220, 'measured', 220, 1, []]]);
+  // An implement escalated before any review of the task (run2's B1: it
+  // failed at sonnet and ran again at opus) is followed by the task's first
+  // review, which the escalation did not add.
+  assert.deepEqual(rows([B1, { ...ESCALATED, start: '10:05:10', end: '10:08:00' }, SECOND]),
+    [['B1 implement', T('10:05:10'), 170, 'measured', 170, 1, []]]);
+  assert.deepEqual(ofKind(S, 'escalation').map(rowOf), [['B1 implement', T('09:02:10'), 170, 'measured', 170, 1, []]]);
 });
 
 test('a run with one launch keeps all its agents and shows no launches table', () => {
@@ -2332,6 +2444,65 @@ test('a run with no slowdowns still gets a short summary', () => {
   assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
   assert.match(res.stdout, /^project test runs: 2; check calls with a test group: 2 \(implement 1, verify 1\)$/m);
   assert.match(res.stdout, /autopsy\.md/);
+});
+
+test('the summaries name the longest agent on the critical path', () => {
+  // run2's path runs from wf_1's A1 implement (280 s) through wf_2's A1
+  // implement (725 s) to verify: the label repeats, the agent is wf_2's.
+  assert.deepEqual(S.time.critical_path.labels,
+    ['A1 implement', 'A1 implement', 'A1 review', 'A1 fix 1', 'A1 re-review 1', 'verify']);
+  assert.deepEqual(S.time.critical_path.longest, { label: 'A1 implement', launch: 'wf_2', wall_s: 725 });
+  assert.deepEqual(A.time.critical_path.longest, { label: 'B1 implement', launch: 'wf_1', wall_s: 180 });
+  const res = runCli(copyRun(RUN2));
+  assert.equal(res.code, 0, res.stderr);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0].split('\n');
+  assert.ok(summary.includes('- Longest on the critical path: A1 implement (725.0 s)'), summary.join('\n'));
+  assert.equal(summary.indexOf('- Longest on the critical path: A1 implement (725.0 s)'),
+    summary.findIndex((l) => l.startsWith('- Slowest phase:')) + 1);
+  const chat = res.stdout.split('\n');
+  assert.equal(chat[chat.findIndex((l) => l.startsWith('slowest phase:')) + 1],
+    'longest on the critical path: A1 implement (725.0 s)');
+  // On a tie the first on the path is named; an agent off the path (B1
+  // implement, 85 s, still running when A1 review starts) never is.
+  const tied = autopsy(buildLaunches([{ start: '10:00:00', s: 135, agents: [
+    { label: 'A1 implement', start: '10:00:05', end: '10:01:05' },
+    { label: 'B1 implement', start: '10:00:05', end: '10:01:30' },
+    { label: 'A1 review', start: '10:01:10', end: '10:02:10' },
+  ] }])).json;
+  assert.deepEqual(tied.time.critical_path.labels, ['A1 implement', 'A1 review']);
+  assert.deepEqual(tied.time.critical_path.longest, { label: 'A1 implement', launch: 'wf_1', wall_s: 60 });
+  // Review focus 5: no timed agent on the path, no line.
+  const dir = copyRun();
+  for (const name of readdirSync(join(dir, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(dir, 'wf_1', name), (lines) => lines.map((l) => {
+      const o = JSON.parse(l);
+      delete o.timestamp;
+      return JSON.stringify(o);
+    }));
+  }
+  const none = runCli(dir);
+  assert.equal(none.code, 0, none.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual([D.time.critical_path.labels, D.time.critical_path.longest], [[], null]);
+  assert.ok(!/longest on the critical path/i.test(none.md), none.md);
+  assert.ok(!/longest on the critical path/i.test(none.stdout), none.stdout);
+});
+
+test('the chat summary keeps its 15-line cap with every optional line', () => {
+  // run2 (earlier launches, three slowdowns, the longest agent) with the
+  // acceptance line and a launch conditions line as well.
+  const lines = python([
+    'import _autopsy',
+    `a = json.loads(${JSON.stringify(JSON.stringify(S))})`,
+    'a["done"]["acceptance"] = {"status": "rejected", "reasons": [], "warnings": 0, "accepted_by_user": True}',
+    '_autopsy._conditions_line = lambda a: "launch conditions: 1 check warned or failed before launch; 0 possible contributors"',
+    'print(json.dumps(_autopsy.render_summary(a, "C:/u/run/autopsy.md").split("\\n")))',
+  ]).filter((l) => l !== '');
+  assert.ok(lines.length <= 15, lines.join('\n'));
+  assert.ok(lines.includes('longest on the critical path: A1 implement (725.0 s)'), lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith('launch conditions: ')), lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith('top suggestion: ')), lines.join('\n'));
+  assert.equal(lines.at(-1), 'full report: C:/u/run/autopsy.md');
 });
 
 test('partial tokens are called minimums', () => {

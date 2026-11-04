@@ -1832,7 +1832,9 @@ for a run with more than one launch `earlier launches: kept N agents, redid M (X
 `(agent time unavailable)` in place of `(X of agent time)` if any is), when the user accepted
 the delivered head and the run's own verdict is not `accepted` the line
 `acceptance: <status>; accepted by the user at the delivered head`
-(see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
+(see `accepted_by_user` below), the slowest phase, the line
+`longest on the critical path: <label> (<s>)` when `time.critical_path.longest` is set, the top
+three slowdowns with their cost, the
 line `project test runs: P; check calls with a test group: T (implement 11, verify 1)`, total
 tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_runs` total, with
 ` (+N unavailable)` when its `unavailable` count is above 0; T and the roles are the legacy
@@ -1890,6 +1892,13 @@ appends that summary to the hand-back report.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
+- `time.critical_path` is `{estimate, labels, longest}`. `longest` is `{label, launch, wall_s}` of
+  the longest timed agent on the path, taken from the agents themselves (a label repeats across
+  launches and reviews), the first on the path on a tie, and `null` when no agent on it is
+  timed. It is often the final fix, which no slowdown row covers. autopsy.md's Summary gets
+  `- Longest on the critical path: <label> (<s>)` after its `- Slowest phase:` line, and the chat
+  summary `longest on the critical path: <label> (<s>)`, from that field only; neither has the
+  line when it is `null`.
 - A partial agent (a tool call with no result, or unreadable lines) has `tool_s` and `other_s`
   `unavailable`: a call without a result may have run to the end. `tool_s_min` is then the
   least tool time that can be shown, a minimum and not the total.
@@ -1985,9 +1994,18 @@ text, because a command may carry a secret.
   the completion notice) is no slowdown: `checks.waits.background_not_waited` counts it, and
   its call is no `long_tool_call` either. Without an observed completion the row's cost and
   `background_s` stay `unavailable`.
-- **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
-  heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
-  reading calls between them; an `inferred` run never proves a rerun.
+- **Heredoc and rerun rules:** `heredoc_failure` needs a failing line whose heredoc file write
+  failed: the line is nothing but the write; or it holds a heredoc write (`cat` or `tee`, fed by
+  the heredoc, writing a file) anywhere and either the Bash tool cut it for its length (a line of
+  at least 6,000 characters, see "Command length", whose result after `Exit code 2` is only the
+  outer shell's `unexpected EOF while looking for matching` line, the shell named by its path,
+  optionally followed by its `syntax error: unexpected end of file` line on bash 5.1 and older)
+  or the shell could not open the write's own target (`line N: <target>: No such file or
+  directory`, the target exactly as written, or by its basename when it holds `$` or `~`, since
+  the shell prints the expanded path). Any other failing line that does more than the write may
+  have failed elsewhere: the write may have run and a later command failed, or an inner
+  `bash -c` printed the EOF (it names itself `bash`). `check_rerun` needs both runs `ran` with
+  the same command, and only reading calls between them; an `inferred` run never proves a rerun.
 - **Queued calls:** calls sent in one model turn share its message id. A call's time starts at
   its own start: the later of its tool_use and the latest result of an earlier call of its
   turn that came at or before its own result. Claude Code returns a turn's results in order, so a fast call queued
@@ -2003,10 +2021,10 @@ also has `background_s`, its background window's length):
 | `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background; the cost is the time the agent waited inside the background window (Background waits, above) |
 | `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
-| `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
+| `heredoc_failure` | a failing Bash command whose heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`) failed: the command is nothing but the write, plus `cd` or assignments, or it holds the write and was cut by the Bash tool for its length or could not open the write's target (Heredoc and rerun rules, above); not an inline script such as `python3 - <<EOF > out.json`. From it to the next successful file write (`bound`), else its own span |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
 | `extra_review_round` | a task's fix and re-review rounds; `unavailable` when one of them is untimed |
-| `escalation` | an agent re-run at another model tier; `unavailable` when it is untimed |
+| `escalation` | an agent re-run at another model tier, and the review the engine runs again after it: when the task's next agent in the launch is labelled exactly `<task> review` and an earlier agent of the launch has that label (an implement rerun at standard after a review's changes or a failed fix, then the whole task reviewed again), that review's time joins the row; not an implement escalated before any review of its task, whose next review is the task's first, nor a review after an adjudicate; `unavailable` when one of them is untimed |
 | `retry` | a retried agent; `unavailable` when it is untimed |
 | `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
 | `long_tool_call` | a tool call over 120 s that no other kind counted; never a `run-checks` or `task-checks` call (check time, under One second, one row). A direct test command stays one: its suggestion is about it |

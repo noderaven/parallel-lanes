@@ -114,6 +114,19 @@
 //   kept although launch 2 ran a recovery merge: the roles differ, and an
 //   agent without a task is redone only when a later one has its role.
 //   Before 1.6.12 the relaunch row cost the whole first launch (2325.7 s).
+//
+// heredoc-too-long (r150, D2 implement, 21:59:52-22:00:30.328Z; the prompt is
+// moved to just before the kept lines):
+//   Bash 21:59:53.771-21:59:54.229  cd <lane> && cat >> a test file with a
+//     heredoc of 183 lines, then PATH=... node --test on the next line: 8,951
+//     characters (9,023 before scrubbing), too long for the Bash tool, which
+//     cut it; the result is 'Exit code 2' and the outer shell's 'unexpected
+//     EOF while looking for matching' line, so nothing ran
+//   Bash 21:59:56.705-21:59:57.951  git status and wc -l on the file; Read
+//     21:59:59.531-22:00:00.225 (its text replaced)
+//   Edit 22:00:28.052-22:00:30.328  the same file, written (its strings
+//     replaced); the Bash call sent in the same turn is dropped with its result
+//   Before 1.6.14 the write was missed: the line does more than the write.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -169,6 +182,25 @@ test('real r150 case: a failing script after a successful heredoc write is no he
   // probe3.py was written; python3 failed on it.
   assert.deepEqual(ofKind(a, 'heredoc_failure'), []);
   assert.equal(suggestion(a, 'heredoc_failure'), undefined);
+});
+
+test('real r150 case: a heredoc line the Bash tool cut short is a heredoc failure', () => {
+  const a = autopsy('heredoc-too-long');
+  const d2 = agentOf(a, 'D2 implement');
+  assert.ok(d2, 'D2 implement is loaded');
+  assert.equal(d2.unmatched_calls, 0);
+  assert.equal(a.detectors.heredoc_failure, 'ok');
+  // From the failing call to the Edit that wrote the file (bound): 36.6 s.
+  assert.deepEqual(ofKind(a, 'heredoc_failure').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.span_s, s.contains]),
+    [['D2 implement', T('21:59:53.771'), 36.6, 'bound', 36.6, []]]);
+  // The program is the test command's node, the first the line runs past cd
+  // and cat; it runs no configured check.
+  assert.deepEqual(ofKind(a, 'heredoc_failure')[0].evidence,
+    { tool: 'Bash', exit: 2, marker: '<<', program: 'node', check: null });
+  const g = suggestion(a, 'heredoc_failure');
+  assert.ok(g, 'a heredoc_failure suggestion');
+  assert.match(g.text, /too long for the Bash tool/);
+  assert.deepEqual(a.slowdowns.map((s) => s.kind), ['heredoc_failure']);
 });
 
 test('real r142 case: overlapping edit retries count their shared time once', () => {

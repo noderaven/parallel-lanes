@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "run_id": "r150",
+  "plan": "C:/u/plans/p.md",
+  "spec": null,
+  "repo": {
+    "mode": "git",
+    "root": "C:/u/project",
+    "branch": "release",
+    "base": "main",
+    "worktree_root": "C:/u/project-wt",
+    "ledger_dir": "C:/u/plans/p.r150.ledger"
+  },
+  "commands": {
+    "setup": [],
+    "test": [
+      "PATH=\"/c/u/py/bin:$PATH\" node tests/run-tests.mjs"
+    ],
+    "lint": [],
+    "build": []
+  },
+  "prelude": [],
+  "lanes": [
+    {
+      "id": "doctor",
+      "name": "Lane doctor",
+      "tasks": [
+        {
+          "id": "D2",
+          "title": "doctor warnings on every platform",
+          "tier": "standard"
+        }
+      ]
+    }
+  ],
+  "join": []
+}
