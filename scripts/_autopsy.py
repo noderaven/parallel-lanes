@@ -24,7 +24,9 @@ check execution is named by a check id or 'run-checks', never by the
 command line or the configured command (which may carry a secret).
 The ledger's accepted events give only a boolean,
 done.acceptance.accepted_by_user (user_accepted): their text names a
-person and is never written out.
+person and is never written out. Its committed and settled events give
+only each task's commit count (task_commits); a task's range is its
+result's own [base, head].
 
 Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
@@ -141,7 +143,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 10
+AUTOPSY_VERSION = 11
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -547,22 +549,85 @@ def user_accepted(run_folder, result):
     return False
 
 
+def ledger_events(run_folder):
+    """Every JSON object line of the run's ledger, in ledger order (the
+    ledger dir's *.jsonl files by name, then lines), as scripts/ledger reads
+    them; lines that are not JSON objects are skipped. None without a ledger
+    dir or when one of its files cannot be read."""
+    ledger = find_ledger(run_folder)
+    if ledger is None:
+        return None
+    events = []
+    for path in _files(ledger, "*.jsonl"):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        for raw in data.splitlines():
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def task_commits(events, task):
+    """done.tasks[task].commits: the number of distinct SHAs in the commits
+    lists of the task's committed and settled events (finish-task writes
+    one per commit round, a batch's under each of its tasks) after its last
+    started event with restart true, or from the start without one; a plain
+    started (a retry or a rerun) does not reset it. UNAVAILABLE without a
+    readable ledger (events None), without such an event, or when one of
+    them has no commits list of SHAs (an older ledger)."""
+    if events is None:
+        return UNAVAILABLE
+    rounds = []
+    for event in events:
+        if event.get("task") != task:
+            continue
+        if event.get("event") == "started" and event.get("restart") is True:
+            rounds = []
+        elif event.get("event") in ("committed", "settled"):
+            rounds.append(event.get("commits"))
+    if not rounds:
+        return UNAVAILABLE
+    seen = set()
+    for commits in rounds:
+        if not isinstance(commits, list) or not all(isinstance(c, str) and _SHA.fullmatch(c) for c in commits):
+            return UNAVAILABLE
+        seen.update(c.lower() for c in commits)
+    return len(seen)
+
+
+def task_range(commits):
+    """done.tasks[].range: a task result's commits, the [base, head] pair
+    the engine writes, when both are SHAs; else None."""
+    if isinstance(commits, list) and len(commits) == 2 \
+            and all(isinstance(c, str) and _SHA.fullmatch(c) for c in commits):
+        return list(commits)
+    return None
+
+
 def done_section(result, run_folder):
     """The done section from the last launch's result; run_folder gives the
-    ledger that accepted_by_user reads."""
+    ledger that each task's commits (task_commits) and accepted_by_user
+    read."""
     if not isinstance(result, dict):
         result = {}
     tasks = result.get("tasks")
     if isinstance(tasks, dict):
         done_tasks = {}
+        events = ledger_events(run_folder)
         for tid, t in tasks.items():
             t = t if isinstance(t, dict) else {}
-            commits = t.get("commits")
             rounds = t.get("rounds")
             done_tasks[tid] = {
                 "status": _str_or_unavailable(t.get("status")),
-                "commits": [c for c in commits if isinstance(c, str) and _SHA.match(c)]
-                if isinstance(commits, list) else UNAVAILABLE,
+                "commits": task_commits(events, tid),
+                "range": task_range(t.get("commits")),
                 "rounds": rounds if isinstance(rounds, int) and not isinstance(rounds, bool) else UNAVAILABLE,
                 "tier_used": _str_or_unavailable(t.get("tier_used")),
             }
@@ -700,13 +765,29 @@ def time_section(run):
     walls = [l["end"] - l["start"] if l["start"] is not None else None for l in run["launches"]]
     wall_s = seconds(sum(walls)) if walls and None not in walls else UNAVAILABLE
     return {"wall_s": wall_s, "phases": phases, "lanes": lanes, "agents": agents,
-            "critical_path": {"estimate": True, "labels": critical_path(run)}, "idle_gaps": gaps}
+            "critical_path": {"estimate": True, "labels": critical_path(run), "longest": critical_longest(run)},
+            "idle_gaps": gaps}
 
 
 def critical_path(run):
     """A timing-based estimate: from the last-ending agent, walk back to the
     latest-ending agent that ended before it started; labels, first to last."""
     return [a["entry"]["label"] for a in critical_agents(run)]
+
+
+def critical_longest(run):
+    """{label, launch, wall_s} of the longest timed agent on the critical
+    path (critical_agents: the agents themselves, since labels repeat across
+    launches and reviews), wall_s to 0.1 s; the first on the path on a tie;
+    None when no agent on the path is timed."""
+    best = None
+    for a in critical_agents(run):
+        if a["start"] is None or a["end"] is None:
+            continue
+        wall = seconds(a["end"] - a["start"])
+        if best is None or wall > best["wall_s"]:
+            best = {"label": a["entry"]["label"], "launch": a["launch"], "wall_s": wall}
+    return best
 
 
 def critical_agents(run):
@@ -836,8 +917,9 @@ SUGGESTIONS = {
                "narrower command while iterating.",
     "repeated_failure": "The same command likely failed again with nothing changed in between. Try "
                         "reading the first failure's output and fixing its cause before rerunning.",
-    "heredoc_failure": "Shell quoting in a heredoc likely broke a file write. Try writing files with the "
-                       "Edit or Write tools instead of shell heredocs.",
+    "heredoc_failure": "A file write by a shell heredoc likely failed: the command was too long for the Bash "
+                       "tool (about 7,000 characters on Windows), its folder was missing, or its quoting "
+                       "broke. Try writing files with the Edit or Write tools instead of shell heredocs.",
     "edit_retry": "An edit likely failed because the file was unread, had changed, or did not hold the "
                   "text. Try reading the file again right before editing it.",
     "extra_review_round": "Review likely found problems the implementer did not catch. Try clearer "
@@ -1141,6 +1223,76 @@ def _only_heredoc_write(command):
         elif not (p[0] == "cd" and len(p) <= 2) and not all(_ASSIGNMENT.match(t) for t in p):
             return False
     return writes > 0
+
+
+# The Bash tool cuts a command near 7,000 to 8,191 characters on Windows
+# (reference.md "Command length"); a heredoc line of at least this length
+# whose result is only the outer shell's unexpected EOF was cut (W1).
+CUT_COMMAND_CHARS = 6000
+# The outer shell names itself by its path (the Bash tool runs it so, as
+# /usr/bin/bash); an inner 'bash -c' an agent writes names itself bash.
+_OUTER_EOF = re.compile(r"^(?P<shell>.*[/\\][^/\\]*): -c: line \d+: "
+                        r"unexpected EOF while looking for matching `.'$")
+_OUTER_END = re.compile(r"^(?P<shell>.+?): -c: line \d+: syntax error: unexpected end of file$")
+
+
+def _cut_by_length(command, text):
+    """W1: a command line of at least CUT_COMMAND_CHARS whose result, after
+    its 'Exit code 2' line, is only the outer shell's 'unexpected EOF while
+    looking for matching' line, optionally followed by the same shell's
+    'syntax error: unexpected end of file' line (bash 5.1 and older)."""
+    if len(command) < CUT_COMMAND_CHARS:
+        return False
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) not in (2, 3) or lines[0] != "Exit code 2":
+        return False
+    eof = _OUTER_EOF.match(lines[1])
+    if eof is None:
+        return False
+    if len(lines) == 3:
+        end = _OUTER_END.match(lines[2])
+        return end is not None and end.group("shell") == eof.group("shell")
+    return True
+
+
+def _write_targets(pipeline):
+    """The files a pipeline's > or >> redirects write (not /dev/null or a
+    descriptor), as written."""
+    return [pipeline[i + 1] for i, token in enumerate(pipeline)
+            if token in _WRITE_REDIRECTS and i + 1 < len(pipeline) and pipeline[i + 1] != "/dev/null"
+            and not all(c in _REDIRECT_CHARS for c in pipeline[i + 1])]
+
+
+def _missing_target(writes, text):
+    """W2: a result line holds the shell's redirect error 'line N: <target>:
+    No such file or directory' for a target of one of writes (heredoc write
+    pipelines), its text exactly; a target holding $ or ~ may match on its
+    basename, since the shell prints the expanded path."""
+    for target in (t for p in writes for t in _write_targets(p)):
+        name = re.escape(target)
+        if "$" in target or "~" in target:
+            name = r"(?:.*[/\\])?" + re.escape(_basename(target))
+        pattern = re.compile(r"(?:^|\s)line \d+: %s: No such file or directory$" % name)
+        if any(pattern.search(l.strip()) for l in text.split("\n")):
+            return True
+    return False
+
+
+def heredoc_write_failed(call):
+    """Whether a failing Bash call's heredoc file write failed: its line is
+    nothing but the write (_only_heredoc_write), or it holds a heredoc write
+    pipeline (_heredoc_write) anywhere and either the Bash tool cut the line
+    (_cut_by_length) or the shell could not open the write's own target
+    (_missing_target). A line that does more than the write may fail
+    elsewhere otherwise: its error text does not say which part failed."""
+    command = _command(call)
+    if _only_heredoc_write(command):
+        return True
+    if not heredocs(command):
+        return False
+    writes = [p for p in _pipelines(command) or [] if _heredoc_write(p)]
+    text = call["text"] if isinstance(call["text"], str) else ""
+    return bool(writes) and (_cut_by_length(command, text) or _missing_target(writes, text))
 
 
 def file_write(command):
@@ -1468,15 +1620,19 @@ def tool_slowdowns(agent, checks):
             first, last = calls[indexes[0]], calls[indexes[-1]]
             add("repeated_failure", indexes, first["own_start"], last["end"], "measured", first)
 
-    # Only a failing line that is nothing but a heredoc file write (cat > f
-    # <<EOF, after cd DIR or assignments) counts: a failing inline script
-    # (python3 - <<EOF) is not a quoting failure, and a line that does more
+    # A heredoc file write failed (heredoc_write_failed) when a failing line
+    # is nothing but the write (cat > f <<EOF, after cd DIR or assignments),
+    # or holds the write and the Bash tool cut the line for its length (the
+    # outer shell's unexpected EOF, nothing ran) or the shell could not open
+    # the write's own target (a missing folder). A failing inline script
+    # (python3 - <<EOF) is not the write, and any other line that does more
     # than the write may have failed elsewhere (its error text does not say
-    # where). The span ends at the next file write that succeeds, by a tool
-    # or by Bash.
+    # where): the write may have run and a later command failed, or an inner
+    # shell printed the EOF. The span ends at the next file write that
+    # succeeds, by a tool or by Bash.
     until = None
     for i, c in enumerate(calls):
-        if not _bash_failed(c) or not _only_heredoc_write(_command(c)):
+        if not _bash_failed(c) or not heredoc_write_failed(c):
             continue
         if until is not None and c["own_start"] < until:
             continue  # a retry inside the previous heredoc failure's span
@@ -1579,6 +1735,29 @@ def relaunch_slowdown(launch, redone):
     return sd
 
 
+def second_review(agents, k):
+    """The review the engine runs again after agents[k], an escalated agent
+    of one launch (agents in its order, start_key), or None. After a
+    review's changes or a failed fix the engine reruns implement at
+    standard and reviews the task again (rerunAtStandard, src/engine.js):
+    the task's next agent after agents[k] is that review when it is
+    labelled exactly '<task> review' and an earlier agent of the launch has
+    that label (the task was reviewed before the escalation). An implement
+    escalated before any review of its task (it failed and ran again at
+    another tier) is followed by the task's first review, which the
+    escalation did not add; an adjudicate next means the review after it is
+    the adjudication's. Only an escalated implement (role 'implement') has
+    one: another role's escalation keeps its own time."""
+    task = agents[k]["entry"]["task"]
+    if task is None or agents[k]["entry"]["role"] != "implement":
+        return None
+    label = task + " review"
+    if not any(a["entry"]["label"] == label for a in agents[:k]):
+        return None
+    following = next((a for a in agents[k + 1:] if a["entry"]["task"] == task), None)
+    return following if following is not None and following["entry"]["label"] == label else None
+
+
 def run_slowdowns(run):
     """The slowdowns found in roles, launches and idle gaps."""
     out = []
@@ -1600,13 +1779,26 @@ def run_slowdowns(run):
         # Retries and escalations exactly as run-report counts them, per
         # launch (_transcripts.escalations).
         entries = [a["entry"] for a in launch["agents"]]
-        # An untimed agent's row costs unavailable, cost_kind too.
-        for a, earlier in zip(launch["agents"], _transcripts.escalations(entries)):
+        # An untimed agent's row costs unavailable, cost_kind too. An
+        # escalation row also covers the review the engine runs again after
+        # it (second_review), unavailable when one of the two is untimed.
+        for k, (a, earlier) in enumerate(zip(launch["agents"], _transcripts.escalations(entries))):
             kind = UNAVAILABLE if a["start"] is None or a["end"] is None else "measured"
             if a["entry"]["retried"]:
                 out.append(_slowdown("retry", a, a["start"], a["end"], kind))
-            if earlier is not None:
+            if earlier is None:
+                continue
+            review = second_review(launch["agents"], k)
+            if review is None:
                 out.append(_slowdown("escalation", a, a["start"], a["end"], kind))
+                continue
+            members = [a, review]
+            sd = _slowdown("escalation", a, a["start"], None, "measured",
+                           covers=[(x, x["start"], x["end"]) for x in _timed(members)])
+            sd["_cost"] = _agent_time(members)
+            if sd["_cost"] is None:
+                sd["cost_kind"] = UNAVAILABLE
+            out.append(sd)
     redone = redone_agents(run)
     for launch in run["launches"][:-1]:
         out.append(relaunch_slowdown(launch, redone))
@@ -1651,8 +1843,9 @@ def detector_status(run):
 # time, a check call's (check_time, internal: a helper call, or a procedure
 # execution's start or wait call) first; a window from a
 # failure to its recovery, which may hold other work;
-# a whole agent (retry first: an agent ended by an API error also reads as
-# an escalation); a launch's redone agents, last and in a tier of its own, so
+# a whole agent (retry first: a retry run at another tier is an escalation
+# too; an API error's <synthetic> line sets no model, so a retry after one at
+# the same tier is not); a launch's redone agents, last and in a tier of its own, so
 # that a whole-agent row over one of them (a retry, say) takes it first: in
 # the fourth tier the relaunch row could go first, being shorter or, with the
 # same span, earlier (its _at is the launch start, before any agent's).
@@ -3365,6 +3558,14 @@ def _by_user(acceptance):
     return ""
 
 
+def _longest_on_path(a):
+    """'<label> (<s>)' of time.critical_path.longest, or None when it is null."""
+    longest = a["time"]["critical_path"].get("longest")
+    if not isinstance(longest, dict):
+        return None
+    return "%s (%s)" % (longest["label"], _secs(longest["wall_s"]))
+
+
 def _md_summary(a):
     launches = _launch_names(a)
     detail = ", ".join("%s %s" % (l["wf"], l["status"]) for l in launches) or "none"
@@ -3381,6 +3582,9 @@ def _md_summary(a):
     slowest = _slowest_phase(a)
     if slowest is not None:
         lines.append("- Slowest phase: %s (%s)" % (slowest["phase"], _secs(slowest["wall_s"])))
+    longest = _longest_on_path(a)
+    if longest is not None:
+        lines.append("- Longest on the critical path: %s" % longest)
     top = a["slowdowns"][0] if a["slowdowns"] else None
     lines.append("- Slowdowns: %d found%s" % (len(a["slowdowns"]),
                  "" if top is None else "; the largest is %s (%s)" % (top["kind"], _secs(top["cost_s"]))))
@@ -3398,7 +3602,7 @@ def _md_done(a):
             commits = t["commits"]
             lines.append("- %s: %s; %s; %s; tier %s" % (
                 tid, t["status"],
-                "commits unavailable" if commits == UNAVAILABLE else _count_word(len(commits), "commit"),
+                "commits unavailable" if commits == UNAVAILABLE else _count_word(commits, "commit"),
                 "rounds " + str(t["rounds"]), t["tier_used"]))
         if not tasks:
             lines.append("- No tasks listed.")
@@ -3814,6 +4018,9 @@ def render_summary(analysis, md_path):
     slowest = _slowest_phase(a)
     lines.append("slowest phase: %s" % ("unavailable" if slowest is None else
                                         "%s (%s)" % (slowest["phase"], _secs(slowest["wall_s"]))))
+    longest = _longest_on_path(a)
+    if longest is not None:
+        lines.append("longest on the critical path: %s" % longest)
     slowdowns = a["slowdowns"]
     if slowdowns:
         lines.append("slowdowns (%d found), top %d:" % (len(slowdowns), min(3, len(slowdowns))))

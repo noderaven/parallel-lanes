@@ -1268,7 +1268,12 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 `output_tokens_min` still sums every count there is: when `output_incomplete` > 0 report
 `output_tokens_min` as the output figure (a minimum). Report both,
 and call out any agent whose `resolved_models` names a model other than the one requested
-(a fallback).
+(a fallback). A usage line whose model is `<synthetic>` (the message Claude Code writes itself
+for an API error) never sets an agent's resolved model and is left out of `resolved_models` and
+`models`: an agent that ends on one keeps its last real model, and one with only such lines has
+resolved model `unavailable` (its tier comes from the requested model). Their tokens still
+count. So a retry at the same tier after an API error is no escalation, in run-report's
+`escalations` and tiers, autopsy's slowdowns and audit's task escalations alike.
 
 `run-checks` stamps each result with `started` and `ended` (UTC ISO 8601 with milliseconds) and
 `duration_s` (seconds, from a monotonic clock). They are additive: `check-verify` compares only
@@ -1827,7 +1832,9 @@ for a run with more than one launch `earlier launches: kept N agents, redid M (X
 `(agent time unavailable)` in place of `(X of agent time)` if any is), when the user accepted
 the delivered head and the run's own verdict is not `accepted` the line
 `acceptance: <status>; accepted by the user at the delivered head`
-(see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
+(see `accepted_by_user` below), the slowest phase, the line
+`longest on the critical path: <label> (<s>)` when `time.critical_path.longest` is set, the top
+three slowdowns with their cost, the
 line `project test runs: P; check calls with a test group: T (implement 11, verify 1)`, total
 tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_runs` total, with
 ` (+N unavailable)` when its `unavailable` count is above 0; T and the roles are the legacy
@@ -1835,15 +1842,15 @@ tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_
 appends that summary to the hand-back report.
 
 **Sections of `autopsy.json`:** `launches` (one per launch, with its kept and redone work),
-`done` (per task status, commits, rounds, tier; acceptance; final-review counts; E2E), `time`
-(wall time per launch, phases, lanes with busy and idle time, agents with `tool_s` and
+`done` (per task status, commits, range, rounds, tier; acceptance; final-review counts; E2E),
+`time` (wall time per launch, phases, lanes with busy and idle time, agents with `tool_s` and
 `other_s`, the critical path, idle gaps), `tokens`, `checks`, `slowdowns`, `detectors`,
 `suggestions`, `unexplained`, `launch_conditions` and `orphan_snapshots`.
 - `launch_conditions` has one entry per launch, from the doctor result saved for it, and
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 10, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 11, so `history` runs autopsy again on an older `autopsy.json`.
 - `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
   redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
   ran an agent for the same work: an agent with a task when a later one has the same task and
@@ -1858,6 +1865,18 @@ appends that summary to the hand-back report.
   untimed. With more than one launch, autopsy.md's "Where time went" opens with a launches table
   (`| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |`) and its Summary
   has an `Earlier launches:` line, as the chat summary has.
+- `done.tasks` is `{<id>: {status, commits, range, rounds, tier_used}}` from the last launch's
+  result. `commits` is the task's commit count from the ledger: the distinct SHAs in the
+  `commits` lists of the task's `committed` and `settled` events (finish-task writes one per
+  commit round, a fix round its own) in every `*.jsonl` of the ledger, after the task's last
+  `started` event with `restart: true` (or from the start without one); a plain `started`, as a
+  retry or an escalation or adjudication rerun writes, does not reset it. A batch's events repeat
+  the batch's commits under each of its tasks, so each task counts the batch's commits. It is
+  `unavailable` without a readable ledger, when the task has no such event, or when one of them
+  has no `commits` list of SHAs (an older ledger); lines that are not JSON objects are skipped.
+  `range` is the result's own `commits`, the `[base, head]` pair the engine writes, when both are
+  SHAs, else `null`. autopsy.md's What got done prints `N commits`, `1 commit` or
+  `commits unavailable`.
 - `done.acceptance` is `{status, reasons: [{kind, class}], warnings, accepted_by_user}` from the
   last launch's result (`unavailable` when the result has no acceptance object). `status` stays
   the run's own verdict. `accepted_by_user` is `true` when the ledger's `_run.jsonl` holds an
@@ -1873,6 +1892,13 @@ appends that summary to the hand-back report.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
+- `time.critical_path` is `{estimate, labels, longest}`. `longest` is `{label, launch, wall_s}` of
+  the longest timed agent on the path, taken from the agents themselves (a label repeats across
+  launches and reviews), the first on the path on a tie, and `null` when no agent on it is
+  timed. In 9 of the 38 archived runs it was the final fix, which has no slowdown kind of its
+  own. autopsy.md's Summary gets `- Longest on the critical path: <label> (<s>)` after its
+  `- Slowest phase:` line, and the chat summary `longest on the critical path: <label> (<s>)`,
+  from that field only; neither has the line when it is `null`.
 - A partial agent (a tool call with no result, or unreadable lines) has `tool_s` and `other_s`
   `unavailable`: a call without a result may have run to the end. `tool_s_min` is then the
   least tool time that can be shown, a minimum and not the total.
@@ -1968,9 +1994,18 @@ text, because a command may carry a secret.
   the completion notice) is no slowdown: `checks.waits.background_not_waited` counts it, and
   its call is no `long_tool_call` either. Without an observed completion the row's cost and
   `background_s` stay `unavailable`.
-- **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
-  heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
-  reading calls between them; an `inferred` run never proves a rerun.
+- **Heredoc and rerun rules:** `heredoc_failure` needs a failing line whose heredoc file write
+  failed: the line is nothing but the write; or it holds a heredoc write (`cat` or `tee`, fed by
+  the heredoc, writing a file) anywhere and either the Bash tool cut it for its length (a line of
+  at least 6,000 characters, see "Command length", whose result after `Exit code 2` is only the
+  outer shell's `unexpected EOF while looking for matching` line, the shell named by its path,
+  optionally followed by its `syntax error: unexpected end of file` line on bash 5.1 and older)
+  or the shell could not open the write's own target (`line N: <target>: No such file or
+  directory`, the target exactly as written, or by its basename when it holds `$` or `~`, since
+  the shell prints the expanded path). Any other failing line that does more than the write may
+  have failed elsewhere: the write may have run and a later command failed, or an inner
+  `bash -c` printed the EOF (it names itself `bash`). `check_rerun` needs both runs `ran` with
+  the same command, and only reading calls between them; an `inferred` run never proves a rerun.
 - **Queued calls:** calls sent in one model turn share its message id. A call's time starts at
   its own start: the later of its tool_use and the latest result of an earlier call of its
   turn that came at or before its own result. Claude Code returns a turn's results in order, so a fast call queued
@@ -1986,10 +2021,10 @@ also has `background_s`, its background window's length):
 | `background_check` | Claude Code's notice at the start of a Bash result says the command went to the background; the cost is the time the agent waited inside the background window (Background waits, above) |
 | `timeout` | Claude Code's notice at the start of a Bash result says the call hit its timeout |
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
-| `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
+| `heredoc_failure` | a failing Bash command whose heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`) failed: the command is nothing but the write, plus `cd` or assignments, or it holds the write and was cut by the Bash tool for its length or could not open the write's target (Heredoc and rerun rules, above); not an inline script such as `python3 - <<EOF > out.json`. From it to the next successful file write (`bound`), else its own span |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
 | `extra_review_round` | a task's fix and re-review rounds; `unavailable` when one of them is untimed |
-| `escalation` | an agent re-run at another model tier; `unavailable` when it is untimed |
+| `escalation` | an agent re-run at another model tier, and the review the engine runs again after it: when the task's next agent in the launch is labelled exactly `<task> review` and an earlier agent of the launch has that label (an implement rerun at standard after a review's changes or a failed fix, then the whole task reviewed again), that review's time joins the row; not an implement escalated before any review of its task, whose next review is the task's first, nor a review after an adjudicate, nor one after an escalated agent whose role is not `implement`; `unavailable` when one of them is untimed |
 | `retry` | a retried agent; `unavailable` when it is untimed |
 | `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
 | `long_tool_call` | a tool call over 120 s that no other kind counted; never a `run-checks` or `task-checks` call (check time, under One second, one row). A direct test command stays one: its suggestion is about it |

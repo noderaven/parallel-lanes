@@ -102,12 +102,14 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 10);
+  assert.equal(A.autopsy_version, 11);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
+  // commits counts the ledger's commits (A1 one, B1 two in one round); range
+  // is the result's [base, head], as the engine writes it.
   assert.deepEqual(A.done.tasks, {
-    A1: { status: 'done', commits: ['1'.repeat(40)], rounds: 1, tier_used: 'standard' },
-    B1: { status: 'done', commits: ['2'.repeat(40), '3'.repeat(40)], rounds: 0, tier_used: 'standard' },
+    A1: { status: 'done', commits: 1, range: ['0'.repeat(40), '1'.repeat(40)], rounds: 1, tier_used: 'standard' },
+    B1: { status: 'done', commits: 2, range: ['0'.repeat(40), '3'.repeat(40)], rounds: 0, tier_used: 'standard' },
   });
   // run1's ledger has no accepted event at its delivered head.
   assert.deepEqual(A.done.acceptance, {
@@ -1081,6 +1083,91 @@ test('a failure after a successful heredoc write is not a heredoc failure', () =
   assert.deepEqual(brief(out), [['heredoc_failure', at(0), 2, 'measured', '<<']]);
 });
 
+// A heredoc write of `size` characters in all, then a test command on the
+// line after it (the r150 D2 shape), and `tail` after that.
+const longWrite = (size, tail = 'node --test tests/a.test.mjs 2>&1 | tail -5') => {
+  const head = "cd '/w' && cat >> tests/a.test.mjs <<'EOF'\n";
+  const end = `\nEOF\n${tail}`;
+  const fill = size - head.length - end.length;
+  const body = Array.from({ length: Math.ceil(fill / 40) }, () => `// ${'x'.repeat(36)}`).join('\n').slice(0, fill);
+  const command = head + body + end;
+  assert.equal(command.length, size);
+  return command;
+};
+const OUTER_EOF = "/usr/bin/bash: -c: line 147: unexpected EOF while looking for matching `''";
+const heredocRows = (command, text) => brief(detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', text, true),
+  ...call1(10, 'e1', 'Edit', { file_path: 'tests/a.test.mjs' }, 'The file tests/a.test.mjs has been updated.')]));
+const HEREDOC_ROW = [['heredoc_failure', at(0), 11, 'bound', '<<']];
+
+test('a heredoc line too long for the Bash tool is a heredoc failure', () => {
+  // W1: a line of 6,000 characters or more holding a heredoc write, whose
+  // result after 'Exit code 2' is only the outer shell's unexpected EOF
+  // (bash 5.1 and older add a syntax error line). The tool cut the line, so
+  // the shell ran none of it: the write failed.
+  const command = longWrite(9023);
+  const syntax = '/usr/bin/bash: -c: line 188: syntax error: unexpected end of file';
+  for (const text of [`Exit code 2\n${OUTER_EOF}`, `Exit code 2\n${OUTER_EOF}\n${syntax}`, `Exit code 2\n${OUTER_EOF}\n`]) {
+    assert.deepEqual(heredocRows(command, text), HEREDOC_ROW, text);
+  }
+  const out = detect([use(0, 'h1', 'Bash', { command }), res(2, 'h1', 'Bash', `Exit code 2\n${OUTER_EOF}`, true)]);
+  assert.deepEqual(out.slowdowns[0].evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'node', check: null });
+  // 6,000 characters is the least; a Windows shell path counts too.
+  assert.deepEqual(heredocRows(longWrite(6000), `Exit code 2\n${OUTER_EOF}`), HEREDOC_ROW);
+  assert.deepEqual(heredocRows(command,
+    "Exit code 2\nC:\\Program Files\\Git\\usr\\bin\\bash.exe: -c: line 9: unexpected EOF while looking for matching `\"'"),
+  HEREDOC_ROW);
+  // Review focus 3: none of these says the write failed.
+  for (const [line, text] of [
+    // One character short.
+    [longWrite(5999), `Exit code 2\n${OUTER_EOF}`],
+    // A short line with the same message (its write ran first).
+    ["cd /w && cat > a.txt <<'EOF'\nx\nEOF\nnode a.js", "Exit code 2\n/usr/bin/bash: -c: line 4: unexpected EOF while looking for matching `''"],
+    // An inner shell's EOF after the write: it names itself bash, not by path.
+    [longWrite(9023, "bash -c \"echo 'x\""), "Exit code 2\nbash: -c: line 1: unexpected EOF while looking for matching `''"],
+    // The EOF line and the syntax error line of two shells: the outer one,
+    // named by its path, and an inner bash.
+    [command, `Exit code 2\n${OUTER_EOF}\nbash: -c: line 1: syntax error: unexpected end of file`],
+    // More output than the shell's message, another exit code, or a line
+    // without a heredoc write.
+    [command, `Exit code 2\n${OUTER_EOF}\nnot ok 1 - a`],
+    [command, `Exit code 1\n${OUTER_EOF}`],
+    [command, `${OUTER_EOF}`],
+    [command.replace("cat >> tests/a.test.mjs <<'EOF'", "python3 - <<'EOF'"), `Exit code 2\n${OUTER_EOF}`],
+  ]) {
+    assert.deepEqual(heredocRows(line, text), [], `${line.slice(-40)}: ${text}`);
+  }
+});
+
+test('a heredoc write to a missing folder is a heredoc failure', () => {
+  // W2: the shell's redirect error names the heredoc write's own target.
+  assert.deepEqual(heredocRows("cd /w && cat > src/x/a.ts <<'EOF'\nexport const a = 1;\nEOF\ngit add src/x/a.ts",
+    "Exit code 128\n/usr/bin/bash: line 1: src/x/a.ts: No such file or directory\nfatal: pathspec 'src/x/a.ts' did not match any files"),
+  HEREDOC_ROW);
+  // A target holding $ or ~ matches on its basename: the shell prints the
+  // expanded path.
+  assert.deepEqual(heredocRows("S=/c/u/tmp/gone && cat > \"$S/probe.py\" <<'EOF'\nprint(1)\nEOF\npython3 \"$S/probe.py\"",
+    "Exit code 2\n/usr/bin/bash: line 1: /c/u/tmp/gone/probe.py: No such file or directory\n"
+    + "python3: can't open file '/c/u/tmp/gone/probe.py': [Errno 2] No such file or directory"), HEREDOC_ROW);
+  assert.deepEqual(heredocRows("cat > ~/notes/a.md <<'EOF'\nx\nEOF\nwc -l ~/notes/a.md",
+    "Exit code 1\n/usr/bin/bash: line 1: /home/u/notes/a.md: No such file or directory\nwc: /home/u/notes/a.md: No such file or directory"),
+  HEREDOC_ROW);
+  // Review focus 3: another file's error, or a message that is not the
+  // shell's redirect error, is no heredoc failure.
+  for (const [line, text] of [
+    // The write ran; source fails on a path that is not the target.
+    ["cat > /tmp/a.sh <<'EOF'\necho hi\nEOF\nsource ./a.sh", 'Exit code 1\n/usr/bin/bash: line 4: ./a.sh: No such file or directory'],
+    // cat names its own file, not the shell.
+    ["cd /w && cat > src/a.ts <<'EOF'\nx\nEOF\ncat src/a.ts", 'Exit code 1\ncat: src/a.ts: No such file or directory'],
+    ["cat > \"$D/a.ts\" <<'EOF'\nx\nEOF\ncat src/a.ts", 'Exit code 1\ncat: src/a.ts: No such file or directory'],
+    // An exact target needs the whole path.
+    ["cat > src/x/a.ts <<'EOF'\nx\nEOF\nnode b.js", 'Exit code 1\n/usr/bin/bash: line 1: lib/src/x/a.ts: No such file or directory'],
+    // An inline script's output file is not a heredoc write.
+    ["python3 - <<'EOF' > out/r.json\nprint(1)\nEOF", 'Exit code 1\n/usr/bin/bash: line 1: out/r.json: No such file or directory'],
+  ]) {
+    assert.deepEqual(heredocRows(line, text), [], `${line}: ${text}`);
+  }
+});
+
 test('a rerun needs proof that nothing changed', () => {
   const bash = (ts, id, command, text = 'ok', isError = false) => [
     use(ts, id, 'Bash', { command }), res(ts + 5, id, 'Bash', text, isError)];
@@ -1440,11 +1527,17 @@ function buildLaunches(launches, tasks = ['A1', 'B1', 'C1']) {
       const model = a.model || 'sonnet';
       writeFileSync(join(dir, wf, `agent-${id}.meta.json`), JSON.stringify({
         agentType: 'workflow-subagent', description: a.label, workflowPhase: a.phase || 'Lane a', model }));
+      // Claude Code's API error message: model <synthetic>, zero usage.
+      const synthetic = { type: 'assistant', timestamp: a.end && T(a.end), isApiErrorMessage: true, message: {
+        id: `s_${id}`, role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence',
+        content: [{ type: 'text', text: 'API Error' }],
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } };
       const lines = [
         { type: 'user', timestamp: a.start && T(a.start), message: { role: 'user', content: 'Do the task.' } },
-        { type: 'assistant', timestamp: a.end && T(a.end), message: {
+        a.synthetic === 'only' ? synthetic : { type: 'assistant', timestamp: a.end && T(a.end), message: {
           id: `m_${id}`, role: 'assistant', model: `claude-${model}-4-6`, stop_reason: 'end_turn',
           content: [{ type: 'text', text: 'Done.' }], usage } },
+        ...(a.synthetic === 'end' ? [synthetic] : []),
       ];
       writeFileSync(join(dir, wf, `agent-${id}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
     });
@@ -1595,6 +1688,61 @@ test('a retry or escalation of an untimed agent costs unavailable', () => {
   ]);
   const NONE = ['unavailable', 'unavailable', 'unavailable', 'unavailable', 1, []];
   assert.deepEqual(rows(launch(false)), [[['B1 implement', ...NONE]], [['B1 review retry', ...NONE]]]);
+});
+
+test('an agent ended by an API error and retried at its own tier is no escalation', () => {
+  // Review focus 4. B1 implement (opus) ends on a <synthetic> line and its
+  // retry runs at opus; A1 implement has only a <synthetic> line, and its
+  // retry runs at opus too. Neither is an escalation, so the retry rows
+  // contain nothing.
+  const res = autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents: [
+    { label: 'B1 implement', model: 'opus', synthetic: 'end', start: '10:00:05', end: '10:05:00' },
+    { label: 'B1 implement retry', model: 'opus', start: '10:05:10', end: '10:08:00' },
+    { label: 'A1 implement', model: 'opus', synthetic: 'only', start: '10:08:10', end: '10:08:20' },
+    { label: 'A1 implement retry', model: 'opus', start: '10:08:30', end: '10:09:00' },
+  ] }]));
+  assert.equal(res.code, 0, res.stderr);
+  assert.deepEqual(ofKind(res.json, 'escalation'), []);
+  assert.deepEqual(ofKind(res.json, 'retry').map(rowOf), [
+    ['B1 implement retry', T('10:05:10'), 170, 'measured', 170, 1, []],
+    ['A1 implement retry', T('10:08:30'), 30, 'measured', 30, 1, []],
+  ]);
+  assert.equal(res.json.detectors.escalation, 'ok');
+  assert.ok(!res.text.includes('<synthetic>'), res.text);
+});
+
+test('an escalation row covers the review the engine runs again after it', () => {
+  // After a review's changes the engine reruns implement at standard and
+  // reviews the task again (rerunAtStandard): B1 review, B1 implement at
+  // opus (the escalation), then B1 review once more, which joins the row.
+  const B1 = { label: 'B1 implement', start: '10:00:05', end: '10:05:00' };
+  const REVIEW = { label: 'B1 review', start: '10:05:10', end: '10:06:00' };
+  const ESCALATED = { label: 'B1 implement', model: 'opus', start: '10:06:10', end: '10:09:00' };
+  const SECOND = { label: 'B1 review', start: '10:09:10', end: '10:10:00' };
+  const rows = (agents) => ofKind(autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents }])).json, 'escalation')
+    .map(rowOf);
+  // 170 s of the escalated implement and 50 s of the second review.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, SECOND]), [['B1 implement', T('10:06:10'), 220, 'measured', 220, 1, []]]);
+  // An untimed second review makes the cost unknown, never a part.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'B1 review' }]),
+    [['B1 implement', T('10:06:10'), 'unavailable', 'unavailable', 'unavailable', 1, []]]);
+  // The task's next agent is an adjudicate: the review after it is not the
+  // escalation's.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'B1 adjudicate', start: '10:09:10', end: '10:09:40' },
+    { ...SECOND, start: '10:09:50', end: '10:10:30' }]), [['B1 implement', T('10:06:10'), 170, 'measured', 170, 1, []]]);
+  // Another task's agent between them changes nothing.
+  assert.deepEqual(rows([B1, REVIEW, ESCALATED, { label: 'A1 implement', start: '10:09:05', end: '10:09:08' }, SECOND]),
+    [['B1 implement', T('10:06:10'), 220, 'measured', 220, 1, []]]);
+  // An implement escalated before any review of the task (run2's B1: it
+  // failed at sonnet and ran again at opus) is followed by the task's first
+  // review, which the escalation did not add.
+  assert.deepEqual(rows([B1, { ...ESCALATED, start: '10:05:10', end: '10:08:00' }, SECOND]),
+    [['B1 implement', T('10:05:10'), 170, 'measured', 170, 1, []]]);
+  // Only an escalated implement gains the review after it: an escalated
+  // review (B1 review at opus, then once more at opus) keeps its own time.
+  assert.deepEqual(rows([B1, REVIEW, { ...ESCALATED, label: 'B1 review' }, { ...SECOND, model: 'opus' }]),
+    [['B1 review', T('10:06:10'), 170, 'measured', 170, 1, []]]);
+  assert.deepEqual(ofKind(S, 'escalation').map(rowOf), [['B1 implement', T('09:02:10'), 170, 'measured', 170, 1, []]]);
 });
 
 test('a run with one launch keeps all its agents and shows no launches table', () => {
@@ -1767,6 +1915,129 @@ test('a run the engine accepted adds nothing for a user acceptance', () => {
   assert.ok(res.md.split('\n').includes('- Acceptance: accepted (checks_stale: missing); warnings 1'), res.md);
   assert.ok(res.md.split('\n').includes('- Acceptance: accepted'), res.md);
   assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
+});
+
+// ---- commit counts ----
+// A task's commits come from the ledger's committed and settled events
+// (finish-task writes one per commit round), after its last started event
+// with restart true. run1's b.jsonl holds B1's events; each case below
+// replaces it with `lines` (null: no b.jsonl).
+
+const sha = (c) => c.repeat(40);
+const B1_START = { task: 'B1', event: 'started', base: sha('0') };
+const committed = (commits, task = 'B1') => ({ task, event: 'committed', base: sha('0'), head: sha('9'), commits });
+const settled = (extra = {}) => ({ task: 'B1', event: 'settled', outcome: 'park', base: sha('0'), head: sha('9'),
+  ...extra });
+
+function ledgerRun(lines) {
+  const dir = copyRun();
+  const path = join(dir, 'p.f1.ledger', 'b.jsonl');
+  if (lines === null) rmSync(path);
+  else writeFileSync(path, lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n');
+  return dir;
+}
+
+// done.tasks of each run folder, from done_section in one process.
+const doneTasks = (dirs) => python([
+  'import _autopsy',
+  'out = []',
+  `for d in json.loads(${JSON.stringify(JSON.stringify(dirs))}):`,
+  '    with open(d + "/wf_1.json", encoding="utf-8") as f:',
+  '        out.append(_autopsy.done_section(json.load(f)["result"], d)["tasks"])',
+  'print(json.dumps(out))',
+]);
+
+test('a task\'s commits are the distinct commits of its ledger events', () => {
+  const cases = [
+    // One round, one commit.
+    [[B1_START, committed([sha('2')])], 1],
+    // A fix round writes its own event.
+    [[B1_START, committed([sha('2')]), committed([sha('4')])], 2],
+    // A commit listed twice (a finish-task rerun repeats its events) counts once.
+    [[B1_START, committed([sha('2'), sha('4')]), committed([sha('5')]), committed([sha('5')])], 3],
+    // A settled event's commits count too; an empty list adds none.
+    [[B1_START, committed([sha('2')]), settled({ commits: [sha('4')] })], 2],
+    [[B1_START, committed([sha('2')]), settled({ commits: [] })], 1],
+    // Review focus 1: a plain started (a retry or a rerun) does not reset...
+    [[B1_START, committed([sha('2')]), { ...B1_START, base: sha('2') }, committed([sha('4')])], 2],
+    // ...a started with restart true does.
+    [[B1_START, committed([sha('2')]), { ...B1_START, restart: true }, committed([sha('4')])], 1],
+    [[B1_START, committed([sha('2')]), { ...B1_START, restart: true }], 'unavailable'],
+    // Review focus 2: lines that are not JSON objects are skipped...
+    [['not json {', '[1]', 'null', '"committed"', B1_START, committed([sha('2')])], 1],
+    // ...and a committed or settled event without a commits list (an older
+    // ledger) makes the count unavailable.
+    [[B1_START, committed([sha('2')]), settled()], 'unavailable'],
+    [[B1_START, committed([sha('2')]), { task: 'B1', event: 'committed', base: sha('0'), head: sha('9') }],
+      'unavailable'],
+    [[B1_START, committed([sha('2')]), settled({ commits: 'x' })], 'unavailable'],
+    [[B1_START, committed([sha('2'), 'HEAD'])], 'unavailable'],
+    // No committed or settled event, or no b.jsonl at all.
+    [[B1_START], 'unavailable'],
+    [null, 'unavailable'],
+  ];
+  const out = doneTasks(cases.map(([lines]) => ledgerRun(lines)));
+  cases.forEach(([lines, want], i) => {
+    assert.equal(out[i].B1.commits, want, JSON.stringify(lines));
+    // A1's own events (a.jsonl) are untouched by B1's.
+    assert.equal(out[i].A1.commits, 1, JSON.stringify(lines));
+  });
+});
+
+test('every ledger file counts, and without a ledger every count is unavailable', () => {
+  // B1's events may sit in any *.jsonl of the ledger (a.jsonl here).
+  const elsewhere = ledgerRun(null);
+  editLines(join(elsewhere, 'p.f1.ledger', 'a.jsonl'), (ls) => [...ls, JSON.stringify(committed([sha('2')]))]);
+  const noLedger = copyRun();
+  rmSync(join(noLedger, 'p.f1.ledger'), { recursive: true });
+  const [moved, none] = doneTasks([elsewhere, noLedger]);
+  assert.deepEqual([moved.A1.commits, moved.B1.commits], [1, 1]);
+  assert.deepEqual([none.A1.commits, none.B1.commits], ['unavailable', 'unavailable']);
+  // The range still comes from the result.
+  assert.deepEqual(none.B1.range, [sha('0'), sha('3')]);
+});
+
+test('range is the result\'s [base, head] when both are SHAs, else null', () => {
+  const cases = [
+    [[sha('0'), sha('3')], [sha('0'), sha('3')]],
+    [['abc1234', 'ABCDEF0'], ['abc1234', 'ABCDEF0']],
+    [[sha('0')], null],
+    [[sha('0'), 'HEAD'], null],
+    [['', sha('3')], null],
+    [[sha('0'), sha('3'), sha('4')], null],
+    [[sha('0'), 3], null],
+    [null, null],
+    [undefined, null],
+    ['0..3', null],
+  ];
+  const dirs = cases.map(([commits]) => {
+    const dir = copyRun();
+    const wfPath = join(dir, 'wf_1.json');
+    const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+    if (commits === undefined) delete wf.result.tasks.B1.commits;
+    else wf.result.tasks.B1.commits = commits;
+    writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+    return dir;
+  });
+  const out = doneTasks(dirs);
+  cases.forEach(([commits, want], i) => {
+    assert.deepEqual(out[i].B1.range, want, JSON.stringify(commits));
+    // The count is the ledger's whatever the range.
+    assert.equal(out[i].B1.commits, 2, JSON.stringify(commits));
+  });
+});
+
+test('What got done prints each task\'s commit count', () => {
+  const res = runCli(copyRun());
+  assert.equal(res.code, 0, res.stderr);
+  const done = res.md.split('## What got done\n\n')[1].split('\n## ')[0].split('\n');
+  assert.ok(done.includes('- A1: done; 1 commit; rounds 1; tier standard'), done.join('\n'));
+  assert.ok(done.includes('- B1: done; 2 commits; rounds 0; tier standard'), done.join('\n'));
+  const none = runCli(ledgerRun(null));
+  assert.equal(none.code, 0, none.stderr);
+  assert.ok(none.md.split('\n').includes('- B1: done; commits unavailable; rounds 0; tier standard'), none.md);
+  // No sha reaches autopsy.md.
+  assert.ok(!res.md.includes(sha('2')) && !res.md.includes(sha('0')), res.md);
 });
 
 const run3 = autopsy(copyRun(RUN3));
@@ -2180,6 +2451,65 @@ test('a run with no slowdowns still gets a short summary', () => {
   assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
   assert.match(res.stdout, /^project test runs: 2; check calls with a test group: 2 \(implement 1, verify 1\)$/m);
   assert.match(res.stdout, /autopsy\.md/);
+});
+
+test('the summaries name the longest agent on the critical path', () => {
+  // run2's path runs from wf_1's A1 implement (280 s) through wf_2's A1
+  // implement (725 s) to verify: the label repeats, the agent is wf_2's.
+  assert.deepEqual(S.time.critical_path.labels,
+    ['A1 implement', 'A1 implement', 'A1 review', 'A1 fix 1', 'A1 re-review 1', 'verify']);
+  assert.deepEqual(S.time.critical_path.longest, { label: 'A1 implement', launch: 'wf_2', wall_s: 725 });
+  assert.deepEqual(A.time.critical_path.longest, { label: 'B1 implement', launch: 'wf_1', wall_s: 180 });
+  const res = runCli(copyRun(RUN2));
+  assert.equal(res.code, 0, res.stderr);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0].split('\n');
+  assert.ok(summary.includes('- Longest on the critical path: A1 implement (725.0 s)'), summary.join('\n'));
+  assert.equal(summary.indexOf('- Longest on the critical path: A1 implement (725.0 s)'),
+    summary.findIndex((l) => l.startsWith('- Slowest phase:')) + 1);
+  const chat = res.stdout.split('\n');
+  assert.equal(chat[chat.findIndex((l) => l.startsWith('slowest phase:')) + 1],
+    'longest on the critical path: A1 implement (725.0 s)');
+  // On a tie the first on the path is named; an agent off the path (B1
+  // implement, 85 s, still running when A1 review starts) never is.
+  const tied = autopsy(buildLaunches([{ start: '10:00:00', s: 135, agents: [
+    { label: 'A1 implement', start: '10:00:05', end: '10:01:05' },
+    { label: 'B1 implement', start: '10:00:05', end: '10:01:30' },
+    { label: 'A1 review', start: '10:01:10', end: '10:02:10' },
+  ] }])).json;
+  assert.deepEqual(tied.time.critical_path.labels, ['A1 implement', 'A1 review']);
+  assert.deepEqual(tied.time.critical_path.longest, { label: 'A1 implement', launch: 'wf_1', wall_s: 60 });
+  // Review focus 5: no timed agent on the path, no line.
+  const dir = copyRun();
+  for (const name of readdirSync(join(dir, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(dir, 'wf_1', name), (lines) => lines.map((l) => {
+      const o = JSON.parse(l);
+      delete o.timestamp;
+      return JSON.stringify(o);
+    }));
+  }
+  const none = runCli(dir);
+  assert.equal(none.code, 0, none.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual([D.time.critical_path.labels, D.time.critical_path.longest], [[], null]);
+  assert.ok(!/longest on the critical path/i.test(none.md), none.md);
+  assert.ok(!/longest on the critical path/i.test(none.stdout), none.stdout);
+});
+
+test('the chat summary keeps its 15-line cap with every optional line', () => {
+  // run2 (earlier launches, three slowdowns, the longest agent) with the
+  // acceptance line and a launch conditions line as well.
+  const lines = python([
+    'import _autopsy',
+    `a = json.loads(${JSON.stringify(JSON.stringify(S))})`,
+    'a["done"]["acceptance"] = {"status": "rejected", "reasons": [], "warnings": 0, "accepted_by_user": True}',
+    '_autopsy._conditions_line = lambda a: "launch conditions: 1 check warned or failed before launch; 0 possible contributors"',
+    'print(json.dumps(_autopsy.render_summary(a, "C:/u/run/autopsy.md").split("\\n")))',
+  ]).filter((l) => l !== '');
+  assert.ok(lines.length <= 15, lines.join('\n'));
+  assert.ok(lines.includes('longest on the critical path: A1 implement (725.0 s)'), lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith('launch conditions: ')), lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith('top suggestion: ')), lines.join('\n'));
+  assert.equal(lines.at(-1), 'full report: C:/u/run/autopsy.md');
 });
 
 test('partial tokens are called minimums', () => {

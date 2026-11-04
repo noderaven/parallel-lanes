@@ -17,7 +17,9 @@ launches' kept_agents, redone_agents and redone_agent_s summed, and
 '(agent time unavailable)' in place of '(<X> of agent time)' if any is;
 see launches), when the user accepted the delivered head and the run's
 own verdict is not accepted the line 'acceptance: <status>; accepted by
-the user at the delivered head' (see done), the slowest phase, the top
+the user at the delivered head' (see done), the slowest phase, the line
+'longest on the critical path: <label> (<s>)' when time.critical_path's
+longest is set (see time), the top
 three slowdowns with their cost, when a recorded launch has a warned,
 failed or unread check the line 'launch conditions: <n> check(s) warned
 or failed before launch[, <k> could not be read]; <m> possible
@@ -31,8 +33,10 @@ has usage), the top suggestion and the absolute path of autopsy.md.
 --quiet prints nothing.
 
 autopsy.md is plain ASCII with these sections, in order: Summary (with
-the earlier launches line as '- Earlier launches: ...' and the acceptance
-as '- Acceptance: <status>'), What got done (its '- Acceptance: <status>
+the earlier launches line as '- Earlier launches: ...', the acceptance
+as '- Acceptance: <status>' and, after '- Slowest phase: ...', the line
+'- Longest on the critical path: <label> (<s>)' when time.critical_path's
+longest is set), What got done (its '- Acceptance: <status>
 (<kind>: <class>, ...); warnings <n>' line and the Summary's both end with
 '; accepted by the user at the delivered head' when accepted_by_user is
 true and the status is not accepted), Where time went (for a run with
@@ -84,10 +88,22 @@ redone agents' summed wall times (the relaunch row's span_s); each is
 "unavailable" when one of its agents is untimed, and 0 with no agent.
 
 done (from the last launch's result): tasks {<id>: {status, commits,
-rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
+range, rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
 warnings: <count>, accepted_by_user}, final {fixed, declined, open}
 (counts) and e2e (pass, fail or none). Free text (notes, reason details,
 warnings, findings, evidence) is never copied.
+- tasks.commits is the task's commit count from the ledger: the distinct
+  SHAs in the commits lists of its committed and settled events (one per
+  commit round) in every *.jsonl of the ledger, after its last started
+  event with restart true (or from the start without one); a plain
+  started (a retry or a rerun) does not reset it. A batch's events repeat
+  the batch's commits under each task, so each counts the batch's. It is
+  "unavailable" without a readable ledger, when the task has no such
+  event, or when one of them has no commits list of SHAs (an older
+  ledger); lines that are not JSON objects are skipped. range is the
+  result's own commits, the [base, head] pair the engine writes, when
+  both are SHAs, else null. What got done prints 'N commits', '1 commit'
+  or 'commits unavailable'.
 - acceptance.status stays the run's own verdict. accepted_by_user is true
   when the ledger's _run.jsonl holds an accepted event (what 'ledger
   accept' appends) whose head equals the result's delivered_sha exactly,
@@ -101,7 +117,7 @@ time: wall_s (the launches' sum), phases [{phase, launch, start, end,
 wall_s, agents}], lanes [{lane, launch, start, end, busy_s, idle_s}],
 agents [{label, launch, phase, task, role, start, end, wall_s, tool_s,
 tool_s_min, other_s, unmatched_calls}], critical_path {estimate: true,
-labels} and idle_gaps [{start, end, s}].
+labels, longest} and idle_gaps [{start, end, s}].
 - An agent's span is its first timed transcript line (the prompt
   included) to its last event (assistant message, tool call or tool
   result). tool_s_min is the union of its matched tool call spans
@@ -121,6 +137,10 @@ labels} and idle_gaps [{start, end, s}].
   rest of its span (both "unavailable" unless every agent is timed).
 - The critical path is a timing-based estimate: from the last-ending agent,
   walk back to the latest-ending agent that ended before it started.
+  longest is {label, launch, wall_s} of the longest timed agent on it,
+  taken from the agents themselves (a label repeats across launches and
+  reviews), the first on the path on a tie; null when no agent on it is
+  timed (the summaries then have no line about it).
 - An idle gap is a span over 60 s inside a launch where no agent of that
   launch runs. A launch with an agent that has no timestamps has none
   listed (and with no such launch the idle_gap detector is
@@ -214,23 +234,45 @@ model turn that came at or before its own result. The kinds:
   Text in command output, files read or other tools never counts.
 - repeated_failure: the same Bash command (whitespace-normalised) fails
   twice or more in one agent; first failing call to last failing result.
-- heredoc_failure: a failing Bash command that is nothing but a heredoc
-  file write: each pipeline is a heredoc feeding cat or tee, with no |
-  stage, that writes a file (a > or >> redirect, or tee), or only 'cd DIR'
-  or NAME=value assignments. A failing inline script such as 'python3 -
-  <<EOF', even with its output redirected (> out.json), does not count, and neither does a line that does more than the write (cat > f
-  <<EOF then python3 f): its error text does not say which part failed,
-  so it is an unlocated failure. From it to the agent's next successful
-  file write, by Edit or Write or by a Bash redirect or tee (bound), else
-  its own span.
+- heredoc_failure: a failing Bash command whose heredoc file write failed.
+  A heredoc write is a pipeline that is a heredoc feeding cat or tee, with
+  no | stage, that writes a file (a > or >> redirect, or tee). It failed
+  when the command is nothing but the write (each pipeline the write, or
+  only 'cd DIR' or NAME=value assignments), or when the command holds a
+  write anywhere and either (W1) it is at least 6,000 characters long (the
+  Windows Bash tool cuts a command near 7,000 to 8,191) and its result,
+  after 'Exit code 2', is only the outer shell's '<shell path>: -c: line
+  N: unexpected EOF while looking for matching' line, optionally followed
+  by the same shell's 'syntax error: unexpected end of file' line (bash
+  5.1 and older), or (W2) its result holds the shell's 'line N: <target>:
+  No such file or directory' for a > or >> target of a write, the target
+  exactly as written, or by its basename when it holds $ or ~ (the shell
+  prints the expanded path). A failing inline script such as 'python3 -
+  <<EOF', even with its output redirected (> out.json), does not count,
+  and neither does any other line that does more than the write (cat > f
+  <<EOF then python3 f, or an inner 'bash -c', which names itself bash):
+  its error text does not say which part failed, so it is an unlocated
+  failure. From it to the agent's next successful file write, by Edit or
+  Write or by a Bash redirect or tee (bound), else its own span.
 - edit_retry: an Edit or Write fails as unread, changed, or text not
   found; from it to the next successful write of that file.
 - extra_review_round: a task's 'fix N' and 're-review N' agents; the sum
   of their wall times, "unavailable" (cost_kind too) when one of them is
   untimed.
 - escalation and retry: an agent run-report counts as one (the same label
-  again at another model tier in the same launch; a label ending ' retry');
-  that agent's wall time, "unavailable" (cost_kind too) when it is untimed.
+  again at another model tier in the same launch, where a <synthetic> API
+  error line never sets a model; a label ending ' retry'); that agent's
+  wall time, "unavailable" (cost_kind too) when it is untimed. An
+  escalation row also covers the review the engine runs again after it
+  (an implement rerun at standard after a review's changes or a failed
+  fix, then the whole task reviewed again): when the task's next agent in
+  the launch's agent order is labelled exactly '<task> review' and an
+  earlier agent of the launch has that label, that review's wall time
+  joins the row ("unavailable" when one of the two is untimed). An
+  implement escalated before any review of its task is followed by the
+  task's first review, which stays out, and so does a review after an
+  adjudicate. An escalation of another role than implement covers only
+  its own agent.
 - relaunch: every launch but the last, at its start; the summed wall
   times of its redone agents (see launches), "unavailable" (cost_kind
   too) when one of them is untimed, never 0 or a part, and 0 (listed,

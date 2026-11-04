@@ -23,6 +23,8 @@ import _shell  # noqa: E402
 UNAVAILABLE = "unavailable"
 TOKEN_FIELDS = ("input_tokens", "output_tokens",
                 "cache_read_input_tokens", "cache_creation_input_tokens")
+# The model Claude Code writes on its own API error message: no model ran it.
+SYNTHETIC_MODEL = "<synthetic>"
 
 
 def read_json(path):
@@ -113,6 +115,11 @@ def read_usage(path):
     its message.id, each repeating that message's usage (output_tokens as a
     running value). Each message counts once, with the last usage seen for
     its id (and requestId when present); lines without an id count each.
+    resolved_model is the model of the last usage line that names one and
+    models counts messages per model, both leaving out SYNTHETIC_MODEL (an
+    API error message Claude Code writes itself): an agent ended by one
+    keeps its last real model, and one with only such lines has none. Their
+    tokens still count.
     complete is False when a counted line has stop_reason null (its
     output_tokens is a mid-stream value) or when unreadable is above 0.
     unreadable counts non-blank lines that are not valid JSON or not valid
@@ -159,7 +166,7 @@ def read_usage(path):
                 mid = msg.get("id")
                 rid = obj.get("requestId")
                 key = (mid, rid if isinstance(rid, str) else None) if isinstance(mid, str) and mid else None
-                if isinstance(msg.get("model"), str):
+                if isinstance(msg.get("model"), str) and msg["model"] != SYNTHETIC_MODEL:
                     model = msg["model"]
                     # Each message counts once per model, on the first line that names it.
                     if key is None or (key, model) not in counted:
