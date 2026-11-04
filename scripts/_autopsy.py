@@ -24,7 +24,9 @@ check execution is named by a check id or 'run-checks', never by the
 command line or the configured command (which may carry a secret).
 The ledger's accepted events give only a boolean,
 done.acceptance.accepted_by_user (user_accepted): their text names a
-person and is never written out.
+person and is never written out. Its committed and settled events give
+only each task's commit count (task_commits); a task's range is its
+result's own [base, head].
 
 Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
@@ -141,7 +143,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 10
+AUTOPSY_VERSION = 11
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -547,22 +549,85 @@ def user_accepted(run_folder, result):
     return False
 
 
+def ledger_events(run_folder):
+    """Every JSON object line of the run's ledger, in ledger order (the
+    ledger dir's *.jsonl files by name, then lines), as scripts/ledger reads
+    them; lines that are not JSON objects are skipped. None without a ledger
+    dir or when one of its files cannot be read."""
+    ledger = find_ledger(run_folder)
+    if ledger is None:
+        return None
+    events = []
+    for path in _files(ledger, "*.jsonl"):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        for raw in data.splitlines():
+            try:
+                event = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def task_commits(events, task):
+    """done.tasks[task].commits: the number of distinct SHAs in the commits
+    lists of the task's committed and settled events (finish-task writes
+    one per commit round, a batch's under each of its tasks) after its last
+    started event with restart true, or from the start without one; a plain
+    started (a retry or a rerun) does not reset it. UNAVAILABLE without a
+    readable ledger (events None), without such an event, or when one of
+    them has no commits list of SHAs (an older ledger)."""
+    if events is None:
+        return UNAVAILABLE
+    rounds = []
+    for event in events:
+        if event.get("task") != task:
+            continue
+        if event.get("event") == "started" and event.get("restart") is True:
+            rounds = []
+        elif event.get("event") in ("committed", "settled"):
+            rounds.append(event.get("commits"))
+    if not rounds:
+        return UNAVAILABLE
+    seen = set()
+    for commits in rounds:
+        if not isinstance(commits, list) or not all(isinstance(c, str) and _SHA.fullmatch(c) for c in commits):
+            return UNAVAILABLE
+        seen.update(c.lower() for c in commits)
+    return len(seen)
+
+
+def task_range(commits):
+    """done.tasks[].range: a task result's commits, the [base, head] pair
+    the engine writes, when both are SHAs; else None."""
+    if isinstance(commits, list) and len(commits) == 2 \
+            and all(isinstance(c, str) and _SHA.fullmatch(c) for c in commits):
+        return list(commits)
+    return None
+
+
 def done_section(result, run_folder):
     """The done section from the last launch's result; run_folder gives the
-    ledger that accepted_by_user reads."""
+    ledger that each task's commits (task_commits) and accepted_by_user
+    read."""
     if not isinstance(result, dict):
         result = {}
     tasks = result.get("tasks")
     if isinstance(tasks, dict):
         done_tasks = {}
+        events = ledger_events(run_folder)
         for tid, t in tasks.items():
             t = t if isinstance(t, dict) else {}
-            commits = t.get("commits")
             rounds = t.get("rounds")
             done_tasks[tid] = {
                 "status": _str_or_unavailable(t.get("status")),
-                "commits": [c for c in commits if isinstance(c, str) and _SHA.match(c)]
-                if isinstance(commits, list) else UNAVAILABLE,
+                "commits": task_commits(events, tid),
+                "range": task_range(t.get("commits")),
                 "rounds": rounds if isinstance(rounds, int) and not isinstance(rounds, bool) else UNAVAILABLE,
                 "tier_used": _str_or_unavailable(t.get("tier_used")),
             }
@@ -1651,8 +1716,9 @@ def detector_status(run):
 # time, a check call's (check_time, internal: a helper call, or a procedure
 # execution's start or wait call) first; a window from a
 # failure to its recovery, which may hold other work;
-# a whole agent (retry first: an agent ended by an API error also reads as
-# an escalation); a launch's redone agents, last and in a tier of its own, so
+# a whole agent (retry first: a retry run at another tier is an escalation
+# too; an API error's <synthetic> line sets no model, so a retry after one at
+# the same tier is not); a launch's redone agents, last and in a tier of its own, so
 # that a whole-agent row over one of them (a retry, say) takes it first: in
 # the fourth tier the relaunch row could go first, being shorter or, with the
 # same span, earlier (its _at is the launch start, before any agent's).
@@ -3398,7 +3464,7 @@ def _md_done(a):
             commits = t["commits"]
             lines.append("- %s: %s; %s; %s; tier %s" % (
                 tid, t["status"],
-                "commits unavailable" if commits == UNAVAILABLE else _count_word(len(commits), "commit"),
+                "commits unavailable" if commits == UNAVAILABLE else _count_word(commits, "commit"),
                 "rounds " + str(t["rounds"]), t["tier_used"]))
         if not tasks:
             lines.append("- No tasks listed.")

@@ -264,6 +264,40 @@ test('Haiku agents get a haiku tier, and a rerun on Opus counts as a haiku escal
   assert.equal(out.models['claude-haiku-5-5'], 1);
 });
 
+test('a <synthetic> usage line never sets the model, so a retry after an API error is no escalation', () => {
+  // Review focus 4. T1 implement (opus) ends on Claude Code's API error
+  // line (model <synthetic>) and its retry runs at opus; T1 review has only
+  // synthetic lines.
+  const dir = join(TMP, 'synthetic');
+  mkdirSync(dir, { recursive: true });
+  writeAgent(dir, 's1', 'T1 implement', 'opus', [
+    usageLine('m1', 'claude-opus-5-5', 7, 'end_turn', '2026-10-02T10:00:00.000Z'),
+    usageLine('m2', '<synthetic>', 0, 'stop_sequence', '2026-10-02T10:01:00.000Z')]);
+  writeAgent(dir, 's2', 'T1 implement retry', 'opus',
+    [usageLine('m3', 'claude-opus-5-5', 9, 'end_turn', '2026-10-02T10:02:00.000Z')]);
+  writeAgent(dir, 's3', 'T1 review', 'opus',
+    [usageLine('m4', '<synthetic>', 0, 'stop_sequence', '2026-10-02T10:03:00.000Z')]);
+  writeAgent(dir, 's4', 'T1 review retry', undefined,
+    [usageLine('m5', '<synthetic>', 0, 'stop_sequence', '2026-10-02T10:04:00.000Z')]);
+  const r = run([dir, MANIFEST]);
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out.agents.map((a) => [a.label, a.resolved_model, a.tier, a.resolved_models]), [
+    ['T1 implement', 'claude-opus-5-5', 'opus', { 'claude-opus-5-5': 1 }],
+    ['T1 implement retry', 'claude-opus-5-5', 'opus', { 'claude-opus-5-5': 1 }],
+    ['T1 review', 'unavailable', 'opus', {}],
+    ['T1 review retry', 'unavailable', 'unavailable', {}],
+  ]);
+  assert.equal(out.escalations, 0);
+  assert.equal(out.tiers.opus.escalations, 0);
+  assert.equal(out.retries, 2);
+  assert.deepEqual(out.models, { 'claude-opus-5-5': 2 });
+  // Token counts from synthetic lines stay counted.
+  assert.equal(out.tiers.opus.agents, 3);
+  assert.equal(out.tiers.opus.output_tokens, 7 + 0 + 9 + 0);
+  assert.equal(out.unavailable, 0);
+});
+
 test('effort comes from the result file where the Workflow tool writes it', () => {
   // Transcripts in <session>/subagents/workflows/wf_<id>/, result in
   // <session>/workflows/wf_<id>.json; nothing beside the transcript dir.

@@ -1268,7 +1268,12 @@ agent counted in a tier (or in the run) is incomplete, that tier's (or `totals`'
 `output_tokens_min` still sums every count there is: when `output_incomplete` > 0 report
 `output_tokens_min` as the output figure (a minimum). Report both,
 and call out any agent whose `resolved_models` names a model other than the one requested
-(a fallback).
+(a fallback). A usage line whose model is `<synthetic>` (the message Claude Code writes itself
+for an API error) never sets an agent's resolved model and is left out of `resolved_models` and
+`models`: an agent that ends on one keeps its last real model, and one with only such lines has
+resolved model `unavailable` (its tier comes from the requested model). Their tokens still
+count. So a retry at the same tier after an API error is no escalation, in run-report's
+`escalations` and tiers, autopsy's slowdowns and audit's task escalations alike.
 
 `run-checks` stamps each result with `started` and `ended` (UTC ISO 8601 with milliseconds) and
 `duration_s` (seconds, from a monotonic clock). They are additive: `check-verify` compares only
@@ -1843,7 +1848,7 @@ appends that summary to the hand-back report.
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 10, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 11, so `history` runs autopsy again on an older `autopsy.json`.
 - `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
   redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
   ran an agent for the same work: an agent with a task when a later one has the same task and
@@ -1858,6 +1863,18 @@ appends that summary to the hand-back report.
   untimed. With more than one launch, autopsy.md's "Where time went" opens with a launches table
   (`| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |`) and its Summary
   has an `Earlier launches:` line, as the chat summary has.
+- `done.tasks` is `{<id>: {status, commits, range, rounds, tier_used}}` from the last launch's
+  result. `commits` is the task's commit count from the ledger: the distinct SHAs in the
+  `commits` lists of the task's `committed` and `settled` events (finish-task writes one per
+  commit round, a fix round its own) in every `*.jsonl` of the ledger, after the task's last
+  `started` event with `restart: true` (or from the start without one); a plain `started`, as a
+  retry or an escalation or adjudication rerun writes, does not reset it. A batch's events repeat
+  the batch's commits under each of its tasks, so each task counts the batch's commits. It is
+  `unavailable` without a readable ledger, when the task has no such event, or when one of them
+  has no `commits` list of SHAs (an older ledger); lines that are not JSON objects are skipped.
+  `range` is the result's own `commits`, the `[base, head]` pair the engine writes, when both are
+  SHAs, else `null`. autopsy.md's What got done prints `N commits`, `1 commit` or
+  `commits unavailable`.
 - `done.acceptance` is `{status, reasons: [{kind, class}], warnings, accepted_by_user}` from the
   last launch's result (`unavailable` when the result has no acceptance object). `status` stays
   the run's own verdict. `accepted_by_user` is `true` when the ledger's `_run.jsonl` holds an

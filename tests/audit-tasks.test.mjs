@@ -401,3 +401,23 @@ test('escalations come from the archived transcripts only', () => {
   assert.equal(layout[0].escalations.state, 'unavailable');
   assert.match(layout[0].escalations.note, /outside the run folder/);
 });
+
+test('an implement retried at its own tier after an API error is no escalation', () => {
+  // Review focus 4: A1 implement (opus) ends on Claude Code's API error line
+  // (model <synthetic>) and its retry runs at opus; A1 review has only a
+  // synthetic line and no requested model.
+  const [s0, s1] = [S('a'), S('b')];
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const line = (timestamp, model) => ({ type: 'assistant', timestamp, message: { id: `m${timestamp}`, model, usage } });
+  const spec = reviewedRun(s0, s1);
+  spec.launches = [launch({ A1: { status: 'done', commits: [s0, s1] } }, {
+    agents: [
+      { label: 'A1 implement', model: 'opus',
+        lines: [line('2026-10-01T00:00:01Z', 'claude-opus-4-1'), line('2026-10-01T00:00:02Z', '<synthetic>')] },
+      { label: 'A1 implement retry', model: 'opus', lines: [line('2026-10-01T00:00:03Z', 'claude-opus-4-1')] },
+      { label: 'A1 review', lines: [line('2026-10-01T00:00:04Z', '<synthetic>')] },
+    ],
+  })];
+  const esc = audit(makeRun(spec), facts()).A1.changes.escalations;
+  assert.deepEqual(esc.map((e) => [e.wf, e.escalations.state, e.escalations.value]), [['wf_1', 'present', []]]);
+});

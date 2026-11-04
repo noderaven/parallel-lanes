@@ -84,10 +84,22 @@ redone agents' summed wall times (the relaunch row's span_s); each is
 "unavailable" when one of its agents is untimed, and 0 with no agent.
 
 done (from the last launch's result): tasks {<id>: {status, commits,
-rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
+range, rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
 warnings: <count>, accepted_by_user}, final {fixed, declined, open}
 (counts) and e2e (pass, fail or none). Free text (notes, reason details,
 warnings, findings, evidence) is never copied.
+- tasks.commits is the task's commit count from the ledger: the distinct
+  SHAs in the commits lists of its committed and settled events (one per
+  commit round) in every *.jsonl of the ledger, after its last started
+  event with restart true (or from the start without one); a plain
+  started (a retry or a rerun) does not reset it. A batch's events repeat
+  the batch's commits under each task, so each counts the batch's. It is
+  "unavailable" without a readable ledger, when the task has no such
+  event, or when one of them has no commits list of SHAs (an older
+  ledger); lines that are not JSON objects are skipped. range is the
+  result's own commits, the [base, head] pair the engine writes, when
+  both are SHAs, else null. What got done prints 'N commits', '1 commit'
+  or 'commits unavailable'.
 - acceptance.status stays the run's own verdict. accepted_by_user is true
   when the ledger's _run.jsonl holds an accepted event (what 'ledger
   accept' appends) whose head equals the result's delivered_sha exactly,
@@ -229,8 +241,9 @@ model turn that came at or before its own result. The kinds:
   of their wall times, "unavailable" (cost_kind too) when one of them is
   untimed.
 - escalation and retry: an agent run-report counts as one (the same label
-  again at another model tier in the same launch; a label ending ' retry');
-  that agent's wall time, "unavailable" (cost_kind too) when it is untimed.
+  again at another model tier in the same launch, where a <synthetic> API
+  error line never sets a model; a label ending ' retry'); that agent's
+  wall time, "unavailable" (cost_kind too) when it is untimed.
 - relaunch: every launch but the last, at its start; the summed wall
   times of its redone agents (see launches), "unavailable" (cost_kind
   too) when one of them is untimed, never 0 or a part, and 0 (listed,
