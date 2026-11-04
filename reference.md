@@ -2093,9 +2093,11 @@ recurring slowdowns ranked by total time lost with the engine versions they appe
 trends per task and role by engine version, suggestions ranked by total stake, and the runs
 whose data is too old for a section (left out of that section's totals). There is no automatic
 "regressed after its fix" flag. Each run in `history.json` carries `full_suite_runs` (the legacy
-check calls with a test group) and `project_test_runs` (the autopsy's `checks.project_test_runs`
-total, the whole-suite executions), each a number or `unavailable`; the per-run table in
-`history.md` shows them as `Test-group calls` and `Project test runs`.
+check calls with a test group), `project_test_runs` (the autopsy's `checks.project_test_runs`
+total: the executions known to have run an exact `commands.test` entry) and, beside it,
+`project_test_runs_unavailable` (its `unavailable` count: the executions where that cannot be
+known), each a number or `unavailable`; the per-run table in `history.md` shows them as
+`Test-group calls` and `Project test runs`, the latter as `N (+M unavailable)` when M is above 0.
 
 Exit codes: `autopsy` ends with exit 0 on success, exit 2 on a usage error or a folder without
 a `*.lanes.json` or a `wf_*` dir, and exit 3 when a path needs converting on Windows and no Git

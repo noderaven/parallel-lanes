@@ -34,7 +34,8 @@ history.json:
 
   {"runs": [{run_id, folder, date, engine_version, tasks, agents, wall_s,
              slowest_phase, tokens_total, tokens_per_task, tokens_partial,
-             full_suite_runs, project_test_runs, acceptance, accepted_by_user,
+             full_suite_runs, project_test_runs,
+             project_test_runs_unavailable, acceptance, accepted_by_user,
              top_slowdown}],
    "recurring": [{kind, total_s, runs: [{run_id, engine_version, cost_s}]}],
    "token_trends": {<engine_version>: {runs, tokens_per_task, by_role,
@@ -54,8 +55,10 @@ history.json:
 - full_suite_runs: the autopsy's checks.full_suite_runs total, the legacy
   check calls with a test group (a test group may be narrower than the
   project suite). project_test_runs: its checks.project_test_runs total,
-  the executions of an exact commands.test entry (the whole project
-  suite). Each is "unavailable" when the autopsy has no number for it.
+  the executions known to have run an exact commands.test entry (the
+  whole project suite); project_test_runs_unavailable, beside it: its
+  unavailable count, the executions where that cannot be known. Each is
+  "unavailable" when the autopsy has no number for it.
 - acceptance: the run's own status (the autopsy's done.acceptance.status,
   else the index entry's). accepted_by_user: the autopsy's
   done.acceptance.accepted_by_user (true when the ledger holds a user
@@ -86,7 +89,8 @@ history.json:
 history.md is plain ASCII: the per-run table, recurring slowdowns, token
 trends, suggestions and the insufficient-data list. The per-run table's
 Test-group calls column shows full_suite_runs and its Project test runs
-column, after it, project_test_runs. Its Acceptance column shows
+column, after it, project_test_runs, as 'N (+M unavailable)' when
+project_test_runs_unavailable M is above 0. Its Acceptance column shows
 acceptance, as '<status> (accepted by user)' when accepted_by_user is true
 and the status is not accepted. Neither file holds command, output or
 prompt text.
@@ -339,6 +343,7 @@ def build_row(entry, analysis):
     top = slowdowns[0] if isinstance(slowdowns, list) and slowdowns and isinstance(slowdowns[0], dict) else None
     full = _dig(analysis, "checks", "full_suite_runs", "total")
     project = _dig(analysis, "checks", "project_test_runs", "total")
+    project_unknown = _dig(analysis, "checks", "project_test_runs", "unavailable")
     row.update({
         "tasks": tasks,
         "agents": len(agents) if isinstance(agents, list) else UNAVAILABLE,
@@ -349,6 +354,7 @@ def build_row(entry, analysis):
         "tokens_partial": partial if isinstance(partial, bool) else UNAVAILABLE,
         "full_suite_runs": full if _num(full) else UNAVAILABLE,
         "project_test_runs": project if _num(project) else UNAVAILABLE,
+        "project_test_runs_unavailable": project_unknown if _num(project_unknown) else UNAVAILABLE,
         "acceptance": acceptance,
         "accepted_by_user": by_user if isinstance(by_user, bool) else UNAVAILABLE,
         "top_slowdown": None if top is None else {"kind": top.get("kind"), "cost_s": top.get("cost_s")},
@@ -508,6 +514,16 @@ def _acceptance(row):
     return row["acceptance"]
 
 
+def _project_runs(row):
+    """history.md's Project test runs cell: the total, with ' (+M
+    unavailable)' when the unavailable count M is above 0; 'unavailable'
+    when the total is."""
+    total, unknown = row["project_test_runs"], row["project_test_runs_unavailable"]
+    if not _num(total):
+        return UNAVAILABLE
+    return "%d%s" % (total, " (+%d unavailable)" % unknown if _num(unknown) and unknown > 0 else "")
+
+
 def _top_slowdown(top):
     if not isinstance(top, dict):
         return "none"
@@ -546,7 +562,7 @@ def render_markdown(history, hdir, opts):
             [[r["run_id"], r["date"], r["engine_version"], r["tasks"], r["agents"], _autopsy._secs(r["wall_s"]),
               r["slowest_phase"], _tokens(r["tokens_total"], r["tokens_partial"] is True),
               _tokens(r["tokens_per_task"], r["tokens_partial"] is True), r["full_suite_runs"],
-              r["project_test_runs"], _acceptance(r), _top_slowdown(r["top_slowdown"])] for r in h["runs"]])
+              _project_runs(r), _acceptance(r), _top_slowdown(r["top_slowdown"])] for r in h["runs"]])
     else:
         lines.append("No runs.")
     lines += ["", "## Recurring slowdowns", ""]
