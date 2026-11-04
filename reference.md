@@ -2022,13 +2022,16 @@ also has `background_s`, its background window's length):
   procedure execution ("Long checks") is the check policy's own execution, timed in `checks`:
   an internal check-time row over its own time, charged in the second tier before
   `long_tool_call`, so an `edit_retry` window or a fix agent's `extra_review_round` that holds the
-  call keeps only its own time. It is no slowdown: no row, suggestion, detector or
+  call keeps only its own time. A procedure execution's start and `await-checks wait` calls
+  with a result are check time too, each over its own time, so a whole-agent row (`retry`,
+  `escalation`, `extra_review_round`) or a `relaunch` row that holds a long check keeps only the
+  rest, however the check ran. Check time is no slowdown: no row, suggestion, detector or
   launch-condition contributor, never in a `contains` (one inside a `timeout` row of the same call
   folds into it without a trace) and nothing in history. Its time counts as covered in
-  `unexplained` (Open questions), as a procedure execution's does. `timeout` and
-  `background_check` still apply to the call, and a helper call that is a `check_rerun` stays
-  one (the rerun row keeps its time). Before 1.6.13 such a call over 120 s was a
-  `long_tool_call`.
+  `unexplained` (Open questions). `timeout` and `background_check` still apply to a helper call
+  that is no procedure execution, and a call that is a `check_rerun` stays one (the rerun row
+  keeps its time). Before 1.6.13 such a helper call over 120 s was a `long_tool_call`, and the
+  procedure's calls were held by the whole-agent and `relaunch` rows around them.
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
 name, the exit code when known, the matched marker string, the program that ran, and the id of

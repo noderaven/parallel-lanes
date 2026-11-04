@@ -280,12 +280,15 @@ is no procedure execution (see checks.waits) is the check policy's own
 execution, timed in checks. Its own time is charged as check time, an
 internal row in the second tier before long_tool_call, so a window or
 whole-agent row that holds the call (edit_retry, extra_review_round, ...)
-keeps only its own time. Check time is no slowdown: it has no row,
-suggestion, detector, launch-condition contributor or history entry and
-is in no contains (inside a timeout row of the same call it folds without
-a trace). timeout and background_check still apply to the call, and a
-helper call that is a check_rerun stays one (the rerun row keeps its
-time).
+keeps only its own time. A procedure execution's start and await-checks
+wait calls with a result are check time too, each over its own time, so
+a whole-agent or relaunch row that holds them keeps only the rest. Check
+time is no slowdown: it has no row, suggestion, detector,
+launch-condition contributor or history entry and is in no contains
+(inside a timeout row of the same call it folds without a trace).
+timeout and background_check still apply to a helper call that is no
+procedure execution, and a call that is a check_rerun stays one (the
+rerun row keeps its time).
 
 detectors: {<kind>: ok | partial | not_available}. A detector is
 not_available when its inputs are missing (no timed tool events, no
@@ -308,7 +311,7 @@ an agent's time, cut at its events (a model turn, a tool call), that no
 slowdown covers. A slowdown covers its own agent's time (a relaunch row,
 its redone agents'), and an idle gap any agent's. Check time covers its
 own agent's time too: a procedure execution's start and wait calls, and
-the check time of helper calls (One second, one row).
+the check time of helper calls (Check time, above).
 
 launch_conditions: one entry per launch, in launches order: {wf, state,
 reason, observed_at, before_start_s, doctor_version, status, checks:

@@ -108,12 +108,15 @@ procedure) is the check policy's own execution, timed in checks: never a
 long_tool_call. tool_slowdowns gives it an internal check_time row over
 its own time, charged in CHARGE_TIERS' second tier before long_tool_call,
 so a window or whole-agent row that holds the call (edit_retry,
-extra_review_round, ...) keeps only its own time. find_slowdowns leaves
-check_time out of the rows it returns (no slowdown, suggestion, detector,
-launch-condition contributor or history entry; never in a contains) and
-keeps the parts it took in run["_check_time"], which unexplained_section
-counts as covered. timeout and background_check still apply to the call;
-a helper call that is a check_rerun gets no check_time row.
+extra_review_round, ...) keeps only its own time. A procedure execution's
+start and wait calls with a result get check_time rows too, each over its
+own time, so check time is one category however the check ran.
+find_slowdowns leaves check_time out of the rows it returns (no slowdown,
+suggestion, detector, launch-condition contributor or history entry;
+never in a contains) and keeps the parts it took in run["_check_time"],
+which unexplained_section counts as covered. timeout and background_check
+still apply to a helper call outside a procedure; a call that is a
+check_rerun gets no check_time row.
 
 Relaunches. An agent of a launch but the last is redone when a later launch
 ran an agent for the same work (redone_agents): the same task and role, or,
@@ -1418,8 +1421,10 @@ def tool_slowdowns(agent, checks):
     line match_check reads as run-checks or task-checks (a helper call) is
     check time, timed in checks_section: an internal CHECK_TIME row over
     its own time, so it is no long_tool_call, while timeout and
-    background_check still apply to it. A helper call that is a
-    check_rerun gets no check_time row: the rerun row keeps its time."""
+    background_check still apply to it. A procedure execution's start and
+    wait calls with a result get a CHECK_TIME row over each call's own
+    time too. A call that is a check_rerun gets no check_time row: the
+    rerun row keeps its time."""
     calls = _calls(agent)
     out = []
     procedures = _procedures(calls)
@@ -1523,8 +1528,11 @@ def tool_slowdowns(agent, checks):
 
     # Check time: settle_slowdowns charges it in the second tier, before the
     # windows and whole-agent rows that may hold the call, and find_slowdowns
-    # then leaves it out (it is no slowdown).
-    for i in helpers:
+    # then leaves it out (it is no slowdown). A procedure execution's start
+    # and wait calls are check time too, each over its own time, so check
+    # time is one category however the check ran.
+    procedure_ran = [i for i in procedure_calls if calls[i]["end"] is not None]
+    for i in sorted(helpers + procedure_ran):
         if i not in reruns:
             add(CHECK_TIME, [i], calls[i]["own_start"], calls[i]["end"], "measured", calls[i])
 
@@ -1640,7 +1648,8 @@ def detector_status(run):
 
 # The order an agent's slowdown rows take its time in (settle_slowdowns):
 # Claude Code's own notice about a call and the wait for it; one call's own
-# time, a helper check call's (check_time, internal) first; a window from a
+# time, a check call's (check_time, internal: a helper call, or a procedure
+# execution's start or wait call) first; a window from a
 # failure to its recovery, which may hold other work;
 # a whole agent (retry first: an agent ended by an API error also reads as
 # an escalation); a launch's redone agents, last and in a tier of its own, so
@@ -2953,7 +2962,7 @@ def unexplained_section(run, slowdowns):
     call); a slowdown covers its own agent's time (a relaunch row, its
     redone agents'), and an idle gap any agent's. Check time, counted in the
     checks section, covers its own time too: a procedure execution's start
-    and wait calls (_procedures), and the parts of helper calls the
+    and wait calls (_procedures), and the parts of check calls the
     check_time rows took (run["_check_time"], which find_slowdowns sets;
     none before it ran)."""
     found = []

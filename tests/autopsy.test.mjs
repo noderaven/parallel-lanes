@@ -1123,6 +1123,22 @@ test('a foreground helper check call is check time, not a long tool call', () =>
   assert.deepEqual(direct.check_time, []);
 });
 
+test('a procedure\'s start and wait calls are check time, each over its own time', () => {
+  // A backgrounded run-checks --out F start and two await-checks wait F
+  // calls; the model turns between them (1-2, 200-210) are no check time.
+  const F = 'C:/u/plans/p.ledger/checks/final-fix.1.json';
+  const out = detect([
+    use(0, 'b1', 'Bash', { command: `python3 C:/u/skill/scripts/run-checks C:/u/wt --out ${F} --cmd test npm test`,
+      run_in_background: true }), res(1, 'b1', 'Bash', 'Command running in background with ID: bx1.'),
+    use(2, 'w1', 'Bash', { command: `python3 C:/u/skill/scripts/await-checks wait ${F}` }),
+    res(200, 'w1', 'Bash', 'Exit code 4\n{"status": "running"}', true),
+    use(210, 'w2', 'Bash', { command: `python3 C:/u/skill/scripts/await-checks wait ${F}` }),
+    res(330, 'w2', 'Bash', '{"ok": true}'),
+  ]);
+  assert.deepEqual(out.slowdowns, []);
+  assert.deepEqual(out.check_time, [[0, 1], [2, 200], [210, 330]]);
+});
+
 test('a helper call that hits its timeout keeps the timeout row, with no check time in it', () => {
   // Review focus 1: the check_time row of the call folds into the timeout row
   // silently; the timeout row already names the call.
