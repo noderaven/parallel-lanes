@@ -20,8 +20,10 @@ tool-outcomes prints) and gap_causes _audit_core.gap_causes over the same
 audit_version 2 (1.6.16) added gap_causes and moved the plan and spec
 hashes and the plan copy's state from every task to run.checks (plan_hash,
 spec_hash, section_hash); 3 (1.6.17) added each task's checks.task_check
-and run.checks.task_checks. repo is a ref saying how far the git facts can be
-trusted:
+and run.checks.task_checks, open_work.final's re_review and each of its
+findings' re_review, and cites what the journal records by journal line
+(<wf>/journal.jsonl L<n>, present). repo is a ref saying how far the git
+facts can be trusted:
   - no repo: unavailable, "no --repo", and every git fact says so;
   - a repo that is not a git repo, or lacks the run's start point
     (_audit_run.start_point): unavailable with open_repo's reason, and every
@@ -102,9 +104,16 @@ this run's engine (before 1.6.0)' for run.checks.task_checks.not_recorded,
 with ' for tasks <id>, ...' when they are only some of the committed,
 unsettled tasks, and lists its unmatched files. A value is shown as
 '<value> [<state>]', with its note after ' - ' and its sources in
-parentheses; a review verdict read from the journal shows its state as
-'[inferred: read from the transcript]' (TRANSCRIPT_INFERRED; other inferred
-values keep '[inferred]'). Evidence validity invalid by checks_failed reads
+parentheses; a review verdict, recorded in the journal, reads '<label> in
+<wf>: <verdict>, <n> finding(s)[ (the engine read it as <x>)] [present]
+(<wf>/journal.jsonl L<n>)'. Right under the final review line Open work
+gives the final re-review line (_re_review_line: 'judged <head7>...', or
+RE_REVIEW_FORMS' text), and after each final open or declined finding's
+disposition its re-review (_finding_re_review: '- re-review: <status>',
+RE_REVIEW_RULES' text, 're-review of <head7>, not the delivered sha
+<delivered>: <status>' or 'resolved (the decline upheld)') with the
+re-reviewer's evidence quoted; a task minor has none, nor a finding whose
+engine recorded no review. Evidence validity invalid by checks_failed reads
 'failed checks' (FAILED_CHECKS) on the Acceptance and Checks lines, while
 audit.json keeps 'invalid' and the rule. A ruling without by reads 'ruling
 by implementer (no role recorded)' (NO_ROLE), the ledger's own rule.
@@ -131,12 +140,11 @@ import _autopsy  # noqa: E402
 
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
 # 2 (1.6.16): gap_causes, and the plan and spec hashes in run.checks.
-# 3 (1.6.17): each task's checks.task_check, and run.checks.task_checks.
+# 3 (1.6.17): each task's checks.task_check, and run.checks.task_checks;
+# open_work.final's re_review and its findings' re_review; journal lines.
 AUDIT_VERSION = 3
 NO_REPO = "no --repo"
 UNCHECKED = "repo not checked against the run"
-# audit.md's bracket for a review verdict read from the journal.
-TRANSCRIPT_INFERRED = "inferred: read from the transcript"
 # A ruling without by, as the ledger counts it (ledger ruling_records).
 NO_ROLE = "implementer (no role recorded)"
 FAILED_CHECKS = "failed checks"
@@ -163,6 +171,21 @@ TASK_CHECK = "checked before its commit"
 # (not) in the head the delivered verify passed at, <sha7>'.
 CONTAINED = "its last commit %s is in the head the delivered verify passed at, %s"
 NOT_CONTAINED = "its last commit %s is not in the head the delivered verify passed at, %s"
+# Open work's final re-review line for each form but judged.
+RE_REVIEW_FORMS = {
+    "not_recorded": "per-finding results not recorded by this run's engine",
+    "no_valid_result": "no valid result",
+    "not_run": "not run",
+    "none": "none (no final findings)",
+    "unavailable": "unavailable",
+}
+# A final finding's re-review line for each rule without a status of its own.
+RE_REVIEW_RULES = {
+    "raised": "raised by the re-review",
+    "not_run": "not run",
+    "contradictory": "contradictory results",
+    "no_result": "no result",
+}
 # The Terms section: (term, definition), fixed text in this order.
 TERMS = (
     ("[present]", "the value is established (from the sources named after it, when there are any). Not a gap."),
@@ -173,11 +196,9 @@ TERMS = (
     ("[unavailable]", "the value, or the comparison it needs, cannot be read or derived from what audit was given "
                       "(an older engine, no --repo, no launch or an unknown launch order); it is unknown, never 0 "
                       "or false. An evidence gap."),
-    ("[inferred]", "derived from other evidence rather than recorded, such as a commit outside the task ranges "
-                   "that the final re-review's head contains. Not a gap."),
-    ("[%s]" % TRANSCRIPT_INFERRED, "a review verdict and its count of findings, read from the reviewer's "
-                                   "structured result in the launch's journal; the ledger records no verdict. "
-                                   "Not a gap."),
+    ("[inferred]", "derived from other evidence, such as a commit outside the task ranges that final.head "
+                   "contains when the engine (1.2.1 or later) recorded no final re-review head: final re-review "
+                   "(no recorded head). Not a gap."),
     ("invalid", "as the gate, check-verify found the result's acceptance, its verify report, the saved "
                 "evidence or a recorded sha or time malformed (verify_invalid); as evidence validity, the "
                 "verify result breaks the acceptance rule named beside it (checks that ran and failed read "
@@ -196,6 +217,10 @@ TERMS = (
                  "attempt the archive holds decides."),
     ("round(s)", "the fix rounds a task's review took, as its reviewed event records them, each a fix and a "
                  "re-review; 0 means the review approved with no fix round."),
+    ("re-review", "the final re-reviewer's word on one finding, after the final fix, as the launch's journal "
+                  "and the result record it: resolved means the defect is gone or the decline is right, not that "
+                  "it was fixed; open means it is not; raised by the re-review is a problem the fix introduced. "
+                  "The final re-review line counts these words over the final findings."),
     ("task rulings", "the ruling events the ledger records under a task: what an agent decided on the user's "
                      "behalf, quoted, with its role (a ruling without one is the implementer's)."),
     ("run-end rulings", "the rulings a run_ended event counts: the adjudications that ran in that launch, not "
@@ -942,10 +967,13 @@ def _md_task(t, out, minors=None):
         out.append("- review verdicts: none recorded")
     for v in rv["verdicts"]:
         val = v.get("value") or {}
-        if v["state"] == "inferred":
+        if v["state"] == "present":
+            # Recorded in the journal; the engine's other reading in parentheses.
             text = "%s, %s finding(s)" % (_scalar(val.get("verdict")), _scalar(val.get("findings")))
-            out.append(_ref("%s in %s" % (val.get("label"), val.get("wf")), v, value=text,
-                            state=TRANSCRIPT_INFERRED))
+            if v.get("note"):
+                text += " (%s)" % v["note"]
+            out.append(_with_sources("- %s in %s: %s [present]" % (val.get("label"), val.get("wf"), text),
+                                     v.get("sources")))
         else:
             out.append(_ref("review verdicts", v))
     approval = rv.get("approval")
@@ -1056,6 +1084,58 @@ def _md_after(r, out):
     out.append("")
 
 
+def _delivered_text(delivered):
+    """The delivered sha as a re-review line names it: its first 7 digits when
+    it is a sha, else as recorded (as l131's)."""
+    if isinstance(delivered, str) and _audit_run.FULL_SHA.fullmatch(delivered):
+        return delivered[:7]
+    return _scalar(delivered)
+
+
+def _re_review_line(r):
+    """Open work's final re-review line (open_work.final.value.re_review):
+    'judged <head7>[, not the delivered sha <delivered>]: <r> resolved, <o>
+    open, <m> without a result[, <c> with contradictory results] of the <F>
+    final finding(s); <n> new', or RE_REVIEW_FORMS' text."""
+    v = r.get("value") if _is_ref(r) and isinstance(r.get("value"), dict) else None
+    if v is None:
+        return _ref("final re-review", r)
+    if v.get("form") != "judged":
+        return _ref("final re-review", r, value=RE_REVIEW_FORMS.get(v.get("form"), _scalar(v.get("form"))))
+    text = "judged %s" % _sha7(v.get("head"))
+    delivered = v.get("delivered")
+    if isinstance(delivered, str) and delivered and delivered != v.get("head"):
+        text += ", not the delivered sha %s" % _delivered_text(delivered)
+    text += ": %s resolved, %s open, %s without a result" % (v.get("resolved"), v.get("open"), v.get("without_result"))
+    if v.get("contradictory"):
+        text += ", %s with contradictory results" % v["contradictory"]
+    text += " of the %s final finding(s); %s new" % (v.get("of"), v.get("new"))
+    return _ref("final re-review", r, value=text)
+
+
+def _finding_re_review(f, out, indent):
+    """A final finding's re-review, after its disposition: '- re-review:
+    <status>' (RE_REVIEW_RULES' text when it has none of its own), its
+    evidence quoted under it; none for a task minor or a finding whose
+    engine recorded no review (not_recorded: the final re-review line says
+    so once)."""
+    r = f.get("re_review")
+    v = r.get("value") if _is_ref(r) and isinstance(r.get("value"), dict) else None
+    if v is None or v.get("rule") == "not_recorded":
+        return
+    if v.get("rule") in RE_REVIEW_RULES:
+        out.append(_ref("re-review", r, indent, value=RE_REVIEW_RULES[v["rule"]]))
+        return
+    label, status = "re-review", _scalar(v.get("status"))
+    if v.get("rule") == "other_head":
+        label = "re-review of %s, not the delivered sha %s" % (_sha7(v.get("head")),
+                                                                _delivered_text(v.get("delivered")))
+    elif v.get("rule") == "decline_upheld":
+        status += " (the decline upheld)"
+    out.append(_ref(label, r, indent, value=status))
+    out += _quote("re-review evidence", v.get("evidence"), indent + "  ")
+
+
 def _md_finding(f, out, indent=""):
     parts = [str(f[k]) for k in ("lens", "task", "severity") if f.get(k) is not None]
     if f.get("file") is not None:
@@ -1071,6 +1151,7 @@ def _md_finding(f, out, indent=""):
         for key in ("evidence", "reason"):
             if d.get(key) is not None:
                 out += _quote("disposition %s" % key, d[key], indent + "    ")
+    _finding_re_review(f, out, indent + "  ")
 
 
 def _md_open(o, out, placed, order_unknown=False):
@@ -1111,6 +1192,8 @@ def _md_open(o, out, placed, order_unknown=False):
     counts = _final_counts(final)
     out.append(_ref("final review", final, value=_open_counts(counts)))
     if isinstance(value, dict):
+        if value.get("re_review") is not None:
+            out.append(_re_review_line(value["re_review"]))
         for f in value["findings"]:
             _md_finding(f, out, "  ")
         for item in value["cannot_verify"]:

@@ -600,7 +600,7 @@ test('the task-check lines without a file, for older engines and for files that 
     + ` this task; its engine is unknown (${LEDGER}/a.jsonl L7)`]);
 });
 
-test('audit.md labels transcript verdicts, rulings without a role and lens-covered commits', () => {
+test('audit.md cites journal verdicts by line, and labels rulings without a role and lens-covered commits', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r, {
     taskEvents: [
@@ -610,16 +610,21 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
   }));
   const { json, md } = view(folder, ['--repo', r.dir]);
   const lines = beforeTerms(md).split('\n');
-  // Review verdicts come from the journal.
-  const label = '[inferred: read from the transcript]';
-  assert.deepEqual(lines.filter((l) => l.includes(label)), [
-    `- A1 review in wf_aaaaaa: changes, 1 finding(s) ${label} (transcript:wf_aaaaaa/A1 review)`,
-    `- A1 re-review 1 in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A1 re-review 1)`,
-    `- A2 review in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A2 review)`,
+  // Review verdicts are recorded in the journal: present, each at its
+  // result's line (L1 is the launched line, then a started and a result
+  // line per agent).
+  const journal = 'wf_aaaaaa/journal.jsonl';
+  assert.deepEqual(lines.filter((l) => /^- A\d (review|re-review \d+) in /.test(l)), [
+    `- A1 review in wf_aaaaaa: changes, 1 finding(s) [present] (${journal} L5)`,
+    `- A1 re-review 1 in wf_aaaaaa: approve, 0 finding(s) [present] (${journal} L7)`,
+    `- A2 review in wf_aaaaaa: approve, 0 finding(s) [present] (${journal} L11)`,
   ]);
-  // Other inferred lines keep the bare state.
-  assert.deepEqual(lines.filter((l) => l.includes('[inferred]')),
-    [`- ${r.fix}: final re-review [inferred] (transcript:wf_aaaaaa/final re-review)`]);
+  // The final re-review's head is recorded too: no inferred line is left,
+  // and nothing reads as from the transcript.
+  assert.deepEqual(lines.filter((l) => l.includes(`: final re-review [`)),
+    [`- ${r.fix}: final re-review [present] - judged ${r.fix.slice(0, 7)} (${journal} L15; git:${r.fix})`]);
+  assert.doesNotMatch(beforeTerms(md), /\[inferred|transcript:/);
+  assert.ok(walkSources(folder, json, r.dir) > 40);
   // A ruling without by is the implementer's, as the ledger counts it;
   // audit.json keeps what was recorded.
   assert.ok(lines.includes(`- ruling by implementer (no role recorded), quoted from ${LEDGER}/a.jsonl L7:`), md);
@@ -636,6 +641,141 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
   assert.deepEqual([entry.coverage.value, entry.coverage.state, entry.coverage.note], ['final review', 'present', note]);
   assert.ok(lens.md.split('\n').includes(
     `- ${r.fix}: final review [present] - ${note} (wf_aaaaaa.json #/result/final/lens_heads/0/head; git:${r.fix})`), lens.md);
+});
+
+// An accepted run whose final review left F1 open (fixed, re-review says
+// open), F2 declined (the re-review upheld it), F3 fixed and N1 new; the
+// journal's final re-review (L15) judged the fix.
+function reReviewSpec(r, over = {}) {
+  const finding = (id) => ({ id, lens: 'security', severity: 'important', file: 'a1.txt', line: 1, issue: `issue ${id}` });
+  const rv = (id, status, evidence) => ({ id, status, evidence });
+  const results = over.results || [rv('F1', 'open', 'still fails npm test zqcmd'), rv('F2', 'resolved', 'the decline is right'),
+    rv('F3', 'resolved', 'gone')];
+  const final = {
+    findings: ['F1', 'F2', 'F3'].map(finding),
+    fixed: [{ ...finding('F3'), disposition: { id: 'F3', status: 'fixed', evidence: 'did' }, review: rv('F3', 'resolved', 'gone') }],
+    open: [
+      { ...finding('F1'), reason: 'still open after the final re-review', disposition: { id: 'F1', status: 'fixed', evidence: 'did it' },
+        review: rv('F1', 'open', 'still fails npm test zqcmd') },
+      { severity: 'minor', file: 'a2.txt', line: 2, issue: 'new one', id: 'N1', reason: 'new in the final fix' },
+    ],
+    declined: [{ ...finding('F2'), reason: 'not needed', disposition: { id: 'F2', status: 'declined', evidence: 'e', reason: 'not needed' },
+      review: rv('F2', 'resolved', 'the decline is right') }],
+    cannot_verify: [], missing_lenses: [], head: r.fix, lens_heads: [{ lens: 'superpowers', head: r.a2 }],
+    task_minors_open: [{ id: 'A1-1', severity: 'minor', file: 'a1.txt', line: 1, issue: 'nit', fix: 'x' }],
+    ...(over.final || {}),
+  };
+  const spec = acceptedSpec(r, { result: { final, ...(over.result || {}) } });
+  spec.launches[0].journal[6] = { label: 'final re-review', result: over.rr === undefined ? {
+    head: over.head || r.fix, results, new_findings: [{ severity: 'minor', file: 'a2.txt', line: 2, issue: 'new one' }],
+  } : over.rr };
+  return spec;
+}
+
+test('Open work gives the final re-review and each final finding\'s re-review, without --repo', () => {
+  const r = repoRun();
+  const { json, jsonText, md } = view(makeRun(reReviewSpec(r)));
+  const open = mdSection(md, 'Open work');
+  const at = (list, i, tail = '') => `wf_aaaaaa.json #/result/final/${list}/${i}${tail}`;
+  const header = open.findIndex((l) => l.startsWith('- final review: '));
+  // Right under the final review line, from the journal and the result (no git).
+  assert.equal(open[header + 1], `- final re-review: judged ${r.fix.slice(0, 7)}: 2 resolved, 1 open, 0 without a result of`
+    + ' the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.deepEqual(json.run.open_work.final.value.re_review.value,
+    { form: 'judged', head: r.fix, delivered: r.fix, resolved: 2, open: 1, without_result: 0, contradictory: 0, of: 3, new: 1 });
+  // After each disposition: the re-review as a value, then its evidence quoted.
+  const block = (id) => {
+    const start = open.findIndex((l) => l.startsWith(`  - ${id} `));
+    const end = open.findIndex((l, i) => i > start && l.startsWith('  - '));
+    return open.slice(start, end < 0 ? open.length : end);
+  };
+  assert.deepEqual(block('F1').slice(-6), [
+    '    - disposition: fixed',
+    `      - disposition evidence, quoted from ${at('open', 0)}:`,
+    '        > did it',
+    `    - re-review: open [present] (${at('open', 0, '/review')})`,
+    `      - re-review evidence, quoted from ${at('open', 0, '/review')}, configured commands shown as check ids:`,
+    '        > still fails <check:test#1>',
+  ]);
+  assert.deepEqual(block('N1').slice(-1), [`    - re-review: raised by the re-review [present] (${at('open', 1)})`]);
+  assert.deepEqual(block('F2').slice(-3), [
+    `    - re-review: resolved (the decline upheld) [present] (${at('declined', 0, '/review')})`,
+    `      - re-review evidence, quoted from ${at('declined', 0, '/review')}:`,
+    '        > the decline is right',
+  ]);
+  // Task minors get none.
+  assert.ok(block('A1-1').length > 1);
+  assert.deepEqual(block('A1-1').filter((l) => /re-review/.test(l)), []);
+  // The evidence is recorded text: quote lines only, never a command.
+  for (const l of beforeTerms(md).split('\n')) if (/decline is right|still fails/.test(l)) assert.match(l, /^\s*> /, l);
+  assert.doesNotMatch(jsonText + md, /zqcmd/);
+  // Neither line is a gap.
+  assert.deepEqual(json.gaps.filter((g) => /re_review/.test(g.where)), []);
+});
+
+test('the final re-review line and each finding\'s line in every recorded shape', () => {
+  const r = repoRun();
+  const s7 = r.fix.slice(0, 7);
+  const lines = (spec) => {
+    const open = mdSection(view(makeRun(spec)).md, 'Open work');
+    return {
+      header: open.find((l) => l.startsWith('- final re-review: ')),
+      findings: open.filter((l) => /^ {4}- re-review/.test(l)),
+    };
+  };
+  // A re-review of another head than delivered, l131's non-sha delivered value.
+  const other = lines(reReviewSpec(r, { head: r.a2, result: { delivered_sha: 'see-below' } }));
+  assert.equal(other.header, `- final re-review: judged ${r.a2.slice(0, 7)}, not the delivered sha see-below: 2 resolved,`
+    + ' 1 open, 0 without a result of the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.equal(other.findings[0], `    - re-review of ${r.a2.slice(0, 7)}, not the delivered sha see-below: open [present]`
+    + ' (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L15)');
+  // Null reviews: contradictory results, no result for the id, a re-review
+  // that never gave a result.
+  const rv = (id, status) => ({ id, status, evidence: 'e' });
+  const nulls = {
+    open: [
+      { id: 'F1', severity: 'important', issue: 'a', reason: 'the final re-review gave contradictory results for it', review: null },
+      { id: 'F2', severity: 'important', issue: 'b', reason: 'the final re-review gave no result for it', review: null },
+    ],
+    declined: [],
+  };
+  const mixed = lines(reReviewSpec(r, { final: nulls, results: [rv('F1', 'open'), rv('F1', 'resolved'), rv('F3', 'resolved')] }));
+  assert.equal(mixed.header, `- final re-review: judged ${s7}: 1 resolved, 0 open, 1 without a result, 1 with contradictory`
+    + ' results of the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.deepEqual(mixed.findings, [
+    '    - re-review: contradictory results [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L15)',
+    '    - re-review: no result [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl L15)',
+  ]);
+  const started = reReviewSpec(r, { final: nulls });
+  started.launches[0].journal[6] = { label: 'final re-review' };
+  const notRun = lines(started);
+  assert.equal(notRun.header, '- final re-review: no valid result [present] (wf_aaaaaa/journal.jsonl L14)');
+  assert.deepEqual(notRun.findings, [
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)',
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl)',
+  ]);
+  // No re-review entry at all, with and without final findings.
+  const absent = reReviewSpec(r, { final: nulls });
+  absent.launches[0].journal.splice(6, 1);
+  assert.equal(lines(absent).header, "- final re-review: not run [present] - each finding's reason says why");
+  const clean = acceptedSpec(r);
+  clean.launches[0].journal.splice(6, 1);
+  assert.equal(lines(clean).header, '- final re-review: none (no final findings) [present]');
+  // Before 1.2.0: the re-review recorded findings only; said once, and no
+  // finding has a line.
+  const legacy = reReviewSpec(r, {
+    rr: { findings: [] },
+    final: { open: [{ id: 'F1', severity: 'important', issue: 'a', reason: 'r' }], declined: [], fixed: [] },
+  });
+  assert.deepEqual(lines(legacy), {
+    header: "- final re-review: per-finding results not recorded by this run's engine [present]", findings: [] });
+  // No journal archived: unavailable, a gap.
+  const lost = reReviewSpec(r);
+  delete lost.launches[0].journal;
+  const lostView = view(makeRun(lost));
+  assert.equal(mdSection(lostView.md, 'Open work').find((l) => l.startsWith('- final re-review: ')),
+    '- final re-review: unavailable [unavailable] - no journal archived for wf_aaaaaa');
+  assert.ok(lostView.json.gaps.some((g) => g.where === '#/run/open_work/final/value/re_review'), lostView.md);
 });
 
 test('open counts add the open task minors and the carried ones', () => {
@@ -1005,7 +1145,7 @@ test('audit.md ends with its terms', () => {
   });
   assert.deepEqual(named, [
     '[present]', '[missing]', '[stale]', '[conflicting]', '[unavailable]', '[inferred]',
-    '[inferred: read from the transcript]', 'invalid', 'verified', 'checked before its commit', 'round(s)', 'task rulings',
+    'invalid', 'verified', 'checked before its commit', 'round(s)', 're-review', 'task rulings',
     'run-end rulings', 'gate', 'carry',
     'context added by pre-flight', 'cause',
   ]);
@@ -1015,12 +1155,18 @@ test('audit.md ends with its terms', () => {
   assert.match(term('verified'), /not the task's own check/);
   assert.match(term('checked before its commit'), /the last attempt the archive holds decides/);
   assert.match(term('checked before its commit'), /fixers run no task checks/);
+  // The journal is a record (1.6.17): inferred is only the rule for a head
+  // the engine did not record, and resolved is not fixed.
+  assert.doesNotMatch(terms.join('\n'), /rather than recorded|read from the transcript/);
+  assert.match(term('[inferred]'), /no recorded head/);
+  assert.match(term('re-review'), /^- re-review: the final re-reviewer's word on one finding/);
+  assert.match(term('re-review'), /resolved means the defect is gone or the decline is right, not that it was fixed/);
   assert.equal(terms.at(-1), '- cause: gaps that share a pointer (each array index read as N), a state and a note (each '
     + 'sha read as <sha>, and shown so when the notes differ), listed once under Evidence gaps with the tasks whose '
     + 'blocks hold them, or, for a run-level cause, with run, followed by every value when there is more than one or a '
     + 'single string or number.');
   // The four gap states say they are gaps; the others say they are not.
-  for (const l of terms.slice(0, 7)) {
+  for (const l of terms.slice(0, 6)) {
     const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
     assert.ok(l.endsWith(gap ? 'An evidence gap.' : 'Not a gap.'), l);
   }
@@ -1065,6 +1211,13 @@ test('privacy', () => {
         delivered_sha: r.fix,
         reasons: [{ kind: 'checks_failed', class: 'failed', detail: 'failing at the head: npm test zqcmd (exit 1), then ls zqreason' }],
         warnings: [],
+      },
+      // The re-reviewer's evidence is recorded text too.
+      final: {
+        findings: [{ id: 'F1', severity: 'important', issue: 'i' }], fixed: [], declined: [], cannot_verify: [],
+        missing_lenses: [], head: r.fix, lens_heads: [{ lens: 'superpowers', head: r.a2 }], task_minors_open: [],
+        open: [{ id: 'F1', severity: 'important', issue: 'i', reason: 'still open after the final re-review',
+          review: { id: 'F1', status: 'open', evidence: 'fails at ls and npm test zqcmd zqreason' } }],
       },
     },
     taskEvents: [{ task: 'A1', event: 'ruling', by: 'adjudicator', text: 'run pip install zqsetup first, then ls' }],

@@ -278,13 +278,49 @@ test('structured_results joins labels to results', () => {
     { wf: 'wf_2', startTime: 2000, dirless: true },
     { wf: 'wf_3', startTime: 3000 },
   ], ['print(json.dumps([c.structured_results(l) for l in run["launches"]]))']);
-  assert.deepEqual(out[0].map((s) => [s.label, s.result]), [
-    ['A1 implement', { status: 'done' }],
-    ['A1 review', { verdict: 'approve', findings: [] }],
-    ['A2 implement', null],
+  // line: the result's journal line, or the started line when it has none
+  // (L1 is the launched line).
+  assert.deepEqual(out[0].map((s) => [s.label, s.result, s.line]), [
+    ['A1 implement', { status: 'done' }, 3],
+    ['A1 review', { verdict: 'approve', findings: [] }, 5],
+    ['A2 implement', null, 6],
   ]);
   assert.equal(new Set(out[0].map((s) => s.agent_id)).size, 3);
   assert.deepEqual(out.slice(1), [[], []]);
+});
+
+test('journal lines are physical, blank lines counted, and cited as <wf>/journal.jsonl L<n>', () => {
+  const lines = [
+    { type: 'launched' },
+    { type: 'started', agentId: 'a1', label: 'final review' },
+    '',
+    { type: 'started', agentId: 'a2', label: 'final re-review' },
+    'not json',
+    { type: 'result', agentId: 'a1', result: { head: 'x' } },
+    { type: 'result', agentId: 'a2', result: null },
+    { type: 'started', agentId: 'a3', label: 'final re-review retry' },
+  ];
+  const run = makeRun({
+    launches: [{ wf: 'wf_j', startTime: 1000 }, { wf: 'wf_n', startTime: 2000 }, { wf: 'wf_d', startTime: 3000, dirless: true }],
+    files: { 'wf_j/journal.jsonl': lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\r\n') + '\r\n' },
+  });
+  const out = pythonJSON([
+    'import _audit_core as c',
+    'run = c.load_run(sys.argv[1])',
+    'print(json.dumps([[c.structured_results(l), c.journal_file(l) is not None, c.journal_src(l, 7), c.journal_src(l)]',
+    '                  for l in run["launches"]]))',
+  ], [run]);
+  // A null result cites its result line; a started entry with no result
+  // cites its started line.
+  assert.deepEqual(out[0][0].map((s) => [s.label, s.result, s.line]), [
+    ['final review', { head: 'x' }, 6],
+    ['final re-review', null, 7],
+    ['final re-review retry', null, 8],
+  ]);
+  assert.deepEqual(out.map((x) => x[1]), [true, false, false]);
+  assert.deepEqual(out[0][2], { path: 'wf_j/journal.jsonl', at: 'L7' });
+  assert.deepEqual(out[0][3], { path: 'wf_j/journal.jsonl', at: null });
+  assert.deepEqual(out.slice(1).map((x) => x[0]), [[], []]);
 });
 
 test('manifest_tasks is in run order', () => {

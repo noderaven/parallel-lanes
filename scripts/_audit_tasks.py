@@ -60,7 +60,13 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                (<ledger>/reviews/<id>-*), verdicts (from the journal's
                '<id> review' and '<id> re-review <n>' structured results, a
                trailing ' retry' being the same round with the later result
-               kept: only the verdict and the count of findings, inferred)
+               kept: only the verdict and the count of findings, present,
+               each at its result's journal line, <wf>/journal.jsonl L<n>;
+               a started entry with no result is unavailable at its started
+               line. For engines from 1.2.0 (CHECKED_REVIEW_ENGINE, by
+               result.version) a verdict the engine's checkedReview acts on
+               as another (_engine_read: changes or invalid) has the note
+               ENGINE_READ. The ledger's reviewed event stays the approval.)
                and approval (by event order: a reviewed event approves its
                head, a later reopened withdraws it, a later committed event
                with another head makes it stale).
@@ -126,6 +132,10 @@ TC_UNKNOWN_ENGINE = "no launch result reports this task; its engine is unknown"
 TC_UNREADABLE_ENGINE = "a launch result that reports this task records an engine version audit cannot read"
 TC_MISSING = "no task-check file archived, though the task's commands include a test, lint or build command"
 TC_NOT_REQUIRED = "the task's commands include no test, lint or build command: the engine asks for no task check"
+# A journal verdict the engine's checkedReview read otherwise (engines from
+# 1.2.0): changes or invalid.
+CHECKED_REVIEW_ENGINE = (1, 2, 0)
+ENGINE_READ = "the engine read it as %s"
 
 ref = core.ref
 src = core.src
@@ -527,16 +537,36 @@ def _review_label(task_id):
     return re.compile(r"^%s (review|re-review \d+)( retry)?$" % re.escape(task_id))
 
 
+def _engine_read(result):
+    """How the engine's checkedReview (src/engine.js) acts on a review
+    result: invalid for a verdict other than approve and changes, or for
+    changes with no findings; changes for an approve that carries a critical
+    or important finding; else its verdict."""
+    verdict = result.get("verdict")
+    if verdict not in ("approve", "changes"):
+        return "invalid"
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    if verdict == "approve" and any(isinstance(f, dict) and f.get("severity") in ("critical", "important")
+                                    for f in findings):
+        return "changes"
+    if verdict == "changes" and not findings:
+        return "invalid"
+    return verdict
+
+
 def _verdicts(ctx, task_id):
     pattern = _review_label(task_id)
     out = []
     for launch in ctx.run.get("launches") or []:
-        journal = os.path.join(launch["dir"], "journal.jsonl") if launch.get("dir") else None
-        if journal is None or not os.path.isfile(journal):
+        if core.journal_file(launch) is None:
             status = core.task_status(launch, task_id)
             if launch.get("result") is None or (status is not None and status not in UNREVIEWED_STATUSES):
                 out.append(ref(None, "unavailable", [src(_wf_file(launch))], "no journal archived for %s" % launch["wf"]))
             continue
+        # checkedReview shipped in 1.2.0; a launch with no version is before
+        # 1.4.3, so whether it read the verdict so is unknown.
+        version = _audit_run.result_version(launch)
+        checked = version is not None and version >= CHECKED_REVIEW_ENGINE
         rounds, order = {}, []
         for entry in core.structured_results(launch):
             label = entry.get("label")
@@ -552,14 +582,16 @@ def _verdicts(ctx, task_id):
         for base in order:
             entry = rounds[base]
             result = entry.get("result")
-            at = [src("transcript:%s/%s" % (launch["wf"], entry["label"]))]
+            at = [core.journal_src(launch, entry["line"])]
             if not isinstance(result, dict):
                 out.append(ref({"wf": launch["wf"], "label": base, "verdict": None, "findings": None},
                                "unavailable", at, "no structured result"))
                 continue
             findings = result.get("findings")
+            read = _engine_read(result)
+            note = ENGINE_READ % read if checked and read != result.get("verdict") else None
             out.append(ref({"wf": launch["wf"], "label": base, "verdict": result.get("verdict"),
-                            "findings": len(findings) if isinstance(findings, list) else None}, "inferred", at))
+                            "findings": len(findings) if isinstance(findings, list) else None}, "present", at, note))
     return out
 
 

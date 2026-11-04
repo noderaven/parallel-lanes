@@ -443,15 +443,51 @@ test('review packages, verdicts and pre-flight context', () => {
   }), { wf: 'wf_0', startTime: 1, dirless: true, result: { tasks: {} } }];
   const a1 = audit(makeRun(spec), facts()).A1;
   assert.deepEqual(a1.review.packages.value, [`${LEDGER}/reviews/A1-r1.md`]);
-  assert.deepEqual(a1.review.verdicts.map((v) => [v.value.label, v.value.verdict, v.value.findings, v.state, v.sources[0].path]), [
-    ['A1 review', 'changes', 2, 'inferred', 'transcript:wf_1/A1 review'],
-    ['A1 re-review 1', 'approve', 0, 'inferred', 'transcript:wf_1/A1 re-review 1 retry'],
+  // Recorded in the journal: present, each citing its result's line (the
+  // retry's for a round it retried; L1 is the launched line).
+  assert.deepEqual(a1.review.verdicts.map((v) => [v.value.label, v.value.verdict, v.value.findings, v.state, v.sources, v.note]), [
+    ['A1 review', 'changes', 2, 'present', [{ path: 'wf_1/journal.jsonl', at: 'L5' }], undefined],
+    ['A1 re-review 1', 'approve', 0, 'present', [{ path: 'wf_1/journal.jsonl', at: 'L8' }], undefined],
   ]);
   assert.doesNotMatch(JSON.stringify(a1), /zqprompt|zqcmd/);
   const pre = a1.placement.preflight_context;
   assert.equal(pre.label, 'context added by pre-flight (not ordering)');
   assert.deepEqual(pre.launches.map((l) => [l.wf, l.entries.state]), [['wf_0', 'unavailable'], ['wf_1', 'present']]);
   assert.deepEqual(pre.launches[1].entries.value.map((e) => [e.producer, e.what.quote]), [['A2', 'reads <check:test#1> output']]);
+});
+
+test('a journal verdict the engine read differently says so, for engines from 1.2.0 only', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const journal = [
+    { label: 'A1 review', result: { verdict: 'approve', findings: [{ severity: 'important', issue: 'i' }] } },
+    { label: 'A1 re-review 1', result: { verdict: 'changes', findings: [] } },
+    { label: 'A1 re-review 2', result: { verdict: 'lgtm', findings: [] } },
+    { label: 'A1 re-review 3', result: { verdict: 'approve', findings: [{ severity: 'minor', issue: 'm' }] } },
+    { label: 'A1 re-review 4' },
+  ];
+  const verdicts = (version) => {
+    const spec = reviewedRun(s0, s1);
+    const result = { tasks: { A1: { status: 'done', commits: [s0, s1] } }, preflight: { undeclared: [] } };
+    if (version !== undefined) result.version = version;
+    spec.launches = [launch({}, { result, journal })];
+    return audit(makeRun(spec), facts()).A1.review.verdicts;
+  };
+  const modern = verdicts('1.2.0');
+  assert.deepEqual(modern.map((v) => [v.value.label, v.value.verdict, v.state, v.note, v.sources[0].at]), [
+    ['A1 review', 'approve', 'present', 'the engine read it as changes', 'L3'],
+    ['A1 re-review 1', 'changes', 'present', 'the engine read it as invalid', 'L5'],
+    ['A1 re-review 2', 'lgtm', 'present', 'the engine read it as invalid', 'L7'],
+    ['A1 re-review 3', 'approve', 'present', undefined, 'L9'],
+    // A started entry with no result cites its started line.
+    ['A1 re-review 4', null, 'unavailable', 'no structured result', 'L10'],
+  ]);
+  assert.deepEqual(modern[4].sources, [{ path: 'wf_1/journal.jsonl', at: 'L10' }]);
+  // checkedReview shipped in 1.2.0: an older engine, or one that records no
+  // version, read the verdict as written.
+  for (const version of ['1.1.0', undefined]) {
+    assert.deepEqual(verdicts(version).map((v) => v.note), [undefined, undefined, undefined, undefined, 'no structured result'],
+      String(version));
+  }
 });
 
 test('escalations come from the archived transcripts only', () => {
@@ -467,6 +503,8 @@ test('escalations come from the archived transcripts only', () => {
   const esc = audit(folder, facts()).A1.changes.escalations;
   assert.deepEqual(esc.map((e) => [e.wf, e.escalations.state]), [['wf_1', 'present'], ['wf_2', 'unavailable']]);
   assert.deepEqual(esc[0].escalations.value, [{ label: 'A1 implement', from_tier: 'sonnet', to_tier: 'opus' }]);
+  // Escalations come from the transcripts, and cite them as transcript:.
+  assert.deepEqual(esc[0].escalations.sources, [{ path: 'transcript:wf_1/A1 implement', at: null }]);
   // In a <session>/subagents/workflows layout the transcripts are not read:
   // that would prefer a session-level result outside the run folder.
   const top = tempDir('pl-audit-layout-');

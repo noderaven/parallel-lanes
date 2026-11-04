@@ -47,7 +47,11 @@ delivered sha are both recorded (non-empty strings) and differ; when one is
 missing it is unavailable, its note naming what is missing (E2E_NO_CHECKED,
 E2E_NO_DELIVERED, or both joined by "; "). A commit outside the task ranges
 that a final lens head contains is present with the note LENS_NOTE (that
-head's first 7 digits).
+head's first 7 digits); one that the final re-review's recorded head
+contains (_re_review_head) is present with RE_REVIEW_NOTE, cited by that
+result's journal line (<wf>/journal.jsonl L<n>); only the rule for an
+engine that recorded no re-review head (final re-review (no recorded
+head)) is inferred.
 
 The plan and spec hashes are run-level facts, in checks once (never per
 task; input_hashes): plan_hash and spec_hash hold one ref per setup
@@ -87,7 +91,26 @@ is a manifest task id, the latest snapshot that lists each; None with
 carried_minors_open),
 "not_recorded" (which of "open", "declined" and "cannot_verify" the result
 has no list for, as older engines have no open list: that count is
-unknown, not 0; cannot_verify is then [])}.
+unknown, not 0; cannot_verify is then []), "re_review" (_re_review)}.
+
+re_review is the final re-review, from the latest launch's journal and
+result only (no git), its last final re-review entry (RE_REVIEW_LABELS)
+deciding: {form, head, delivered (the result's delivered_sha as recorded),
+resolved, open, without_result, contradictory, of, new}. form judged (a
+valid result: head, results and new_findings; each id of final.findings
+counted by the statuses its results give it: none, more than one, resolved,
+or another, so of = the four counts; new the new findings), not_recorded
+(findings only: before 1.2.0), no_valid_result (any other result, or a
+started entry with none), not_run (no entry, with final findings; note
+RE_REVIEW_NOT_RUN), none (no entry and no final findings), each present
+with the journal line for judged and no_valid_result; unavailable without
+a journal ("no journal archived for <wf>").
+
+Each final finding (open or declined, never a task minor) has re_review
+(_finding_re_review): {rule, status, head, delivered, evidence (the
+review's evidence, quoted)}, present, never a gap, rule the first that
+applies of raised, not_recorded, not_run, contradictory, no_result,
+other_head, decline_upheld and result.
 
 acceptance also holds verdict_without_override (derive_verdict with no
 override) and verdict_rule_without_override (_verdict_rule when that verdict
@@ -119,6 +142,14 @@ SCRIPTS = os.path.dirname(os.path.realpath(__file__))
 MISSING_LAUNCH = "the ledger records this launch; its transcripts are not archived"
 # The note of a commit outside the task ranges that a final lens head contains.
 LENS_NOTE = "contained in the final review's head %s"
+# The note of one that the final re-review's recorded head contains.
+RE_REVIEW_NOTE = "judged %s"
+# The final re-review's journal labels (a budget retry is the same call).
+RE_REVIEW_LABELS = ("final re-review", "final re-review retry")
+# The final re-review line's note when no journal entry ran it.
+RE_REVIEW_NOT_RUN = "each finding's reason says why"
+# A finding id the engine gives the re-review's new findings (N1, N2, ...).
+NEW_FINDING_ID = re.compile(r"^N[0-9]+$")
 # What an e2e entry without both shas lacks (both, joined by "; ").
 E2E_NO_CHECKED = "the end-to-end check recorded no sha"
 E2E_NO_DELIVERED = "the run recorded no delivered sha"
@@ -519,6 +550,13 @@ def _parse_version(text):
     return tuple(int(x) for x in match.group(1).split(".")) if match else None
 
 
+def result_version(launch):
+    """A launch's result.version as a tuple of ints, or None (no version:
+    before 1.4.3, or one that does not parse)."""
+    result = launch.get("result")
+    return _parse_version(result.get("version") if isinstance(result, dict) else None)
+
+
 def _version(run, launch):
     """(the engine version as a tuple of ints or None, its source)."""
     result = launch.get("result") or {}
@@ -554,26 +592,33 @@ def _lens_heads(launch, final):
             continue
         head = result.get("head") if isinstance(result, dict) else None
         if isinstance(head, str) and head:
-            heads.append((head, c.src("transcript:%s/%s" % (launch["wf"], label))))
+            heads.append((head, c.journal_src(launch, entry["line"])))
     return heads
+
+
+def _valid_re_review(result):
+    """A final re-review result that judged a head: an object with a string
+    head and results and new_findings lists (spec 5.5)."""
+    head = result.get("head") if isinstance(result, dict) else None
+    return isinstance(head, str) and bool(head) and isinstance(result.get("results"), list) \
+        and isinstance(result.get("new_findings"), list)
 
 
 def _re_review_head(launch):
     """(head, source) of the last 'final re-review' structured result that
     records a head (a budget retry included), when that result is a valid
-    review: an object with a string head and results and new_findings
-    lists (spec 5.5). False when the last result that records a head is not
-    valid: it covers nothing, and no head-less rule may stand in for it.
-    None when no result records a head."""
+    review (_valid_re_review), its source the result's journal line. False
+    when the last result that records a head is not valid: it covers
+    nothing, and no head-less rule may stand in for it. None when no result
+    records a head."""
     found = None
     for entry in c.structured_results(launch):
         label, result = entry["label"], entry["result"]
-        if label not in ("final re-review", "final re-review retry"):
+        if label not in RE_REVIEW_LABELS:
             continue
         head = result.get("head") if isinstance(result, dict) else None
         if isinstance(head, str) and head:
-            valid = isinstance(result.get("results"), list) and isinstance(result.get("new_findings"), list)
-            found = (head, c.src("transcript:%s/%s" % (launch["wf"], label))) if valid else False
+            found = (head, c.journal_src(launch, entry["line"])) if _valid_re_review(result) else False
     return found
 
 
@@ -640,7 +685,8 @@ def _code_outside(run, git, git_note, launch, why, pairs):
             entry["coverage"] = c.ref("final review", "present", [lens_hit[1], c.src("git:" + lens_hit[0])],
                                       LENS_NOTE % lens_hit[0][:7])
         elif rr and git.is_ancestor(sha, rr[0]):
-            entry["coverage"] = c.ref("final re-review", "inferred", [rr[1]])
+            entry["coverage"] = c.ref("final re-review", "present", [rr[1], c.src("git:" + rr[0])],
+                                      RE_REVIEW_NOTE % rr[0][:7])
         elif no_head_rule and git.is_ancestor(sha, final_head):
             sources = [_wf_src(launch, "final", "head")] + ([v_src] if v_src is not None else [])
             entry["coverage"] = c.ref("final re-review (no recorded head)", "inferred", sources)
@@ -1143,6 +1189,102 @@ def _finding(f, status, sources, pairs):
     return out
 
 
+def _last_re_review(launch):
+    """The journal's last final re-review entry (RE_REVIEW_LABELS: a budget
+    retry is the call the engine used), or None."""
+    found = None
+    for entry in c.structured_results(launch):
+        if entry["label"] in RE_REVIEW_LABELS:
+            found = entry
+    return found
+
+
+def _statuses(results, fid):
+    """The statuses a re-review's results give the id fid, each distinct one
+    once, in order."""
+    seen, out = set(), []
+    for r in results if isinstance(results, list) else []:
+        if isinstance(r, dict) and r.get("id") == fid:
+            key = json.dumps(r.get("status"), sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(r.get("status"))
+    return out
+
+
+def _re_review(launch, final, entry, has_journal):
+    """open_work.final's re_review, from the latest launch's journal (its last
+    final re-review entry decides) and result, no git: {form, head,
+    delivered, resolved, open, without_result, contradictory, of, new}."""
+    delivered = (launch.get("result") or {}).get("delivered_sha")
+    value = {"form": None, "head": None, "delivered": delivered if isinstance(delivered, str) else None,
+             "resolved": None, "open": None, "without_result": None, "contradictory": None, "of": None, "new": None}
+    if not has_journal:
+        value["form"] = "unavailable"
+        return c.ref(value, "unavailable", [], "no journal archived for %s" % launch["wf"])
+    if entry is None:
+        findings = any(isinstance(final.get(k), list) and final[k] for k in ("findings", "fixed", "declined", "open"))
+        value["form"] = "not_run" if findings else "none"
+        return c.ref(value, "present", [], RE_REVIEW_NOT_RUN if findings else None)
+    result, at = entry["result"], [c.journal_src(launch, entry["line"])]
+    if _valid_re_review(result):
+        counts = {"resolved": 0, "open": 0, "without_result": 0, "contradictory": 0}
+        listed = final.get("findings")
+        for f in listed if isinstance(listed, list) else []:
+            statuses = _statuses(result["results"], f.get("id") if isinstance(f, dict) else None)
+            kind = ("without_result" if not statuses else "contradictory" if len(statuses) > 1
+                    else "resolved" if statuses[0] == "resolved" else "open")
+            counts[kind] += 1
+        value.update(counts, form="judged", head=result["head"], of=sum(counts.values()),
+                     new=len(result["new_findings"]))
+        return c.ref(value, "present", at)
+    if isinstance(result, dict) and isinstance(result.get("findings"), list) \
+            and "results" not in result and "new_findings" not in result:
+        value["form"] = "not_recorded"
+        return c.ref(value, "present", [])
+    value["form"] = "no_valid_result"
+    return c.ref(value, "present", at)
+
+
+def _finding_re_review(f, key, i, launch, entry, has_journal, pairs):
+    """A final open or declined finding's re_review, {rule, status, head,
+    delivered, evidence}, present: the first rule that applies of raised (an
+    open N<k>, the re-review's own), not_recorded (no review key: before
+    1.2.0), for a null review not_run (the journal holds no final re-review
+    result), contradictory (its results give the id more than one status)
+    or no_result, other_head (the re-review judged another head than the
+    delivered sha), decline_upheld (declined, resolved) and result. The
+    evidence is the review's, quoted."""
+    f = f if isinstance(f, dict) else {}
+    at = _wf_src(launch, "final", key, i, "review")
+    value = {"rule": None, "status": None, "head": None, "delivered": None, "evidence": None}
+    result = entry["result"] if entry is not None else None
+    line = [c.journal_src(launch, entry["line"])] if entry is not None else []
+    review = f.get("review")
+    if key == "open" and isinstance(f.get("id"), str) and NEW_FINDING_ID.match(f["id"]):
+        value["rule"] = "raised"
+        return c.ref(value, "present", [at])
+    if "review" not in f:
+        value["rule"] = "not_recorded"
+        return c.ref(value, "present", [at])
+    if not isinstance(review, dict):
+        if has_journal and not isinstance(result, dict):
+            value["rule"] = "not_run"
+            return c.ref(value, "present", [at, c.journal_src(launch)])
+        results = result.get("results") if isinstance(result, dict) else None
+        value["rule"] = "contradictory" if has_journal and len(_statuses(results, f.get("id"))) > 1 else "no_result"
+        return c.ref(value, "present", [at] + line)
+    value["status"] = review.get("status")
+    value["evidence"] = _q(review.get("evidence"), [at], pairs)
+    head = result.get("head") if isinstance(result, dict) else None
+    delivered = (launch.get("result") or {}).get("delivered_sha")
+    if isinstance(head, str) and head and isinstance(delivered, str) and delivered and head != delivered:
+        value.update(rule="other_head", head=head, delivered=delivered)
+        return c.ref(value, "present", [at] + line)
+    value["rule"] = "decline_upheld" if key == "declined" and value["status"] == "resolved" else "result"
+    return c.ref(value, "present", [at])
+
+
 def _cannot_verify(item, source, pairs):
     if isinstance(item, str):
         return _q(item, [source], pairs)
@@ -1219,11 +1361,14 @@ def _open_work(run, launch, why, pairs):
         out["final"] = c.ref(None, "unavailable", [_wf_src(launch, "final")],
                              "the latest launch has no final review result")
         return out
+    entry, has_journal = _last_re_review(launch), c.journal_file(launch) is not None
     findings = []
     for key, state in (("open", "open"), ("declined", "declined")):
         items = final.get(key)
         for i, f in enumerate(items if isinstance(items, list) else []):
-            findings.append(_finding(f, state, [_wf_src(launch, "final", key, i)], pairs))
+            finding = _finding(f, state, [_wf_src(launch, "final", key, i)], pairs)
+            finding["re_review"] = _finding_re_review(f, key, i, launch, entry, has_journal, pairs)
+            findings.append(finding)
     cannot = final.get("cannot_verify")
     cannot = [_cannot_verify(item, _wf_src(launch, "final", "cannot_verify", i), pairs)
               for i, item in enumerate(cannot if isinstance(cannot, list) else [])]
@@ -1234,7 +1379,8 @@ def _open_work(run, launch, why, pairs):
               for i, f in enumerate(minors)] if isinstance(minors, list) else None
     carried = final.get("carried_minors_open")
     carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
-    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
+    value = {"findings": findings, "re_review": _re_review(launch, final, entry, has_journal),
+             "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
              "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
              # Older engines' finals have no open list: its count is unknown, not 0.
              "not_recorded": [key for key in ("open", "declined", "cannot_verify")

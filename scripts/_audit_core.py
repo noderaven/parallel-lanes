@@ -9,9 +9,11 @@ Import with:
 Evidence references. Every derived value is ref(value, state, sources,
 note=None): {"value", "state", "sources"[, "note"]}, state one of STATES,
 each source src(path, at): path relative to the run folder with '/'
-separators, or git:<sha>, or transcript:<wf>/<label>; at a ledger line
-(L<n>, physical line numbers, blank lines counted), a JSON pointer (#/...),
-a sha, or None. collect_gaps(obj) lists every nested ref whose state is in
+separators (a launch's journal is <wf>/journal.jsonl, journal_src), or
+git:<sha>, or transcript:<wf>/<label> (escalations, read from the agent
+transcripts); at a ledger or journal line (L<n>, physical line numbers,
+blank lines counted), a JSON pointer (#/...), a sha, or None.
+collect_gaps(obj) lists every nested ref whose state is in
 GAP_STATES, in document order, as {"where": <JSON pointer>, "state",
 "value", "note"}.
 
@@ -474,20 +476,38 @@ def task_launch(run, task_id):
     return None
 
 
-def structured_results(launch):
-    """[{"label", "agent_id", "result"}] from <launch dir>/journal.jsonl: each
-    {"type": "started"} entry, in order, joined by agentId to its
-    {"type": "result"} entry (result None when it has none). A dirless
-    launch, or a missing or unreadable journal, gives []."""
+def journal_file(launch):
+    """<launch dir>/journal.jsonl when it is a file, else None (a dirless
+    launch included)."""
     if not launch.get("dir"):
+        return None
+    path = os.path.join(launch["dir"], "journal.jsonl")
+    return path if os.path.isfile(path) else None
+
+
+def journal_src(launch, line=None):
+    """A source in the launch's journal, <wf>/journal.jsonl, at L<line> (the
+    file itself when line is None)."""
+    return src("%s/journal.jsonl" % launch["wf"], None if line is None else "L%d" % line)
+
+
+def structured_results(launch):
+    """[{"label", "agent_id", "result", "line"}] from <launch
+    dir>/journal.jsonl: each {"type": "started"} entry, in order, joined by
+    agentId to its {"type": "result"} entry (result None when it has none).
+    line is the result entry's physical 1-based line number (blank lines
+    counted), or the started entry's when it has none. A dirless launch, or
+    a missing or unreadable journal, gives []."""
+    path = journal_file(launch)
+    if path is None:
         return []
     try:
-        with open(os.path.join(launch["dir"], "journal.jsonl"), "rb") as f:
+        with open(path, "rb") as f:
             text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return []
     started, results = [], {}
-    for line in text.split("\n"):
+    for n, line in enumerate(text.split("\n"), 1):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -495,15 +515,16 @@ def structured_results(launch):
         if not isinstance(entry, dict) or not isinstance(entry.get("agentId"), str):
             continue
         if entry.get("type") == "started":
-            started.append(entry)
+            started.append((n, entry))
         elif entry.get("type") == "result":
-            results.setdefault(entry["agentId"], []).append(entry.get("result"))
+            results.setdefault(entry["agentId"], []).append((n, entry.get("result")))
     out = []
-    for entry in started:
+    for n, entry in started:
         queue = results.get(entry["agentId"]) or []
+        line, result = queue.pop(0) if queue else (n, None)
         label = entry.get("label")
         out.append({"label": label if isinstance(label, str) else None, "agent_id": entry["agentId"],
-                    "result": queue.pop(0) if queue else None})
+                    "result": result, "line": line})
     return out
 
 
