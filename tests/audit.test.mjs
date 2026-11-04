@@ -485,6 +485,8 @@ test('open counts add the open task minors and the carried ones', () => {
       summary: md.split('\n').find((l) => l.startsWith('- open work: ')),
       stdout: stdout.split('\n').find((l) => l.startsWith('open work: ')),
       header: mdSection(md, 'Open work').find((l) => l.startsWith('- final review: ')),
+      // The entries under the header that name a minor (ids A1-1, T9-1 ...).
+      listed: mdSection(md, 'Open work').filter((l) => /^ {2}- [A-Z]\d-\d open/.test(l)).map((l) => l.replace(/ \(A\d.*$/, '')),
       bottom: mdSection(md, 'Bottom line').find((l) => /^Final (findings|review)/.test(l)),
     };
   };
@@ -498,6 +500,8 @@ test('open counts add the open task minors and the carried ones', () => {
   assert.equal(both.stdout, `open work: 0 task(s), ${three}`);
   assert.equal(both.header, `- final review: ${three} [present] (wf_aaaaaa.json #/result/final)`);
   assert.equal(both.bottom, 'Final findings: 1 open or declined; open task minors: 3; cannot-verify items: 0.');
+  // Under the header: the task minors, then the carried ids as recorded.
+  assert.deepEqual(both.listed, ['  - A1-1 open', '  - A2-1 open', '  - T9-1 open (carried minor)']);
 
   // The engine's note makes the count a lower bound.
   const lower = counts(finalWith({ task_minors_open: [minor('A2-1')], carried_minors_open: [], cannot_verify: [earlier] }));
@@ -572,6 +576,28 @@ test('the bottom line says what is unavailable and invents nothing', () => {
     'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.',
     'Code outside recorded task ranges: unavailable (no --repo).',
   ]);
+
+  // ledger status fails on a line that is not JSON: the blocked and
+  // deferred tasks are unknown, not none.
+  const broken = view(makeRun({ ledger: { 'a.jsonl': [{ task: 'A2', event: 'blocked', reason: 'stuck' }, 'not json'] } }));
+  assert.equal(broken.json.run.open_work.ledger_state.state, 'unavailable');
+  assert.equal(mdSection(broken.md, 'Bottom line')[1],
+    'Tasks: committed 0, reviewed 0, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2; blocked and deferred unknown.');
+});
+
+test('the bottom line gives the engine\'s reasons for its own verdict', () => {
+  const r = repoRun();
+  const acceptance = {
+    status: 'unverified', delivered_sha: r.fix, warnings: [],
+    reasons: [{ kind: 'checks_stale', class: 'missing', detail: 'stale zqdetail' },
+      { kind: 'final_fix_unreviewed', class: 'missing', detail: 'unreviewed zqdetail' },
+      { kind: 'checks_stale', class: 'missing', detail: 'again zqdetail' }],
+  };
+  const { json, md } = view(makeRun(acceptedSpec(r, { result: { acceptance } })), ['--repo', r.dir]);
+  assert.deepEqual([json.run.acceptance.verdict.value, json.run.acceptance.verdict_rule], ['unverified', null]);
+  const bottom = mdSection(md, 'Bottom line');
+  assert.equal(bottom[0], 'Verdict: unverified (checks_stale, final_fix_unreviewed).');
+  assert.doesNotMatch(bottom.join('\n'), /zqdetail/);
 });
 
 test('the bottom line names a user override at the delivered head, never its text', () => {
@@ -584,11 +610,20 @@ test('the bottom line names a user override at the delivered head, never its tex
   const { json, md } = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.fix)] })), ['--repo', r.dir]);
   assert.equal(json.run.acceptance.verdict.value, 'accepted by user');
   const bottom = mdSection(md, 'Bottom line');
+  // The verdict already says it; the override's text is never shown.
   assert.deepEqual(bottom.slice(0, 2), [
-    'Verdict: accepted by user; accepted by the user at the delivered head.',
+    'Verdict: accepted by user.',
     'Tasks: committed 2, reviewed 2, verified 0, accepted 2 of 2.',
   ]);
   assert.doesNotMatch(bottom.join('\n'), /zqoverride/);
+  // A result without an acceptance object: the verdict is unavailable, the
+  // override at the delivered sha still in effect. Its note has its own
+  // parenthesis, so it follows '; '.
+  const older = view(makeRun(acceptedSpec(r, { result: { acceptance: undefined }, runEvents: [accept(r.fix)] })),
+    ['--repo', r.dir]);
+  assert.equal(older.json.run.acceptance.verdict.value, 'unavailable');
+  assert.equal(mdSection(older.md, 'Bottom line')[0],
+    'Verdict: unavailable; no acceptance object (an older engine); accepted by the user at the delivered head.');
   // An override at another head is not in effect.
   const stale = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.a2)] })), ['--repo', r.dir]);
   assert.equal(stale.json.run.acceptance.verdict.value, 'unverified');
@@ -621,6 +656,11 @@ test('audit.md ends with its terms', () => {
     const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
     assert.ok(l.endsWith(gap ? 'An evidence gap.' : 'Not a gap.'), l);
   }
+  // A present value may name no source; an unavailable one may show a value
+  // whose comparison is missing.
+  assert.ok(terms[0].startsWith('- [present]: the value is established (from the sources named after it, when there are any).'),
+    terms[0]);
+  assert.ok(terms[4].startsWith('- [unavailable]: the value, or the comparison it needs, cannot be read or derived'), terms[4]);
 });
 
 test('a verify head that is not delivered is stale', () => {

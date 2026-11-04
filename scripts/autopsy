@@ -90,18 +90,18 @@ redone agents' summed wall times (the relaunch row's span_s); each is
 done (from the last launch's result): tasks {<id>: {status, commits,
 range, rounds, tier_used}}, acceptance {status, reasons: [{kind, class}],
 warnings: <count>, accepted_by_user}, final {fixed, declined, open,
-task_minors_open[, task_minors_open_min]} (counts) and e2e (pass, fail or
+task_minors_open, task_minors_open_min} (counts) and e2e (pass, fail or
 none). Free text (notes, reason details, warnings, findings, evidence) is
 never copied.
 - final.task_minors_open is the open task minors: the result's
   final.task_minors_open findings plus its final.carried_minors_open ids,
   each counted when it is a list, "unavailable" when neither is (never 0).
-  When a final.cannot_verify string holds the engine's note that some
-  minors "did not reach the final lenses or task_minors_open", the count
-  is a lower bound and task_minors_open_min is true (the key is absent
-  otherwise). What got done prints '- Final review: <fixed> fixed,
-  <declined> declined, <open> open; task minors open: <M>' ('at least <M>',
-  or unavailable).
+  task_minors_open_min is true when a final.cannot_verify string holds the
+  engine's note that some minors "did not reach the final lenses or
+  task_minors_open" (the count is then a lower bound), false otherwise,
+  and "unavailable" with the count. What got done prints '- Final review:
+  <fixed> fixed, <declined> declined, <open> open; task minors open: <M>'
+  ('at least <M>', or unavailable).
 - tasks.commits is the task's commit count from the ledger: the distinct
   SHAs in the commits lists of its committed and settled events (one per
   commit round) in every *.jsonl of the ledger, after its last started

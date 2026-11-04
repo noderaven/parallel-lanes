@@ -117,7 +117,9 @@ test('done lists each task and the acceptance', () => {
     accepted_by_user: false,
   });
   // run1's result has neither task_minors_open nor carried_minors_open.
-  assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0, task_minors_open: 'unavailable' });
+  assert.deepEqual(A.done.final, {
+    fixed: 1, declined: 0, open: 0, task_minors_open: 'unavailable', task_minors_open_min: 'unavailable',
+  });
   assert.equal(A.done.e2e, 'pass');
   // A1 implement and verify each run the test command once.
   assert.deepEqual(A.checks.executions.map((x) => [x.agent, x.check, x.certainty, x.s]),
@@ -152,7 +154,7 @@ test('done.final counts the open task minors and the carried ones', () => {
   const head = '- Final review: 1 fixed, 0 declined, 0 open; task minors open: ';
 
   const both = run((f) => { f.task_minors_open = [minor('A1-1'), minor('B1-1')]; f.carried_minors_open = ['T9-1']; });
-  assert.deepEqual(both.final, counts({ task_minors_open: 3 }));
+  assert.deepEqual(both.final, counts({ task_minors_open: 3, task_minors_open_min: false }));
   assert.equal(both.line, `${head}3`);
   assert.ok(!both.text.includes('MINOR-TEXT-1'));
   // The engine's note makes the count a lower bound.
@@ -161,11 +163,11 @@ test('done.final counts the open task minors and the carried ones', () => {
   assert.equal(lower.line, `${head}at least 1`);
   // An engine before carried minors counts its task minors alone.
   const older = run((f) => { f.task_minors_open = [minor('A1-1')]; });
-  assert.deepEqual(older.final, counts({ task_minors_open: 1 }));
+  assert.deepEqual(older.final, counts({ task_minors_open: 1, task_minors_open_min: false }));
   assert.equal(older.line, `${head}1`);
-  // Neither key: unavailable, never 0, the note or not.
+  // Neither key: unavailable, never 0, the note or not; the bound with it.
   const none = run((f) => { f.cannot_verify = [earlier]; });
-  assert.deepEqual(none.final, counts({ task_minors_open: 'unavailable' }));
+  assert.deepEqual(none.final, counts({ task_minors_open: 'unavailable', task_minors_open_min: 'unavailable' }));
   assert.equal(none.line, `${head}unavailable`);
   // No final review keeps its line.
   const noFinal = run((f, result) => { delete result.final; });

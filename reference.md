@@ -1889,14 +1889,15 @@ appends that summary to the hand-back report.
   What got done `- Acceptance:` line and its Summary's both end with
   `; accepted by the user at the delivered head`, and the chat summary has the `acceptance:`
   line above (it has no acceptance line otherwise).
-- `done.final` is `{fixed, declined, open, task_minors_open}` (counts; `unavailable` when the
-  last launch's result has no final review object). `task_minors_open` (1.6.15) is the open task
-  minors: the result's `final.task_minors_open` findings plus its `final.carried_minors_open`
-  ids, `unavailable` when it has neither list, never 0. When a `final.cannot_verify` string holds
-  the engine's note that some minors "did not reach the final lenses or task_minors_open", the
-  count is a lower bound and `task_minors_open_min: true` is added (absent otherwise). autopsy.md's
-  What got done prints `- Final review: N fixed, N declined, N open; task minors open: M` (or
-  `at least M`, or `unavailable`).
+- `done.final` is `{fixed, declined, open, task_minors_open, task_minors_open_min}` (counts;
+  `unavailable` when the last launch's result has no final review object). `task_minors_open`
+  (1.6.15) is the open task minors: the result's `final.task_minors_open` findings plus its
+  `final.carried_minors_open` ids, `unavailable` when it has neither list, never 0.
+  `task_minors_open_min` is `true` when a `final.cannot_verify` string holds the engine's note
+  that some minors "did not reach the final lenses or task_minors_open" (the count is then a lower
+  bound), `false` otherwise, and `unavailable` with the count. autopsy.md's What got done prints
+  `- Final review: N fixed, N declined, N open; task minors open: M` (or `at least M`, or
+  `unavailable`).
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -2213,7 +2214,8 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `at least M` when the result's `cannot_verify` holds the engine's note that some minors "did
   not reach the final lenses or task_minors_open" (a resume whose earlier tasks no carried
   snapshot covers), and `unavailable` when the result has neither list, never 0; N and M read
-  `unavailable` when the final review is.
+  `unavailable` when the final review is. Under the header the open task minors are listed, then
+  each carried id as `<id> open (carried minor)`.
 - **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
   placement, changes (rulings, events, escalations), commits and review (reviews, each with its
   brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
@@ -2235,11 +2237,15 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   recorded count is `unavailable` (one gap) and nothing is listed missing.
 - **Bottom line** (1.6.15): `audit.md` opens, after its title, with `## Bottom line`, one
   paragraph in which each part comes from one value the audit computed and none from recorded
-  text: the verdict with what made it unverified (or why it is `unavailable`);
+  text: the verdict with what made it so (audit's own rule when it disagrees with the engine, else
+  the engine's reason kinds for the engine's own verdict, as Acceptance lists them, for example
+  `Verdict: unverified (checks_stale, final_fix_unreviewed).`), or why it is `unavailable`;
   `accepted by the user at the delivered head` when an override at the delivered sha is in effect
-  (never its text); the tasks `committed C, reviewed R, verified V, accepted A of N`, each
-  counting `true` values with `(k settled)`, `(k not required)` and `(k unavailable)` where a
-  task has such a value, then the blocked and deferred counts above 0; the final findings
+  and the verdict is not already `accepted by user` (never the override's text); the tasks
+  `committed C, reviewed R, verified V, accepted A of N`, each counting `true` values with
+  `(k settled)`, `(k not required)` and `(k unavailable)` where a task has such a value, then the
+  blocked and deferred counts above 0 (`blocked and deferred unknown` when `ledger status`
+  failed); the final findings
   (`N open or declined`, or `Final review unavailable`), the open task minors as above and the
   cannot-verify items; the code outside recorded task ranges and how many lack review evidence;
   the launches missing from the archive when the ledger records more; and `G evidence gap(s)

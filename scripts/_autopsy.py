@@ -676,9 +676,10 @@ def done_section(result, run_folder):
         final = {k: _count(fin.get(k)) for k in ("fixed", "declined", "open")}
         minors, at_least = open_task_minors(fin.get("task_minors_open"), fin.get("carried_minors_open"),
                                             fin.get("cannot_verify"))
+        # Both keys always: the count and whether it is a lower bound, each
+        # "unavailable" when the result has neither minors list.
         final["task_minors_open"] = UNAVAILABLE if minors is None else minors
-        if at_least:
-            final["task_minors_open_min"] = True
+        final["task_minors_open_min"] = UNAVAILABLE if minors is None else at_least
     else:
         final = UNAVAILABLE
     if "e2e" not in result:
@@ -3650,7 +3651,7 @@ def _md_done(a):
     fin = done["final"]
     if isinstance(fin, dict):
         lines.append("- Final review: %s fixed, %s declined, %s open; task minors open: %s%s" % (
-            fin["fixed"], fin["declined"], fin["open"], "at least " if fin.get("task_minors_open_min") else "",
+            fin["fixed"], fin["declined"], fin["open"], "at least " if fin["task_minors_open_min"] is True else "",
             fin["task_minors_open"]))
     else:
         lines.append("- Final review: unavailable")

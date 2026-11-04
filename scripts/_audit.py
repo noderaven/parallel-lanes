@@ -30,12 +30,15 @@ sections Bottom line, Summary, Acceptance, Launches, Tasks (one block per
 task), Code outside recorded task ranges, Checks, After delivery (only with
 --head), Open work, Evidence gaps and Terms (TERMS, fixed text). The Bottom
 line is one paragraph, each part from one value audit computed and none
-from recorded text: the verdict with its verdict_rule (or, unavailable, its
-note), ACCEPTED_BY_USER when an override's head is present (at the
-delivered sha), the tasks' committed, reviewed, verified and accepted
-counts of true values (each with '(<k> settled, <k> not required, <k>
-unavailable)' for the kinds there are) and the blocked and deferred counts
-above 0, the final findings, open task minors and cannot-verify items, the
+from recorded text: the verdict with why (_verdict_line: its verdict_rule,
+else the engine's reason kinds for the engine's own verdict, else,
+unavailable, its note), ACCEPTED_BY_USER when an override's head is present
+(at the delivered sha) and the verdict is not already accepted by user,
+the tasks' committed, reviewed, verified and accepted counts of true values
+(each with '(<k> settled, <k> not required, <k> unavailable)' for the kinds
+there are) and the blocked and deferred counts above 0 ('blocked and
+deferred unknown' when open_work.ledger_state is set), the final findings,
+open task minors and cannot-verify items, the
 code outside recorded task ranges, the launches missing from the archive,
 and the gap count with NOT_GAPS. The Summary's open work line and the Open
 work header read '<N> open or declined final finding(s), <M> open task
@@ -43,7 +46,8 @@ minor(s)': M is open_work.final's task_minors_open plus its
 carried_minors_open (_autopsy.open_task_minors), 'at least M' when a
 cannot_verify quote holds _autopsy.MINORS_NOT_REACHED, and unavailable when
 both lists are null; N and M are unavailable when the final review is.
-A value is shown as '<value> [<state>]', with its
+Under the header come the open task minors, then each carried id as
+'<id> open (carried minor)'. A value is shown as '<value> [<state>]', with its
 note after ' - ' and its sources in parentheses; a review verdict read from
 the journal shows its state as '[inferred: read from the transcript]'
 (TRANSCRIPT_INFERRED; other inferred values keep '[inferred]'). Evidence
@@ -82,13 +86,14 @@ FAILED_CHECKS = "failed checks"
 NOT_GAPS = "(cannot-verify items and inferred lines are not gaps)"
 # The Terms section: (term, definition), fixed text in this order.
 TERMS = (
-    ("[present]", "the value is established from the sources named after it. Not a gap."),
+    ("[present]", "the value is established (from the sources named after it, when there are any). Not a gap."),
     ("[missing]", "evidence the value needs should be in the archive (or the repo) and is not. An evidence gap."),
     ("[stale]", "the evidence is for another revision or an earlier state than the one that counts, such as "
                 "checks run before the delivered sha. An evidence gap."),
     ("[conflicting]", "two records of the same fact disagree, such as the result and the ledger. An evidence gap."),
-    ("[unavailable]", "the value cannot be read or derived from what audit was given (an older engine, no --repo, "
-                      "no launch or an unknown launch order); it is unknown, never 0 or false. An evidence gap."),
+    ("[unavailable]", "the value, or the comparison it needs, cannot be read or derived from what audit was given "
+                      "(an older engine, no --repo, no launch or an unknown launch order); it is unknown, never 0 "
+                      "or false. An evidence gap."),
     ("[inferred]", "derived from other evidence rather than recorded, such as a commit outside the task ranges "
                    "that the final re-review's head contains. Not a gap."),
     ("[%s]" % TRANSCRIPT_INFERRED, "a review verdict and its count of findings, read from the reviewer's "
@@ -358,26 +363,56 @@ def _task_count(tasks, field):
     return "%d (%s)" % (n, ", ".join(extra)) if extra else str(n)
 
 
+def _verdict_line(a):
+    """'Verdict: <verdict>' with why: the verdict_rule (audit's own reason),
+    else, for the engine's own verdict, its reason kinds (unquoted, as
+    Acceptance prints them), else, unavailable, the verdict's note; in
+    parentheses, or after '; ' when the text has its own. ACCEPTED_BY_USER
+    follows when an override is in effect (its head present, at the
+    delivered sha) and the verdict does not already say so: only a verdict
+    unavailable for want of an acceptance object can be one."""
+    verdict = a["verdict"]
+    value = verdict.get("value")
+    why = a.get("verdict_rule")
+    run_verdict = a.get("run_verdict")
+    if not why and verdict.get("state") == "unavailable":
+        why = verdict.get("note")
+    elif not why and _is_ref(run_verdict) and value == run_verdict.get("value"):
+        kinds = []
+        for r in a.get("reasons") or []:
+            kind = r.get("kind") if isinstance(r, dict) else None
+            if isinstance(kind, str) and kind and kind not in kinds:
+                kinds.append(kind)
+        why = ", ".join(kinds)
+    line = "Verdict: %s" % _scalar(value)
+    if why:
+        line += ("; %s" if "(" in why else " (%s)") % why
+    # An override counts only at the delivered sha; its text is never shown.
+    in_effect = any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in a.get("overrides") or [])
+    if in_effect and value != "accepted by user":
+        line += "; " + _autopsy.ACCEPTED_BY_USER
+    return line + "."
+
+
 def _md_bottom_line(audit, out):
     """One paragraph, each part from one value audit computed; no recorded
     text."""
     run = audit["run"]
-    a = run["acceptance"]
     c = _counts(audit)
-    verdict = a["verdict"]
-    why = a.get("verdict_rule") or (verdict.get("note") if verdict.get("state") == "unavailable" else None)
-    line = "Verdict: %s%s" % (_scalar(verdict.get("value")), " (%s)" % why if why else "")
-    # An override counts only at the delivered sha; its text is never shown.
-    if any(_is_ref(o.get("head")) and o["head"]["state"] == "present" for o in a.get("overrides") or []):
-        line += "; " + _autopsy.ACCEPTED_BY_USER
-    lines = [line + "."]
+    lines = [_verdict_line(run["acceptance"])]
     tasks = audit["tasks"]
     line = "Tasks: committed %s, reviewed %s, verified %s, accepted %s of %d" % (
         _task_count(tasks, "committed"), _task_count(tasks, "reviewed"), _task_count(tasks, "verified"),
         _task_count(tasks, "accepted"), len(tasks))
-    held = [(state, len(set(t["task"] for t in run["open_work"]["tasks"] if t["status"] == state)))
-            for state in ("blocked", "deferred")]
-    held = ["%d %s" % (n, state) for state, n in held if n]
+    open_work = run["open_work"]
+    if open_work.get("ledger_state") is not None:
+        # ledger status failed: the ledger's blocked and deferred tasks are
+        # unknown, so no count is given.
+        held = ["blocked and deferred unknown"]
+    else:
+        held = [(state, len(set(t["task"] for t in open_work["tasks"] if t["status"] == state)))
+                for state in ("blocked", "deferred")]
+        held = ["%d %s" % (n, state) for state, n in held if n]
     lines.append(line + ("; " + ", ".join(held) if held else "") + ".")
     f = c["final"]
     if f["findings"] is None:
@@ -725,6 +760,9 @@ def _md_open(o, out):
                     out += _quote(key, item[key], "    ")
         for f in value["task_minors_open"] or []:
             _md_finding(f, out, "  ")
+        # The carried ids the header counts, as recorded (ids only).
+        for cid in value.get("carried_minors_open") or []:
+            out.append("  - %s open (carried minor)" % cid)
     out.append("")
 
 
