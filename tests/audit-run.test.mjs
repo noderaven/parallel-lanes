@@ -5,11 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SYMLINKS } from './platform.mjs';
 import { loadHelpers } from './harness.mjs';
-import { LEDGER, commit, makeRepo, makeRun, pythonJSON } from './audit-helpers.mjs';
+import { DEFAULT_PLAN, DEFAULT_RUN, LEDGER, commit, makeRepo, makeRun, pythonJSON } from './audit-helpers.mjs';
 
 const { finalChecks } = await loadHelpers(['finalChecks']);
 
@@ -427,7 +428,13 @@ test('launches list layout gaps; no launch is unavailable', () => {
 const ENDED = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
 const MISSING_NOTE = 'the ledger records this launch; its transcripts are not archived';
 const LEDGER_SRC = [{ path: LEDGER, at: null }];
-const auditGaps = (folder) => pythonJSON(['import _audit', 'print(json.dumps(_audit.build(sys.argv[1])["gaps"]))'], [folder]);
+// _audit.build's gaps and gap_causes.
+const built = (folder) => pythonJSON([
+  'import _audit',
+  'a = _audit.build(sys.argv[1])',
+  'print(json.dumps({"gaps": a["gaps"], "causes": a["gap_causes"]}))',
+], [folder]);
+const auditGaps = (folder) => built(folder).gaps;
 
 test('two recorded launches and one archived give one missing gap', () => {
   const folder = makeRun({ ledger: { '_run.jsonl': [ENDED, ENDED] }, launches: [launch(accepted(D))] });
@@ -447,6 +454,12 @@ test('two recorded launches and one archived give one missing gap', () => {
   const none = sections(makeRun({ ledger: null, launches: [launch(accepted(D))] }));
   assert.deepEqual([none.launches.recorded.state, none.launches.recorded.note], ['unavailable', 'no ledger in the archive']);
   assert.deepEqual(none.launches.missing, []);
+  // Three unnamed missing launches: three gaps, one cause keeping all three
+  // values, never merged into one.
+  const three = built(makeRun({ ledger: { '_run.jsonl': [ENDED, ENDED, ENDED, ENDED] }, launches: [launch(accepted(D))] }));
+  assert.equal(three.gaps.filter((g) => g.where.startsWith('#/run/launches/missing')).length, 3);
+  assert.deepEqual(three.causes.filter((g) => g.pointer.startsWith('#/run/launches/missing')),
+    [{ pointer: '#/run/launches/missing/N', state: 'missing', note: MISSING_NOTE, tasks: null, values: [null, null, null] }]);
 });
 
 test('named missing launches are listed by wf id', () => {
@@ -462,8 +475,51 @@ test('named missing launches are listed by wf id', () => {
   // Named ones first, then one unnamed launch.
   assert.deepEqual(s.launches.missing.map((g) => [g.value, g.state, g.note]),
     [['wf_bbbbbb', 'missing', MISSING_NOTE], ['wf_cccccc', 'missing', MISSING_NOTE], [null, 'missing', MISSING_NOTE]]);
-  assert.deepEqual(auditGaps(folder).filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
+  const b = built(folder);
+  assert.deepEqual(b.gaps.filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
     ['#/run/launches/missing/0', '#/run/launches/missing/1', '#/run/launches/missing/2']);
+  // One run-level cause whose values keep the wf ids, in order.
+  assert.deepEqual(b.causes.filter((g) => g.pointer.startsWith('#/run/launches/missing')),
+    [{ pointer: '#/run/launches/missing/N', state: 'missing', note: MISSING_NOTE, tasks: null,
+      values: ['wf_bbbbbb', 'wf_cccccc', null] }]);
+});
+
+test('the plan and spec hashes are run checks, one per setup event with its ledger line', () => {
+  const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+  const [planSha, specSha] = [sha256(DEFAULT_PLAN), sha256(DEFAULT_RUN.spec)];
+  const setup = (over = {}) => ({ task: '_run', event: 'run_started', phase: 'setup', head: D, plan_sha256: planSha, spec_sha256: specSha, ...over });
+  const folder = makeRun({ ledger: { '_run.jsonl': [setup(), ENDED, setup({ plan_sha256: OTHER })] }, launches: [launch(accepted(D))] });
+  const c = sections(folder).checks;
+  const at = (n) => ({ path: `${LEDGER}/_run.jsonl`, at: `L${n}` });
+  const plan = { path: 'p.md', at: null };
+  assert.deepEqual(c.plan_hash, [
+    { value: planSha, state: 'present', sources: [at(1), plan] },
+    { value: OTHER, state: 'stale', sources: [at(3), plan], note: "the archived plan copy differs from this launch's" },
+  ]);
+  assert.deepEqual(c.spec_hash.map((r) => [r.value, r.state, r.sources[0]]), [[specSha, 'present', at(1)], [specSha, 'present', at(3)]]);
+  assert.deepEqual(c.section_hash, { value: 'p.md', state: 'present', sources: [plan] });
+  // The stale setup event is one run-level gap, not one per task.
+  const b = built(folder);
+  assert.deepEqual(b.gaps.filter((g) => /plan_hash|spec_hash|section_hash/.test(g.where)).map((g) => g.where),
+    ['#/run/checks/plan_hash/1']);
+  assert.deepEqual(b.causes.filter((g) => g.pointer.includes('plan_hash')),
+    [{ pointer: '#/run/checks/plan_hash/N', state: 'stale', note: "the archived plan copy differs from this launch's",
+      tasks: null, values: [OTHER] }]);
+  // No setup event: one unavailable entry each.
+  const none = sections(makeRun({ ledger: { '_run.jsonl': [ENDED] }, launches: [launch(accepted(D))] })).checks;
+  assert.deepEqual([none.plan_hash, none.spec_hash].map((l) => l.map((r) => [r.state, r.note, r.sources])),
+    [[['unavailable', 'no setup run_started recorded', LEDGER_SRC]], [['unavailable', 'no setup run_started recorded', LEDGER_SRC]]]);
+  // Without a plan copy, or with one that cannot be read, the section hashes
+  // are unavailable once.
+  const noPlan = makeRun({ plan: null, launches: [launch(accepted(D))] });
+  assert.deepEqual(sections(noPlan).checks.section_hash,
+    { value: null, state: 'unavailable', sources: [], note: 'no plan copy archived' });
+  assert.deepEqual(built(noPlan).gaps.filter((g) => g.note === 'no plan copy archived').map((g) => g.where),
+    ['#/run/checks/section_hash']);
+  const unreadable = makeRun({ launches: [launch(accepted(D))] });
+  writeFileSync(join(unreadable, 'p.md'), Buffer.from([0xff, 0xfe, 0xfd]));
+  assert.deepEqual(sections(unreadable).checks.section_hash,
+    { value: null, state: 'unavailable', sources: [plan], note: 'the plan copy could not be read' });
 });
 
 test('e2e is stale only when both shas are recorded and differ', () => {
@@ -489,9 +545,13 @@ test('e2e is stale only when both shas are recorded and differ', () => {
     const name = JSON.stringify([checked, delivered]);
     assert.deepEqual([e2e.state, e2e.note], [state, note], name);
     assert.deepEqual(e2e.value, { checked_sha: checked === undefined ? null : checked, items: 2, failed: 1 }, name);
-    // Stale and unavailable are both gaps: the gap count stays.
-    const gaps = auditGaps(folder).filter((g) => g.where === '#/run/checks/e2e');
+    // Stale and unavailable are both gaps: the gap count stays, and each is
+    // one run-level cause with its value.
+    const b = built(folder);
+    const gaps = b.gaps.filter((g) => g.where === '#/run/checks/e2e');
     assert.deepEqual(gaps.map((g) => [g.state, g.note]), state === 'present' ? [] : [[state, note]], name);
+    assert.deepEqual(b.causes.filter((g) => g.pointer === '#/run/checks/e2e').map((g) => [g.state, g.note, g.tasks, g.values]),
+      state === 'present' ? [] : [[state, note, null, [e2e.value]]], name);
   }
 });
 

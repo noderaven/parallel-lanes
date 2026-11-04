@@ -88,8 +88,10 @@ test('a reviewed, verified, accepted task', () => {
   assert.deepEqual(a1.commits.entries[0].files.value, ['f2.txt']);
   assert.deepEqual(a1.commits.entries[0].line, { path: `${LEDGER}/a.jsonl`, at: 'L2' });
   assert.equal(a1.commits.legacy, null);
-  assert.deepEqual(a1.requirement.plan_hash.map(vs), [[PLAN_SHA, 'present']]);
-  assert.deepEqual(a1.requirement.spec_hash.map(vs), [[SPEC_SHA, 'present']]);
+  // The plan and spec hashes and the plan copy are run-level (run.checks):
+  // a task holds only its own brief hash and brief file.
+  assert.deepEqual(Object.keys(a1.requirement), ['brief_hash', 'brief_file']);
+  assert.doesNotMatch(JSON.stringify(out.A2), new RegExp(PLAN_SHA));
   assert.deepEqual(vs(a1.review.reviews[0].spec_match), [SPEC_SHA, 'present']);
   assert.deepEqual(vs(a1.placement.depends_on), [[], 'present']);
   assert.deepEqual(out.A2.placement.depends_on.value, ['A1']);
@@ -129,8 +131,9 @@ test('a legacy review without head is unavailable', () => {
   assert.deepEqual(vs(out.A1.status.reviewed), [null, 'unavailable']);
   assert.equal(out.A1.review.reviews[0].head, null);
   assert.equal(out.A1.status.reviewed.note, 'review recorded no head');
-  // No run_started: the plan and spec hashes are unavailable, not stale.
-  assert.deepEqual(out.A1.requirement.plan_hash.map((r) => r.state), ['unavailable']);
+  // No run_started: the task gets no plan or spec hash gap of its own (the
+  // run-level one is in run.checks).
+  assert.deepEqual(Object.keys(out.A1.requirement), ['brief_hash', 'brief_file']);
 });
 
 test('a pre-1.4.4 review', () => {
@@ -230,15 +233,26 @@ test('the brief hash is the plan section\'s', () => {
   const [s0, s1] = [S('a'), S('b')];
   const out = audit(makeRun(reviewedRun(s0, s1)), facts());
   const req = out.A1.requirement;
-  assert.deepEqual(vs(req.section_hash), [SECTION.A1, 'present']);
+  // The section hash is compared, not listed: the plan copy is a run check.
+  assert.equal(req.section_hash, undefined);
   assert.deepEqual(vs(req.brief_hash), [SECTION.A1, 'present']);
+  assert.deepEqual(req.brief_hash.sources, [{ path: `${LEDGER}/a.jsonl`, at: 'L3' }, { path: 'p.md', at: null }]);
   assert.notEqual(SECTION.A1, sha256('brief\n'));
   assert.equal(req.brief_file.value, `${LEDGER}/briefs/A1.md`);
   assert.match(req.brief_file.note, /latest regeneration, not hashed/);
   const spec = reviewedRun(s0, s1);
   spec.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: sha256('brief\n') });
   assert.equal(audit(makeRun(spec), facts()).A1.requirement.brief_hash.state, 'stale');
-  assert.equal(audit(makeRun({ ...reviewedRun(s0, s1), plan: null }), facts()).A1.requirement.section_hash.state, 'unavailable');
+  // Without a plan copy the brief hash has nothing to compare with.
+  const noPlan = audit(makeRun({ ...reviewedRun(s0, s1), plan: null }), facts()).A1.requirement;
+  assert.deepEqual([...vs(noPlan.brief_hash), noPlan.brief_hash.note], [SECTION.A1, 'unavailable', 'no plan section to compare']);
+  assert.equal(noPlan.section_hash, undefined);
+  // A plan copy without the task's section: the task's own gap, on its brief hash.
+  const lacking = audit(makeRun({ ...reviewedRun(s0, s1), plan: DEFAULT_PLAN.split('### Task A2')[0] }), facts());
+  assert.deepEqual([...vs(lacking.A2.requirement.brief_hash), lacking.A2.requirement.brief_hash.note],
+    [null, 'missing', "the plan copy has no usable section: no heading for task 'A2'"]);
+  assert.deepEqual(lacking.A2.requirement.brief_hash.sources, [{ path: 'p.md', at: null }]);
+  assert.deepEqual(vs(lacking.A1.requirement.brief_hash), [SECTION.A1, 'present']);
   // Every review's brief hash is compared, not only the latest one's.
   const twice = reviewedRun(s0, s1, [reviewed('A1', s1)]);
   twice.ledger['a.jsonl'][2] = reviewed('A1', s1, { brief_sha256: sha256('brief\n') });

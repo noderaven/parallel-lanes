@@ -1510,7 +1510,8 @@ show it under its own label after the acceptance lead.
   - autopsy: `autopsy generated (<m> possible contributor(s))`, `autopsy generated
     (contributors unavailable)`, `autopsy failed (exit N)` or `autopsy not run`.
   - audit: `audit generated (<k> evidence gap(s))`, where k is the length of the `gaps` list in
-    `<run folder>/audit/audit.json` (read with `--audit-exit 0` and `--run-folder`); `audit
+    `<run folder>/audit/audit.json` (one entry per gap value, not per cause; any `audit_version`;
+    read with `--audit-exit 0` and `--run-folder`); `audit
     generated (gaps unavailable)` when that file is missing, unreadable or has no `gaps` list, or
     there is no `--run-folder`; `audit failed (exit N)`; or `audit not run`. See "Audit".
   - cleanup: `cleanup awaiting approval`, `cleanup done`, `cleanup declined`, `cleanup failed`
@@ -2171,9 +2172,24 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
 - **States.** Every derived value is `{value, state, sources, note?}` with a state of `present`,
   `missing`, `stale`, `conflicting`, `unavailable` or `inferred`; no others. The `gaps` list in
   `audit.json` holds every value whose state is `missing`, `stale`, `conflicting` or
-  `unavailable`, and its length is the number `tool-outcomes` prints. Sources are paths relative
-  to the run folder, `git:<sha>` or `transcript:<wf>/<agent label>`, each with a ledger line, a
-  JSON pointer or a sha.
+  `unavailable`, one entry per value, and its length is the number `tool-outcomes` prints. Sources
+  are paths relative to the run folder, `git:<sha>` or `transcript:<wf>/<agent label>`, each with a
+  ledger line, a JSON pointer or a sha.
+- **Gap causes** (1.6.16, `audit_version` 2). One fact missing from the archive is often a gap in
+  every task, so `audit.json` also has `gap_causes`, one entry per cause in first-seen order:
+  `{pointer, state, note, tasks, values}`. A cause is the gap pointer with every array index read
+  as `N` (`#/tasks/N/status/verified`), the state, and the note with every sha of 7 to 64 hex
+  digits read as `<sha>`; `note` is the cause's first note as written. `tasks` lists the ids of
+  the tasks whose blocks hold the cause, each once, in run order (`null` for a run-level cause);
+  `values` lists every value of a run-level cause in order, repeats included, so three missing
+  launches stay three values (`null` for a task cause). `audit.md`'s Evidence gaps section opens
+  with `<G> evidence gap(s) in <C> cause(s)` and prints one line per cause:
+  `- <pointer> [<state>] - <note> (tasks <id>, <id>)`, or `(run)` for a run-level cause,
+  `(run: <v>, <v>)` with every value (`unknown` for `null`) when it has more than one or a single
+  plain one. `gaps` itself is per value as before. An older run audited again counts fewer gaps
+  where the plan and spec hashes or the plan copy's state were a gap in every task (each is now
+  one run-level gap), and a task whose section the plan copy lacks has one gap, its brief hash,
+  instead of two.
 - **Acceptance** is three facts and one derived verdict: `run_verdict` (the result's
   `acceptance`), `gate` (check-verify's archive-mode outcome: its status, or `checker_error`),
   and `override` (the ledger `accepted` event). The verdict is `accepted`, `accepted by user`,
@@ -2218,13 +2234,22 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `unavailable` when the result has neither list, never 0; N and M read `unavailable` when the
   final review is. Under the header the open task minors are listed, then each carried id as `<id>
   open (carried minor)`.
-- **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
-  placement, changes (rulings, events, escalations), commits and review (reviews, each with its
-  brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
-  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`. Review verdicts come
-  from the journal and are `inferred`; `audit.md` shows them as
-  `[inferred: read from the transcript]` (other `inferred` values keep `[inferred]`). A ruling
-  without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
+- **Per task,** in run order, the audit shows the requirement (the latest review's brief hash
+  against the task's plan section hash, and the brief file), placement, changes (rulings, events,
+  escalations), commits and review (reviews, each with its brief and spec hashes against the
+  run's, packages, verdicts and approval), each with its state. Everything a task's committed,
+  reviewed, verified or accepted state rests on stays in its block, "no ledger" included (one
+  cause per fact, not one gap). A plan copy without the task's section makes the task's brief hash
+  `missing` with the reason. The facts that are run-level by construction are in `run.checks`
+  once, not in every task: `plan_hash` and `spec_hash`, one entry per setup `run_started` event
+  (its recorded hash against the archived copy, its ledger line among the sources), and
+  `section_hash`, the plan copy the section hashes are read from (`unavailable` with `no plan copy
+  archived` or `the plan copy could not be read`). `audit.md` prints them in Checks as `plan hash,
+  setup event <n>`, `spec hash, setup event <n>` and `plan copy for the section hashes`. A launch
+  is the union of `wf_*` dirs and `wf_*.json` files; its result comes only from `<run
+  folder>/<wf>.json`. Review verdicts come from the journal and are `inferred`; `audit.md` shows
+  them as `[inferred: read from the transcript]` (other `inferred` values keep `[inferred]`). A
+  ruling without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
   verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
   settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
   a task that is not done, or is settled or blocked, stays `false`.
@@ -2254,12 +2279,13 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   when `ledger status` failed); the final findings (`N open or declined`, or `Final review
   unavailable`), the open task minors as above and the cannot-verify items; the code outside
   recorded task ranges and how many lack review evidence; the launches missing from the archive
-  when the ledger records more; and `G evidence gap(s) (cannot-verify items and inferred lines are
-  not gaps)`. Nothing else.
+  when the ledger records more; and `<G> evidence gap(s) in <C> cause(s) (cannot-verify items and
+  inferred lines are not gaps)`. Nothing else. The summary's last line before the report path
+  gives the same `<G> evidence gap(s) in <C> cause(s)`.
 - **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
   states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
-  validity's), round(s), task rulings and run-end rulings, gate, carry and context added by
-  pre-flight.
+  validity's), round(s), task rulings and run-end rulings, gate, carry, context added by
+  pre-flight and (1.6.16) cause.
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
 <run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from

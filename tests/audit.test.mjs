@@ -284,7 +284,9 @@ test('an accepted run with a repo', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r));
   const { json, md, stdout } = view(folder, ['--repo', r.dir]);
-  assert.equal(json.audit_version, 1);
+  assert.equal(json.audit_version, 2);
+  assert.deepEqual(Object.keys(json), ['audit_version', 'run_id', 'repo', 'run', 'tasks', 'gaps', 'gap_causes']);
+  assert.deepEqual(json.gap_causes, []);
   assert.equal(json.run_id, 't1');
   assert.equal(json.run.acceptance.verdict.value, 'accepted');
   assert.equal(json.run.acceptance.gate, 'match');
@@ -308,7 +310,7 @@ test('an accepted run with a repo', () => {
     'Tasks: committed 2, reviewed 2, verified 2, accepted 2 of 2.',
     'Final findings: 0 open or declined; open task minors: 0; cannot-verify items: 0.',
     'Code outside recorded task ranges: 1 commit(s), 0 without review evidence.',
-    '0 evidence gap(s) (cannot-verify items and inferred lines are not gaps).',
+    '0 evidence gap(s) in 0 cause(s) (cannot-verify items and inferred lines are not gaps).',
   ]);
   assert.ok(stdout.split('\n').includes('open work: 0 task(s), 0 open or declined final finding(s), 0 open task minor(s)'),
     stdout);
@@ -321,7 +323,8 @@ test('an accepted run with a repo', () => {
   assert.match(lines[lines.length - 1], /^full report: .*audit\.md$/);
   assert.ok(existsSync(lines[lines.length - 1].slice('full report: '.length)));
   assert.match(stdout, /verdict accepted/);
-  assert.match(stdout, /evidence gaps: 0/);
+  assert.ok(lines.includes('0 evidence gap(s) in 0 cause(s)'), stdout);
+  assert.deepEqual(mdSection(md, 'Evidence gaps'), ['0 evidence gap(s) in 0 cause(s)']);
   // --json prints the same document.
   const res = audit(folder, ['--repo', r.dir, '--json']);
   assert.equal(res.code, 0, res.stderr);
@@ -564,8 +567,9 @@ test('the bottom line says what is unavailable and invents nothing', () => {
     'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.',
     'Code outside recorded task ranges: unavailable (no --repo).',
     'Launches missing from the archive: 1 of 1 recorded.',
-    `${json.gaps.length} evidence gap(s) (cannot-verify items and inferred lines are not gaps).`,
+    `${json.gaps.length} evidence gap(s) in ${json.gap_causes.length} cause(s) (cannot-verify items and inferred lines are not gaps).`,
   ]);
+  assert.ok(json.gap_causes.length > 0 && json.gap_causes.length < json.gaps.length);
   assert.ok(json.gaps.length > 0);
   assert.doesNotMatch(bottom.join('\n'), /zqblocked/);
 
@@ -682,8 +686,11 @@ test('audit.md ends with its terms', () => {
   assert.deepEqual(named, [
     '[present]', '[missing]', '[stale]', '[conflicting]', '[unavailable]', '[inferred]',
     '[inferred: read from the transcript]', 'invalid', 'round(s)', 'task rulings', 'run-end rulings', 'gate', 'carry',
-    'context added by pre-flight',
+    'context added by pre-flight', 'cause',
   ]);
+  assert.equal(terms.at(-1), '- cause: gaps that share a pointer (each array index read as N), a state and a note (each '
+    + 'sha read as <sha>; the first note is shown), listed once under Evidence gaps with the tasks whose blocks hold '
+    + 'them, or with run and every value for a run-level cause.');
   // The four gap states say they are gaps; the others say they are not.
   for (const l of terms.slice(0, 7)) {
     const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
@@ -913,8 +920,103 @@ test('legacy layouts get a view', () => {
     const { json, md } = view(folder);
     assert.ok(json.gaps.some(expected), `${name}: ${JSON.stringify(json.gaps)}`);
     assert.equal(md.split('\n')[0], FIRST_LINE, name);
-    assert.match(md, new RegExp(`evidence gaps: ${json.gaps.length}`), name);
+    const listed = mdSection(md, 'Evidence gaps');
+    assert.equal(listed[0], `${json.gaps.length} evidence gap(s) in ${json.gap_causes.length} cause(s)`, name);
+    assert.equal(listed.length, json.gap_causes.length + 1, name);
   }
+});
+
+test('Evidence gaps lists each cause once, with its tasks or the run', () => {
+  const ended = { task: '_run', event: 'run_ended', status: 'complete', agents: 3, rulings: 0 };
+  const carried = { task: '_run', event: 'carried', wf: 'wf_bbbbbb', rulings: 0 };
+  const result = { tasks: { A1: { status: 'done', commits: [S('0'), S('1')] }, A2: { status: 'not_run', commits: null } } };
+  const folder = makeRun({
+    ledger: {
+      '_run.jsonl': [setup(S('0')), ended, carried, ended, ended],
+      'a.jsonl': [{ task: 'A1', event: 'started', base: S('0') }, { task: 'A1', event: 'committed', commits: [S('1')], base: S('0'), head: S('1') }],
+    },
+    launches: [{ wf: 'wf_aaaaaa', startTime: START, durationMs: DURATION, result, dirless: true }],
+  });
+  const { json, md, stdout } = view(folder);
+  const both = `${json.gaps.length} evidence gap(s) in ${json.gap_causes.length} cause(s)`;
+  const listed = mdSection(md, 'Evidence gaps');
+  assert.equal(listed[0], both);
+  // One line per cause, each once.
+  const lines = listed.slice(1);
+  assert.equal(lines.length, json.gap_causes.length);
+  assert.equal(new Set(lines).size, lines.length);
+  for (const line of [
+    '- #/repo [unavailable] - no --repo (run)',
+    // A run-level cause lists every value: a named launch and an unnamed one.
+    '- #/run/launches/missing/N [missing] - the ledger records this launch; its transcripts are not archived (run: wf_bbbbbb, unknown)',
+    // A cause in every task, and causes in some.
+    '- #/tasks/N/requirement/brief_hash [unavailable] - no review recorded (tasks A1, A2)',
+    '- #/tasks/N/status/reviewed [missing] - no review recorded (tasks A1)',
+    '- #/tasks/N/commits/entries/N/commits [unavailable] - no --repo (tasks A1)',
+  ]) assert.ok(lines.includes(line), `${line}\n${md}`);
+  assert.doesNotMatch(md, /#\/tasks\/\d/);
+  // audit.json keeps every per-task value in gaps.
+  assert.equal(json.gaps.filter((g) => /^#\/tasks\/\d+\/requirement\/brief_hash$/.test(g.where)).length, 2);
+  assert.deepEqual(json.gap_causes.find((g) => g.pointer === '#/tasks/N/requirement/brief_hash'),
+    { pointer: '#/tasks/N/requirement/brief_hash', state: 'unavailable', note: 'no review recorded', tasks: ['A1', 'A2'], values: null });
+  assert.deepEqual(json.gap_causes.find((g) => g.pointer === '#/run/launches/missing/N').values, ['wf_bbbbbb', null]);
+  // The Bottom line and the Summary give both counts.
+  assert.equal(mdSection(md, 'Bottom line').at(-1), `${both} (cannot-verify items and inferred lines are not gaps).`);
+  assert.ok(mdSection(md, 'Summary').includes(`- ${both}`), md);
+  assert.ok(stdout.split('\n').includes(both), stdout);
+});
+
+test('the plan and spec hashes print once, in Checks, by setup event and ledger line', () => {
+  const r = repoRun();
+  const { json, md } = view(makeRun(acceptedSpec(r, { runEvents: [setup(r.p0)] })), ['--repo', r.dir]);
+  assert.deepEqual(json.gaps, []);
+  const run = `${LEDGER}/_run.jsonl`;
+  assert.deepEqual(mdSection(md, 'Checks').filter((l) => /^- (plan|spec) (hash|copy)/.test(l)), [
+    `- plan hash, setup event 1: ${PLAN_SHA} [present] (${run} L1; p.md)`,
+    `- plan hash, setup event 2: ${PLAN_SHA} [present] (${run} L2; p.md)`,
+    `- spec hash, setup event 1: ${SPEC_SHA} [present] (${run} L1; p-design.md)`,
+    `- spec hash, setup event 2: ${SPEC_SHA} [present] (${run} L2; p-design.md)`,
+    '- plan copy for the section hashes: p.md [present] (p.md)',
+  ]);
+  // In no task block: audit.md holds each hash only there (a review's own
+  // spec match stays with its review).
+  assert.equal(md.split(PLAN_SHA).length - 1, 2);
+  assert.deepEqual(md.split('\n').filter((l) => l.includes(SPEC_SHA) && !l.startsWith('- spec hash, setup event ')),
+    [`  - spec match: ${SPEC_SHA} [present] (${LEDGER}/a.jsonl L3; p-design.md)`,
+      `  - spec match: ${SPEC_SHA} [present] (${LEDGER}/a.jsonl L6; p-design.md)`]);
+  assert.doesNotMatch(md, /plan section hash|hash, launch \d/);
+  for (const t of json.tasks) assert.deepEqual(Object.keys(t.requirement), ['brief_hash', 'brief_file'], t.id);
+  // Without a plan copy: one run-level gap, printed once in Checks.
+  const noPlan = view(makeRun({ ...acceptedSpec(r), plan: null }), ['--repo', r.dir]);
+  assert.deepEqual(noPlan.json.gaps.filter((g) => g.note === 'no plan copy archived').map((g) => g.where),
+    ['#/run/checks/section_hash']);
+  assert.deepEqual(noPlan.md.split('\n').filter((l) => /no plan copy archived( \(run\))?$/.test(l)), [
+    '- plan copy for the section hashes: unknown [unavailable] - no plan copy archived',
+    '- #/run/checks/section_hash [unavailable] - no plan copy archived (run)',
+  ]);
+});
+
+test('a task keeps every fact its states rest on; "no ledger" is one cause per fact', () => {
+  const result = { tasks: { A1: { status: 'done', commits: [S('0'), S('1')] }, A2: { status: 'done', commits: [S('1'), S('2')] } } };
+  const { json, md } = view(makeRun({ ledger: null, launches: [{ wf: 'wf_aaaaaa', startTime: START, durationMs: DURATION, result }] }));
+  json.tasks.forEach((t, i) => {
+    for (const field of ['committed', 'reviewed']) {
+      assert.deepEqual([t.status[field].state, t.status[field].note], ['unavailable', 'no ledger'], `${t.id} ${field}`);
+      assert.ok(json.gaps.some((g) => g.where === `#/tasks/${i}/status/${field}` && g.note === 'no ledger'), `${t.id} ${field}`);
+    }
+  });
+  for (const field of ['committed', 'reviewed']) {
+    assert.equal(md.split('\n').filter((l) => l === `- ${field}: unknown [unavailable] - no ledger`).length, 2, field);
+  }
+  assert.deepEqual(json.gap_causes.filter((g) => g.note === 'no ledger').map((g) => [g.pointer, g.tasks, g.values]), [
+    ['#/tasks/N/requirement/brief_file', ['A1', 'A2'], null],
+    ['#/tasks/N/changes/carry', ['A1', 'A2'], null],
+    ['#/tasks/N/changes/deferred', ['A1', 'A2'], null],
+    ['#/tasks/N/review/packages', ['A1', 'A2'], null],
+    ['#/tasks/N/status/committed', ['A1', 'A2'], null],
+    ['#/tasks/N/status/reviewed', ['A1', 'A2'], null],
+  ]);
+  assert.ok(mdSection(md, 'Evidence gaps').includes('- #/tasks/N/status/committed [unavailable] - no ledger (tasks A1, A2)'), md);
 });
 
 test('the summary counts recorded launches the archive is missing', () => {
@@ -1061,8 +1163,20 @@ test('the run-tools line counts the gaps', () => {
   const folder = makeRun({ launches: [{ wf: 'wf_old', startTime: START, durationMs: DURATION, result: {}, dirless: true }] });
   const { json } = view(folder);
   assert.ok(json.gaps.length > 0);
-  const res = spawnSync('python3', [join(SCRIPTS, 'tool-outcomes'), '--run-folder', folder, '--audit-exit', '0'], { encoding: 'utf8' });
+  const outcomes = () => spawnSync('python3', [join(SCRIPTS, 'tool-outcomes'), '--run-folder', folder, '--audit-exit', '0'],
+    { encoding: 'utf8' });
+  const res = outcomes();
   assert.equal(res.status, 0, res.stderr);
+  // Every gap counts, not every cause.
+  assert.ok(json.gap_causes.length < json.gaps.length);
   assert.ok(res.stdout.includes(`audit generated (${json.gaps.length} evidence gap(s))`), res.stdout);
   assert.ok(statSync(join(folder, 'audit', 'audit.json')).isFile());
+  // tool-outcomes reads only gaps: an audit.json of version 1 (no
+  // gap_causes) still gives its count.
+  const v1 = { ...json, audit_version: 1 };
+  delete v1.gap_causes;
+  writeFileSync(join(folder, 'audit', 'audit.json'), JSON.stringify(v1));
+  const old = outcomes();
+  assert.equal(old.status, 0, old.stderr);
+  assert.ok(old.stdout.includes(`audit generated (${json.gaps.length} evidence gap(s))`), old.stdout);
 });

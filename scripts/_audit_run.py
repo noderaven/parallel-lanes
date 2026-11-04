@@ -49,6 +49,18 @@ E2E_NO_DELIVERED, or both joined by "; "). A commit outside the task ranges
 that a final lens head contains is present with the note LENS_NOTE (that
 head's first 7 digits).
 
+The plan and spec hashes are run-level facts, in checks once (never per
+task; input_hashes): plan_hash and spec_hash hold one ref per setup
+run_started event, in ledger order, its sources that ledger line and the
+archived copy: the recorded hash against the copy's sha256 (present when
+they agree, or when neither exists; stale when they differ, or when the
+launch recorded none but the archive holds a copy; unavailable without a
+copy to compare, or when the event has no such key). Without a setup event
+each is one unavailable ref, "no setup run_started recorded". section_hash
+is the plan copy the tasks' section hashes are read from: present, its
+value the copy's path, else unavailable ("no plan copy archived", "the plan
+copy could not be read").
+
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
 in manifest run order, with a recorded range; with its ledger source. When
@@ -691,7 +703,54 @@ def _checks(run, launch, why, gate, evidence, rule, want):
         e_note = "the gate is %s" % gate["status"]
     out["evidence"] = c.ref(evidence, e_state, g_sources, e_note)
     out["rule"] = rule
+    out.update(input_hashes(run))
     return out
+
+
+def _hashes(run, setups, key, copy_path, what):
+    """One ref per setup event: its recorded key against the archived copy."""
+    if not setups:
+        return [c.ref(None, "unavailable", _ledger_src(run), "no setup run_started recorded")]
+    copy_sha = c.file_sha256(os.path.join(run["folder"], copy_path)) if copy_path else None
+    out = []
+    for event, source in setups:
+        sources = [source]
+        if key not in event:
+            out.append(c.ref(None, "unavailable", sources, "the launch recorded no %s hash" % what))
+            continue
+        recorded = event[key]
+        if copy_path:
+            sources.append(c.src(copy_path))
+        if recorded is None:
+            if copy_sha is None:
+                out.append(c.ref(None, "present", sources, "the launch recorded no %s" % what))
+            else:
+                out.append(c.ref(None, "stale", sources, "the launch recorded no %s, but the archive holds one" % what))
+        elif copy_sha is None:
+            out.append(c.ref(recorded, "unavailable", sources, "no %s copy archived to compare" % what))
+        elif recorded == copy_sha:
+            out.append(c.ref(recorded, "present", sources))
+        else:
+            out.append(c.ref(recorded, "stale", sources, "the archived %s copy differs from this launch's" % what))
+    return out
+
+
+def input_hashes(run):
+    """{"plan_hash", "spec_hash", "section_hash"}: the run-level input facts
+    (see the module docstring)."""
+    setups = [(e, s) for e, s in _events(run) if e.get("event") == "run_started" and e.get("phase") == "setup"]
+    plan = run.get("plan_path")
+    if plan is None:
+        section = c.ref(None, "unavailable", [], "no plan copy archived")
+    elif c.read_text(os.path.join(run["folder"], plan)) is None:
+        section = c.ref(None, "unavailable", [c.src(plan)], "the plan copy could not be read")
+    else:
+        section = c.ref(plan, "present", [c.src(plan)])
+    return {
+        "plan_hash": _hashes(run, setups, "plan_sha256", plan, "plan"),
+        "spec_hash": _hashes(run, setups, "spec_sha256", run.get("spec_path"), "spec"),
+        "section_hash": section,
+    }
 
 
 def _evidence_source(run, launch, files):

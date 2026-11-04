@@ -660,6 +660,9 @@ test('reference.md documents the audit', () => {
     // the open counts, the bottom line and the terms (1.6.15)
     'open task minor(s)', 'carried_minors_open', '## Bottom line', '## Terms',
     '(cannot-verify items and inferred lines are not gaps)',
+    // the gap causes and the run-level hashes (1.6.16)
+    'gap_causes', '`audit_version` 2', 'in <C> cause(s) (cannot-verify items and inferred lines are not gaps)',
+    '`run.checks`', 'setup event',
   ];
   for (const word of wants) {
     assert.ok(audit.includes(word), `the Audit section lacks ${word}`);

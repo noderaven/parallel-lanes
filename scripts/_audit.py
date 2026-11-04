@@ -9,12 +9,18 @@ build(folder, repo=None, head=None) reads the run folder once
 (_audit_core.load_run, which raises _audit_core.OutsideRunFolder for an input
 that resolves outside it) and returns
 
-  {"audit_version": 1, "run_id", "repo", "run", "tasks", "gaps"}
+  {"audit_version": 2, "run_id", "repo", "run", "tasks", "gaps",
+   "gap_causes"}
 
 run is _audit_run.run_sections without its facts, tasks
-_audit_tasks.task_sections, and gaps _audit_core.collect_gaps over the rest
-(JSON pointers from the document root). repo is a ref saying how far the
-git facts can be trusted:
+_audit_tasks.task_sections, gaps _audit_core.collect_gaps over the rest
+(JSON pointers from the document root; one entry per gap value, the length
+tool-outcomes prints) and gap_causes _audit_core.gap_causes over the same
+(one entry per cause: {"pointer", "state", "note", "tasks", "values"}).
+audit_version 2 (1.6.16) added gap_causes and moved the plan and spec
+hashes and the plan copy's state from every task to run.checks (plan_hash,
+spec_hash, section_hash). repo is a ref saying how far the git facts can be
+trusted:
   - no repo: unavailable, "no --repo", and every git fact says so;
   - a repo that is not a git repo, or lacks the run's start point
     (_audit_run.start_point): unavailable with open_repo's reason, and every
@@ -27,14 +33,20 @@ inputs give the same bytes wherever the run folder lies.
 
 render_md(audit) is audit.md: its first line is FIRST_LINE, then the
 sections Bottom line, Summary, Acceptance, Launches, Tasks (one block per
-task), Code outside recorded task ranges, Checks, After delivery (only with
---head), Open work, Evidence gaps and Terms (TERMS, fixed text). The Bottom
-line is one paragraph, each part from one value audit computed and none
-from recorded text: the verdict with why (_verdict_line: its verdict_rule,
-else, unavailable, its note, else, accepted by user, 'over <overrode>'
-(the run's own verdict and reason kinds, as Acceptance computes them),
-else the engine's reason kinds for the engine's own verdict; accepted (gate
-unavailable) carries run.checks.gate_reason inside its parenthesis),
+task), Code outside recorded task ranges, Checks (with the plan and spec
+hashes once, each labelled by its setup event, its ledger line among the
+sources, and the plan copy for the section hashes), After delivery (only
+with --head), Open work, Evidence gaps (under '<G> evidence gap(s) in <C>
+cause(s)', one line per cause: '- <pointer> [<state>] - <note> (tasks <id>,
+...)', or '(run)' for a run-level cause, '(run: <v>, ...)' with every value,
+null as unknown, when it has more than one or a single plain one) and Terms
+(TERMS, fixed text). The Bottom line is one paragraph, each part from one
+value audit computed and none from recorded text: the verdict with why
+(_verdict_line: its verdict_rule, else, unavailable, its note, else,
+accepted by user, 'over <overrode>' (the run's own verdict and reason
+kinds, as Acceptance computes them), else the engine's reason kinds for the
+engine's own verdict; accepted (gate unavailable) carries
+run.checks.gate_reason inside its parenthesis),
 ACCEPTED_BY_USER when an override's head is present (at the delivered sha)
 and the verdict is not already accepted by user, the tasks' committed,
 reviewed, verified and accepted counts of true values (each with '(<k>
@@ -42,10 +54,12 @@ settled, <k> not required, <k> unavailable)' for the kinds there are) and
 the blocked and deferred counts above 0 ('blocked and deferred unknown'
 when open_work.ledger_state is set), the final findings, open task minors
 and cannot-verify items, the code outside recorded task ranges, the
-launches missing from the archive, and the gap count with NOT_GAPS. The
-Summary's open work line and the Open work header read '<N> open or
-declined final finding(s), <M> open task minor(s)': M is open_work.final's
-task_minors_open plus its carried_minors_open (_autopsy.open_task_minors),
+launches missing from the archive, and '<G> evidence gap(s) in <C>
+cause(s)' with NOT_GAPS (the summary's last line before the report path
+gives the same counts). The Summary's open work line and the Open work
+header read '<N> open or declined final finding(s), <M> open task
+minor(s)': M is open_work.final's task_minors_open plus its
+carried_minors_open (_autopsy.open_task_minors),
 'at least M' when a cannot_verify quote holds _autopsy.MINORS_NOT_REACHED,
 and unavailable when both lists are null; N and M are unavailable when the
 final review is. Under the header come the open task minors, then each
@@ -80,6 +94,8 @@ import _audit_tasks  # noqa: E402
 import _autopsy  # noqa: E402
 
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
+# 2 (1.6.16): gap_causes, and the plan and spec hashes in run.checks.
+AUDIT_VERSION = 2
 NO_REPO = "no --repo"
 UNCHECKED = "repo not checked against the run"
 # audit.md's bracket for a review verdict read from the journal.
@@ -123,6 +139,9 @@ TERMS = (
     ("context added by pre-flight", "a producer pre-flight found the task relies on without naming it in its "
                                     "Consumes (the result's preflight.undeclared): its Produces block went into "
                                     "the task's brief; it does not order the task after the producer."),
+    ("cause", "gaps that share a pointer (each array index read as N), a state and a note (each sha read as "
+              "<sha>; the first note is shown), listed once under Evidence gaps with the tasks whose blocks hold "
+              "them, or with run and every value for a run-level cause."),
 )
 
 
@@ -152,13 +171,15 @@ def build(folder, repo=None, head=None):
     tasks = _audit_tasks.task_sections(run, git, facts, pairs, git_note=git_note)
     run_id = manifest.get("run_id")
     audit = {
-        "audit_version": 1,
+        "audit_version": AUDIT_VERSION,
         "run_id": run_id if isinstance(run_id, str) else None,
         "repo": repo_ref,
         "run": sections,
         "tasks": tasks,
     }
-    audit["gaps"] = core.collect_gaps(audit)
+    gaps, causes = core.collect_gaps(audit), core.gap_causes(audit)
+    audit["gaps"] = gaps
+    audit["gap_causes"] = causes
     return audit
 
 
@@ -324,7 +345,14 @@ def _counts(audit):
         "held_unknown": open_work.get("ledger_state") is not None,
         "final": _final_counts(open_work.get("final")),
         "gaps": len(audit["gaps"]),
+        "causes": len(audit["gap_causes"]),
     }
+
+
+def _gaps_text(c):
+    """'<G> evidence gap(s) in <C> cause(s)', for the summary, the Bottom
+    line and the Evidence gaps header."""
+    return "%d evidence gap(s) in %d cause(s)" % (c["gaps"], c["causes"])
 
 
 def _outside_text(c):
@@ -348,7 +376,7 @@ def _summary_lines(audit):
     lines.append("code outside recorded task ranges: %s" % _outside_text(c))
     held = OPEN_TASKS_UNKNOWN if c["held_unknown"] else "%d task(s)" % c["open_tasks"]
     lines.append("open work: %s, %s" % (held, _open_counts(c["final"])))
-    lines.append("evidence gaps: %d" % c["gaps"])
+    lines.append(_gaps_text(c))
     return lines
 
 
@@ -448,7 +476,7 @@ def _md_bottom_line(audit, out):
     missing = len(run["launches"].get("missing") or [])
     if missing and c["recorded"] is not None:
         lines.append("Launches missing from the archive: %d of %d recorded." % (missing, c["recorded"]))
-    lines.append("%d evidence gap(s) %s." % (c["gaps"], NOT_GAPS))
+    lines.append("%s %s." % (_gaps_text(c), NOT_GAPS))
     out += ["## Bottom line", ""] + lines + [""]
 
 
@@ -545,13 +573,8 @@ def _md_task(t, out):
 
     req = t["requirement"]
     out += ["", "Requirement:"]
-    out.append(_ref("plan section hash", req["section_hash"]))
     out.append(_ref("brief hash (latest review)", req["brief_hash"]))
     out.append(_ref("brief file", req["brief_file"]))
-    for i, r in enumerate(req.get("plan_hash") or [], 1):
-        out.append(_ref("plan hash, launch %d" % i, r))
-    for i, r in enumerate(req.get("spec_hash") or [], 1):
-        out.append(_ref("spec hash, launch %d" % i, r))
 
     p = t["placement"]
     out += ["", "Placement:"]
@@ -711,7 +734,22 @@ def _md_checks(c, out):
                         % (_scalar(ev.get("checked_sha")), ev.get("items"), ev.get("failed"))))
     else:
         out.append(_ref("e2e", e2e))
+    # The run's input hashes, once: by setup event, its ledger line among
+    # the sources.
+    for kind in ("plan", "spec"):
+        for i, r in enumerate(c.get("%s_hash" % kind) or [], 1):
+            label = "%s hash, setup event %d" % (kind, i) if _at_line(r) else "%s hash" % kind
+            out.append(_ref(label, r))
+    if c.get("section_hash") is not None:
+        out.append(_ref("plan copy for the section hashes", c["section_hash"]))
     out.append("")
+
+
+def _at_line(r):
+    """True when a ref's first source is a ledger line (L<n>)."""
+    sources = r.get("sources") if _is_ref(r) else None
+    at = sources[0].get("at") if sources and isinstance(sources[0], dict) else None
+    return isinstance(at, str) and at.startswith("L")
 
 
 def _md_after(r, out):
@@ -791,19 +829,35 @@ def _md_open(o, out):
     out.append("")
 
 
-def _md_gaps(gaps, out):
+def _plain(value):
+    return isinstance(value, (str, int, float)) and not isinstance(value, bool)
+
+
+def _cause_where(cause):
+    """'(tasks <id>, ...)' for a cause under tasks; '(run)', or '(run: <v>,
+    ...)' with every value ('unknown' for null) when there is more than one
+    or a single plain one, for a run-level cause."""
+    if cause.get("tasks") is not None:
+        return "(tasks %s)" % ", ".join(str(t) for t in cause["tasks"])
+    values = cause.get("values") or []
+    if not values or (len(values) == 1 and not _plain(values[0])):
+        return "(run)"
+    return "(run: %s)" % ", ".join(str(v) if _plain(v) else _scalar(v) for v in values)
+
+
+def _md_gaps(audit, out):
+    """'<G> evidence gap(s) in <C> cause(s)', then one line per cause:
+    '- <pointer> [<state>] - <note> (tasks <id>, ...)' or '(run...)'."""
     out += ["## Evidence gaps", ""]
-    out.append("evidence gaps: %d" % len(gaps))
+    out.append(_gaps_text(_counts(audit)))
     out.append("")
-    for g in gaps:
-        line = "- %s: %s" % (g["where"], g["state"])
-        value = g.get("value")
-        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-            line += " (%s)" % value
-        if g.get("note"):
-            line += " - %s" % g["note"]
-        out.append(line)
-    if gaps:
+    causes = audit["gap_causes"]
+    for cause in causes:
+        line = "- %s [%s]" % (cause["pointer"], cause["state"])
+        if cause.get("note"):
+            line += " - %s" % cause["note"]
+        out.append("%s %s" % (line, _cause_where(cause)))
+    if causes:
         out.append("")
 
 
@@ -824,7 +878,7 @@ def render_md(audit):
     if run.get("after_delivery") is not None:
         _md_after(run["after_delivery"], out)
     _md_open(run["open_work"], out)
-    _md_gaps(audit["gaps"], out)
+    _md_gaps(audit, out)
     _md_terms(out)
     while out and out[-1] == "":
         out.pop()
