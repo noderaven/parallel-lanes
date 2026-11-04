@@ -8,7 +8,7 @@ Import with:
 task_sections(run, git, facts, pairs, git_note=None) returns one dict per
 _audit_core.manifest_tasks entry, in run order (prelude, lanes, join):
 {"id", "lane", "requirement", "placement", "changes", "commits", "review",
-"status"}.
+"status", "checks"}.
 
 run is _audit_core.load_run's dict, git an _audit_git.Git or None, pairs
 _audit_core.command_pairs(manifest), and facts the run-level facts:
@@ -73,7 +73,23 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                unavailable, "the acceptance gate is unavailable", for a task
                the result reports done that is neither settled nor blocked;
                a task that is not done, or is settled or blocked, stays
-               false.
+               false. verified false by containment has the note
+               NOT_CONTAINED.
+  checks       task_check: the task's own check before its commit, from
+               _audit_run.task_check_index's attempts for it (no git
+               needed). Never committed, settled, or no ledger: null,
+               present, a note (no line). With attempts, the last decides:
+               {file, unit, attempt, selected, reasons, ok, failed, base,
+               head, head_is_task_commit (HEAD was one of the task's own
+               commits: a committed event's head or one it lists),
+               tree_changed, earlier: {passed, failed,
+               no_result}, fix_commits_after (_fix_commits_after)}, present
+               for passed and failed, unavailable for no result (its note
+               why), stale when its policy base is not the task's range base
+               (its first committed or settled event's base). Without one,
+               by _audit_run.task_check_engine: before 1.6.0, null, present,
+               TC_NOT_RECORDED; no launch reports it, unavailable; else
+               missing when _audit_run.task_has_checks, else not_required.
 
 spec_match compares a review's spec_sha256 with the sha256 of the archived
 spec copy, else with the spec_sha256 of a setup run_started event: the
@@ -91,6 +107,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _audit_core as core  # noqa: E402
+import _audit_run  # noqa: E402
 import _brief  # noqa: E402
 import _transcripts  # noqa: E402
 from _audit_run import GATE_UNAVAILABLE_VERDICT  # noqa: E402
@@ -99,6 +116,16 @@ NO_REPO = "no --repo"
 PREFLIGHT_LABEL = "context added by pre-flight (not ordering)"
 TRANSITIONS = ("committed", "settled")
 UNREVIEWED_STATUSES = ("skipped", "not_run")
+# verified false by git containment (audit.md words this line itself).
+NOT_CONTAINED = "the verify head does not contain the task head"
+# The task check's notes when there is no file to read.
+TC_NOT_COMMITTED = "not committed"
+TC_SETTLED = "settled by adjudicator"
+TC_NOT_RECORDED = "not recorded by this run's engine (before 1.6.0)"
+TC_UNKNOWN_ENGINE = "no launch result reports this task; its engine is unknown"
+TC_UNREADABLE_ENGINE = "a launch result that reports this task records an engine version audit cannot read"
+TC_MISSING = "no task-check file archived, though the task's commands include a test, lint or build command"
+TC_NOT_REQUIRED = "the task's commands include no test, lint or build command: the engine asks for no task check"
 
 ref = core.ref
 src = core.src
@@ -172,6 +199,7 @@ class _Ctx(object):
         self.plan_text = core.read_text(os.path.join(self.folder, self.plan_path)) if self.plan_path else None
         self.spec_sha = core.file_sha256(os.path.join(self.folder, self.spec_path)) if self.spec_path else None
         self.escalations = {}  # wf -> ([entry], [earlier tier or None]) or a reason
+        self.task_checks = _audit_run.task_check_index(run)
 
     def quote(self, text, sources):
         return core.quote(text, sources, self.pairs)
@@ -667,7 +695,7 @@ def _verified_status(ctx, task_head, head_src):
         return ref(None, "unavailable", sources, "the repo cannot tell whether the verify head contains the task head")
     if contained:
         return ref(True, "present", sources)
-    return ref(False, "present", sources, "the verify head does not contain the task head")
+    return ref(False, "present", sources, NOT_CONTAINED)
 
 
 def _accepted_status(ctx, events, result_status):
@@ -739,6 +767,68 @@ def _result_status(ctx, task_id, events, is_legacy):
     return ref(status, "present", sources, note)
 
 
+# ---- checks ----
+
+def _fix_commits_after(committed, range_base):
+    """The committed events after the task's last committed event from its
+    range base: an implement or a rerun commits from the task base after
+    its task check; a fix commits from the previous head and runs none."""
+    if not isinstance(range_base, str):
+        return 0
+    from_base = [i for i, le in enumerate(committed) if le["event"].get("base") == range_base]
+    return len(committed) - 1 - from_base[-1] if from_base else len(committed)
+
+
+def _task_check(ctx, task_id, lane, events):
+    """checks.task_check: the task's own check before its commit, from its
+    last task-check attempt (see the module docstring)."""
+    if not ctx.ledger:
+        return ref(None, "present", [], "no ledger")
+    committed = [le for le in events if le["event"].get("event") == "committed"]
+    transitions = [le for le in events if le["event"].get("event") in TRANSITIONS]
+    if not committed:
+        return ref(None, "present", ctx.ledger_src(), TC_NOT_COMMITTED)
+    if transitions[-1]["event"].get("event") == "settled":
+        return ref(None, "present", [_line_src(transitions[-1])], TC_SETTLED)
+    attempts = ctx.task_checks["attempts"].get(task_id)
+    at = [_line_src(committed[-1])]
+    if not attempts:
+        kind, sources = _audit_run.task_check_engine(ctx.run, task_id)
+        if kind == "before":
+            return ref(None, "present", sources, TC_NOT_RECORDED)
+        if kind == "unknown":
+            return ref(None, "unavailable", at, TC_UNKNOWN_ENGINE)
+        if kind == "unreadable":
+            return ref(None, "unavailable", at + sources, TC_UNREADABLE_ENGINE)
+        if _audit_run.task_has_checks(ctx.manifest, lane):
+            return ref(None, "missing", at, TC_MISSING)
+        manifest_path = ctx.run.get("manifest_path")
+        return ref("not_required", "present", [src(manifest_path)] if manifest_path else [], TC_NOT_REQUIRED)
+    last = attempts[-1]
+    range_base = transitions[0]["event"].get("base")
+    # The task's own commits: each committed event's head and the commits it lists.
+    own = set(_event_head(le["event"]) for le in committed)
+    for le in committed:
+        listed = le["event"].get("commits")
+        if isinstance(listed, list):
+            own.update(x for x in listed if isinstance(x, str))
+    earlier = [a["outcome"] for a in attempts[:-1]]
+    value = {
+        "file": last["file"], "unit": last["unit"], "attempt": last["attempt"], "selected": last["selected"],
+        "reasons": last["reasons"], "ok": last["ok"], "failed": last["failed"], "base": last["base"],
+        "head": last["head"], "head_is_task_commit": last["head"] is not None and last["head"] in own,
+        "tree_changed": last["tree_changed"],
+        "earlier": {"passed": earlier.count("passed"), "failed": earlier.count("failed"),
+                    "no_result": earlier.count("no result")},
+        "fix_commits_after": _fix_commits_after(committed, range_base),
+    }
+    sources = [src(last["file"])]
+    if last["base"] is not None and isinstance(range_base, str) and last["base"] != range_base:
+        return ref(value, "stale", sources,
+                   "the check ran against %s, not the task's recorded base %s" % (last["base"], range_base))
+    return ref(value, "unavailable" if last["outcome"] == "no result" else "present", sources, last["reason"])
+
+
 # ---- the sections ----
 
 def task_sections(run, git, facts, pairs, git_note=None):
@@ -773,5 +863,6 @@ def task_sections(run, git, facts, pairs, git_note=None):
                 "accepted": _accepted_status(ctx, events, result_status),
                 "result_status": result_status,
             },
+            "checks": {"task_check": _task_check(ctx, task_id, lane, events)},
         })
     return out

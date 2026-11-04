@@ -9,7 +9,7 @@ build(folder, repo=None, head=None) reads the run folder once
 (_audit_core.load_run, which raises _audit_core.OutsideRunFolder for an input
 that resolves outside it) and returns
 
-  {"audit_version": 2, "run_id", "repo", "run", "tasks", "gaps",
+  {"audit_version": 3, "run_id", "repo", "run", "tasks", "gaps",
    "gap_causes"}
 
 run is _audit_run.run_sections without its facts, tasks
@@ -19,7 +19,8 @@ tool-outcomes prints) and gap_causes _audit_core.gap_causes over the same
 (one entry per cause: {"pointer", "state", "note", "tasks", "values"}).
 audit_version 2 (1.6.16) added gap_causes and moved the plan and spec
 hashes and the plan copy's state from every task to run.checks (plan_hash,
-spec_hash, section_hash). repo is a ref saying how far the git facts can be
+spec_hash, section_hash); 3 (1.6.17) added each task's checks.task_check
+and run.checks.task_checks. repo is a ref saying how far the git facts can be
 trusted:
   - no repo: unavailable, "no --repo", and every git fact says so;
   - a repo that is not a git repo, or lacks the run's start point
@@ -59,8 +60,9 @@ by user, the tasks' committed, reviewed, verified and accepted counts of
 true values (_task_count: each with '(<k> settled, <k> not required, <k>
 unavailable)' for the kinds there are; the summary's tasks line counts the
 same way) and the blocked and deferred counts above 0 ('blocked and
-deferred unknown' when open_work.ledger_state is set), 'Final findings:
-<open> open, <declined> declined; open task minors: <M>' and the
+deferred unknown' when open_work.ledger_state is set), then '; task checks:
+<k> committed after a failed check' when k > 0 (_failed_checks), 'Final
+findings: <open> open, <declined> declined; open task minors: <M>' and the
 cannot-verify items, the code outside recorded task ranges, the launches
 missing from the archive, and '<G> evidence gap(s) in <C> cause(s)' with
 NOT_GAPS (the summary's last line before the report path gives the same
@@ -90,7 +92,15 @@ final review header gives that reason), and for a lower
 bound LOWER_BOUND_NOTE (a task with no line has none listed). When
 open_work.ledger_state is set, the open work line's task count is
 OPEN_TASKS_UNKNOWN and Open work's blocked or deferred tasks read unknown
-rather than none. A value is shown as
+rather than none. A task block's status lines are committed, reviewed,
+verified (_verified_line: for git containment 'its last commit <sha7> is
+(not) in the head the delivered verify passed at, <sha7>' instead of its
+note), checked before its commit (_task_check_lines, TASK_CHECK; no line for
+a task never committed, settled, or committed by an engine before 1.6.0),
+accepted and result status. Checks says once 'task checks: not recorded by
+this run's engine (before 1.6.0)' for run.checks.task_checks.not_recorded,
+with ' for tasks <id>, ...' when they are only some of the committed,
+unsettled tasks, and lists its unmatched files. A value is shown as
 '<value> [<state>]', with its note after ' - ' and its sources in
 parentheses; a review verdict read from the journal shows its state as
 '[inferred: read from the transcript]' (TRANSCRIPT_INFERRED; other inferred
@@ -121,7 +131,8 @@ import _autopsy  # noqa: E402
 
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
 # 2 (1.6.16): gap_causes, and the plan and spec hashes in run.checks.
-AUDIT_VERSION = 2
+# 3 (1.6.17): each task's checks.task_check, and run.checks.task_checks.
+AUDIT_VERSION = 3
 NO_REPO = "no --repo"
 UNCHECKED = "repo not checked against the run"
 # audit.md's bracket for a review verdict read from the journal.
@@ -145,6 +156,13 @@ LOWER_BOUND_NOTE = ("a task block with no open minors line has none listed; more
 # A minor id: '<prefix>-<n>' (src/engine.js taskMinorFindings).
 MINOR_ID = re.compile(r"^(.+)-[0-9]+$")
 LETTER_FIRST = re.compile(r"^[A-Za-z]")
+# A task block's line on the task's own check, after verified.
+TASK_CHECK = "checked before its commit"
+# The verified line's text for git containment (the value and note in
+# audit.json are unchanged): '<value> [present] - its last commit <sha7> is
+# (not) in the head the delivered verify passed at, <sha7>'.
+CONTAINED = "its last commit %s is in the head the delivered verify passed at, %s"
+NOT_CONTAINED = "its last commit %s is not in the head the delivered verify passed at, %s"
 # The Terms section: (term, definition), fixed text in this order.
 TERMS = (
     ("[present]", "the value is established (from the sources named after it, when there are any). Not a gap."),
@@ -164,6 +182,18 @@ TERMS = (
                 "evidence or a recorded sha or time malformed (verify_invalid); as evidence validity, the "
                 "verify result breaks the acceptance rule named beside it (checks that ran and failed read "
                 "failed checks)."),
+    ("verified", "a task against the delivered verify: true when its last commit is in the head the delivered "
+                 "verify passed at (git containment, read with --repo); false when it is not, or when the verify "
+                 "result breaks an acceptance rule (failed checks included); not_required when the manifest "
+                 "configures no test, lint or build command. It is about the run's delivered checks, not the "
+                 "task's own check (checked before its commit)."),
+    (TASK_CHECK, "the task's own check (scripts/task-checks, engines from 1.6.0), which its implementer runs once "
+                 "before committing: the checks it selected, run on the uncommitted working tree against the "
+                 "task base, passed, failed, or left no result (an empty file, an unreadable one or an error "
+                 "record). It covers that working tree, not the committed code, and no fix commit after it: "
+                 "fixers run no task checks. Acceptance does not read it. not_required: the task's commands "
+                 "include no test, lint or build command, so the engine asks for none. Known limit: the last "
+                 "attempt the archive holds decides."),
     ("round(s)", "the fix rounds a task's review took, as its reviewed event records them, each a fix and a "
                  "re-review; 0 means the review approved with no fix round."),
     ("task rulings", "the ruling events the ledger records under a task: what an agent decided on the user's "
@@ -600,7 +630,9 @@ def _md_bottom_line(audit, out):
         held = [(state, len(set(t["task"] for t in open_work["tasks"] if t["status"] == state)))
                 for state in ("blocked", "deferred")]
         held = ["%d %s" % (n, state) for state, n in held if n]
-    lines.append(line + ("; " + ", ".join(held) if held else "") + ".")
+    failed = _failed_checks(tasks)
+    checked = "; task checks: %d committed after a failed check" % failed if failed else ""
+    lines.append(line + ("; " + ", ".join(held) if held else "") + checked + ".")
     f = c["final"]
     if not f["present"]:
         lines.append("Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.")
@@ -702,14 +734,118 @@ def _md_launches(launches, out):
     out.append("")
 
 
+def _sha7(sha):
+    return sha[:7] if isinstance(sha, str) and sha else _scalar(sha)
+
+
+def _task_entry_head(entry):
+    """A commits entry's head as _audit_tasks reads it: its head, else
+    (legacy) its last recorded commit, else None."""
+    if isinstance(entry.get("head"), str) and entry["head"]:
+        return entry["head"]
+    recorded = entry.get("recorded")
+    return recorded[-1] if isinstance(recorded, list) and recorded and isinstance(recorded[-1], str) else None
+
+
+def _verified_line(t):
+    """The verified line. Git containment says what it covers (CONTAINED,
+    NOT_CONTAINED: the task's last commit, and the verify head from the
+    ref's git source); every other value prints as it is."""
+    r = t["status"]["verified"]
+    contained = r.get("value") is True and r.get("state") == "present"
+    if not contained and not (r.get("value") is False and r.get("note") == _audit_tasks.NOT_CONTAINED):
+        return _ref("verified", r)
+    entries = t["commits"]["entries"]
+    verify = [x.get("at") for x in r.get("sources") or [] if isinstance(x, dict)
+              and isinstance(x.get("path"), str) and x["path"].startswith("git:")]
+    text = (CONTAINED if contained else NOT_CONTAINED) % (
+        _sha7(_task_entry_head(entries[-1]) if entries else None), _sha7(verify[-1] if verify else None))
+    return _with_sources("- verified: %s [%s] - %s" % (_scalar(r["value"]), r["state"], text), r.get("sources"))
+
+
+def _task_check_outcome(v):
+    """passed, failed or no result, from a task-check value: failed is None
+    for an attempt with no result, else ok tells a pass from a failure."""
+    if v.get("failed") is None:
+        return "no result"
+    return "passed" if v.get("ok") is True else "failed"
+
+
+def _task_check_lines(t):
+    """The task check's line, after verified: none when its value is null and
+    present (not committed, settled, or an engine before 1.6.0); a value
+    without an attempt as any ref; else '<passed|failed|no result> [<state>]
+    - ' and, with a policy (reasons not null), '[<why no result>; ]<selected>
+    check of the working tree against the task base <base7>' (a stale one
+    'against <base7>, not the task's recorded base <base7>'), then '; HEAD
+    was <head7>[, the task's own commit: this check ran after it]' when HEAD
+    was not the base, the earlier attempts, '; the checkout changed while it
+    ran' and the fix commits after it; without one, why it has no result (or
+    no policy) and the earlier attempts. A failure lists each failing check
+    under it, or that no command failed."""
+    r = t.get("checks", {}).get("task_check")
+    if not _is_ref(r):
+        return []
+    v = r.get("value")
+    if not isinstance(v, dict):
+        return [] if v is None and r["state"] == "present" else [_ref(TASK_CHECK, r)]
+    outcome = _task_check_outcome(v)
+    with_policy = v.get("reasons") is not None
+    parts = []
+    if not with_policy:
+        parts.append(r.get("note") or _audit_run.TC_NO_POLICY)
+    else:
+        if outcome == "no result" and r["state"] != "stale" and r.get("note"):
+            parts.append(r["note"])
+        base = _sha7(v.get("base"))
+        if r["state"] == "stale":
+            entries = t["commits"]["entries"]
+            recorded = entries[0].get("base") if entries else None
+            where = "against %s, not the task's recorded base %s" % (base, _sha7(recorded))
+        else:
+            where = "against the task base %s" % base
+        parts.append("%s check of the working tree %s" % (_scalar(v.get("selected")), where))
+        head = v.get("head")
+        if isinstance(head, str) and head != v.get("base"):
+            own = ", the task's own commit: this check ran after it" if v.get("head_is_task_commit") else ""
+            parts.append("HEAD was %s%s" % (head[:7], own))
+    e = v.get("earlier") or {}
+    counts = [e.get(key) or 0 for key in ("passed", "failed", "no_result")]
+    if sum(counts):
+        parts.append("%d earlier attempt(s): %d passed, %d failed, %d without a result" % tuple([sum(counts)] + counts))
+    if with_policy and v.get("tree_changed") is True:
+        parts.append("the checkout changed while it ran")
+    if with_policy and v.get("fix_commits_after"):
+        parts.append("%d fix commit(s) after its check: fixers run no task checks" % v["fix_commits_after"])
+    lines = [_with_sources("- %s: %s [%s] - %s" % (TASK_CHECK, outcome, r["state"], "; ".join(parts)),
+                           r.get("sources"))]
+    if outcome == "failed":
+        failed = v.get("failed") or []
+        lines += ["  - %s (%s): exit %s" % (f.get("check"), _scalar(f.get("group")), _scalar(f.get("exit")))
+                  for f in failed]
+        if not failed:
+            lines.append("  - no command failed (HEAD moved while it ran)")
+    return lines
+
+
+def _failed_checks(tasks):
+    """The tasks committed after a failed task check: their last attempt
+    failed."""
+    values = [t.get("checks", {}).get("task_check", {}).get("value") for t in tasks]
+    return sum(1 for v in values if isinstance(v, dict) and _task_check_outcome(v) == "failed")
+
+
 def _md_task(t, out, minors=None):
     """One task block; it ends with '- open minors: <id>, ...' when minors
     (the open minors _placed_minors puts here) has any."""
     out += ["### Task %s (lane %s)" % (t["id"], _scalar(t.get("lane"))), ""]
     s = t["status"]
     out.append("Status:")
-    for field in ("committed", "reviewed", "verified", "accepted"):
+    for field in ("committed", "reviewed"):
         out.append(_ref(field, s[field]))
+    out.append(_verified_line(t))
+    out += _task_check_lines(t)
+    out.append(_ref("accepted", s["accepted"]))
     out.append(_ref("result status", s["result_status"]))
 
     req = t["requirement"]
@@ -843,7 +979,10 @@ def _md_outside(r, out):
     out.append("")
 
 
-def _md_checks(c, out):
+def _md_checks(c, out, tasks=()):
+    """tasks is audit["tasks"]: the task checks line names the tasks an
+    engine before 1.6.0 committed only when it is some of the committed,
+    unsettled ones."""
     out += ["## Checks", ""]
     v = c["verify"]
     value = v.get("value")
@@ -877,6 +1016,17 @@ def _md_checks(c, out):
                         % (_scalar(ev.get("checked_sha")), ev.get("items"), ev.get("failed"))))
     else:
         out.append(_ref("e2e", e2e))
+    task_checks = c.get("task_checks") or {}
+    not_recorded = task_checks.get("not_recorded") or []
+    if not_recorded:
+        line = "- task checks: %s" % _audit_tasks.TC_NOT_RECORDED
+        scope = [t for t in tasks if t["status"]["committed"].get("value") is True
+                 and t["status"]["reviewed"].get("value") != "settled"]
+        if len(not_recorded) < len(scope):
+            line += " for tasks %s" % ", ".join(not_recorded)
+        out.append(line)
+    if task_checks.get("unmatched"):
+        out.append("- task check files that match no task: %s" % ", ".join(task_checks["unmatched"]))
     # The run's input hashes, once: by setup event, its ledger line among
     # the sources.
     for kind in ("plan", "spec"):
@@ -1035,7 +1185,7 @@ def render_md(audit):
     for i, t in enumerate(audit["tasks"]):
         _md_task(t, out, placed[0].get(i) if placed is not None else None)
     _md_outside(run["code_outside_ranges"], out)
-    _md_checks(run["checks"], out)
+    _md_checks(run["checks"], out, audit["tasks"])
     if run.get("after_delivery") is not None:
         _md_after(run["after_delivery"], out)
     entries = run["launches"]["entries"].get("value")

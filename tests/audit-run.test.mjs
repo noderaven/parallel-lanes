@@ -805,6 +805,52 @@ test('open work is listed', () => {
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);
 });
 
+test('checks name the tasks whose engine records no task check, and the task-check files that match no task', () => {
+  const [s0, s1, s2] = ['a', 'b', 'c'].map((ch) => ch.repeat(40));
+  const ledger = {
+    'a.jsonl': [
+      { task: 'A1', event: 'started', base: s0 },
+      { task: 'A1', event: 'committed', commits: [s1], base: s0, head: s1 },
+      { task: 'A2', event: 'started', base: s1 },
+      { task: 'A2', event: 'committed', commits: [s2], base: s1, head: s2 },
+    ],
+  };
+  const done = { A1: { status: 'done', commits: [s0, s1] }, A2: { status: 'done', commits: [s1, s2] } };
+  const at = (version, tasks, extra = {}) => launch(accepted(D, { version, tasks }), extra);
+  const later = { wf: 'wf_bbbbbb', startTime: START + 600000 };
+  const taskChecks = (spec) => sections(makeRun({ ledger, ...spec })).checks.task_checks;
+  // Every committed task's engine is before 1.6.0.
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', done)] }), { not_recorded: ['A1', 'A2'], unmatched: [] });
+  // Mixed launches: only the task a launch before 1.6.0 reports.
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', { A1: done.A1 }), at('1.6.0', { A2: done.A2 }, later)] }),
+    { not_recorded: ['A1'], unmatched: [] });
+  // A settled or never-committed task is not listed; a task with a file never is.
+  const settled = { ...ledger, 'a.jsonl': [...ledger['a.jsonl'], { task: 'A2', event: 'settled', outcome: 'park', base: s1, head: s2 }] };
+  const policy = (unit, tasks) => JSON.stringify({ results: [], ok: true, head: s0, policy: { unit, tasks, base: s0, selected: 'lane', reasons: [] } });
+  assert.deepEqual(sections(makeRun({ ledger: settled, launches: [at('1.5.1', done)] })).checks.task_checks,
+    { not_recorded: ['A1'], unmatched: [] });
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', done)], files: { [`${LEDGER}/checks/task-A1.1.json`]: policy('A1', ['A1']) } }),
+    { not_recorded: ['A2'], unmatched: [] });
+  // Files no manifest task matches: by policy (unit and tasks), else by name.
+  const checks = `${LEDGER}/checks`;
+  const out = taskChecks({
+    launches: [at('1.6.0', done)],
+    files: {
+      [`${checks}/task-A1.1.json`]: policy('A1', ['A1']),
+      [`${checks}/task-A1-A2.1.json`]: '',
+      [`${checks}/task-A1-Z9.1.json`]: '',
+      [`${checks}/task-Z8.1.json`]: policy('Z8', ['Z8']),
+      [`${checks}/task-Z9.1.json`]: 'not json',
+      [`${checks}/task-Z9.1.1.log`]: 'zqtail',
+      [`${checks}/verify-${D}.json`]: JSON.stringify(verifyAt(D)),
+    },
+  });
+  assert.deepEqual(out, {
+    not_recorded: [],
+    unmatched: [`${checks}/task-A1-Z9.1.json`, `${checks}/task-Z8.1.json`, `${checks}/task-Z9.1.json`],
+  });
+});
+
 test('audit treats an empty verify-<sha>.json as invalid or missing, never present', () => {
   const evidence = `${LEDGER}/checks/verify-${D}.json`;
   const folder = makeRun({

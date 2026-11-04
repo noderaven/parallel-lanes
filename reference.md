@@ -2279,6 +2279,43 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
   settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
   a task that is not done, or is settled or blocked, stays `false`.
+- **Verified** (1.6.17) is git containment, and `audit.md` says so: `- verified: true [present] -
+  its last commit <sha7> is in the head the delivered verify passed at, <sha7>`, or `- verified:
+  false [present] - its last commit <sha7> is not in the head the delivered verify passed at,
+  <sha7>`. It is about the run's delivered checks, not the task's own check. `audit.json`'s value,
+  state and note are unchanged, and the `checks_failed` and invalid-evidence notes stay.
+- **The task's own check** (1.6.17, `audit_version` 3). Each task holds
+  `tasks[i].checks.task_check` (not a status: the Bottom line's four counts are unchanged), read
+  from the archived ledger's `checks/task-<unit>.<n>.json` files, which `scripts/task-checks`
+  writes before the commit (engines from 1.6.0). `audit.md` prints it after `verified`: `- checked
+  before its commit: <passed|failed|no result> [<state>] - <selected> check of the working tree
+  against the task base <base7>[; HEAD was <head7>[, the task's own commit: this check ran after
+  it]][; <k> earlier attempt(s): <p> passed, <f> failed, <m> without a result][; the checkout
+  changed while it ran][; <k> fix commit(s) after its check: fixers run no task checks] (<file>)`;
+  a failure lists each failing check under it as `<check id> (<group>): exit <n>`, or `no command
+  failed (HEAD moved while it ran)`. A file matches by its policy's `unit` and `tasks` (a batch
+  file counts for each of its tasks); one without a policy (empty, or an error record with none)
+  by its name: an exact task id, else a batch unit whose two parts are task ids, else Checks lists
+  it once as matching no task. Attempts sort by `n` within a name, names by their earliest
+  `policy.started` (a name with none last); the last attempt the archive holds decides, and the
+  earlier ones are counted. `passed` and `failed` are `present`; `no result` (an empty or
+  unreadable file, or an error record: the line says which) is `unavailable`; a policy base other
+  than the task's recorded range base is `stale`. The fix commits are the task's `committed`
+  events after its last one from the task base (a fix commits from the previous head, and fixers
+  run no task checks). The value is `{file, unit, attempt, selected, reasons, ok, failed, base,
+  head, head_is_task_commit, tree_changed, earlier: {passed, failed, no_result},
+  fix_commits_after}`: `reasons` the policy's reason codes only (`null` without a policy),
+  `failed` the failing results as check ids (`[]` for a pass, `null` for no result). Without a
+  file: `missing` (a gap) when the task's lane (the project for prelude and join) has a test, lint
+  or build command, else the value `not_required`; when a launch whose result reports the task
+  (not as skipped or not_run) records a `version` before 1.6.0, or none (before 1.4.3), no line and
+  no gap, and Checks says once `- task checks: not recorded by this run's engine (before
+  1.6.0)`, naming the tasks when only some are; when no launch result reports it, `unavailable`
+  (`no launch result reports this task; its engine is unknown`). A task never committed, or
+  settled, has no line, even with files (its value `null`, `present`). `run.checks.task_checks`
+  is `{not_recorded, unmatched}`: those task ids, and the files that match no task. None of it
+  needs `--repo`. The check covers the uncommitted working tree before the commit, not the
+  committed code, and acceptance never reads it.
 - **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
   (counted as archive-run counts them, see "Run history") with the archived ones.
   `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one
@@ -2305,8 +2342,9 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   verified V, accepted A of N`, each counting `true` values with `(k settled)`, `(k not
   required)` and `(k unavailable)` where a task has such a value (the summary's tasks line counts
   the same way), then the blocked and deferred counts above 0 (`blocked and deferred unknown`
-  when `ledger status` failed); `Final findings: <open> open, <declined> declined; open task
-  minors: <M>` (M a number, `<M> listed (more may be missing)` or `unavailable`), or `Final
+  when `ledger status` failed) and (1.6.17) `task checks: <k> committed after a failed check` when
+  k > 0 (tasks whose last task-check attempt failed); `Final findings: <open> open, <declined>
+  declined; open task minors: <M>` (M a number, `<M> listed (more may be missing)` or `unavailable`), or `Final
   review unavailable`, and the cannot-verify items; the code outside recorded task ranges and how
   many lack review evidence; the launches missing from the archive when the ledger records more;
   and `<G> evidence gap(s) in <C> cause(s) (cannot-verify items and inferred lines are not
@@ -2315,7 +2353,8 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
 - **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
   states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
   validity's), round(s), task rulings and run-end rulings, gate, carry, context added by
-  pre-flight and (1.6.16) cause.
+  pre-flight, (1.6.16) cause, and (1.6.17) verified and checked before its commit, with its known
+  limit: the last attempt the archive holds decides.
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
 <run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from
@@ -2323,7 +2362,9 @@ the fixed list and its exit code. Details in "Verify evidence".
 
 **Privacy.** `audit.md` starts with a line saying it holds local paths and recorded text and is
 not meant to be shared as-is; the report is local-only. It never copies prompts, raw tool output,
-diffs or doctor snapshots. Configured commands become check ids (`test#1`, `<lane>.test#1`,
+diffs or doctor snapshots, and never prints a check file's `error`, `tail`, `log` or `checkout`
+(a task check is named by its archive path; only its reason codes, check ids, groups and exits
+are kept). Configured commands become check ids (`test#1`, `<lane>.test#1`,
 `setup#<n>`, `unmatched#<n>`), never command lines. Other recorded text (rulings, notes, reasons,
 findings, dispositions, warnings) is quoted as written, marked as a quote with its source, and can
 hold a command the manifest never configured.

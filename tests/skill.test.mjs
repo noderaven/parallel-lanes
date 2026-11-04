@@ -661,12 +661,16 @@ test('reference.md documents the audit', () => {
     'open task minor(s)', 'carried_minors_open', '## Bottom line', '## Terms',
     '(cannot-verify items and inferred lines are not gaps)',
     // the gap causes and the run-level hashes (1.6.16)
-    'gap_causes', '`audit_version` 2', 'in <C> cause(s) (cannot-verify items and inferred lines are not gaps)',
+    'gap_causes', '`audit_version` 3', 'in <C> cause(s) (cannot-verify items and inferred lines are not gaps)',
     '`run.checks`', 'setup event',
     // each task's open minors and the plain wordings (1.6.16)
     'open minors: <id>, <id>', "not recorded by this run's engine", 'listed (more may be missing)',
     '<open> open and <declined> declined final finding(s)', 'verdict_without_override',
     'verdict_rule_without_override',
+    // each task's own check and what verified covers (1.6.17)
+    'checked before its commit', '`tasks[i].checks.task_check`', '`run.checks.task_checks`',
+    'is in the head the delivered verify passed at', 'the last attempt the archive holds decides',
+    "a check file's `error`, `tail`, `log` or `checkout`",
   ];
   for (const word of wants) {
     assert.ok(audit.includes(word), `the Audit section lacks ${word}`);

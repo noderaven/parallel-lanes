@@ -61,6 +61,14 @@ is the plan copy the tasks' section hashes are read from: present, its
 value the copy's path, else unavailable ("no plan copy archived", "the plan
 copy could not be read").
 
+checks.task_checks (1.6.17) is {"not_recorded", "unmatched"}: the committed
+tasks, not settled last, with no task-check file that a launch before 1.6.0
+reports (task_check_engine), in run order, and the task-check files that
+match no task. task_check_index reads those files (each task's attempts in
+order), task_check_engine says which engine judges a task without one, and
+task_has_checks whether the engine asks for one; _audit_tasks builds each
+task's checks.task_check from them.
+
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
 in manifest run order, with a recorded range; with its ledger source. When
@@ -141,6 +149,17 @@ CHECKER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 WF_NAME = re.compile(r"^wf_[A-Za-z0-9_-]+$")
 EVIDENCE_NAME = re.compile(r"^(session-verify|verify)-([0-9a-f]{40}|[0-9a-f]{64})\.json$")
 CHECK_GROUPS = ("test", "lint", "build")
+# The task checks (scripts/task-checks): <ledger>/checks/task-<unit>.<n>.json
+# (the unit parsed greedily), written from this engine on.
+TASK_CHECK_NAME = re.compile(r"^task-(.+)\.([1-9][0-9]*)\.json$")
+TASK_CHECK_ENGINE = (1, 6, 0)
+# Why a task-check attempt has no result, or says nothing of its policy.
+TC_EMPTY = "the file is empty: reserved, never written"
+TC_UNREADABLE = "the file cannot be read"
+TC_ERROR_NO_POLICY = "an error record with no policy"
+TC_ERROR = "an error record"
+TC_NO_RESULT = "no command result recorded"
+TC_NO_POLICY = "the file records no policy"
 
 
 # ---- check-verify ----
@@ -494,6 +513,12 @@ def _recorded(run):
 
 # ---- code outside recorded task ranges ----
 
+def _parse_version(text):
+    """A version string's leading digits as a tuple of ints, or None."""
+    match = re.match(r"(\d+(?:\.\d+)*)", text) if isinstance(text, str) else None
+    return tuple(int(x) for x in match.group(1).split(".")) if match else None
+
+
 def _version(run, launch):
     """(the engine version as a tuple of ints or None, its source)."""
     result = launch.get("result") or {}
@@ -509,10 +534,7 @@ def _version(run, launch):
                 data = None
             if isinstance(data, dict) and isinstance(data.get("engine_version"), str):
                 text, source = data["engine_version"], c.src(report, "#/engine_version")
-    match = re.match(r"(\d+(?:\.\d+)*)", text) if isinstance(text, str) else None
-    if match is None:
-        return None, source
-    return tuple(int(x) for x in match.group(1).split(".")), source
+    return _parse_version(text), source
 
 
 def _lens_heads(launch, final):
@@ -719,6 +741,7 @@ def _checks(run, launch, why, gate, evidence, rule, want):
         e_note = "the gate is %s" % gate["status"]
     out["evidence"] = c.ref(evidence, e_state, g_sources, e_note)
     out["rule"] = rule
+    out["task_checks"] = _task_checks(run, task_check_index(run))
     out.update(input_hashes(run))
     return out
 
@@ -802,6 +825,203 @@ def _e2e(run, launch, result):
         return c.ref(value, "present", [source])
     return c.ref(value, "stale", [source], "the end-to-end check covered %s, not the delivered %s"
                  % (checked, delivered))
+
+
+# ---- task checks ----
+
+def _read_check(path):
+    """(the JSON object in a task-check file, None), or (None, why it gives
+    none: TC_EMPTY or TC_UNREADABLE)."""
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, TC_UNREADABLE
+    if not text.strip():
+        return None, TC_EMPTY
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, TC_UNREADABLE
+    return (data, None) if isinstance(data, dict) else (None, TC_UNREADABLE)
+
+
+def _check_attempt(manifest, rel, stem, n, data, why):
+    """One task-check file as an attempt (see task_check_index)."""
+    policy = data.get("policy") if data is not None else None
+    policy = policy if isinstance(policy, dict) else None
+    results = data.get("results") if data is not None else None
+    ok = data.get("ok") if data is not None else None
+    if data is None:
+        outcome, reason = "no result", why
+    elif ok is True:
+        outcome, reason = "passed", None
+    elif isinstance(results, list) and results:
+        outcome, reason = "failed", None
+    elif "error" in data:
+        outcome, reason = "no result", TC_ERROR if policy is not None else TC_ERROR_NO_POLICY
+    else:
+        outcome, reason = "no result", TC_NO_RESULT
+    if policy is None and reason is None:
+        reason = TC_NO_POLICY
+    failed = None
+    if outcome == "passed":
+        failed = []
+    elif outcome == "failed":
+        failed = [x for x in _check_ids(manifest, results) if not _zero(x["exit"])]
+
+    def text(obj, key):
+        value = obj.get(key) if isinstance(obj, dict) else None
+        return value if isinstance(value, str) and value else None
+
+    reasons = None
+    if policy is not None:
+        listed = policy.get("reasons")
+        reasons = [r["code"] for r in listed if isinstance(r, dict) and isinstance(r.get("code"), str)] \
+            if isinstance(listed, list) else []
+    tree_changed = data.get("tree_changed") if data is not None else None
+    return {
+        "file": rel, "stem": stem, "attempt": n, "outcome": outcome, "reason": reason,
+        "unit": text(policy, "unit") or stem, "selected": text(policy, "selected"), "reasons": reasons,
+        "ok": ok if isinstance(ok, bool) else None, "failed": failed, "base": text(policy, "base"),
+        "head": text(data, "head"), "tree_changed": tree_changed if isinstance(tree_changed, bool) else None,
+        "started": text(policy, "started"), "policy": policy,
+    }
+
+
+def _check_tasks(attempt, ids):
+    """The manifest task ids (in run order) one task-check file is for: by
+    its policy's unit and tasks; without a policy, by its stem: an exact id,
+    else a batch unit '<first>-<last>' whose two parts are ids (each)."""
+    policy = attempt["policy"]
+    if policy is not None:
+        listed = policy.get("tasks")
+        named = [x for x in listed if isinstance(x, str)] if isinstance(listed, list) else []
+        if isinstance(policy.get("unit"), str):
+            named.append(policy["unit"])
+        return [t for t in ids if t in named]
+    stem = attempt["stem"]
+    if stem in ids:
+        return [stem]
+    for first in ids:
+        last = stem[len(first) + 1:]
+        if stem.startswith(first + "-") and last in ids:
+            return [t for t in ids if t in (first, last)]
+    return []
+
+
+def _ordered_attempts(attempts):
+    """By n within a stem; stems by their earliest policy.started (ISO 8601
+    stamps of one form, compared as text), a stem with none last, then by
+    name."""
+    stems = {}
+    for a in attempts:
+        stems.setdefault(a["stem"], []).append(a)
+
+    def key(stem):
+        started = [a["started"] for a in stems[stem] if a["started"] is not None]
+        return (not started, min(started) if started else "", stem)
+
+    out = []
+    for stem in sorted(stems, key=key):
+        out += sorted(stems[stem], key=lambda a: a["attempt"])
+    return out
+
+
+def task_check_index(run):
+    """{"attempts": {task id: [attempt, ...] in order}, "unmatched": [path]}
+    over the ledger's checks/task-<unit>.<n>.json files (TASK_CHECK_NAME, the
+    unit parsed greedily). Each attempt is {"file", "stem", "attempt" (n),
+    "outcome" (passed: ok true; failed: ok not true, results not empty; no
+    result: an empty or unreadable file or an error record), "reason" (why
+    it has no result, or TC_NO_POLICY), "unit", "selected", "reasons" (the
+    policy's reason codes only; None without a policy), "ok", "failed"
+    ([{check, group, exit}] of each non-zero exit, check ids as Checks gives
+    them; [] for a pass; None for no result), "base", "head",
+    "tree_changed", "started", "policy"}. A file counts for every task
+    _check_tasks names, else it is listed in unmatched (name order). Only
+    the policy's reason codes and the results' check ids, groups and exits
+    are kept: never a file's error, tail, log or checkout."""
+    manifest = run.get("manifest") or {}
+    ids = [t["id"] for t, _lane in c.manifest_tasks(manifest)]
+    by_task, unmatched = {}, []
+    checks = os.path.join(run["folder"], run["ledger"], "checks") if run.get("ledger") else None
+    try:
+        names = sorted(os.listdir(checks)) if checks else []
+    except OSError:
+        names = []
+    for name in names:
+        match = TASK_CHECK_NAME.match(name)
+        path = os.path.join(checks, name)
+        if match is None or not os.path.isfile(path):
+            continue
+        rel = "%s/checks/%s" % (run["ledger"], name)
+        data, why = _read_check(path)
+        attempt = _check_attempt(manifest, rel, match.group(1), int(match.group(2)), data, why)
+        tasks = _check_tasks(attempt, ids)
+        if not tasks:
+            unmatched.append(rel)
+        for tid in tasks:
+            by_task.setdefault(tid, []).append(attempt)
+    return {"attempts": dict((tid, _ordered_attempts(a)) for tid, a in by_task.items()), "unmatched": unmatched}
+
+
+def task_check_engine(run, task_id):
+    """(kind, sources): which engine judges a committed task with no
+    task-check file, by every launch whose result reports it with a status
+    other than skipped or not_run, each by its result.version only (the
+    report's engine_version is the latest launch's, not each one's).
+    "before": one of them ran an engine before 1.6.0 (TASK_CHECK_ENGINE), or
+    records no version (before 1.4.3); "unknown": none reports the task;
+    "unreadable": one records a version that does not parse; else
+    "recorded". sources are those launches' version sources."""
+    reporting = [l for l in run.get("launches") or []
+                 if c.task_status(l, task_id) not in (None, "skipped", "not_run")]
+    if not reporting:
+        return "unknown", []
+    before, unreadable = [], []
+    for launch in reporting:
+        text = launch["result"].get("version")
+        version = _parse_version(text)
+        if text is None or text == "":
+            before.append(_wf_src(launch, "version"))
+        elif version is None:
+            unreadable.append(_wf_src(launch, "version"))
+        elif version < TASK_CHECK_ENGINE:
+            before.append(_wf_src(launch, "version"))
+    if before:
+        return "before", before
+    if unreadable:
+        return "unreadable", unreadable
+    return "recorded", [_wf_src(l, "version") for l in reporting]
+
+
+def task_has_checks(manifest, lane):
+    """Whether the engine asks a task's implementer for a task check: its
+    lane (the project's for prelude and join) has a test, lint or build
+    command (src/prompts-task.js taskChecksCommand over laneChecks)."""
+    m = manifest if isinstance(manifest, dict) else {}
+    lane_id = None if lane in ("prelude", "join") else lane
+    return any(_command_group(m, lane_id, group) for group in CHECK_GROUPS)
+
+
+def _task_checks(run, index):
+    """{"not_recorded": [task id], "unmatched": [path]}: the committed tasks
+    whose last committed or settled event is no settled one, with no
+    task-check file, that a launch before 1.6.0 reports (task_check_engine),
+    in run order; and the task-check files that match no task."""
+    events = {}
+    for event, _source in _events(run):
+        if isinstance(event.get("task"), str) and event.get("event") in ("committed", "settled"):
+            events.setdefault(event["task"], []).append(event.get("event"))
+    not_recorded = []
+    for task, _lane in c.manifest_tasks(run.get("manifest")):
+        kinds = events.get(task["id"]) or []
+        if "committed" not in kinds or kinds[-1] == "settled" or index["attempts"].get(task["id"]):
+            continue
+        if task_check_engine(run, task["id"])[0] == "before":
+            not_recorded.append(task["id"])
+    return {"not_recorded": not_recorded, "unmatched": list(index["unmatched"])}
 
 
 # ---- acceptance ----

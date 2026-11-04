@@ -352,6 +352,8 @@ test('not_required and unknown stay distinct', () => {
   assert.deepEqual(vs(order.A1.status.verified), [null, 'unavailable']);
   const noAncestor = audit(folder, facts({ verify_head: s0 }), { repo: repo.dir });
   assert.deepEqual(vs(noAncestor.A1.status.verified), [false, 'present']);
+  // audit.json keeps the containment note (audit.md words the line).
+  assert.equal(noAncestor.A1.status.verified.note, 'the verify head does not contain the task head');
   const verdict = audit(folder, facts({ verdict: 'unavailable', accepted_run: false }), { repo: repo.dir });
   assert.deepEqual(vs(verdict.A1.status.accepted), [null, 'unavailable']);
 });
@@ -477,6 +479,280 @@ test('escalations come from the archived transcripts only', () => {
   const layout = audit(moved, facts()).A1.changes.escalations;
   assert.equal(layout[0].escalations.state, 'unavailable');
   assert.match(layout[0].escalations.note, /outside the run folder/);
+});
+
+// ---- the task's own check before its commit (1.6.17) ----
+
+const CHECKS = `${LEDGER}/checks`;
+const AT = (minute) => `2026-10-12T10:${String(minute).padStart(2, '0')}:00.000Z`;
+// Free text the audit must never copy: checkout, logs, tails, error records
+// and reason details.
+const CANARIES = /zqcheckout|zqlog|zqtail|zqerror|zqdetail|zqcmd/;
+
+// A task-checks evidence file (run-checks' JSON plus task-checks' policy)
+// for unit at base: passing, at minute 0.
+function taskCheck(unit, base, over = {}, policy = {}) {
+  return {
+    checkout: '/home/x/proj-wt/zqcheckout',
+    branch: 'feat',
+    head: base,
+    results: [{ group: 'test', command: 'npm test zqcmd', exit: 0, log: '/tmp/zqlog/task.1.log', tail: 'ok zqtail', duration_s: 1 }],
+    ok: true,
+    clean: false,
+    tracked_before: [],
+    tracked_after: [],
+    untracked_before: [],
+    untracked_after: [],
+    tree_changed: false,
+    policy: {
+      unit, tasks: [unit], lane: 'a', base, started: AT(0), entry: null, selected: 'lane',
+      reasons: [{ code: 'no_entry', detail: 'no task_checks entry zqdetail' }], changed: ['a1.txt'], ...policy,
+    },
+    ...over,
+  };
+}
+const failing = (unit, base, exits = [1], over = {}) => taskCheck(unit, base, {
+  ok: false,
+  results: exits.map((exit) => ({ group: 'test', command: 'npm test zqcmd', exit, log: '/tmp/zqlog/x.log', tail: 'FAIL zqtail' })),
+  ...over,
+});
+const errorRecord = (policy) => ({ results: [], ok: false, error: 'run-checks crashed zqerror', policy });
+
+// A launch whose result records engine version.
+const engine = (version, tasks, over = {}) => launch(tasks, {
+  result: { ...(version === undefined ? {} : { version }), tasks, preflight: { undeclared: [] } }, ...over,
+});
+const files = (named) => Object.fromEntries(Object.entries(named)
+  .map(([name, data]) => [`${CHECKS}/${name}`, typeof data === 'string' ? data : JSON.stringify(data)]));
+
+// reviewedRun (A1 s0..s1, reviewed) in a 1.6.0 launch, with check files.
+function checkedRun(s0, s1, named, extra = []) {
+  const spec = reviewedRun(s0, s1, extra);
+  spec.launches = [engine('1.6.0', { A1: { status: 'done', commits: [s0, s1] }, A2: { status: 'not_run', commits: null } })];
+  spec.files = { ...spec.files, ...files(named) };
+  return spec;
+}
+const tc = (section) => section.checks.task_check;
+
+test('the task check before its commit: a pass', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const spec = checkedRun(s0, s1, { 'task-A1.1.json': taskCheck('A1', s0), 'task-A2.1.json': taskCheck('A2', s1) });
+  const out = audit(makeRun(spec), facts());
+  const r = tc(out.A1);
+  assert.deepEqual([r.state, r.note], ['present', undefined]);
+  assert.deepEqual(r.sources, [{ path: `${CHECKS}/task-A1.1.json`, at: null }]);
+  assert.deepEqual(r.value, {
+    file: `${CHECKS}/task-A1.1.json`, unit: 'A1', attempt: 1, selected: 'lane', reasons: ['no_entry'], ok: true, failed: [],
+    base: s0, head: s0, head_is_task_commit: false, tree_changed: false, earlier: { passed: 0, failed: 0, no_result: 0 },
+    fix_commits_after: 0,
+  });
+  // Not a status: the Bottom line's four counts are unchanged.
+  assert.deepEqual(Object.keys(out.A1.status), ['committed', 'reviewed', 'verified', 'accepted', 'result_status']);
+  // A2 never committed: no line and no gap, even with a file.
+  assert.deepEqual([tc(out.A2).value, tc(out.A2).state, tc(out.A2).note], [null, 'present', 'not committed']);
+  // Reason codes only: no checkout, log, tail or detail text.
+  assert.doesNotMatch(JSON.stringify(out), CANARIES);
+  // It needs no git: with a repo the value is the same.
+  const repo = makeRepo(2);
+  const withRepo = audit(makeRun(checkedRun(repo.shas[0], repo.shas[1], { 'task-A1.1.json': taskCheck('A1', repo.shas[0]) })),
+    facts(), { repo: repo.dir });
+  assert.deepEqual([tc(withRepo.A1).value.ok, tc(withRepo.A1).state], [true, 'present']);
+});
+
+test('the task check before its commit: a failure, and one where no command failed', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const out = audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': failing('A1', s0, [1, 0]) })), facts());
+  const r = tc(out.A1);
+  assert.deepEqual([r.value.ok, r.value.failed, r.state, r.note], [false, [{ check: 'test#1', group: 'test', exit: 1 }], 'present', undefined]);
+  // ok false with every exit 0 (HEAD moved while it ran) is a failure with no failing command.
+  const moved = tc(audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': failing('A1', s0, [0]) })), facts()).A1);
+  assert.deepEqual([moved.value.ok, moved.value.failed, moved.state], [false, [], 'present']);
+  assert.doesNotMatch(JSON.stringify(out), CANARIES);
+});
+
+test('several attempts: the last decides, the earlier ones are counted', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const pass = taskCheck('A1', s0);
+  const fail = failing('A1', s0);
+  const of = (named) => {
+    const r = tc(audit(makeRun(checkedRun(s0, s1, named)), facts()).A1);
+    return [r.value.ok, r.value.failed, r.state, r.value.file.slice(CHECKS.length + 1), r.value.attempt, r.value.earlier];
+  };
+  assert.deepEqual(of({ 'task-A1.1.json': fail, 'task-A1.2.json': pass }),
+    [true, [], 'present', 'task-A1.2.json', 2, { passed: 0, failed: 1, no_result: 0 }]);
+  assert.deepEqual(of({ 'task-A1.1.json': pass, 'task-A1.2.json': pass }),
+    [true, [], 'present', 'task-A1.2.json', 2, { passed: 1, failed: 0, no_result: 0 }]);
+  assert.deepEqual(of({ 'task-A1.1.json': '', 'task-A1.2.json': fail }),
+    [false, [{ check: 'test#1', group: 'test', exit: 1 }], 'present', 'task-A1.2.json', 2, { passed: 0, failed: 0, no_result: 1 }]);
+  // n orders as a number: 10 after 9 and 2.
+  assert.deepEqual(of({ 'task-A1.2.json': fail, 'task-A1.10.json': pass, 'task-A1.9.json': '' }),
+    [true, [], 'present', 'task-A1.10.json', 10, { passed: 0, failed: 1, no_result: 1 }]);
+  // A pass, then a reserved file never written: the last decides.
+  assert.deepEqual(of({ 'task-A1.1.json': pass, 'task-A1.2.json': '' }),
+    [null, null, 'unavailable', 'task-A1.2.json', 2, { passed: 1, failed: 0, no_result: 0 }]);
+});
+
+test('a last attempt with no result is unavailable, and its note says why', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const of = (data) => tc(audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': data })), facts()).A1);
+  for (const [data, note] of [
+    ['', 'the file is empty: reserved, never written'],
+    ['not json', 'the file cannot be read'],
+    ['[1]', 'the file cannot be read'],
+    [errorRecord(null), 'an error record with no policy'],
+  ]) {
+    const r = of(data);
+    assert.deepEqual([r.value.ok === true, r.value.failed, r.state, r.note], [false, null, 'unavailable', note], note);
+    // No policy: no selection, reasons or base; the unit is the file name's.
+    assert.deepEqual([r.value.unit, r.value.selected, r.value.reasons, r.value.base, r.value.head], ['A1', null, null, null, null]);
+    assert.deepEqual(r.sources, [{ path: `${CHECKS}/task-A1.1.json`, at: null }]);
+  }
+  // An error record with its policy keeps the selection.
+  const r = of(errorRecord(taskCheck('A1', s0).policy));
+  assert.deepEqual([r.value.ok, r.value.failed, r.state, r.note, r.value.selected, r.value.reasons, r.value.base],
+    [false, null, 'unavailable', 'an error record', 'lane', ['no_entry'], s0]);
+  assert.doesNotMatch(JSON.stringify(r), CANARIES);
+});
+
+test('a batch file counts for each of its tasks; a file without a policy matches by its name', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const batch = (named) => {
+    const spec = checkedRun(s0, s1, named, [started('A2', s0), committed('A2', s0, s1), reviewed('A2', s1)]);
+    spec.launches = [engine('1.6.0', { A1: { status: 'done', commits: [s0, s1] }, A2: { status: 'done', commits: [s0, s1] } })];
+    return audit(makeRun(spec), facts());
+  };
+  const both = batch({ 'task-A1-A2.1.json': taskCheck('A1-A2', s0, {}, { tasks: ['A1', 'A2'] }) });
+  for (const id of ['A1', 'A2']) {
+    assert.deepEqual([tc(both[id]).value.unit, tc(both[id]).value.file, tc(both[id]).state],
+      ['A1-A2', `${CHECKS}/task-A1-A2.1.json`, 'present'], id);
+  }
+  // An empty batch file has no policy: its name's parts are both manifest ids.
+  const empty = batch({ 'task-A1-A2.1.json': taskCheck('A1-A2', s0, {}, { tasks: ['A1', 'A2'] }), 'task-A1-A2.2.json': '' });
+  for (const id of ['A1', 'A2']) {
+    const r = tc(empty[id]);
+    assert.deepEqual([r.value.unit, r.value.attempt, r.state, r.value.earlier], ['A1-A2', 2, 'unavailable',
+      { passed: 1, failed: 0, no_result: 0 }], id);
+  }
+  // Across names, by each name's earliest policy.started; a name with none last.
+  const order = batch({
+    'task-A1.1.json': taskCheck('A1', s0, {}, { started: AT(30) }),
+    'task-A1-A2.1.json': failing('A1-A2', s0, [1], { policy: { ...taskCheck('A1-A2', s0).policy, tasks: ['A1', 'A2'], started: AT(10) } }),
+  });
+  assert.deepEqual([tc(order.A1).value.file, tc(order.A1).value.earlier], [`${CHECKS}/task-A1.1.json`, { passed: 0, failed: 1, no_result: 0 }]);
+  assert.equal(tc(order.A2).value.file, `${CHECKS}/task-A1-A2.1.json`);
+  const last = batch({ 'task-A1.1.json': '', 'task-A1-A2.1.json': taskCheck('A1-A2', s0, {}, { tasks: ['A1', 'A2'] }) });
+  assert.deepEqual([tc(last.A1).value.file, tc(last.A1).state], [`${CHECKS}/task-A1.1.json`, 'unavailable']);
+});
+
+test('fix commits after the check come from the ledger', () => {
+  const [s0, s1, s2, s3] = [S('a'), S('b'), S('c'), S('d')];
+  const of = (extra) => tc(audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': taskCheck('A1', s0) }, extra)), facts()).A1)
+    .value.fix_commits_after;
+  assert.equal(of([]), 0);
+  assert.equal(of([committed('A1', s1, s2), reviewed('A1', s2)]), 1);
+  assert.equal(of([committed('A1', s1, s2), committed('A1', s2, s3), reviewed('A1', s3)]), 2);
+  // An escalated implement commits from the task base again, after its own
+  // check: no fix commit after it, whatever the rounds.
+  assert.equal(of([committed('A1', s0, s2), reviewed('A1', s2, { rounds: 0 })]), 0);
+  // A rerun after a fix also commits from the task base.
+  assert.equal(of([committed('A1', s1, s2), committed('A1', s0, s3), reviewed('A1', s3)]), 0);
+});
+
+test('HEAD at the check, the checkout changing, and a base that is not the task\'s', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const of = (data) => tc(audit(makeRun(checkedRun(s0, s1, { 'task-A1.1.json': data })), facts()).A1);
+  const other = of(taskCheck('A1', s0, { head: S('e') }));
+  assert.deepEqual([other.value.head, other.value.head_is_task_commit, other.state], [S('e'), false, 'present']);
+  // HEAD is the task's own commit: the check ran after it.
+  const own = of(taskCheck('A1', s0, { head: s1 }));
+  assert.deepEqual([own.value.head, own.value.head_is_task_commit, own.state], [s1, true, 'present']);
+  // Any commit a committed event lists is the task's own, not only its head.
+  const spec = checkedRun(s0, s1, { 'task-A1.1.json': taskCheck('A1', s0, { head: S('9') }) });
+  spec.ledger['a.jsonl'][1] = committed('A1', s0, s1, [S('9'), s1]);
+  const first = tc(audit(makeRun(spec), facts()).A1);
+  assert.deepEqual([first.value.head, first.value.head_is_task_commit], [S('9'), true]);
+  assert.equal(of(taskCheck('A1', s0, { tree_changed: true })).value.tree_changed, true);
+  assert.equal(of(taskCheck('A1', s0, { tree_changed: undefined })).value.tree_changed, null);
+  // A policy base other than the task's recorded range base is stale.
+  const stale = of(taskCheck('A1', S('f'), { head: S('f') }));
+  assert.deepEqual([stale.value.base, stale.value.ok, stale.state, stale.note],
+    [S('f'), true, 'stale', `the check ran against ${S('f')}, not the task's recorded base ${s0}`]);
+});
+
+test('no task-check file: missing when the engine asks for one, not_required when it does not', () => {
+  const [s0, s1, s2, s3] = [S('a'), S('b'), S('c'), S('d')];
+  const run = (manifest) => audit(makeRun({
+    manifest: { prelude: [{ id: 'P1', title: 'Pre' }], join: [{ id: 'J1', title: 'Join' }], ...manifest },
+    ledger: {
+      'p.jsonl': [started('P1', s0), committed('P1', s0, s1)],
+      'a.jsonl': [started('A1', s1), committed('A1', s1, s2)],
+      'j.jsonl': [started('J1', s2), committed('J1', s2, s3)],
+    },
+    launches: [engine('1.6.0', { P1: { status: 'done', commits: [s0, s1] }, A1: { status: 'done', commits: [s1, s2] },
+      J1: { status: 'done', commits: [s2, s3] } })],
+  }), facts());
+  const rows = (out) => ['P1', 'A1', 'J1', 'A2'].map((id) => [id, tc(out[id]).value, tc(out[id]).state]);
+  const missing = "no task-check file archived, though the task's commands include a test, lint or build command";
+  const none = "the task's commands include no test, lint or build command: the engine asks for no task check";
+  // The project's test command: every committed task should have one.
+  const project = run({});
+  assert.deepEqual(rows(project), [['P1', null, 'missing'], ['A1', null, 'missing'], ['J1', null, 'missing'], ['A2', null, 'present']]);
+  assert.equal(tc(project.A1).note, missing);
+  assert.deepEqual(tc(project.A1).sources, [{ path: `${LEDGER}/a.jsonl`, at: 'L2' }]);
+  // Only lane a has a command: prelude and join use the project's.
+  const lane = run({ commands: { test: [] }, lane_commands: { a: { test: ['npm test zqlane'] } } });
+  assert.deepEqual(rows(lane), [['P1', 'not_required', 'present'], ['A1', null, 'missing'], ['J1', 'not_required', 'present'],
+    ['A2', null, 'present']]);
+  assert.deepEqual([tc(lane.P1).note, tc(lane.P1).sources], [none, [{ path: 'p.lanes.json', at: null }]]);
+  // A lane whose own group is empty overrides the project's, as the engine reads it.
+  const emptied = run({ lane_commands: { a: { test: [] } } });
+  assert.deepEqual(rows(emptied).map((r) => r[2]), ['missing', 'present', 'missing', 'present']);
+  assert.equal(tc(emptied.A1).value, 'not_required');
+});
+
+test('a task with no file is judged by the engines of the launches that report it', () => {
+  const [s0, s1, s2] = [S('a'), S('b'), S('c')];
+  const ledger = { 'a.jsonl': [started('A1', s0), committed('A1', s0, s1), started('A2', s1), committed('A2', s1, s2)] };
+  const later = { wf: 'wf_2', startTime: 1760000900000 };
+  const both = { A1: { status: 'done', commits: [s0, s1] }, A2: { status: 'done', commits: [s1, s2] } };
+  const of = (launches) => {
+    const out = audit(makeRun({ ledger, launches }), facts());
+    return ['A1', 'A2'].map((id) => [tc(out[id]).value, tc(out[id]).state, tc(out[id]).note]);
+  };
+  const notRecorded = [null, 'present', "not recorded by this run's engine (before 1.6.0)"];
+  const missing = [null, 'missing', "no task-check file archived, though the task's commands include a test, lint or build command"];
+  // Before 1.6.0, or no version (before 1.4.3): no line and no gap.
+  assert.deepEqual(of([engine('1.5.1', both)]), [notRecorded, notRecorded]);
+  assert.deepEqual(of([engine(undefined, both)]), [notRecorded, notRecorded]);
+  // Mixed launches: a skipped or not_run report does not count; any
+  // reporting launch before 1.6.0 does.
+  assert.deepEqual(of([engine('1.5.1', { A1: both.A1, A2: { status: 'not_run', commits: null } }),
+    engine('1.6.0', { A1: { status: 'skipped', commits: [s0, s1] }, A2: both.A2 }, later)]), [notRecorded, missing]);
+  assert.deepEqual(of([engine('1.5.1', { A1: both.A1 }), engine('1.6.0', both, later)]), [notRecorded, missing]);
+  const sources = tc(audit(makeRun({ ledger, launches: [engine(undefined, both)] }), facts()).A1).sources;
+  assert.deepEqual(sources, [{ path: 'wf_1.json', at: '#/result' }]);
+  // No launch result reports the task: its engine is unknown, a gap.
+  const unknown = [null, 'unavailable', 'no launch result reports this task; its engine is unknown'];
+  assert.deepEqual(of([]), [unknown, unknown]);
+  assert.deepEqual(of([engine('1.6.0', { A1: { status: 'not_run', commits: null } })]), [unknown, unknown]);
+  // A version audit cannot read is no engine before 1.6.0 either.
+  const unreadable = [null, 'unavailable', 'a launch result that reports this task records an engine version audit cannot read'];
+  assert.deepEqual(of([engine('dev', both)]), [unreadable, unreadable]);
+});
+
+test('a settled task gets no line, even with files', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const out = audit(makeRun({
+    ledger: { 'a.jsonl': [started('A1', s0), committed('A1', s0, s1), { task: 'A1', event: 'blocked', reason: 'stuck' },
+      { task: 'A1', event: 'settled', outcome: 'park', base: s0, head: s1 }] },
+    launches: [engine('1.6.0', { A1: { status: 'deferred', commits: [s0, s1] } })],
+    files: files({ 'task-A1.1.json': taskCheck('A1', s0) }),
+  }), facts());
+  const r = tc(out.A1);
+  assert.deepEqual([r.value, r.state, r.note, r.sources], [null, 'present', 'settled by adjudicator', [{ path: `${LEDGER}/a.jsonl`, at: 'L4' }]]);
+  // No ledger: nothing is known committed, and the task check is no gap.
+  const none = tc(audit(makeRun({ ledger: null, launches: [engine('1.6.0', { A1: { status: 'done', commits: [s0, s1] } })] }), facts()).A1);
+  assert.deepEqual([none.value, none.state, none.note], [null, 'present', 'no ledger']);
 });
 
 test('an implement retried at its own tier after an API error is no escalation', () => {

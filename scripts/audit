@@ -26,7 +26,7 @@ It writes audit.json and audit.md, as UTF-8, to --out (default
 RUN_FOLDER/audit/), replacing only those two files, and prints a summary of
 at most 10 lines whose last line is 'full report: <path of audit.md>' (with
 --json it prints audit.json instead). The contract of both files is in
-_audit.py: audit.json is {"audit_version": 2, "run_id", "repo", "run",
+_audit.py: audit.json is {"audit_version": 3, "run_id", "repo", "run",
 "tasks", "gaps", "gap_causes"}, every value a ref {"value", "state",
 "sources"[, "note"]} and every recorded text a quote {"quote", "sources",
 "commands_replaced"} in which configured commands are check ids; gaps lists
@@ -51,6 +51,16 @@ minors did not reach the final lenses; unavailable when the result has
 neither list, and Open work then says once that this run's engine recorded
 none); each task block ends with the open minors its id prefix places
 there, and a minor of a batch unit or of no task is under Open work only.
+Each task block says whether the task's own check (its ledger's
+checks/task-<unit>.<n>.json, engines from 1.6.0) ran before its commit, how
+its last attempt ended and what it covered ('- checked before its commit:',
+tasks[i].checks.task_check; run.checks.task_checks names the tasks an engine
+before 1.6.0 committed and the files that match no task), never copying a
+check file's error, tail, log or checkout; and its verified line says what
+the containment covers ('its last commit <sha7> is in the head the
+delivered verify passed at, <sha7>'). The task check needs no --repo. The
+Bottom line adds 'task checks: <k> committed after a failed check' when
+k > 0.
 The summary's tasks line counts as the Bottom line does. For accepted by
 user, the Bottom line names audit's verdict without the override when it
 differs from the run's own (acceptance.verdict_without_override and
