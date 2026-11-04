@@ -746,18 +746,25 @@ test('the final re-review line and each finding\'s line in every recorded shape'
     '    - re-review: contradictory results [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L15)',
     '    - re-review: no result [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl L15)',
   ]);
+  // A re-review that started and returned nothing: no valid result, on the
+  // run line and on each finding's.
   const started = reReviewSpec(r, { final: nulls });
   started.launches[0].journal[6] = { label: 'final re-review' };
-  const notRun = lines(started);
-  assert.equal(notRun.header, '- final re-review: no valid result [present] (wf_aaaaaa/journal.jsonl L14)');
-  assert.deepEqual(notRun.findings, [
-    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)',
-    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl)',
+  const noValid = lines(started);
+  assert.equal(noValid.header, '- final re-review: no valid result [present] (wf_aaaaaa/journal.jsonl L14)');
+  assert.deepEqual(noValid.findings, [
+    '    - re-review: no valid result [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L14)',
+    '    - re-review: no valid result [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl L14)',
   ]);
   // No re-review entry at all, with and without final findings.
   const absent = reReviewSpec(r, { final: nulls });
   absent.launches[0].journal.splice(6, 1);
-  assert.equal(lines(absent).header, "- final re-review: not run [present] - each finding's reason says why");
+  const notRun = lines(absent);
+  assert.equal(notRun.header, "- final re-review: not run [present] - each finding's reason says why");
+  assert.deepEqual(notRun.findings, [
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)',
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl)',
+  ]);
   const clean = acceptedSpec(r);
   clean.launches[0].journal.splice(6, 1);
   assert.equal(lines(clean).header, '- final re-review: none (no final findings) [present]');
@@ -769,13 +776,27 @@ test('the final re-review line and each finding\'s line in every recorded shape'
   });
   assert.deepEqual(lines(legacy), {
     header: "- final re-review: per-finding results not recorded by this run's engine [present]", findings: [] });
-  // No journal archived: unavailable, a gap.
-  const lost = reReviewSpec(r);
+  // No journal archived: unavailable, a gap; a null review has no result
+  // recorded, its reason saying why (not a gap).
+  const lost = reReviewSpec(r, { final: nulls });
   delete lost.launches[0].journal;
   const lostView = view(makeRun(lost));
-  assert.equal(mdSection(lostView.md, 'Open work').find((l) => l.startsWith('- final re-review: ')),
+  const lostLines = mdSection(lostView.md, 'Open work');
+  assert.equal(lostLines.find((l) => l.startsWith('- final re-review: ')),
     '- final re-review: unavailable [unavailable] - no journal archived for wf_aaaaaa');
-  assert.ok(lostView.json.gaps.some((g) => g.where === '#/run/open_work/final/value/re_review'), lostView.md);
+  assert.deepEqual(lostLines.filter((l) => /^ {4}- re-review/.test(l)), [0, 1].map((i) => '    - re-review: no result recorded'
+    + ` [present] - no journal archived for wf_aaaaaa; its reason says why (wf_aaaaaa.json #/result/final/open/${i}/review)`));
+  assert.deepEqual(lostView.json.gaps.filter((g) => g.where.startsWith('#/run/open_work')).map((g) => g.where),
+    ['#/run/open_work/final/value/re_review']);
+  // A journal that cannot be read: the same, saying so.
+  const broken = reReviewSpec(r, { final: nulls });
+  delete broken.launches[0].journal;
+  broken.files['wf_aaaaaa/journal.jsonl/keep'] = '';
+  const brokenLines = mdSection(view(makeRun(broken)).md, 'Open work');
+  assert.equal(brokenLines.find((l) => l.startsWith('- final re-review: ')),
+    '- final re-review: unavailable [unavailable] - the journal for wf_aaaaaa could not be read');
+  assert.equal(brokenLines.find((l) => /^ {4}- re-review/.test(l)), '    - re-review: no result recorded [present] - the journal'
+    + ' for wf_aaaaaa could not be read; its reason says why (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)');
 });
 
 test('open counts add the open task minors and the carried ones', () => {

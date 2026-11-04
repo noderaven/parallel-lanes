@@ -179,10 +179,13 @@ RE_REVIEW_FORMS = {
     "none": "none (no final findings)",
     "unavailable": "unavailable",
 }
-# A final finding's re-review line for each rule without a status of its own.
+# A final finding's re-review line for each rule without a status of its own
+# (no_result_recorded's note says why: no journal, or one that cannot be read).
 RE_REVIEW_RULES = {
     "raised": "raised by the re-review",
+    "no_result_recorded": "no result recorded",
     "not_run": "not run",
+    "no_valid_result": "no valid result",
     "contradictory": "contradictory results",
     "no_result": "no result",
 }

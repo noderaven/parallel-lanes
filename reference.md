@@ -2279,20 +2279,28 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   reads `per-finding results not recorded by this run's engine`; any other result, or a started
   entry with none, `no valid result` at its line; no entry, `not run` (`each finding's reason
   says why`) with final findings, else `none (no final findings)`; all `present`. Without a
-  journal it is `unavailable` (`no journal archived for <wf>`).
+  journal it is `unavailable` (`no journal archived for <wf>`), and so is a journal whose file
+  cannot be read (`the journal for <wf> could not be read`), one gap; a journal line that does
+  not parse is skipped.
 - **Each final finding's re-review** (1.6.17). After its disposition each open or declined final
   finding (never a task minor) gives its `re_review`, `{rule, status, head, delivered,
   evidence}`, `present` and never a gap, by the first rule that applies: an open `N<k>` (the
   re-review's new findings) reads `re-review: raised by the re-review`; a finding with no
-  `review` (before 1.2.0) has no line; a `null` review reads `re-review: not run` when the
-  journal holds no final re-review result, `re-review: contradictory results` when its results
-  give the id more than one status, else `re-review: no result` (also when no journal is
-  archived); a re-review of a head other than the delivered sha reads `re-review of <head7>, not
-  the delivered sha <delivered>: <status>`; a declined finding the re-review resolved reads
-  `re-review: resolved (the decline upheld)`; any other `re-review: <status>`. A line with a
-  status is followed by the re-reviewer's evidence as a quote (`re-review evidence, quoted from
-  wf_<id>.json #/result/final/<list>/<i>/review`). `resolved` is the re-reviewer's word that the
-  defect is gone or the decline is right, not that it was fixed.
+  `review` (before 1.2.0) has no line. A `null` review (the engine records one when no
+  re-review ran, when it gave the id contradictory results, or none) reads, without a journal
+  or with one that cannot be read, `re-review: no result recorded` with the note `no journal
+  archived for <wf>; its reason says why` (or `the journal for <wf> could not be read; its
+  reason says why`); with a journal, `re-review: not run` when it holds no final re-review entry
+  at all, `re-review: no valid result` when the last entry is started only, has a `null` result
+  or no valid result (the run line's `no valid result`), `re-review: contradictory results`
+  when its results give the id more than one status, else `re-review: no result` (the
+  re-review ran and left the id out). A re-review of a head other than the delivered sha reads
+  `re-review of <head7>, not the delivered sha <delivered>: <status>`; a declined finding the
+  re-review resolved reads `re-review: resolved (the decline upheld)`; any other `re-review:
+  <status>`. A line with a status is followed by the re-reviewer's evidence as a quote
+  (`re-review evidence, quoted from wf_<id>.json #/result/final/<list>/<i>/review`). `resolved`
+  is the re-reviewer's word that the defect is gone or the decline is right, not that it was
+  fixed.
 - **Per task,** in run order, the audit shows the requirement (the latest review's brief hash
   against the task's plan section hash, and the brief file), placement, changes (rulings, events,
   escalations), commits and review (reviews, each with its brief and spec hashes against the
@@ -2308,7 +2316,8 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   is the union of `wf_*` dirs and `wf_*.json` files; its result comes only from `<run
   folder>/<wf>.json`. Review verdicts (1.6.17) are recorded in the launch's journal: `present`,
   each at its result's line (a budget retry's for a round it retried; a started entry with no
-  result is `unavailable` at its started line); the ledger's `reviewed` event stays the
+  result is `unavailable` at its started line; a launch whose journal is missing or cannot be
+  read is one `unavailable` entry saying which); the ledger's `reviewed` event stays the
   approval. For engines from 1.2.0 (by `result.version`: a launch with none is before 1.4.3 and
   gets no note), a verdict the engine's `checkedReview` acted on as another adds
   `(the engine read it as changes)` or `(the engine read it as invalid)`. A

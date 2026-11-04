@@ -674,7 +674,8 @@ test('reference.md documents the audit', () => {
     // the journal as a record and each final finding's re-review (1.6.17)
     '`<wf>/journal.jsonl L<n>`', '(the engine read it as', '`final re-review [present] - judged <head7>`',
     '- final re-review: judged <head7>', 'raised by the re-review', 'resolved (the decline upheld)',
-    're-review evidence', '`re_review`',
+    're-review evidence', '`re_review`', '`re-review: no result recorded`', '`re-review: no valid result`',
+    'could not be read',
   ];
   // The journal's verdicts are recorded, not inferred from the transcript.
   assert.ok(!audit.includes('read from the transcript'), 'the Audit section still says read from the transcript');

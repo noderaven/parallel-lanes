@@ -63,8 +63,13 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                kept: only the verdict and the count of findings, present,
                each at its result's journal line, <wf>/journal.jsonl L<n>;
                a started entry with no result is unavailable at its started
-               line. For engines from 1.2.0 (CHECKED_REVIEW_ENGINE, by
-               result.version) a verdict the engine's checkedReview acts on
+               line; a launch whose journal is missing or cannot be read,
+               when its result does not report the task skipped or not run,
+               is one unavailable entry, its note _audit_run.journal_note
+               (no journal archived, or it could not be read). For engines
+               from 1.2.0
+               (CHECKED_REVIEW_ENGINE, by result.version) a verdict the
+               engine's checkedReview acts on
                as another (_engine_read: changes or invalid) has the note
                ENGINE_READ. The ledger's reviewed event stays the approval.)
                and approval (by event order: a reviewed event approves its
@@ -558,17 +563,18 @@ def _verdicts(ctx, task_id):
     pattern = _review_label(task_id)
     out = []
     for launch in ctx.run.get("launches") or []:
-        if core.journal_file(launch) is None:
+        entries, why = core.read_journal(launch)
+        if entries is None:
             status = core.task_status(launch, task_id)
             if launch.get("result") is None or (status is not None and status not in UNREVIEWED_STATUSES):
-                out.append(ref(None, "unavailable", [src(_wf_file(launch))], "no journal archived for %s" % launch["wf"]))
+                out.append(ref(None, "unavailable", [src(_wf_file(launch))], _audit_run.journal_note(launch, why)))
             continue
         # checkedReview shipped in 1.2.0; a launch with no version is before
         # 1.4.3, so whether it read the verdict so is unknown.
         version = _audit_run.result_version(launch)
         checked = version is not None and version >= CHECKED_REVIEW_ENGINE
         rounds, order = {}, []
-        for entry in core.structured_results(launch):
+        for entry in entries:
             label = entry.get("label")
             match = pattern.match(label) if isinstance(label, str) else None
             if not match:

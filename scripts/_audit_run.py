@@ -104,13 +104,16 @@ or another, so of = the four counts; new the new findings), not_recorded
 started entry with none), not_run (no entry, with final findings; note
 RE_REVIEW_NOT_RUN), none (no entry and no final findings), each present
 with the journal line for judged and no_valid_result; unavailable without
-a journal ("no journal archived for <wf>").
+a journal (NO_JOURNAL) or with one whose file cannot be read
+(UNREADABLE_JOURNAL; _audit_core.read_journal tells them apart).
 
 Each final finding (open or declined, never a task minor) has re_review
 (_finding_re_review): {rule, status, head, delivered, evidence (the
 review's evidence, quoted)}, present, never a gap, rule the first that
-applies of raised, not_recorded, not_run, contradictory, no_result,
-other_head, decline_upheld and result.
+applies of raised, not_recorded, no_result_recorded (a null review with no
+journal or an unreadable one: its note that journal note and REASON_SAYS),
+not_run, no_valid_result, contradictory, no_result, other_head,
+decline_upheld and result.
 
 acceptance also holds verdict_without_override (derive_verdict with no
 override) and verdict_rule_without_override (_verdict_rule when that verdict
@@ -148,6 +151,11 @@ RE_REVIEW_NOTE = "judged %s"
 RE_REVIEW_LABELS = ("final re-review", "final re-review retry")
 # The final re-review line's note when no journal entry ran it.
 RE_REVIEW_NOT_RUN = "each finding's reason says why"
+# Why a launch's journal gives nothing (read_journal), and what a null
+# review's line adds then.
+NO_JOURNAL = "no journal archived for %s"
+UNREADABLE_JOURNAL = "the journal for %s could not be read"
+REASON_SAYS = "; its reason says why"
 # A finding id the engine gives the re-review's new findings (N1, N2, ...).
 NEW_FINDING_ID = re.compile(r"^N[0-9]+$")
 # What an e2e entry without both shas lacks (both, joined by "; ").
@@ -1189,14 +1197,21 @@ def _finding(f, status, sources, pairs):
     return out
 
 
-def _last_re_review(launch):
-    """The journal's last final re-review entry (RE_REVIEW_LABELS: a budget
-    retry is the call the engine used), or None."""
+def _last_re_review(entries):
+    """The last final re-review entry of a journal's entries
+    (RE_REVIEW_LABELS: a budget retry is the call the engine used), or
+    None."""
     found = None
-    for entry in c.structured_results(launch):
+    for entry in entries or []:
         if entry["label"] in RE_REVIEW_LABELS:
             found = entry
     return found
+
+
+def journal_note(launch, why):
+    """Why a launch's journal gives nothing (why: read_journal's reason):
+    NO_JOURNAL or UNREADABLE_JOURNAL."""
+    return (NO_JOURNAL if why == c.JOURNAL_ABSENT else UNREADABLE_JOURNAL) % launch["wf"]
 
 
 def _statuses(results, fid):
@@ -1212,16 +1227,17 @@ def _statuses(results, fid):
     return out
 
 
-def _re_review(launch, final, entry, has_journal):
+def _re_review(launch, final, entry, why):
     """open_work.final's re_review, from the latest launch's journal (its last
-    final re-review entry decides) and result, no git: {form, head,
-    delivered, resolved, open, without_result, contradictory, of, new}."""
+    final re-review entry decides; why is read_journal's reason it gives
+    nothing, else None) and result, no git: {form, head, delivered, resolved,
+    open, without_result, contradictory, of, new}."""
     delivered = (launch.get("result") or {}).get("delivered_sha")
     value = {"form": None, "head": None, "delivered": delivered if isinstance(delivered, str) else None,
              "resolved": None, "open": None, "without_result": None, "contradictory": None, "of": None, "new": None}
-    if not has_journal:
+    if why is not None:
         value["form"] = "unavailable"
-        return c.ref(value, "unavailable", [], "no journal archived for %s" % launch["wf"])
+        return c.ref(value, "unavailable", [], journal_note(launch, why))
     if entry is None:
         findings = any(isinstance(final.get(k), list) and final[k] for k in ("findings", "fixed", "declined", "open"))
         value["form"] = "not_run" if findings else "none"
@@ -1246,15 +1262,19 @@ def _re_review(launch, final, entry, has_journal):
     return c.ref(value, "present", at)
 
 
-def _finding_re_review(f, key, i, launch, entry, has_journal, pairs):
+def _finding_re_review(f, key, i, launch, entry, why, form, pairs):
     """A final open or declined finding's re_review, {rule, status, head,
     delivered, evidence}, present: the first rule that applies of raised (an
     open N<k>, the re-review's own), not_recorded (no review key: before
-    1.2.0), for a null review not_run (the journal holds no final re-review
-    result), contradictory (its results give the id more than one status)
-    or no_result, other_head (the re-review judged another head than the
-    delivered sha), decline_upheld (declined, resolved) and result. The
-    evidence is the review's, quoted."""
+    1.2.0); for a null review no_result_recorded (no journal, or one that
+    cannot be read, why: audit cannot tell why it is null; the note says so
+    and that the finding's reason says why), not_run (the journal holds no
+    final re-review entry), no_valid_result (the run line's form: the last
+    entry is started only, null or no valid result), contradictory (its
+    results give the id more than one status) or no_result; then
+    other_head (the re-review judged another head than the delivered sha),
+    decline_upheld (declined, resolved) and result. form is the run line's
+    (_re_review). The evidence is the review's, quoted."""
     f = f if isinstance(f, dict) else {}
     at = _wf_src(launch, "final", key, i, "review")
     value = {"rule": None, "status": None, "head": None, "delivered": None, "evidence": None}
@@ -1268,11 +1288,18 @@ def _finding_re_review(f, key, i, launch, entry, has_journal, pairs):
         value["rule"] = "not_recorded"
         return c.ref(value, "present", [at])
     if not isinstance(review, dict):
-        if has_journal and not isinstance(result, dict):
+        if why is not None:
+            value["rule"] = "no_result_recorded"
+            sources = [at] + ([c.journal_src(launch)] if why == c.JOURNAL_UNREADABLE else [])
+            return c.ref(value, "present", sources, journal_note(launch, why) + REASON_SAYS)
+        if entry is None:
             value["rule"] = "not_run"
             return c.ref(value, "present", [at, c.journal_src(launch)])
-        results = result.get("results") if isinstance(result, dict) else None
-        value["rule"] = "contradictory" if has_journal and len(_statuses(results, f.get("id"))) > 1 else "no_result"
+        if form == "no_valid_result":
+            value["rule"] = "no_valid_result"
+        else:
+            results = result.get("results") if isinstance(result, dict) else None
+            value["rule"] = "contradictory" if len(_statuses(results, f.get("id"))) > 1 else "no_result"
         return c.ref(value, "present", [at] + line)
     value["status"] = review.get("status")
     value["evidence"] = _q(review.get("evidence"), [at], pairs)
@@ -1361,13 +1388,15 @@ def _open_work(run, launch, why, pairs):
         out["final"] = c.ref(None, "unavailable", [_wf_src(launch, "final")],
                              "the latest launch has no final review result")
         return out
-    entry, has_journal = _last_re_review(launch), c.journal_file(launch) is not None
+    entries, why = c.read_journal(launch)
+    entry = _last_re_review(entries)
+    re_review = _re_review(launch, final, entry, why)
     findings = []
     for key, state in (("open", "open"), ("declined", "declined")):
         items = final.get(key)
         for i, f in enumerate(items if isinstance(items, list) else []):
             finding = _finding(f, state, [_wf_src(launch, "final", key, i)], pairs)
-            finding["re_review"] = _finding_re_review(f, key, i, launch, entry, has_journal, pairs)
+            finding["re_review"] = _finding_re_review(f, key, i, launch, entry, why, re_review["value"]["form"], pairs)
             findings.append(finding)
     cannot = final.get("cannot_verify")
     cannot = [_cannot_verify(item, _wf_src(launch, "final", "cannot_verify", i), pairs)
@@ -1379,7 +1408,7 @@ def _open_work(run, launch, why, pairs):
               for i, f in enumerate(minors)] if isinstance(minors, list) else None
     carried = final.get("carried_minors_open")
     carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
-    value = {"findings": findings, "re_review": _re_review(launch, final, entry, has_journal),
+    value = {"findings": findings, "re_review": re_review,
              "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
              "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
              # Older engines' finals have no open list: its count is unknown, not 0.

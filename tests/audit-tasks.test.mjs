@@ -490,6 +490,20 @@ test('a journal verdict the engine read differently says so, for engines from 1.
   }
 });
 
+test('a journal that cannot be read gives no verdict, and says so', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const spec = reviewedRun(s0, s1);
+  // journal.jsonl is a directory: it exists, and reading it fails.
+  spec.launches = [launch({ A1: { status: 'done', commits: [s0, s1] } }, { journal: undefined })];
+  spec.files['wf_1/journal.jsonl/keep'] = '';
+  const verdicts = audit(makeRun(spec), facts()).A1.review.verdicts;
+  assert.deepEqual(verdicts.map((v) => [v.value, v.state, v.note, v.sources]), [
+    [null, 'unavailable', 'the journal for wf_1 could not be read', [{ path: 'wf_1.json', at: null }]]]);
+  // No journal at all keeps its note.
+  delete spec.files['wf_1/journal.jsonl/keep'];
+  assert.equal(audit(makeRun(spec), facts()).A1.review.verdicts[0].note, 'no journal archived for wf_1');
+});
+
 test('escalations come from the archived transcripts only', () => {
   const [s0, s1] = [S('a'), S('b')];
   const spec = reviewedRun(s0, s1);

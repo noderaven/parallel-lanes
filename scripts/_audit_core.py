@@ -74,6 +74,9 @@ STATES = ("present", "missing", "stale", "conflicting", "unavailable", "inferred
 GAP_STATES = ("missing", "stale", "conflicting", "unavailable")
 # A sha in a gap note, read as <sha> in the cause key.
 NOTE_SHA = re.compile(r"\b[0-9a-f]{7,64}\b")
+# Why read_journal gives no entries.
+JOURNAL_ABSENT = "absent"
+JOURNAL_UNREADABLE = "unreadable"
 
 
 # ---- evidence references ----
@@ -476,19 +479,27 @@ def task_launch(run, task_id):
     return None
 
 
-def journal_file(launch):
-    """<launch dir>/journal.jsonl when it is a file, else None (a dirless
-    launch included)."""
-    if not launch.get("dir"):
-        return None
-    path = os.path.join(launch["dir"], "journal.jsonl")
-    return path if os.path.isfile(path) else None
-
-
 def journal_src(launch, line=None):
     """A source in the launch's journal, <wf>/journal.jsonl, at L<line> (the
     file itself when line is None)."""
     return src("%s/journal.jsonl" % launch["wf"], None if line is None else "L%d" % line)
+
+
+def read_journal(launch):
+    """(entries, None) for a launch's readable <launch dir>/journal.jsonl,
+    entries as structured_results gives them (lines that do not parse are
+    skipped); (None, JOURNAL_ABSENT) when there is none (a dirless launch
+    included); (None, JOURNAL_UNREADABLE) when the path exists but reading
+    it fails (an OSError, as for a directory of that name)."""
+    path = os.path.join(launch["dir"], "journal.jsonl") if launch.get("dir") else None
+    if path is None or not os.path.exists(path):
+        return None, JOURNAL_ABSENT
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None, JOURNAL_UNREADABLE
+    return _journal_entries(text), None
 
 
 def structured_results(launch):
@@ -497,15 +508,13 @@ def structured_results(launch):
     agentId to its {"type": "result"} entry (result None when it has none).
     line is the result entry's physical 1-based line number (blank lines
     counted), or the started entry's when it has none. A dirless launch, or
-    a missing or unreadable journal, gives []."""
-    path = journal_file(launch)
-    if path is None:
-        return []
-    try:
-        with open(path, "rb") as f:
-            text = f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return []
+    a missing or unreadable journal (read_journal tells them apart), gives
+    []."""
+    return read_journal(launch)[0] or []
+
+
+def _journal_entries(text):
+    """A journal's started entries joined to their results (structured_results)."""
     started, results = [], {}
     for n, line in enumerate(text.split("\n"), 1):
         try:

@@ -859,10 +859,14 @@ test('the final re-review line counts each final finding against the journal', (
     ['not_run', 'present', "each finding's reason says why", []]);
   const none = finalWork({}, [{ label: 'final review sp', result: { head: D, findings: [] } }]).value.re_review;
   assert.deepEqual([none.value.form, none.state, none.sources], ['none', 'present', []]);
-  // No journal archived: unavailable, a gap.
+  // No journal archived, or one that cannot be read: unavailable, a gap.
   const result = accepted(D, { final: finalAt(D, { findings }) });
   const lost = sections(makeRun({ launches: [launch(result, { journal: undefined })] })).open_work.final.value.re_review;
   assert.deepEqual([lost.value.form, lost.state, lost.note], ['unavailable', 'unavailable', 'no journal archived for wf_aaaaaa']);
+  const unreadable = sections(makeRun({ launches: [launch(result, { journal: undefined })],
+    files: { 'wf_aaaaaa/journal.jsonl/keep': '' } })).open_work.final.value.re_review;
+  assert.deepEqual([unreadable.value.form, unreadable.state, unreadable.note],
+    ['unavailable', 'unavailable', 'the journal for wf_aaaaaa could not be read']);
 });
 
 test('each open or declined final finding names its re-review; task minors never do', () => {
@@ -904,15 +908,35 @@ test('each open or declined final finding names its re-review; task minors never
   // None is a gap.
   assert.doesNotMatch(JSON.stringify(fw), /zqcmd/);
 
-  // A null review with no re-review result in the journal: not run.
-  for (const j of [[], [{ label: 'final re-review' }], [{ label: 'final re-review', result: null }]]) {
+  // A null review: not run only when the journal holds no final re-review
+  // entry at all (the journal file cited).
+  const notRun = finalWork(final, []).value.findings[1].re_review;
+  assert.deepEqual([notRun.value.rule, notRun.state, notRun.sources],
+    ['not_run', 'present', [at('open', 1), { path: JOURNAL, at: null }]]);
+  // A last entry that is started only, has a null result or is not a valid
+  // result: no valid result (R3's test), at its journal line.
+  const invalid = [[[{ label: 'final re-review' }], 'L2'], [[{ label: 'final re-review', result: null }], 'L3'],
+    [[{ label: 'final re-review', result: { head: D, results: 'none', new_findings: [] } }], 'L3']];
+  for (const [j, line] of invalid) {
     const f2 = finalWork(final, j).value.findings[1].re_review;
-    assert.deepEqual([f2.value.rule, f2.state], ['not_run', 'present'], JSON.stringify(j));
+    assert.deepEqual([f2.value.rule, f2.state, f2.sources], ['no_valid_result', 'present', [at('open', 1), { path: JOURNAL, at: line }]],
+      JSON.stringify(j));
   }
-  // Without a journal audit cannot tell: no result, as the engine recorded.
+  // No journal, or one that cannot be read: audit cannot tell why the review
+  // is null, so no result is recorded, the finding's reason saying why. Not
+  // a gap.
   const result = accepted(D, { final: finalAt(D, final) });
-  const lost = sections(makeRun({ launches: [launch(result, { journal: undefined })] })).open_work.final.value.findings;
-  assert.deepEqual(lost.map((f) => f.re_review.value.rule), ['result', 'no_result', 'no_result', 'raised', 'decline_upheld']);
+  const lostRun = sections(makeRun({ launches: [launch(result, { journal: undefined })] }));
+  const lost = lostRun.open_work.final.value.findings;
+  assert.deepEqual(lost.map((f) => f.re_review.value.rule),
+    ['result', 'no_result_recorded', 'no_result_recorded', 'raised', 'decline_upheld']);
+  assert.deepEqual([lost[1].re_review.state, lost[1].re_review.note, lost[1].re_review.sources],
+    ['present', "no journal archived for wf_aaaaaa; its reason says why", [at('open', 1)]]);
+  const unreadable = sections(makeRun({ launches: [launch(result, { journal: undefined })],
+    files: { 'wf_aaaaaa/journal.jsonl/keep': '' } })).open_work.final.value.findings[2].re_review;
+  assert.deepEqual([unreadable.value.rule, unreadable.state, unreadable.note, unreadable.sources],
+    ['no_result_recorded', 'present', 'the journal for wf_aaaaaa could not be read; its reason says why',
+      [at('open', 2), { path: JOURNAL, at: null }]]);
   // A re-review of another head than the delivered sha names both.
   const otherJournal = [{ label: 'final re-review', result: { head: OTHER, results, new_findings: [] } }];
   const other = finalWork({ findings: [F('F1')], open: [{ ...F('F1'), reason: 'the final re-review judged x',

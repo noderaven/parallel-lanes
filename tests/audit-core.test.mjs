@@ -300,14 +300,20 @@ test('journal lines are physical, blank lines counted, and cited as <wf>/journal
     { type: 'result', agentId: 'a2', result: null },
     { type: 'started', agentId: 'a3', label: 'final re-review retry' },
   ];
+  // wf_u's journal.jsonl exists but cannot be read (a directory: an
+  // OSError on every platform).
   const run = makeRun({
-    launches: [{ wf: 'wf_j', startTime: 1000 }, { wf: 'wf_n', startTime: 2000 }, { wf: 'wf_d', startTime: 3000, dirless: true }],
-    files: { 'wf_j/journal.jsonl': lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\r\n') + '\r\n' },
+    launches: [{ wf: 'wf_j', startTime: 1000 }, { wf: 'wf_n', startTime: 2000 }, { wf: 'wf_d', startTime: 3000, dirless: true },
+      { wf: 'wf_u', startTime: 4000 }],
+    files: {
+      'wf_j/journal.jsonl': lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\r\n') + '\r\n',
+      'wf_u/journal.jsonl/keep': '',
+    },
   });
   const out = pythonJSON([
     'import _audit_core as c',
     'run = c.load_run(sys.argv[1])',
-    'print(json.dumps([[c.structured_results(l), c.journal_file(l) is not None, c.journal_src(l, 7), c.journal_src(l)]',
+    'print(json.dumps([[c.structured_results(l), c.read_journal(l)[1], c.journal_src(l, 7), c.journal_src(l)]',
     '                  for l in run["launches"]]))',
   ], [run]);
   // A null result cites its result line; a started entry with no result
@@ -317,10 +323,15 @@ test('journal lines are physical, blank lines counted, and cited as <wf>/journal
     ['final re-review', null, 7],
     ['final re-review retry', null, 8],
   ]);
-  assert.deepEqual(out.map((x) => x[1]), [true, false, false]);
+  // Read, absent (a dir without one, a dirless launch), or unreadable.
+  assert.deepEqual(out.map((x) => x[1]), [null, 'absent', 'absent', 'unreadable']);
   assert.deepEqual(out[0][2], { path: 'wf_j/journal.jsonl', at: 'L7' });
   assert.deepEqual(out[0][3], { path: 'wf_j/journal.jsonl', at: null });
-  assert.deepEqual(out.slice(1).map((x) => x[0]), [[], []]);
+  assert.deepEqual(out.slice(1).map((x) => x[0]), [[], [], []]);
+  // read_journal gives structured_results' entries for a readable journal.
+  const read = pythonJSON(['import _audit_core as c', 'run = c.load_run(sys.argv[1])',
+    'l = run["launches"][0]', 'print(json.dumps(c.read_journal(l)[0] == c.structured_results(l)))'], [run]);
+  assert.equal(read, true);
 });
 
 test('manifest_tasks is in run order', () => {
