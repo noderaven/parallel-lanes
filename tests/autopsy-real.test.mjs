@@ -216,6 +216,8 @@ test('real r140 case: a wait loop that outlives its background check', () => {
   // A loop that runs sleep is a wait loop: its program is sleep, not grep.
   assert.equal(ofKind(a, 'long_tool_call')[0].evidence.program, 'sleep');
   assert.equal(a.checks.waits.background_not_waited, 0);
+  // The run-checks call is kept without its result: the agent is partial.
+  assert.equal(a.detectors.long_tool_call, 'partial');
 });
 
 test('real r150 case: a background suite the agent did not wait for is no slowdown', () => {

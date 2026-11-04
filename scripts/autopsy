@@ -13,8 +13,9 @@ It writes RUN_FOLDER/autopsy.json and RUN_FOLDER/autopsy.md (replacing only
 those two files) and prints a summary of at most 15 lines to stdout:
 the wall time, for a run with more than one launch the line 'earlier
 launches: kept <N> agents, redid <M> (<X> of agent time)' (the earlier
-launches' kept_agents, redone_agents and redone_agent_s summed, X
-unavailable if any is; see launches), when the user accepted the
+launches' kept_agents, redone_agents and redone_agent_s summed, and
+'(agent time unavailable)' in place of '(<X> of agent time)' if any is;
+see launches), when the user accepted the
 delivered head and the run's own verdict is not accepted the line
 'acceptance: <status>; accepted by the user at the delivered head' (see
 done), the slowest phase, the top three slowdowns with their cost, when
@@ -221,7 +222,8 @@ model turn that came at or before its own result. The kinds:
 - edit_retry: an Edit or Write fails as unread, changed, or text not
   found; from it to the next successful write of that file.
 - extra_review_round: a task's 'fix N' and 're-review N' agents; the sum
-  of their wall times.
+  of their wall times, "unavailable" (cost_kind too) when one of them is
+  untimed.
 - escalation and retry: an agent run-report counts as one (the same label
   again at another model tier in the same launch; a label ending ' retry');
   that agent's wall time.
@@ -254,9 +256,9 @@ check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
 escalation and extra_review_round; relaunch (a launch's redone agents, so
 an agent both retried and redone goes to the retry first, and a relaunch
 row covers each launch's own agents, so it never merges with another).
-Within a tier the shorter row (span_s)
-goes first, then the earlier. A row takes only the parts of its span that
-no row before it took: cost_s is their length. A row left with nothing is
+Within a tier the shorter row (span_s) goes first, then the earlier, then
+the order listed. A row takes only the parts of its span that no row
+before it took: cost_s is their length. A row left with nothing is
 dropped and its kind goes into contains of the row that took most of its
 span (the earliest on a tie); a row of zero length goes to the earliest
 row whose time, ends included, holds its instant, and with none it stays

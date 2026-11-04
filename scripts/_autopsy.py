@@ -1143,7 +1143,8 @@ def _calls(agent):
     waiting = {}
     turns = []  # per call: its turn's number
     by_msg = {}  # message id -> its turn's number
-    turn = -1
+    turn = -1  # the turn of the call before
+    next_turn = 0  # the number a new turn gets: a message id seen again reuses its own
     prev = None  # the kind of the event before
     for i, e in enumerate(agent["events"]):
         if e["kind"] == "tool_use":
@@ -1154,7 +1155,7 @@ def _calls(agent):
             if msg is not None and msg in by_msg:
                 turn = by_msg[msg]
             elif msg is not None or prev != "tool_use":
-                turn += 1  # a new message id, or no tool_use right before
+                turn, next_turn = next_turn, next_turn + 1  # a new message id, or no tool_use right before
             if msg is not None:
                 by_msg[msg] = turn
             turns.append(turn)
@@ -1340,16 +1341,22 @@ def background_waiting(agent, calls, i, start, end):
         it (own start before end, and a result after that event or none):
         the agent sat idle until the notice.
     The backgrounded call's own time is no waiting. Empty when the agent
-    did not wait (a window of length 0 included)."""
-    waits = {j: _is_wait_call(calls[j]) for j in range(i + 1, len(calls))}
+    did not wait (a window of length 0 included).
+    The scan of later calls for (a) and (b) ends at the first one that
+    starts at or past end (start, not own_start, grows in call order): the
+    calls after it hold nothing of the window, though its own gap (b) may."""
     pieces = []
+    prev_wait = False  # whether calls[j - 1] is a wait call
     for j in range(i + 1, len(calls)):
-        if not waits[j]:
-            continue
         c, prev = calls[j], calls[j - 1]
-        pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
-        if prev["end"] is not None and (j - 1 == i or waits[j - 1]):
-            pieces.append((prev["end"], c["own_start"]))
+        wait = _is_wait_call(c)
+        if wait:
+            pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
+            if prev["end"] is not None and (j - 1 == i or prev_wait):
+                pieces.append((prev["end"], c["own_start"]))
+        if c["start"] >= end:
+            break
+        prev_wait = wait
     last = max((e["ts"] for e in agent["events"] if start <= e["ts"] < end), default=None)
     if last is not None and end - last > IDLE_GAP_S and not any(
             c["own_start"] < end and (c["end"] is None or c["end"] > last) for c in calls):
@@ -1358,14 +1365,31 @@ def background_waiting(agent, calls, i, start, end):
     return [(a, b) for a, b in merged([p for p in clipped if p[0] < p[1]])]
 
 
+def _background_calls(agent, calls):
+    """(i, start, end, waiting) for each of calls (_calls(agent)) that Claude
+    Code moved to the background (a background_check notice) and that is
+    no procedure execution's start or wait (_procedures), in call order:
+    start and end its window (_background_window), end None when its
+    completion was never observed, and waiting the agent's waiting in it
+    (background_waiting), empty without an end. tool_slowdowns makes its
+    rows from them, and waits_section counts the windows without waiting."""
+    procedures = _procedures(calls)
+    procedure_calls = set(procedures).union(*procedures.values())
+    for i, c in enumerate(calls):
+        if i in procedure_calls or not notice("background_check", c):
+            continue
+        start, end = _background_window(agent, c)
+        yield i, start, end, [] if end is None else background_waiting(agent, calls, i, start, end)
+
+
 def tool_slowdowns(agent, checks):
     """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
     configured_checks(manifest). A procedure execution's start and its wait
     calls (_procedures) are no timeout, background_check or long_tool_call:
     they are one check execution (checks_section). An await-checks call that
     exits non-zero reports a status (still running, stopped, busy), so it is
-    no repeated_failure either. A background_check with an observed
-    completion covers only the agent's waiting in its window
+    no repeated_failure either. A background_check (_background_calls) with
+    an observed completion covers only the agent's waiting in its window
     (background_waiting), and _background is the window's length (None
     without a completion); a window without waiting adds no row, and its
     call is still no long_tool_call."""
@@ -1381,23 +1405,22 @@ def tool_slowdowns(agent, checks):
         out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker, checks=checks))
         counted.update(indexes)
 
+    background = {i: (start, end, waiting) for i, start, end, waiting in _background_calls(agent, calls)}
     for i, c in enumerate(calls):
         if i in procedure_calls:
             continue
         timeout = notice("timeout", c)
         if timeout:
             add("timeout", [i], c["own_start"], c["end"], "measured", c, timeout)
-        marker = notice("background_check", c)
-        if marker:
+        if i in background:
             counted.add(i)
-            start, end = _background_window(agent, c)
+            marker = notice("background_check", c)
+            start, end, waiting = background[i]
             if end is None:
                 sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker, checks=checks)
                 sd["_background"] = None
                 out.append(sd)
-                continue
-            waiting = background_waiting(agent, calls, i, start, end)
-            if waiting:  # else no slowdown: waits_section counts it as not waited
+            elif waiting:  # else no slowdown: waits_section counts it as not waited
                 sd = _slowdown("background_check", agent, start, end, "bound", c, marker,
                                covers=[(agent, a, b) for a, b in waiting], checks=checks)
                 sd["_cost"] = sum(b - a for a, b in waiting)
@@ -1523,6 +1546,8 @@ def run_slowdowns(run):
         sd = _slowdown("extra_review_round", first, first["start"], None, "measured",
                        covers=[(a, a["start"], a["end"]) for a in timed])
         sd["_cost"] = sum(a["end"] - a["start"] for a in timed) if len(timed) == len(members) else None
+        if sd["_cost"] is None:
+            sd["cost_kind"] = UNAVAILABLE  # an untimed fix or re-review
         out.append(sd)
     for launch in run["launches"]:
         # Retries and escalations exactly as run-report counts them, per
@@ -1640,8 +1665,9 @@ def settle_slowdowns(slowdowns):
        those become its _covers and their length its _cost.
     3. Fold: a row that took nothing is removed and its kind added to the
        _contains of the row that took most of its span (the earliest on a
-       tie). A row of zero length goes to the earliest row whose taken
-       parts, ends included, hold its instant; with none it stays at 0.
+       tie, the shares compared to the millisecond). A row of zero length
+       goes to the earliest row whose taken parts, ends included, hold its
+       instant; with none it stays at 0.
     Rows of unknown cost, rows without a cover (a relaunch row with nothing
     redone) and run-wide rows (an owner None: idle_gap) are neither merged,
     charged nor folded. A relaunch row covers its launch's redone agents, so
@@ -1689,8 +1715,10 @@ def settle_slowdowns(slowdowns):
             for a, b, r in taken.get(id(owner), []):
                 if (a <= start <= b) if zero else (min(b, end) > max(a, start)):
                     share.setdefault(id(r), [r, 0.0])[1] += max(0.0, min(b, end) - max(a, start))
-        most = max([t for _r, t in share.values()], default=0.0)
-        holders = [r for r, t in share.values() if t == most]
+        # Shares are compared to the millisecond: epoch-second floats make
+        # two equal shares differ in their last bits.
+        most = max([round(t, 3) for _r, t in share.values()], default=0.0)
+        holders = [r for r, t in share.values() if round(t, 3) == most]
         if holders:
             into = min(holders, key=lambda r: r["_at"])
             into["_contains"] |= {s["kind"]} | s["_contains"]
@@ -2121,9 +2149,9 @@ def waits_section(run):
     result file's name only: the path holds the user's config dir.
 
     background_not_waited counts the calls Claude Code moved to the
-    background, outside a procedure, whose completion was observed and in
-    whose window the agent did not wait (background_waiting is empty): no
-    background_check slowdown."""
+    background, outside a procedure (_background_calls), whose completion
+    was observed and in whose window the agent did not wait (background_waiting
+    is empty): no background_check slowdown."""
     if not _has_tool_events(run):
         return UNAVAILABLE
     via = waits = stopped = not_waited = 0
@@ -2134,13 +2162,8 @@ def waits_section(run):
         calls = _calls(a)
         procedures = _procedures(calls)
         label = a["entry"]["label"]
-        procedure_calls = set(procedures).union(*procedures.values())
-        for i, c in enumerate(calls):
-            if i in procedure_calls or not notice("background_check", c):
-                continue
-            start, end = _background_window(a, c)
-            if end is not None and not background_waiting(a, calls, i, start, end):
-                not_waited += 1
+        not_waited += sum(1 for _i, _start, end, waiting in _background_calls(a, calls)
+                          if end is not None and not waiting)
         for i, c in enumerate(calls):
             path = procedure_file(c)
             if path is None:
@@ -3253,17 +3276,18 @@ def _evidence_text(evidence, contains=()):
 
 def _earlier_launches(a):
     """'kept N agents, redid M (X of agent time)' over the launches but the
-    last, X the sum of their redone_agent_s (unavailable if any is); None for
-    a run with one launch or none."""
+    last, X the sum of their redone_agent_s; '(agent time unavailable)' when
+    any is unavailable. None for a run with one launch or none."""
     launches = _launch_names(a)
     if len(launches) < 2:
         return None
     earlier = launches[:-1]
     times = [l["redone_agent_s"] for l in earlier]
-    total = round(sum(times), 1) if all(_is_num(t) for t in times) else UNAVAILABLE
-    return "kept %s, redid %d (%s of agent time)" % (
+    spent = "%s of agent time" % _secs(round(sum(times), 1)) if all(_is_num(t) for t in times) \
+        else "agent time unavailable"
+    return "kept %s, redid %d (%s)" % (
         _count_word(sum(l["kept_agents"] for l in earlier), "agent"), sum(l["redone_agents"] for l in earlier),
-        _secs(total))
+        spent)
 
 
 def _by_user(acceptance):

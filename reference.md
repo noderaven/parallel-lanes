@@ -1121,12 +1121,12 @@ check-file lock is held a little longer. `RUN_CHECKS_BUSY_WAIT_S` overrides the 
 tests only.
 
 **Mapping a project's tools.** A tool rarely exits with these codes by itself: a project maps
-its tools to the contract in a wrapper. Thistledown's `unity-batch.sh` is the example: it turns
-the Unity CLI's timeout into `124` and its preflight that finds another Unity holding the
-project open into `75`. A tool's own `--timeout` is not its wall time: it may bound only one
-phase and exit with a code of its own (sc1's Unity CLI timeout exited `6`, read as a test
-failure), so a wrapper that needs a wall-time limit times the whole command and exits `124`
-itself.
+its tools to the contract in a wrapper. A Unity project's `unity-batch.sh` wrapper is the
+example: it turns the Unity CLI's timeout into `124` and its preflight that finds another Unity
+holding the project open into `75`. A tool's own `--timeout` is not its wall time: it may bound
+only one phase and exit with a code of its own (sc1's Unity CLI timeout exited `6`, read as a
+test failure), so a wrapper that needs a wall-time limit times the whole command and exits
+`124` itself.
 
 ## Active-run markers and stops
 
@@ -1822,9 +1822,10 @@ acquired.
 (never a live path from the manifest, so imported runs and runs from another OS work), writes
 `autopsy.json` and `autopsy.md` into it, and prints a summary of at most 15 lines: the wall time,
 for a run with more than one launch `earlier launches: kept N agents, redid M (X of agent time)`
-(the earlier launches' `kept_agents`, `redone_agents` and `redone_agent_s` summed, X
-`unavailable` if any is), when the user accepted the delivered head and the run's own verdict
-is not `accepted` the line `acceptance: <status>; accepted by the user at the delivered head`
+(the earlier launches' `kept_agents`, `redone_agents` and `redone_agent_s` summed, and
+`(agent time unavailable)` in place of `(X of agent time)` if any is), when the user accepted
+the delivered head and the run's own verdict is not `accepted` the line
+`acceptance: <status>; accepted by the user at the delivered head`
 (see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
 full-suite runs, total tokens, the top suggestion and the path of `autopsy.md`. The session
 appends that summary to the hand-back report.
@@ -1975,7 +1976,7 @@ also has `background_s`, its background window's length):
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
 | `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
-| `extra_review_round` | a task's fix and re-review rounds |
+| `extra_review_round` | a task's fix and re-review rounds; `unavailable` when one of them is untimed |
 | `escalation` | an agent re-run at another model tier |
 | `retry` | a retried agent |
 | `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
@@ -1994,11 +1995,10 @@ also has `background_s`, its background window's length):
   `heredoc_failure` and `edit_retry` (a window from a failure to its recovery, which may hold
   other work); `retry`, `escalation` and `extra_review_round` (a whole agent); `relaunch` (a
   launch's redone agents, in a tier of its own so that an agent both retried and redone goes to
-  the retry first). Within a tier the
-  shorter row goes first (its `span_s`), then the earlier one. Each row takes only the parts of
-  its span that no row before it took: `cost_s` is their length and `span_s` its length before
-  charging, so an `edit_retry` inside a `heredoc_failure`'s window keeps its own time and the
-  heredoc row the rest.
+  the retry first). Within a tier the shorter row goes first (its `span_s`), then the earlier
+  one, then the order listed. Each row takes only the parts of its span that no row before it
+  took: `cost_s` is their length and `span_s` its length before charging, so an `edit_retry`
+  inside a `heredoc_failure`'s window keeps its own time and the heredoc row the rest.
 - **Folding:** a row left with nothing is removed, and its kind goes into `contains` of the row
   that took most of its span (the earliest on a tie). A row of zero length folds into the
   earliest row whose time, ends included, holds its instant; with none it stays at 0 s.

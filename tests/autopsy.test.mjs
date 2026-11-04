@@ -467,6 +467,14 @@ test('read_events gives timed events in file order and skips damaged lines', () 
   assert.deepEqual(counted, [2, 2, 2]);
 });
 
+test('a tool_use event carries its line\'s message id', () => {
+  const events = python([
+    'import _autopsy',
+    `print(json.dumps(_autopsy.read_events(${JSON.stringify(join(RUN1, 'wf_1', 'agent-b1.jsonl'))})))`,
+  ]);
+  assert.deepEqual(events.filter((e) => e.kind === 'tool_use').map((e) => e.msg), ['m_b1_2', 'm_b1_3']);
+});
+
 test('exit 2 without a manifest or a wf_ dir, and nothing written', () => {
   const empty = join(TMP, 'empty');
   mkdirSync(empty, { recursive: true });
@@ -709,6 +717,7 @@ function detect(events, notes = [], notices = []) {
     '                  "suggestions": _autopsy.suggestions_section(settled, None),',
     '                  "waits": _autopsy.waits_section(run),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
+    '                  "times": [list(_autopsy._execution_times(agent, c)) for c in calls],',
     '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
   ]);
@@ -776,6 +785,34 @@ test('a call queued behind an earlier call of its turn starts at that call\'s re
     res(10, 'e1', 'Edit', 'ok'),
   ]);
   assert.deepEqual(out.own_starts, [0, 1]);
+});
+
+test('a message id seen again gives no later turn its number', () => {
+  // m1, m2, m1 again, then m3: m3 is a turn of its own, not m2's, so d starts
+  // at its own use (8), not at b's result (9).
+  const out = detect([
+    use(0, 'a', 'Bash', { command: 'x' }, 'm1'),
+    res(5, 'a', 'Bash', 'ok'),
+    use(6, 'b', 'Bash', { command: 'y' }, 'm2'),
+    use(7, 'c', 'Bash', { command: 'z' }, 'm1'),
+    use(8, 'd', 'Bash', { command: 'w' }, 'm3'),
+    res(9, 'b', 'Bash', 'ok'),
+    res(10, 'c', 'Bash', 'ok'),
+    res(11, 'd', 'Bash', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 6, 7, 8]);
+});
+
+test('a check call queued behind a call of its turn starts at that call\'s result', () => {
+  // A Read and the test command sent in one turn: the test runs after the
+  // Read's result (60), so its execution starts there.
+  const out = detect([
+    use(0, 'r1', 'Read', { file_path: 'a.js' }, 'm1'),
+    use(0.5, 't1', 'Bash', { command: 'npm test' }, 'm1'),
+    res(60, 'r1', 'Read', 'x'),
+    res(90, 't1', 'Bash', '9 passed'),
+  ]);
+  assert.deepEqual(out.times[1], [false, 60, 90, 'measured']);
 });
 
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
@@ -929,6 +966,17 @@ test('a background window without waiting is no slowdown, and its call no long c
   assert.equal(out.waits.background_not_waited, 1);
 });
 
+test('a call open across the stretch before the notice is no idle waiting', () => {
+  // bx1 runs from 0; a build runs 10-400 and no wait call follows. The agent
+  // is not idle from 10 to the notice at 300: the build is open across it.
+  const out = detect([...bxRun,
+    use(10, 'b2', 'Bash', { command: 'npm run build' }),
+    res(400, 'b2', 'Bash', 'built'),
+  ], [], [{ ts: 300, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.filter((s) => s.kind === 'background_check'), []);
+  assert.equal(out.waits.background_not_waited, 1);
+});
+
 test('two background checks waited on together are one row over both windows', () => {
   // bx1 runs 0-50 and bx2 2-80; the polls wait for both: 10-21 for bx1,
   // 3-21 for bx2 (from its own result). One row of 18 s; its window is the
@@ -1055,9 +1103,10 @@ test('slowdowns that overlap in time are counted once in the stake', () => {
 
 // The public rows settle_slowdowns leaves of internal rows built with
 // _slowdown, each {kind, start, end}: of agent X unless runWide, and with an
-// unknown cost (its covers kept) when unknown. Each row comes back as [kind,
-// at, cost_s, span_s, merged, contains]; inputs is whether the input rows are
-// unchanged.
+// unknown cost (its covers kept) when unknown; costKind and marker, when
+// given, are the row's cost_kind and evidence marker. Each row comes back as
+// [kind, at, cost_s, span_s, merged, contains], and whole in public; inputs is
+// whether the input rows are unchanged.
 function settle(rows) {
   return python([
     'import _autopsy',
@@ -1065,14 +1114,15 @@ function settle(rows) {
     'rows = []',
     `for r in json.loads(${JSON.stringify(JSON.stringify(rows))}):`,
     '    sd = _autopsy._slowdown(r["kind"], None if r.get("runWide") else X, r["start"], r["end"],',
-    '                            "unavailable" if r.get("unknown") else "measured")',
+    '                            r.get("costKind") or ("unavailable" if r.get("unknown") else "measured"),',
+    '                            marker=r.get("marker"))',
     '    if r.get("unknown"):',
     '        sd["_cost"] = None',
     '    rows.append(sd)',
     'before = repr(rows)',
     'out = [_autopsy.public_slowdown(s) for s in _autopsy.settle_slowdowns(rows)]',
     'print(json.dumps({"rows": [[s["kind"], s["at"], s["cost_s"], s["span_s"], s["merged"], s["contains"]]',
-    '                           for s in out], "inputs": repr(rows) == before}))',
+    '                           for s in out], "public": out, "inputs": repr(rows) == before}))',
   ]);
 }
 
@@ -1164,6 +1214,43 @@ test('a row inside a higher row is folded into it', () => {
     ['retry', at(0), 170, 300, 1, []],
     ['long_tool_call', at(50), 130, 130, 1, []],
   ]);
+});
+
+test('a row that took nothing folds into the row that took most of its span', () => {
+  // The 20 s holder is the earlier one; the 40 s holder takes the fold.
+  assert.deepEqual(settle([
+    { kind: 'long_tool_call', start: 0, end: 20 },
+    { kind: 'check_rerun', start: 20, end: 60 },
+    { kind: 'repeated_failure', start: 0, end: 60 },
+  ]).rows, [
+    ['long_tool_call', at(0), 20, 20, 1, []],
+    ['check_rerun', at(20), 40, 40, 1, ['repeated_failure']],
+  ]);
+});
+
+test('two equal shares at epoch times fold into the earlier holder', () => {
+  // Real timestamps are epoch seconds with milliseconds: the two 0.1 s shares
+  // differ as floats, but are equal to the millisecond.
+  const T0 = 1791613911.832;
+  const out = settle([
+    { kind: 'timeout', start: T0 + 0.1, end: T0 + 0.3 },
+    { kind: 'background_check', start: T0 + 0.3, end: T0 + 1.0 },
+    { kind: 'long_tool_call', start: T0 + 0.2, end: T0 + 0.4 },
+  ]);
+  assert.deepEqual(out.rows.map(([kind, _at, cost, span, _merged, contains]) => [kind, cost, span, contains]), [
+    ['timeout', 0.2, 0.2, ['long_tool_call']],
+    ['background_check', 0.7, 0.7, []],
+  ]);
+});
+
+test('a merge keeps the weakest cost_kind and the earliest row\'s evidence', () => {
+  // The later row is bound and listed first; the earlier is measured.
+  const out = settle([
+    { kind: 'edit_retry', start: 10, end: 30, costKind: 'bound', marker: 'has been modified since' },
+    { kind: 'edit_retry', start: 0, end: 20, costKind: 'measured', marker: 'has not been read yet' },
+  ]);
+  assert.deepEqual(out.rows, [['edit_retry', at(0), 30, 30, 2, []]]);
+  assert.deepEqual([out.public[0].cost_kind, out.public[0].evidence.marker], ['bound', 'has not been read yet']);
 });
 
 test('a row of unknown cost is never merged, charged or folded', () => {
@@ -1298,8 +1385,8 @@ test('a redone agent without timestamps makes the relaunch cost unavailable, nev
     [[null, T('10:00:00'), 'unavailable', 'unavailable', 'unavailable', 1, []]]);
   assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 'unavailable', 'unavailable']);
   assert.equal(D.suggestions.find((g) => g.kind === 'relaunch').stake_s, 'unavailable');
-  assert.match(res.md, /^- Earlier launches: kept 2 agents, redid 2 \(unavailable of agent time\)$/m);
-  assert.match(res.stdout, /^earlier launches: kept 2 agents, redid 2 \(unavailable of agent time\)$/m);
+  assert.match(res.md, /^- Earlier launches: kept 2 agents, redid 2 \(agent time unavailable\)$/m);
+  assert.match(res.stdout, /^earlier launches: kept 2 agents, redid 2 \(agent time unavailable\)$/m);
 });
 
 test('an earlier launch with nothing redone keeps its relaunch row at 0', () => {
@@ -1340,6 +1427,29 @@ test('relaunch is the fifth charging tier, after the whole-agent rows', () => {
   assert.equal(tiers.length, 5);
   assert.deepEqual(tiers[3], ['retry', 'escalation', 'extra_review_round']);
   assert.deepEqual(tiers[4], ['relaunch']);
+});
+
+test('every kind but idle_gap has a charging tier', () => {
+  assert.equal(python(['import _autopsy',
+    'print(json.dumps(set(k for tier in _autopsy.CHARGE_TIERS for k in tier) | {"idle_gap"}',
+    '                 == set(_autopsy.KINDS)))']), true);
+});
+
+test('an extra review round with an untimed fix or re-review costs unavailable', () => {
+  // One launch: A1 implement and review, then a fix and a re-review, one of
+  // them without timestamps.
+  const round = (fix, reReview) => autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents: [
+    { label: 'A1 implement', start: '10:00:05', end: '10:05:00' },
+    { label: 'A1 review', start: '10:05:10', end: '10:06:00' },
+    { label: 'A1 fix 1', ...fix },
+    { label: 'A1 re-review 1', ...reReview },
+  ] }])).json;
+  const FIX = { start: '10:06:10', end: '10:08:00' };
+  const RE_REVIEW = { start: '10:08:10', end: '10:09:00' };
+  const roundRow = (D) => ofKind(D, 'extra_review_round').map((s) => [s.cost_s, s.cost_kind, s.span_s]);
+  assert.deepEqual(roundRow(round(FIX, RE_REVIEW)), [[160, 'measured', 160]]);
+  assert.deepEqual(roundRow(round({}, RE_REVIEW)), [['unavailable', 'unavailable', 'unavailable']]);
+  assert.deepEqual(roundRow(round(FIX, {})), [['unavailable', 'unavailable', 'unavailable']]);
 });
 
 test('a run with one launch keeps all its agents and shows no launches table', () => {
