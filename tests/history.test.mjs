@@ -125,7 +125,7 @@ test('history runs autopsy where it is missing', () => {
   const fa = rowOf(res, 'fa');
   assert.deepEqual(Object.keys(fa), [
     'run_id', 'folder', 'date', 'engine_version', 'tasks', 'agents', 'wall_s', 'slowest_phase', 'tokens_total',
-    'tokens_per_task', 'tokens_partial', 'full_suite_runs', 'acceptance', 'top_slowdown',
+    'tokens_per_task', 'tokens_partial', 'full_suite_runs', 'acceptance', 'accepted_by_user', 'top_slowdown',
   ]);
   const A = autopsyOf(a);
   const tot = A.tokens.totals;
@@ -133,7 +133,7 @@ test('history runs autopsy where it is missing', () => {
   assert.deepEqual(fa, {
     run_id: 'fa', folder: '2026-10-10-fa', date: '2026-10-10', engine_version: '1.4.4', tasks: 2, agents: 4,
     wall_s: 600, slowest_phase: 'Lane a', tokens_total: total, tokens_per_task: Math.round(total / 2),
-    tokens_partial: false, full_suite_runs: 2, acceptance: 'unverified',
+    tokens_partial: false, full_suite_runs: 2, acceptance: 'unverified', accepted_by_user: false,
     top_slowdown: { kind: A.slowdowns[0].kind, cost_s: A.slowdowns[0].cost_s },
   });
   assert.equal(rowOf(res, 'fb').engine_version, 'unavailable');
@@ -177,6 +177,35 @@ test('a stale autopsy is redone', () => {
   assert.equal(autopsyOf(a).kept, undefined, 'the autopsy of fa was not redone');
   assert.equal(autopsyOf(a).inputs_fingerprint, fingerprint(a));
   assert.equal(autopsyOf(b).kept, true, 'a current autopsy was redone');
+});
+
+test('a user acceptance at the delivered head shows beside the run\'s acceptance', () => {
+  // run1 delivers 3333...3333 with acceptance unverified; ledger accept
+  // appends an accepted event at that head to the ledger's _run.jsonl.
+  const accept = (dir) => editLines(join(dir, 'p.f1.ledger', '_run.jsonl'), (lines) => [...lines,
+    JSON.stringify({ task: '_run', event: 'accepted', head: '3'.repeat(40), text: 'ACCEPT-TEXT-9' })]);
+  const cell = (md, runId) => mdRow(md, runId).split('|').slice(1, -1).map((c) => c.trim())[10];
+  // fa: accepted by the user, its own verdict unverified. fb: accepted by
+  // the user and accepted by the run, shown as accepted alone.
+  let { hist, a, b } = makeHistory();
+  accept(a);
+  accept(b);
+  editJson(join(b, 'wf_1.json'), (w) => { w.result.acceptance.status = 'accepted'; });
+  let res = historyOk(hist);
+  assert.deepEqual(['fa', 'fb'].map((id) => [rowOf(res, id).acceptance, rowOf(res, id).accepted_by_user]),
+    [['unverified', true], ['accepted', true]]);
+  assert.deepEqual([cell(res.md, 'fa'), cell(res.md, 'fb')], ['unverified (accepted by user)', 'accepted']);
+  assert.ok(!res.md.includes('ACCEPT-TEXT-9') && !readFileSync(join(hist, 'history.json'), 'utf8').includes('ACCEPT-TEXT-9'));
+  // fa: no accepted event (false). fb: no delivered_sha, so unavailable.
+  ({ hist, a, b } = makeHistory());
+  editJson(join(b, 'wf_1.json'), (w) => {
+    delete w.result.delivered_sha;
+    delete w.result.acceptance.delivered_sha;
+  });
+  res = historyOk(hist);
+  assert.deepEqual(['fa', 'fb'].map((id) => rowOf(res, id).accepted_by_user), [false, 'unavailable']);
+  assert.deepEqual([cell(res.md, 'fa'), cell(res.md, 'fb')], ['unverified', 'unverified']);
+  assert.equal(autopsyOf(b).done.acceptance.accepted_by_user, 'unavailable');
 });
 
 test('recurring slowdowns total across runs with each run\'s version', () => {

@@ -34,7 +34,7 @@ history.json:
 
   {"runs": [{run_id, folder, date, engine_version, tasks, agents, wall_s,
              slowest_phase, tokens_total, tokens_per_task, tokens_partial,
-             full_suite_runs, acceptance, top_slowdown}],
+             full_suite_runs, acceptance, accepted_by_user, top_slowdown}],
    "recurring": [{kind, total_s, runs: [{run_id, engine_version, cost_s}]}],
    "token_trends": {<engine_version>: {runs, tokens_per_task, by_role,
                                        partial_runs}},
@@ -50,6 +50,10 @@ history.json:
   autopsy ranks its largest agents. tokens_per_task: tokens_total / tasks,
   rounded. When tokens_partial is true both are lower bounds: history.md
   shows them as '>= N'.
+- acceptance: the run's own status (the autopsy's done.acceptance.status,
+  else the index entry's). accepted_by_user: the autopsy's
+  done.acceptance.accepted_by_user (true when the ledger holds a user
+  acceptance at the delivered head), "unavailable" without one.
 - top_slowdown: {kind, cost_s} of the autopsy's largest slowdown, or null.
 - recurring: one entry per slowdown kind found in any selected run, ranked
   by total_s (the sum of the runs' known costs). A run's cost_s is the
@@ -74,8 +78,10 @@ history.json:
   runs with no autopsy. Sections with no run are left out.
 
 history.md is plain ASCII: the per-run table, recurring slowdowns, token
-trends, suggestions and the insufficient-data list. Neither file holds
-command, output or prompt text.
+trends, suggestions and the insufficient-data list. The per-run table's
+Acceptance column shows acceptance, as '<status> (accepted by user)' when
+accepted_by_user is true and the status is not accepted. Neither file
+holds command, output or prompt text.
 
 history --runs A,B compares two runs (each a run id or a folder name) and
 writes nothing: it never runs autopsy, so a run whose autopsy is missing or
@@ -320,6 +326,7 @@ def build_row(entry, analysis):
     acceptance = _dig(analysis, "done", "acceptance", "status")
     if not _known(acceptance):
         acceptance = entry.get("acceptance") if _known(entry.get("acceptance")) else UNAVAILABLE
+    by_user = _dig(analysis, "done", "acceptance", "accepted_by_user")
     slowdowns = _dig(analysis, "slowdowns")
     top = slowdowns[0] if isinstance(slowdowns, list) and slowdowns and isinstance(slowdowns[0], dict) else None
     full = _dig(analysis, "checks", "full_suite_runs", "total")
@@ -333,6 +340,7 @@ def build_row(entry, analysis):
         "tokens_partial": partial if isinstance(partial, bool) else UNAVAILABLE,
         "full_suite_runs": full if _num(full) else UNAVAILABLE,
         "acceptance": acceptance,
+        "accepted_by_user": by_user if isinstance(by_user, bool) else UNAVAILABLE,
         "top_slowdown": None if top is None else {"kind": top.get("kind"), "cost_s": top.get("cost_s")},
     })
     return row
@@ -481,6 +489,15 @@ def _tokens(value, partial):
     return (">= %d" if partial else "%d") % value
 
 
+def _acceptance(row):
+    """history.md's Acceptance cell: the run's own status, with ' (accepted
+    by user)' when the user accepted the delivered head and it is not
+    accepted."""
+    if row["accepted_by_user"] is True and row["acceptance"] != "accepted":
+        return "%s (accepted by user)" % row["acceptance"]
+    return row["acceptance"]
+
+
 def _top_slowdown(top):
     if not isinstance(top, dict):
         return "none"
@@ -518,7 +535,7 @@ def render_markdown(history, hdir, opts):
              "Full-suite runs", "Acceptance", "Top slowdown"],
             [[r["run_id"], r["date"], r["engine_version"], r["tasks"], r["agents"], _autopsy._secs(r["wall_s"]),
               r["slowest_phase"], _tokens(r["tokens_total"], r["tokens_partial"] is True),
-              _tokens(r["tokens_per_task"], r["tokens_partial"] is True), r["full_suite_runs"], r["acceptance"],
+              _tokens(r["tokens_per_task"], r["tokens_partial"] is True), r["full_suite_runs"], _acceptance(r),
               _top_slowdown(r["top_slowdown"])] for r in h["runs"]])
     else:
         lines.append("No runs.")
