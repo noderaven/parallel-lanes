@@ -271,7 +271,8 @@ model turn that came at or before its own result. The kinds:
   joins the row ("unavailable" when one of the two is untimed). An
   implement escalated before any review of its task is followed by the
   task's first review, which stays out, and so does a review after an
-  adjudicate.
+  adjudicate. An escalation of another role than implement covers only
+  its own agent.
 - relaunch: every launch but the last, at its start; the summed wall
   times of its redone agents (see launches), "unavailable" (cost_kind
   too) when one of them is untimed, never 0 or a part, and 0 (listed,

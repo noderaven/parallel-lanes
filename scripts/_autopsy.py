@@ -1746,9 +1746,10 @@ def second_review(agents, k):
     escalated before any review of its task (it failed and ran again at
     another tier) is followed by the task's first review, which the
     escalation did not add; an adjudicate next means the review after it is
-    the adjudication's."""
+    the adjudication's. Only an escalated implement (role 'implement') has
+    one: another role's escalation keeps its own time."""
     task = agents[k]["entry"]["task"]
-    if task is None:
+    if task is None or agents[k]["entry"]["role"] != "implement":
         return None
     label = task + " review"
     if not any(a["entry"]["label"] == label for a in agents[:k]):

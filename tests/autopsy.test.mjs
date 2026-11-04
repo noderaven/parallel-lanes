@@ -1738,6 +1738,10 @@ test('an escalation row covers the review the engine runs again after it', () =>
   // review, which the escalation did not add.
   assert.deepEqual(rows([B1, { ...ESCALATED, start: '10:05:10', end: '10:08:00' }, SECOND]),
     [['B1 implement', T('10:05:10'), 170, 'measured', 170, 1, []]]);
+  // Only an escalated implement gains the review after it: an escalated
+  // review (B1 review at opus, then once more at opus) keeps its own time.
+  assert.deepEqual(rows([B1, REVIEW, { ...ESCALATED, label: 'B1 review' }, { ...SECOND, model: 'opus' }]),
+    [['B1 review', T('10:06:10'), 170, 'measured', 170, 1, []]]);
   assert.deepEqual(ofKind(S, 'escalation').map(rowOf), [['B1 implement', T('09:02:10'), 170, 'measured', 170, 1, []]]);
 });
 
