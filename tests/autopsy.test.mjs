@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 9);
+  assert.equal(A.autopsy_version, 10);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -696,7 +696,10 @@ test('evidence holds structured fields only', () => {
 // ---- detector cases on synthetic events (tool_slowdowns) ----
 
 // Events of one agent, labelled X: use() is a tool call, res() its result;
-// times are seconds.
+// times are seconds. As find_slowdowns does, detect() leaves the internal
+// check_time rows out of slowdowns and suggestions; check_time lists the
+// [start, end] parts of the agent's time they took, and found the kinds
+// tool_slowdowns made before settling.
 const use = (ts, id, name, input, msg = null) => (
   { ts, kind: 'tool_use', name, id, is_error: false, text: '', input, msg });
 const res = (ts, id, name, text, isError = false) => (
@@ -709,11 +712,14 @@ function detect(events, notes = [], notices = []) {
       + ` "notices": json.loads(${JSON.stringify(JSON.stringify(notices))})}`,
     '_autopsy.span_agent(agent)',
     'found = _autopsy.tool_slowdowns(agent, _autopsy.configured_checks({"commands": {"test": ["npm test"]}}))',
-    'settled = _autopsy.settle_slowdowns(found)',
+    'every = _autopsy.settle_slowdowns(found)',
+    'settled = [s for s in every if s["kind"] != "check_time"]',
     'calls = _autopsy._calls(agent)',
     'run = {"folder": None, "manifest": {}, "launches": [{"wf": "wf_1", "result": {"version": "1.6.10"},',
     '                                                    "agents": [agent]}]}',
     'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in settled],',
+    '                  "check_time": [[a, b] for s in every if s["kind"] == "check_time" for _o, a, b in s["_covers"]],',
+    '                  "found": sorted(set(s["kind"] for s in found)),',
     '                  "suggestions": _autopsy.suggestions_section(settled, None),',
     '                  "waits": _autopsy.waits_section(run),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
@@ -1097,6 +1103,63 @@ test('a rerun needs proof that nothing changed', () => {
     [['check_rerun', at(100), 5, 'measured', null]]);
 });
 
+// ---- check time (1.6.13) ----
+
+const RUN_CHECKS_LINE = 'python3 C:/u/skill/scripts/run-checks --cmd test npm test';
+const TASK_CHECKS_LINE = 'python3 C:/u/skill/scripts/task-checks C:/u/wt --unit A1';
+
+test('a foreground helper check call is check time, not a long tool call', () => {
+  const call = (command) => detect([use(0, 'b1', 'Bash', { command }), res(300, 'b1', 'Bash', 'ok')]);
+  for (const command of [RUN_CHECKS_LINE, TASK_CHECKS_LINE]) {
+    const out = call(command);
+    assert.deepEqual(out.slowdowns, [], command);
+    assert.deepEqual(out.suggestions, [], command);
+    assert.deepEqual(out.check_time, [[0, 300]], command);
+  }
+  // A direct test command stays a long tool call: its suggestion is about it.
+  const direct = call('npm test');
+  assert.deepEqual(brief(direct), [['long_tool_call', at(0), 300, 'measured', null]]);
+  assert.equal(direct.slowdowns[0].evidence.check, 'test#1');
+  assert.deepEqual(direct.check_time, []);
+});
+
+test('a helper call that hits its timeout keeps the timeout row, with no check time in it', () => {
+  // Review focus 1: the check_time row of the call folds into the timeout row
+  // silently; the timeout row already names the call.
+  const out = detect([use(0, 'b1', 'Bash', { command: RUN_CHECKS_LINE }),
+    res(120, 'b1', 'Bash', 'Command timed out after 2m 0s')]);
+  assert.ok(out.found.includes('check_time'), out.found.join(' '));
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.contains, s.evidence.check]),
+    [['timeout', at(0), 120, 120, [], 'run-checks']]);
+  assert.deepEqual(out.check_time, []);
+});
+
+test('an edit retry around a helper call keeps only its own time', () => {
+  // Review focus 2 (the m1a and r151 shape): the check time is not handed to
+  // the edit_retry window that holds it.
+  const NOT_READ = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const out = detect([
+    use(0, 'e1', 'Edit', { file_path: 'a.js' }, 'm1'), res(1, 'e1', 'Edit', NOT_READ, true),
+    use(10, 'b1', 'Bash', { command: RUN_CHECKS_LINE }, 'm2'), res(310, 'b1', 'Bash', 'ok'),
+    use(320, 'e2', 'Edit', { file_path: 'a.js' }, 'm3'), res(321, 'e2', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.contains]),
+    [['edit_retry', at(0), 21, 321, []]]);
+  assert.deepEqual(out.check_time, [[10, 310]]);
+});
+
+test('a rerun of a helper call stays a check rerun', () => {
+  // check_rerun still applies to a helper call: the rerun row keeps the
+  // second call's time, and only the first call is check time.
+  const out = detect([
+    use(0, 'b1', 'Bash', { command: RUN_CHECKS_LINE }), res(5, 'b1', 'Bash', 'ok'),
+    use(10, 'r1', 'Read', { file_path: 'README.md' }), res(11, 'r1', 'Read', 'x'),
+    use(20, 'b2', 'Bash', { command: RUN_CHECKS_LINE }), res(25, 'b2', 'Bash', 'ok'),
+  ]);
+  assert.deepEqual(brief(out), [['check_rerun', at(20), 5, 'measured', 'run-checks']]);
+  assert.deepEqual(out.check_time, [[0, 5]]);
+});
+
 test('slowdowns that overlap in time are counted once in the stake', () => {
   // Three Edits sent together while a long Bash call runs; each fails as
   // unread when its result comes back, queued behind the Bash call (so they
@@ -1232,6 +1295,30 @@ test('a row inside a higher row is folded into it', () => {
     ['retry', at(0), 170, 300, 1, []],
     ['long_tool_call', at(50), 130, 130, 1, []],
   ]);
+});
+
+test('check time is charged in the second tier and never folds into a public row by name', () => {
+  // Review focus 2: a fix agent's extra_review_round (a whole-agent row,
+  // 0-400) keeps only its own time around a helper call (50-350).
+  assert.deepEqual(settle([
+    { kind: 'extra_review_round', start: 0, end: 400 },
+    { kind: 'check_time', start: 50, end: 350 },
+  ]).rows, [
+    ['extra_review_round', at(0), 100, 400, 1, []],
+    ['check_time', at(50), 300, 300, 1, []],
+  ]);
+  // Review focus 1: a check_time row inside a timeout row is dropped without
+  // a trace, at any length, a zero-length one included.
+  assert.deepEqual(settle([
+    { kind: 'timeout', start: 0, end: 120 },
+    { kind: 'check_time', start: 0, end: 120 },
+    { kind: 'check_time', start: 60, end: 60 },
+  ]).rows, [['timeout', at(0), 120, 120, 1, []]]);
+  // Before a long tool call of the same span, in the order of the tier.
+  assert.deepEqual(settle([
+    { kind: 'long_tool_call', start: 0, end: 200 },
+    { kind: 'check_time', start: 0, end: 200 },
+  ]).rows, [['check_time', at(0), 200, 200, 1, ['long_tool_call']]]);
 });
 
 test('a row that took nothing folds into the row that took most of its span', () => {
@@ -1445,14 +1532,17 @@ test('an agent both retried and redone is charged to the retry first', () => {
 test('relaunch is the fifth charging tier, after the whole-agent rows', () => {
   const tiers = python(['import _autopsy', 'print(json.dumps(_autopsy.CHARGE_TIERS))']);
   assert.equal(tiers.length, 5);
+  assert.deepEqual(tiers[1], ['check_time', 'long_tool_call', 'check_rerun']);
   assert.deepEqual(tiers[3], ['retry', 'escalation', 'extra_review_round']);
   assert.deepEqual(tiers[4], ['relaunch']);
 });
 
-test('every kind but idle_gap has a charging tier', () => {
-  assert.equal(python(['import _autopsy',
-    'print(json.dumps(set(k for tier in _autopsy.CHARGE_TIERS for k in tier) | {"idle_gap"}',
-    '                 == set(_autopsy.KINDS)))']), true);
+test('the charging tiers hold every kind but idle_gap, and the internal check_time', () => {
+  assert.deepEqual(python(['import _autopsy',
+    'tiered = set(k for tier in _autopsy.CHARGE_TIERS for k in tier)',
+    'print(json.dumps([(tiered - {"check_time"}) | {"idle_gap"} == set(_autopsy.KINDS),',
+    '                  "check_time" in _autopsy.KINDS, "check_time" in _autopsy.TOOL_KINDS]))']),
+  [true, false, false]);
 });
 
 test('an extra review round with an untimed fix or re-review costs unavailable', () => {
@@ -1743,6 +1833,26 @@ test('critical-path executions are marked', () => {
   assert.deepEqual(C.checks.executions.map((x) => x.on_critical_path), [false, false, true, true]);
 });
 
+test('a long foreground run-checks call is check time: no row, no unexplained span', () => {
+  // Review focus 3: verify's run-checks call runs 300 s (10:06:40-10:11:40).
+  const dir = copyRun(RUN3);
+  editLines(join(dir, 'wf_1', 'agent-v1.jsonl'), (lines) => lines.map((l) => l
+    .replace('"timestamp":"2026-10-10T10:08:10.000Z"', '"timestamp":"2026-10-10T10:11:40.000Z"')
+    .replace('"timestamp":"2026-10-10T10:09:00.000Z"', '"timestamp":"2026-10-10T10:12:00.000Z"')));
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const text = readFileSync(join(dir, 'autopsy.json'), 'utf8');
+  const D = JSON.parse(text);
+  const verify = D.checks.executions.find((x) => x.agent === 'verify');
+  assert.deepEqual([verify.check, verify.start, verify.s, verify.timing], ['run-checks', T('10:06:40'), 300, 'measured']);
+  assert.deepEqual(D.slowdowns.filter((s) => s.agent === 'verify'), []);
+  assert.ok(!D.slowdowns.some((s) => s.contains.includes('check_time')));
+  assert.ok(!Object.keys(D.detectors).includes('check_time'));
+  for (const out of [text, res.md, res.stdout]) assert.ok(!out.includes('check_time'));
+  const inside = (u) => u.agent === 'verify' && u.start < T('10:11:40') && u.end > T('10:06:40');
+  assert.deepEqual(D.unexplained.filter(inside), []);
+});
+
 test('a check command never appears in raw form', () => {
   const transcript = readFileSync(join(RUN3, 'wf_1', 'agent-a1.jsonl'), 'utf8');
   assert.ok(transcript.includes('PATH=\\"/opt/PATH-SECRET-9/bin:$PATH\\" node tests/run-tests.mjs'));
@@ -1853,6 +1963,27 @@ test('a check that may not have run is inferred', () => {
 test('the r150 parser probes are not check runs', () => {
   assert.equal(chained("cd '/w' && cat > \"/tmp/t5.py\" <<'EOF'\nfor cmd in ['python3 scripts/run-checks . --cmd lint l\\npython3 scripts/run-checks . --cmd test t']:\n    print(cmd)\nEOF\n'C:/py/python.exe' \"/tmp/t5.py\""), null);
   assert.equal(chained("cd '/w' && python -c \"\nimport _autopsy as A\nprint(A.match_check('curl http://x/#a && python3 scripts/run-checks . --cmd test t', []))\n\""), null);
+});
+
+test('a bare variable before a helper script runs it, as an interpreter does', () => {
+  // The r140 and r162 shape: a shell variable holds the interpreter.
+  assert.deepEqual(match('python=C:/u/py/python.exe; "$python" C:/u/skill/scripts/run-checks --cmd test npm-test'),
+    R('run-checks', 'ran'));
+  assert.deepEqual(match('"${PY}" C:/u/skill/scripts/task-checks a b'), R('task-checks'));
+  // Options between them follow the interpreter rule.
+  assert.deepEqual(match('"$PY" -B -X utf8 C:/u/skill/scripts/run-checks --cmd lint x'), R('run-checks'));
+  assert.deepEqual(match('"$PY" -m run-checks --cmd test x'), null);
+  // The await-checks helper is read the same way (the d1a reserve).
+  assert.deepEqual(python(['import _autopsy',
+    'print(json.dumps(_autopsy._await_call({"name": "Bash", "input": {"command":',
+    '    "\\"$PY\\" C:/u/skill/scripts/await-checks reserve --root C:/u/l --name x"}})))']),
+  ['reserve', ['--root', 'C:/u/l', '--name', 'x']]);
+  // Review focus 4: a bare variable not followed by a helper script changes
+  // nothing (these are the values on main).
+  assert.equal(match('"$GIT" status'), null);
+  assert.equal(match('"$PY" -c x'), null);
+  assert.equal(match('$PY -c x'), null);
+  assert.deepEqual(match('$X/run-checks --cmd test x'), R('run-checks', 'ran'));
 });
 
 test('match_check parses a configured command once', () => {
