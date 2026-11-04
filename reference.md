@@ -1842,8 +1842,8 @@ tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_
 appends that summary to the hand-back report.
 
 **Sections of `autopsy.json`:** `launches` (one per launch, with its kept and redone work),
-`done` (per task status, commits, rounds, tier; acceptance; final-review counts; E2E), `time`
-(wall time per launch, phases, lanes with busy and idle time, agents with `tool_s` and
+`done` (per task status, commits, range, rounds, tier; acceptance; final-review counts; E2E),
+`time` (wall time per launch, phases, lanes with busy and idle time, agents with `tool_s` and
 `other_s`, the critical path, idle gaps), `tokens`, `checks`, `slowdowns`, `detectors`,
 `suggestions`, `unexplained`, `launch_conditions` and `orphan_snapshots`.
 - `launch_conditions` has one entry per launch, from the doctor result saved for it, and
@@ -1895,10 +1895,10 @@ appends that summary to the hand-back report.
 - `time.critical_path` is `{estimate, labels, longest}`. `longest` is `{label, launch, wall_s}` of
   the longest timed agent on the path, taken from the agents themselves (a label repeats across
   launches and reviews), the first on the path on a tie, and `null` when no agent on it is
-  timed. It is often the final fix, which no slowdown row covers. autopsy.md's Summary gets
-  `- Longest on the critical path: <label> (<s>)` after its `- Slowest phase:` line, and the chat
-  summary `longest on the critical path: <label> (<s>)`, from that field only; neither has the
-  line when it is `null`.
+  timed. In 9 of the 38 archived runs it was the final fix, which has no slowdown kind of its
+  own. autopsy.md's Summary gets `- Longest on the critical path: <label> (<s>)` after its
+  `- Slowest phase:` line, and the chat summary `longest on the critical path: <label> (<s>)`,
+  from that field only; neither has the line when it is `null`.
 - A partial agent (a tool call with no result, or unreadable lines) has `tool_s` and `other_s`
   `unavailable`: a call without a result may have run to the end. `tool_s_min` is then the
   least tool time that can be shown, a minimum and not the total.
