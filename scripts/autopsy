@@ -21,7 +21,11 @@ the user at the delivered head' (see done), the slowest phase, the top
 three slowdowns with their cost, when a recorded launch has a warned,
 failed or unread check the line 'launch conditions: <n> check(s) warned
 or failed before launch[, <k> could not be read]; <m> possible
-contributor(s)' (see launch_conditions), the full-suite runs, the total
+contributor(s)' (see launch_conditions), the line 'project test runs:
+<P>[ (+<N> unavailable)]; check calls with a test group: <T>[ (<role>
+<n>, ...)]' (see checks: P is project_test_runs' total, with N its
+unavailable count when above 0; T and the roles are the legacy
+full_suite_runs'; each reads unavailable when its source is), the total
 tokens (a minimum when some usage is missing, unavailable when no agent
 has usage), the top suggestion and the absolute path of autopsy.md.
 --quiet prints nothing.
@@ -436,10 +440,10 @@ the background.
 - by_check: runs counts the executions that ran, inferred the others;
   untimed counts the ran executions without a duration, and total_s sums
   the timed ones that ran (bound durations in it are upper bounds).
-- full_suite_runs (autopsy.md's 'Check calls with a test group', the
-  legacy count): total and by_role (run-report's roles) count the
-  executions whose full_suite is ran, inferred those whose full_suite is
-  inferred. A test group may be narrower than the project suite (a
+- full_suite_runs (autopsy.md's 'Check calls with a test group' and the
+  summary's, the legacy count): total and by_role (run-report's roles)
+  count the executions whose full_suite is ran, inferred those whose
+  full_suite is inferred. A test group may be narrower than the project suite (a
   focused run-checks --cmd test, a targeted task check). total is a lower
   bound: runs through a wrapper (bash -c, a script) are not seen, and
   inferred runs may not have happened.
@@ -448,7 +452,8 @@ the background.
   false; reasons tallies the reason codes of the matched evidence
   (no_entry, no_files, outside_files, widen_path, forced, git_failed).
   A call without valid evidence counts as unavailable, never as 0.
-- project_test_runs: total and by_role count the executions that ran an
+- project_test_runs (autopsy.md's 'Project test runs', first on the
+  summary's check line): total and by_role count the executions that ran an
   exact commands.test entry (the whole project suite): a run-checks call
   with a '--cmd test CMD' pair whose CMD is one, a task-checks execution
   whose evidence has project_test_executed true, or a configured command

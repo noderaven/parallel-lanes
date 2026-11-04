@@ -1828,7 +1828,10 @@ for a run with more than one launch `earlier launches: kept N agents, redid M (X
 the delivered head and the run's own verdict is not `accepted` the line
 `acceptance: <status>; accepted by the user at the delivered head`
 (see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
-full-suite runs, total tokens, the top suggestion and the path of `autopsy.md`. The session
+line `project test runs: P; check calls with a test group: T (implement 11, verify 1)`, total
+tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_runs` total, with
+` (+N unavailable)` when its `unavailable` count is above 0; T and the roles are the legacy
+`full_suite_runs` (see "Checks" below); each reads `unavailable` when its source is. The session
 appends that summary to the hand-back report.
 
 **Sections of `autopsy.json`:** `launches` (one per launch, with its kept and redone work),
@@ -2089,7 +2092,10 @@ Never ignore source a check needs.
 recurring slowdowns ranked by total time lost with the engine versions they appeared in, token
 trends per task and role by engine version, suggestions ranked by total stake, and the runs
 whose data is too old for a section (left out of that section's totals). There is no automatic
-"regressed after its fix" flag.
+"regressed after its fix" flag. Each run in `history.json` carries `full_suite_runs` (the legacy
+check calls with a test group) and `project_test_runs` (the autopsy's `checks.project_test_runs`
+total, the whole-suite executions), each a number or `unavailable`; the per-run table in
+`history.md` shows them as `Test-group calls` and `Project test runs`.
 
 Exit codes: `autopsy` ends with exit 0 on success, exit 2 on a usage error or a folder without
 a `*.lanes.json` or a `wf_*` dir, and exit 3 when a path needs converting on Windows and no Git

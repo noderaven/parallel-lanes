@@ -3773,6 +3773,24 @@ def render_markdown(analysis):
     return "\n".join(_ascii(line) for line in text.split("\n"))
 
 
+def _checks_line(checks):
+    """The summary's check line: the project test runs (with ' (+N
+    unavailable)' when some executions cannot be known), then the legacy
+    check calls with a test group and their roles; each reads 'unavailable'
+    when its source is."""
+    project = checks.get("project_test_runs", UNAVAILABLE)
+    if isinstance(project, dict) and _is_num(project.get("total")):
+        unknown = project.get("unavailable")
+        runs = "%d%s" % (project["total"], " (+%d unavailable)" % unknown if _is_num(unknown) and unknown else "")
+    else:
+        runs = UNAVAILABLE
+    full = checks["full_suite_runs"]
+    by_role = full["by_role"]
+    calls = "%s%s" % (full["total"], " (%s)" % ", ".join(
+        "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else "")
+    return "project test runs: %s; check calls with a test group: %s" % (runs, calls)
+
+
 def render_summary(analysis, md_path):
     """The chat summary: at most SUMMARY_MAX_LINES lines."""
     a = analysis
@@ -3798,10 +3816,7 @@ def render_summary(analysis, md_path):
     conditions = _conditions_line(a)
     if conditions is not None:
         lines.append(conditions)
-    full = a["checks"]["full_suite_runs"]
-    by_role = full["by_role"]
-    lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
-        "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
+    lines.append(_checks_line(a["checks"]))
     tot = a["tokens"]["totals"]
     if tot.get("agents_with_usage") == 0:
         lines.append("tokens: unavailable (no agent has usage data)")

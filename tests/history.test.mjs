@@ -125,7 +125,8 @@ test('history runs autopsy where it is missing', () => {
   const fa = rowOf(res, 'fa');
   assert.deepEqual(Object.keys(fa), [
     'run_id', 'folder', 'date', 'engine_version', 'tasks', 'agents', 'wall_s', 'slowest_phase', 'tokens_total',
-    'tokens_per_task', 'tokens_partial', 'full_suite_runs', 'acceptance', 'accepted_by_user', 'top_slowdown',
+    'tokens_per_task', 'tokens_partial', 'full_suite_runs', 'project_test_runs', 'acceptance', 'accepted_by_user',
+    'top_slowdown',
   ]);
   const A = autopsyOf(a);
   const tot = A.tokens.totals;
@@ -133,7 +134,7 @@ test('history runs autopsy where it is missing', () => {
   assert.deepEqual(fa, {
     run_id: 'fa', folder: '2026-10-10-fa', date: '2026-10-10', engine_version: '1.4.4', tasks: 2, agents: 4,
     wall_s: 600, slowest_phase: 'Lane a', tokens_total: total, tokens_per_task: Math.round(total / 2),
-    tokens_partial: false, full_suite_runs: 2, acceptance: 'unverified', accepted_by_user: false,
+    tokens_partial: false, full_suite_runs: 2, project_test_runs: 2, acceptance: 'unverified', accepted_by_user: false,
     top_slowdown: { kind: A.slowdowns[0].kind, cost_s: A.slowdowns[0].cost_s },
   });
   assert.equal(rowOf(res, 'fb').engine_version, 'unavailable');
@@ -184,7 +185,7 @@ test('a user acceptance at the delivered head shows beside the run\'s acceptance
   // appends an accepted event at that head to the ledger's _run.jsonl.
   const accept = (dir) => editLines(join(dir, 'p.f1.ledger', '_run.jsonl'), (lines) => [...lines,
     JSON.stringify({ task: '_run', event: 'accepted', head: '3'.repeat(40), text: 'ACCEPT-TEXT-9' })]);
-  const cell = (md, runId) => mdRow(md, runId).split('|').slice(1, -1).map((c) => c.trim())[10];
+  const cell = (md, runId) => mdRow(md, runId).split('|').slice(1, -1).map((c) => c.trim())[11];
   // fa: accepted by the user, its own verdict unverified. fb: accepted by
   // the user and accepted by the run, shown as accepted alone.
   let { hist, a, b } = makeHistory();
@@ -206,6 +207,37 @@ test('a user acceptance at the delivered head shows beside the run\'s acceptance
   assert.deepEqual(['fa', 'fb'].map((id) => rowOf(res, id).accepted_by_user), [false, 'unavailable']);
   assert.deepEqual([cell(res.md, 'fa'), cell(res.md, 'fb')], ['unverified', 'unverified']);
   assert.equal(autopsyOf(b).done.acceptance.accepted_by_user, 'unavailable');
+});
+
+test('each run carries its project test runs beside the check calls with a test group', () => {
+  const { hist, a, b } = makeHistory();
+  // fb loses every tool call and tool result: both counts are unavailable.
+  for (const name of readdirSync(join(b, 'wf_1')).filter((n) => n.endsWith('.jsonl'))) {
+    editLines(join(b, 'wf_1', name), (lines) => lines.flatMap((l) => {
+      const o = JSON.parse(l);
+      const content = o.message && Array.isArray(o.message.content) ? o.message.content : null;
+      if (!content) return [l];
+      if (content.some((c) => c.type === 'tool_result')) return [];
+      o.message.content = content.map((c) => (c.type === 'tool_use' ? { type: 'text', text: 'x' } : c));
+      return [JSON.stringify(o)];
+    }));
+  }
+  historyOk(hist);
+  // fa's current autopsy says 7 project test runs (+1 unavailable): history
+  // copies the total, not the legacy count.
+  editJson(join(a, 'autopsy.json'), (x) => {
+    x.checks.project_test_runs = { total: 7, by_role: { verify: 7 }, unavailable: 1 };
+  });
+  const res = historyOk(hist);
+  assert.equal(autopsyOf(a).checks.project_test_runs.total, 7, 'the autopsy of fa was redone');
+  assert.equal(autopsyOf(b).checks.project_test_runs, 'unavailable');
+  assert.deepEqual(['fa', 'fb'].map((id) => [rowOf(res, id).full_suite_runs, rowOf(res, id).project_test_runs]),
+    [[2, 7], ['unavailable', 'unavailable']]);
+  const header = res.md.split('\n').find((l) => l.startsWith('| Run |'));
+  assert.ok(header.includes('| Tokens/task | Test-group calls | Project test runs | Acceptance |'), header);
+  assert.ok(!res.md.includes('Full-suite runs'), header);
+  const cells = (runId) => mdRow(res.md, runId).split('|').slice(1, -1).map((c) => c.trim()).slice(9, 11);
+  assert.deepEqual([cells('fa'), cells('fb')], [['2', '7'], ['unavailable', 'unavailable']]);
 });
 
 test('recurring slowdowns total across runs with each run\'s version', () => {

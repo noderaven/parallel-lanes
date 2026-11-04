@@ -2145,7 +2145,8 @@ test('the summary is at most 15 lines and names the essentials', () => {
   assert.deepEqual(top.map((s) => s.kind), ['relaunch', 'idle_gap', 'escalation']);
   for (const s of top) assert.match(res.stdout, new RegExp(`${s.kind}.*${s.cost_s.toFixed(1)} s`));
   assert.ok(!res.stdout.includes('extra_review_round'));
-  assert.match(res.stdout, /full-suite runs: 3/);
+  assert.match(res.stdout, /^project test runs: 3; check calls with a test group: 3 \(implement 3\)$/m);
+  assert.ok(!res.stdout.includes('full-suite runs'), res.stdout);
   assert.match(res.stdout, /suggestion: relaunch/);
   const mdPath = join(dir, 'autopsy.md').replaceAll('\\', '/');
   assert.ok(res.stdout.includes(mdPath), res.stdout);
@@ -2161,7 +2162,7 @@ test('a run with no slowdowns still gets a short summary', () => {
   const res = runCli(copyRun(RUN1));
   assert.equal(res.code, 0, res.stderr);
   assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
-  assert.match(res.stdout, /full-suite runs: 2/);
+  assert.match(res.stdout, /^project test runs: 2; check calls with a test group: 2 \(implement 1, verify 1\)$/m);
   assert.match(res.stdout, /autopsy\.md/);
 });
 
