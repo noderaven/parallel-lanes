@@ -102,7 +102,7 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 7);
+  assert.equal(A.autopsy_version, 8);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
@@ -442,7 +442,7 @@ test('read_events gives timed events in file order and skips damaged lines', () 
   assert.deepEqual(events[1].input, { file_path: 'src/b.js' });
   assert.equal(events[0].ts, Date.parse(T('07:01:00')) / 1000);
   for (const e of events) {
-    assert.deepEqual(Object.keys(e).sort(), ['id', 'input', 'is_error', 'kind', 'name', 'text', 'ts']);
+    assert.deepEqual(Object.keys(e).sort(), ['id', 'input', 'is_error', 'kind', 'msg', 'name', 'text', 'ts']);
   }
   const dir = join(TMP, 'damaged-events');
   mkdirSync(dir, { recursive: true });
@@ -627,7 +627,8 @@ test('evidence holds structured fields only', () => {
 
 // Events of one agent, labelled X: use() is a tool call, res() its result;
 // times are seconds.
-const use = (ts, id, name, input) => ({ ts, kind: 'tool_use', name, id, is_error: false, text: '', input });
+const use = (ts, id, name, input, msg = null) => (
+  { ts, kind: 'tool_use', name, id, is_error: false, text: '', input, msg });
 const res = (ts, id, name, text, isError = false) => (
   { ts, kind: 'tool_result', name, id, is_error: isError, text, input: null });
 function detect(events, notes = [], notices = []) {
@@ -642,11 +643,59 @@ function detect(events, notes = [], notices = []) {
     'print(json.dumps({"slowdowns": [_autopsy.public_slowdown(s) for s in found],',
     '                  "suggestions": _autopsy.suggestions_section(found, None),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
+    '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
   ]);
 }
 const at = (ts) => new Date(ts * 1000).toISOString();
 const brief = (out) => out.slowdowns.map((s) => [s.kind, s.at, s.cost_s, s.cost_kind, s.evidence.marker]);
+
+test('a call queued behind an earlier call of its turn starts at that call\'s result', () => {
+  const NOT_READ = '<tool_use_error>File has not been read yet.</tool_use_error>';
+  const serial = (m) => [
+    use(0, 'b1', 'Bash', { command: 'npm run build' }, m),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, m),
+    use(2, 'e2', 'Edit', { file_path: 'b.js' }, m),
+    res(130, 'b1', 'Bash', 'built'),
+    res(130.1, 'e1', 'Edit', NOT_READ, true),
+    res(130.2, 'e2', 'Edit', NOT_READ, true),
+  ];
+  let out = detect(serial('m1'));
+  assert.deepEqual(out.own_starts, [0, 130, 130.1]);
+  // Only the build is a long call; the queued Edits are charged their own time.
+  assert.deepEqual(brief(out).filter((s) => s[0] === 'long_tool_call'), [['long_tool_call', at(0), 130, 'measured', null]]);
+  // Without message ids, consecutive tool_use events are one turn.
+  assert.deepEqual(detect(serial(null)).own_starts, [0, 130, 130.1]);
+  // A result line between the uses ends the turn when there are no ids ...
+  const twoTurns = (m1, m2) => [
+    use(0, 'b1', 'Bash', { command: 'npm run build' }, m1),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, m1),
+    res(1.5, 'b1', 'Bash', 'built'),
+    use(2, 'e2', 'Edit', { file_path: 'b.js' }, m2),
+    res(3, 'e1', 'Edit', 'ok'),
+    res(4, 'e2', 'Edit', 'ok'),
+  ];
+  assert.deepEqual(detect(twoTurns(null, null)).own_starts, [0, 1.5, 2]);
+  // ... and so does a different message id.
+  assert.deepEqual(detect(twoTurns('m1', 'm2')).own_starts, [0, 1.5, 2]);
+  // Review focus 1: one turn by message id although a result lies between the
+  // uses; e1 started at 3, after b1 ended at 2.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 2' }, 'm1'),
+    res(2, 'b1', 'Bash', 'ok'),
+    use(3, 'e1', 'Edit', { file_path: 'a.js' }, 'm1'),
+    res(5, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 3]);
+  // Review focus 2: an earlier call without a result is ignored.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 99' }, 'm1'),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, 'm1'),
+    res(10, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 1]);
+});
+
 
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
   const moved = 'Command did not complete within its 600s timeout and was moved to the background '
@@ -804,20 +853,23 @@ test('a rerun needs proof that nothing changed', () => {
 });
 
 test('slowdowns that overlap in time are counted once in the stake', () => {
-  // Three Edits sent together while a long Bash call runs; all three fail
-  // as unread when the Bash call returns.
+  // Three Edits sent together while a long Bash call runs; each fails as
+  // unread when its result comes back, queued behind the Bash call (so they
+  // start at 123, 124 and 125). The retries, sent together, succeed at 130,
+  // 131 and 132: the spans overlap.
+  const unread = '<tool_use_error>File has not been read yet.</tool_use_error>';
   const events = [use(0, 'b1', 'Bash', { command: 'npm run build' })];
   for (const f of ['a', 'b', 'c']) events.push(use(0, `e${f}`, 'Edit', { file_path: `${f}.js` }));
-  for (const f of ['a', 'b', 'c']) {
-    events.push(res(124, `e${f}`, 'Edit', '<tool_use_error>File has not been read yet.</tool_use_error>', true));
-  }
-  events.push(res(126, 'b1', 'Bash', 'built'));
+  events.push(res(123, 'b1', 'Bash', 'built'));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(124 + i, `e${f}`, 'Edit', unread, true)));
+  for (const f of ['a', 'b', 'c']) events.push(use(126, `f${f}`, 'Edit', { file_path: `${f}.js` }));
+  ['a', 'b', 'c'].forEach((f, i) => events.push(res(130 + i, `f${f}`, 'Edit', 'ok')));
   const out = detect(events);
   const retries = out.slowdowns.filter((s) => s.kind === 'edit_retry');
-  assert.deepEqual(retries.map((s) => s.cost_s), [124, 124, 124]);
+  assert.deepEqual(retries.map((s) => s.cost_s), [7, 7, 7]);
   const g = out.suggestions.find((s) => s.kind === 'edit_retry');
-  assert.deepEqual([g.count, g.stake_s], [3, 124]);
-  assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 126);
+  assert.deepEqual([g.count, g.stake_s], [3, 9]);
+  assert.equal(out.suggestions.find((s) => s.kind === 'long_tool_call').stake_s, 123);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {

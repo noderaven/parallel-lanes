@@ -31,8 +31,22 @@
 //   three Reads, then the Edits again: engine.test.mjs ok 06:34:18.468,
 //     run.test.mjs ok 06:34:18.485, rules.js fails (string not found) and
 //     succeeds 06:34:22.083
-//   The three edit_retry spans overlap: union 137.9 s, sum 401.5 s. Before
-//   e5032eb the edit_retry suggestion's stake was the sum.
+//   The Edits queued behind the Bash call, so each is charged from the
+//   result it waited for (06:34:08.275), not from its own tool_use: the
+//   three edit_retry spans are 10.2, 10.2 and 13.8 s, overlapping from
+//   06:34:08.275 to 06:34:22.083 (stake 13.8 s). Before 1.6.11 they were
+//   charged from their tool_use (union 137.9 s, sum 401.5 s), which counted
+//   the Bash call's timeout again.
+//
+// queued-timeout (r140, integrate, 02:31:13.6-02:35:44Z):
+//   Bash 02:31:16.772-02:33:17.603  the run-checks call blocks for its 120 s
+//     timeout and moves to the background (bxr6sy1ob)
+//   Bash 02:31:17.130-02:33:17.768  cat join.jsonl | head, sent in the same
+//     turn: queued behind it, answered 0.165 s after it
+//   then the Monitor error, ToolSearch, two sleep loops on the task output
+//     (02:33:22.332-02:35:14.635 and 02:35:16.523-02:35:32.378), the
+//     notification 02:35:31.678 and the closing calls to 02:35:43.877
+//   Before 1.6.11 the cat call counted as a 120 s long_tool_call.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,19 +112,27 @@ test('real r142 case: overlapping edit retries count their shared time once', ()
     .map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool, s.evidence.marker])
     .sort((x, y) => x[1].localeCompare(y[1]));
   assert.deepEqual(retries, [
-    ['A1 implement', T('06:32:04.198'), 134.3, 'measured', 'Edit', 'has not been read yet'],
-    ['A1 implement', T('06:32:05.632'), 132.9, 'measured', 'Edit', 'has not been read yet'],
-    ['A1 implement', T('06:32:07.785'), 134.3, 'measured', 'Edit', 'has not been read yet'],
+    ['A1 implement', T('06:34:08.275'), 10.2, 'measured', 'Edit', 'has not been read yet'],
+    ['A1 implement', T('06:34:08.283'), 10.2, 'measured', 'Edit', 'has not been read yet'],
+    ['A1 implement', T('06:34:08.287'), 13.8, 'measured', 'Edit', 'has not been read yet'],
   ]);
-  // The suggestion's stake is their union (06:32:04.198 to 06:34:22.083),
-  // not the 401.5 s sum.
+  // The suggestion's stake is their union (06:34:08.275 to 06:34:22.083),
+  // not the sum.
   const g = suggestion(a, 'edit_retry');
   assert.ok(g, 'an edit_retry suggestion');
   assert.equal(g.count, 3);
-  close(g.stake_s, 137.9, 'edit_retry stake');
+  close(g.stake_s, 13.8, 'edit_retry stake');
   const sum = retries.reduce((n, r) => n + r[2], 0);
   assert.ok(g.stake_s < sum, `stake ${g.stake_s} is below the sum ${sum}`);
   // The Bash call that held the Edits back really did time out.
   const timeouts = ofKind(a, 'timeout').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool]);
   assert.deepEqual(timeouts, [['A1 implement', T('06:32:01.950'), 126.3, 'measured', 'Bash']]);
+});
+
+test('real r140 case: a call queued behind a timeout is no long call', () => {
+  const a = autopsy('queued-timeout');
+  assert.equal(a.detectors.long_tool_call, 'ok');
+  assert.deepEqual(ofKind(a, 'long_tool_call'), []);
+  const timeouts = ofKind(a, 'timeout').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool]);
+  assert.deepEqual(timeouts, [['integrate', T('02:31:16.772'), 120.8, 'measured', 'Bash']]);
 });

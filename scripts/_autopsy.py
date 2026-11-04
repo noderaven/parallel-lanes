@@ -29,6 +29,13 @@ agent's polls and stops of the task (_completion_after); notification-
 shaped text in a user line or any tool result never counts, since an
 agent can read such text from a file.
 
+Queued calls. The calls of one model turn share its message id and run one
+after the other; Claude Code returns their results in order. A call's own
+time starts at its own start (_calls' own_start): the latest result of an
+earlier call of its turn that came before its own, else its tool_use. A
+fast call queued behind a slow one is charged only its own time. A
+procedure's times, span_agent and unexplained_section use the raw times.
+
 Checks. configured_checks gives each configured command an id: test#1 is
 commands.test[0], <lane>.test#1 is lane_commands.<lane>.test[0] and
 <task>.task.test#1 is task_checks.<task>.test[0]. A Bash call is a check
@@ -99,7 +106,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 7
+AUTOPSY_VERSION = 8
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -193,9 +200,9 @@ def _text_of(content):
     return "\n".join(parts)
 
 
-def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None):
+def _event(ts, kind, name=None, id_=None, is_error=False, text="", input_=None, msg=None):
     return {"ts": ts, "kind": kind, "name": name, "id": id_, "is_error": is_error,
-            "text": text, "input": input_}
+            "text": text, "input": input_, "msg": msg}
 
 
 def read_events_counted(jsonl_path):
@@ -277,7 +284,8 @@ def read_transcript(jsonl_path):
                 if id_ is not None and name is not None:
                     names[id_] = name
                 events.append(_event(ts, "tool_use", name=name, id_=id_,
-                                     input_=b.get("input") if isinstance(b.get("input"), dict) else None))
+                                     input_=b.get("input") if isinstance(b.get("input"), dict) else None,
+                                     msg=msg.get("id") if isinstance(msg.get("id"), str) else None))
         elif obj.get("type") == "user":
             if not any(b.get("type") == "tool_result" for b in blocks):
                 text = _text_of(content)
@@ -295,7 +303,9 @@ def read_transcript(jsonl_path):
 
 def read_events(jsonl_path):
     """The timed events of one transcript, in file order:
-    {ts, kind: assistant|tool_use|tool_result, name, id, is_error, text, input}.
+    {ts, kind: assistant|tool_use|tool_result, name, id, is_error, text, input,
+    msg}; msg is the message id of a tool_use event's assistant line (the
+    calls of one model turn share it), else None.
 
     The file is read as bytes and each line decoded strictly; a line that is
     not valid UTF-8 or not valid JSON is skipped (read_events_counted counts
@@ -955,21 +965,41 @@ def _basename(word):
 
 
 def _calls(agent):
-    """An agent's tool calls in call order: {name, input, start, end,
-    result_i, is_error, text}; end is None when no result answers it."""
+    """An agent's tool calls in call order: {name, input, start, own_start,
+    end, result_i, is_error, text}; end is None when no result answers it.
+
+    own_start is when the call's own time begins. The calls of one model
+    turn (the same message id; without one, the tool_use events next to each
+    other) run one after the other and their results come back in order, so
+    a call queued behind an earlier one of its turn starts at that call's
+    result: own_start is the latest end among the earlier calls of its turn
+    that ended no later than the call, and at least start. A call without a
+    result, or an earlier call without one, leaves own_start at start."""
     calls = []
     waiting = {}
+    turns = []  # per call: its turn's key
+    run = 0
     for i, e in enumerate(agent["events"]):
         if e["kind"] == "tool_use":
-            call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "end": None,
-                    "result_i": None, "is_error": False, "text": ""}
+            call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "own_start": e["ts"],
+                    "end": None, "result_i": None, "is_error": False, "text": ""}
             calls.append(call)
+            msg = e.get("msg")
+            turns.append(msg if msg is not None else ("run", run))
             if e["id"] is not None:
                 waiting[e["id"]] = call
         elif e["kind"] == "tool_result" and e["id"] in waiting:
             call = waiting.pop(e["id"])
             if e["ts"] >= call["start"]:
                 call.update(end=e["ts"], result_i=i, is_error=e["is_error"], text=e["text"])
+        if e["kind"] != "tool_use":
+            run += 1
+    for k, call in enumerate(calls):
+        if call["end"] is None:
+            continue
+        earlier = [c["end"] for c, t in zip(calls[:k], turns[:k])
+                   if t == turns[k] and c["end"] is not None and c["end"] <= call["end"]]
+        call["own_start"] = max([call["start"]] + earlier)
     return calls
 
 
@@ -1116,12 +1146,12 @@ def tool_slowdowns(agent, checks):
             continue
         timeout = notice("timeout", c)
         if timeout:
-            add("timeout", [i], c["start"], c["end"], "measured", c, timeout)
+            add("timeout", [i], c["own_start"], c["end"], "measured", c, timeout)
         marker = notice("background_check", c)
         if marker:
             # A call moved to the background at its timeout: the timeout
             # covers the call, the background wait starts at its result.
-            start = c["end"] if timeout else c["start"]
+            start = c["end"] if timeout else c["own_start"]
             done = _completion_after(agent, c)
             if done is not None:
                 add("background_check", [i], start, done[0], "bound", c, marker)
@@ -1135,7 +1165,7 @@ def tool_slowdowns(agent, checks):
     for indexes in failures.values():
         if len(indexes) >= 2:
             first, last = calls[indexes[0]], calls[indexes[-1]]
-            add("repeated_failure", indexes, first["start"], last["end"], "measured", first)
+            add("repeated_failure", indexes, first["own_start"], last["end"], "measured", first)
 
     # Only a failing line that is nothing but a heredoc file write (cat > f
     # <<EOF, after cd DIR or assignments) counts: a failing inline script
@@ -1147,14 +1177,14 @@ def tool_slowdowns(agent, checks):
     for i, c in enumerate(calls):
         if not _bash_failed(c) or not _only_heredoc_write(_command(c)):
             continue
-        if until is not None and c["start"] < until:
+        if until is not None and c["own_start"] < until:
             continue  # a retry inside the previous heredoc failure's span
         write = next((w for w in calls[i + 1:] if _wrote(w) or _bash_wrote(w)), None)
         if write is None:
-            add("heredoc_failure", [i], c["start"], c["end"], "measured", c, HEREDOC)
+            add("heredoc_failure", [i], c["own_start"], c["end"], "measured", c, HEREDOC)
             until = c["end"]
         else:
-            add("heredoc_failure", [i], c["start"], write["end"], "bound", c, HEREDOC)
+            add("heredoc_failure", [i], c["own_start"], write["end"], "bound", c, HEREDOC)
             until = write["end"]
 
     until = {}
@@ -1165,11 +1195,11 @@ def tool_slowdowns(agent, checks):
         path = c["input"].get("file_path")
         if not marker or not isinstance(path, str):
             continue
-        if path in until and c["start"] < until[path]:
+        if path in until and c["own_start"] < until[path]:
             continue  # a retry inside the previous retry's span
         fixed = next((w for w in calls[i + 1:] if _wrote(w) and w["input"].get("file_path") == path), None)
         end = c["end"] if fixed is None else fixed["end"]
-        add("edit_retry", [i], c["start"], end, "measured", c, marker)
+        add("edit_retry", [i], c["own_start"], end, "measured", c, marker)
         until[path] = end
 
     # A rerun needs proof that nothing changed: both runs certainly ran the
@@ -1187,12 +1217,12 @@ def tool_slowdowns(agent, checks):
         if prev is None or not prev[1] or not ran or c["end"] is None:
             continue
         if all(_reads_only(b) for b in calls[prev[0] + 1:i]):
-            add("check_rerun", [i], c["start"], c["end"], "measured", c,
+            add("check_rerun", [i], c["own_start"], c["end"], "measured", c,
                 RUN_CHECKS if match["check"] == RUN_CHECKS else None)
 
     for i, c in enumerate(calls):
-        if i not in counted and c["end"] is not None and c["end"] - c["start"] > LONG_CALL_S:
-            add("long_tool_call", [i], c["start"], c["end"], "measured", c)
+        if i not in counted and c["end"] is not None and c["end"] - c["own_start"] > LONG_CALL_S:
+            add("long_tool_call", [i], c["own_start"], c["end"], "measured", c)
     return out
 
 
@@ -1974,7 +2004,7 @@ def _execution_times(agent, call, ledger=None):
             start, end, timing = _procedure_times(calls, i, waits, ledger)
             return True, start, end, timing
     background, end, timing = _call_end(agent, call)
-    return background, call["start"], end, timing
+    return background, call["own_start"], end, timing
 
 
 def _execution_end(agent, call, ledger=None):

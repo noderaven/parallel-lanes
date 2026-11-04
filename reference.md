@@ -1911,6 +1911,10 @@ text, because a command may carry a secret.
 - **Heredoc and rerun rules:** `heredoc_failure` needs a failing line that is nothing but a
   heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
   reading calls between them; an `inferred` run never proves a rerun.
+- **Queued calls:** calls sent in one model turn share its message id. A call's time starts at
+  its own start: the latest result of an earlier call of its turn that came before its own,
+  else its tool_use. Claude Code returns a turn's results in order, so a fast call queued
+  behind a slow one is charged only its own time.
 
 **Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and
 `evidence`):
