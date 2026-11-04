@@ -321,7 +321,7 @@ test('every source resolves', () => {
 test('late evidence gives accepted (gate unavailable)', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r, { evidenceMtime: START / 1000 + DURATION / 1000 + 600 }));
-  const { json } = view(folder, ['--repo', r.dir]);
+  const { json, md, stdout } = view(folder, ['--repo', r.dir]);
   assert.equal(json.run.acceptance.gate, 'unavailable');
   assert.equal(json.run.checks.gate.value, 'unavailable');
   assert.equal(json.run.checks.gate_reason, 'verify_evidence_time_untrusted');
@@ -329,6 +329,16 @@ test('late evidence gives accepted (gate unavailable)', () => {
   const tasks = byTask(json);
   assert.deepEqual([tasks.A1.status.verified.value, tasks.A1.status.verified.state], [null, 'unavailable']);
   assert.ok(json.gaps.some((g) => g.where === '#/run/checks/gate' && g.state === 'unavailable'));
+  // A done task's acceptance is unknown, not false, and a gap.
+  for (const [i, id] of [[0, 'A1'], [1, 'A2']]) {
+    const a = tasks[id].status.accepted;
+    assert.deepEqual([a.value, a.state, a.note], [null, 'unavailable', 'the acceptance gate is unavailable'], id);
+    assert.ok(json.gaps.some((g) => g.where === `#/tasks/${i}/status/accepted` && g.state === 'unavailable'), id);
+  }
+  const line = '- accepted: unknown [unavailable] - the acceptance gate is unavailable (wf_aaaaaa.json #/result/tasks/';
+  assert.equal(md.split('\n').filter((l) => l.startsWith(line)).length, 2, md);
+  // The summary counts only accepted tasks, as before.
+  assert.ok(stdout.includes('accepted 0'), stdout);
 });
 
 // A verify head before the delivered sha, saved as evidence that matches the
@@ -350,6 +360,73 @@ test('a match over bad evidence is unverified', () => {
   const tasks = byTask(json);
   assert.deepEqual([tasks.A1.status.verified.value, tasks.A1.status.verified.state], [false, 'present']);
   assert.deepEqual([tasks.A1.status.accepted.value, tasks.A1.status.accepted.state], [false, 'present']);
+  // Only checks that ran and failed read as failed checks.
+  const lines = md.split('\n');
+  assert.ok(lines.includes('- evidence: invalid'), md);
+  assert.ok(lines.some((l) => l.startsWith('- evidence validity: invalid [stale] - checks_stale')), md);
+  assert.ok(lines.includes('- verified: false [present] - the verify evidence is invalid'), md);
+  assert.doesNotMatch(md, /failed checks/);
+});
+
+test('a verify whose checks failed reads failed checks in audit.md', () => {
+  const r = repoRun();
+  const failing = verifyAt(r.fix, {
+    ok: false,
+    results: [{ group: 'test', command: 'npm test zqcmd', exit: 1, log: '/tmp/pl/1.log', tail: 'FAIL zqtail' }],
+  });
+  const folder = makeRun(acceptedSpec(r, { verify: failing }));
+  const { json, md } = view(folder, ['--repo', r.dir]);
+  assert.equal(json.run.acceptance.gate, 'match');
+  assert.equal(json.run.acceptance.verdict.value, 'unverified');
+  // audit.json keeps invalid and its rule.
+  assert.equal(json.run.acceptance.evidence, 'invalid');
+  assert.deepEqual([json.run.checks.evidence.value, json.run.checks.evidence.state, json.run.checks.rule],
+    ['invalid', 'present', 'checks_failed']);
+  const lines = md.split('\n');
+  assert.ok(lines.includes('- evidence: failed checks (checks_failed)'), md);
+  assert.ok(lines.some((l) => l.startsWith('- evidence validity: failed checks [present] - checks_failed (')), md);
+  const note = `the verify at ${r.fix.slice(0, 7)} failed (checks_failed)`;
+  for (const t of json.tasks) assert.deepEqual([t.status.verified.value, t.status.verified.note], [false, note], t.id);
+  assert.equal(lines.filter((l) => l === `- verified: false [present] - ${note}`).length, 2, md);
+  assert.doesNotMatch(md, /evidence is invalid|evidence: invalid|validity: invalid/);
+});
+
+test('audit.md labels transcript verdicts, rulings without a role and lens-covered commits', () => {
+  const r = repoRun();
+  const folder = makeRun(acceptedSpec(r, {
+    taskEvents: [
+      { task: 'A1', event: 'ruling', text: 'keep it small' },
+      { task: 'A1', event: 'ruling', by: 'adjudicator', text: 'go on' },
+    ],
+  }));
+  const { json, md } = view(folder, ['--repo', r.dir]);
+  const lines = md.split('\n');
+  // Review verdicts come from the journal.
+  const label = '[inferred: read from the transcript]';
+  assert.deepEqual(lines.filter((l) => l.includes(label)), [
+    `- A1 review in wf_aaaaaa: changes, 1 finding(s) ${label} (transcript:wf_aaaaaa/A1 review)`,
+    `- A1 re-review 1 in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A1 re-review 1)`,
+    `- A2 review in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A2 review)`,
+  ]);
+  // Other inferred lines keep the bare state.
+  assert.deepEqual(lines.filter((l) => l.includes('[inferred]')),
+    [`- ${r.fix}: final re-review [inferred] (transcript:wf_aaaaaa/final re-review)`]);
+  // A ruling without by is the implementer's, as the ledger counts it;
+  // audit.json keeps what was recorded.
+  assert.ok(lines.includes(`- ruling by implementer (no role recorded), quoted from ${LEDGER}/a.jsonl L7:`), md);
+  assert.ok(lines.includes(`- ruling by adjudicator, quoted from ${LEDGER}/a.jsonl L8:`), md);
+  assert.doesNotMatch(md, /ruling by unknown/);
+  assert.deepEqual(byTask(json).A1.changes.rulings.map((x) => x.value.by), [null, 'adjudicator']);
+
+  // A commit outside the task ranges that a lens head contains names that head.
+  const spec = acceptedSpec(r);
+  spec.launches[0].result.final.lens_heads = [{ lens: 'superpowers', head: r.fix }];
+  const lens = view(makeRun(spec), ['--repo', r.dir]);
+  const entry = lens.json.run.code_outside_ranges.value.commits.find((c) => c.commit === r.fix);
+  const note = `contained in the final review's head ${r.fix.slice(0, 7)}`;
+  assert.deepEqual([entry.coverage.value, entry.coverage.state, entry.coverage.note], ['final review', 'present', note]);
+  assert.ok(lens.md.split('\n').includes(
+    `- ${r.fix}: final review [present] - ${note} (wf_aaaaaa.json #/result/final/lens_heads/0/head; git:${r.fix})`), lens.md);
 });
 
 test('a verify head that is not delivered is stale', () => {

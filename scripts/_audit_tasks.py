@@ -12,9 +12,9 @@ _audit_core.manifest_tasks entry, in run order (prelude, lanes, join):
 
 run is _audit_core.load_run's dict, git an _audit_git.Git or None, pairs
 _audit_core.command_pairs(manifest), and facts the run-level facts:
-{"verdict", "gate", "evidence", "verify_head", "accepted_run",
-"order_known"}. Without git every git fact is unavailable, its note
-git_note, or "no --repo" when git_note is None.
+{"verdict", "gate", "evidence", "evidence_rule", "verify_head",
+"accepted_run", "order_known"}. Without git every git fact is unavailable,
+its note git_note, or "no --repo" when git_note is None.
 
 Every derived value is an _audit_core.ref, and every recorded text an
 _audit_core.quote (configured commands become <check:<id>>). A task's
@@ -61,7 +61,13 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                head, a later reopened withdraws it, a later committed event
                with another head makes it stale).
   status       committed, reviewed, verified, accepted and result_status, as
-               in the spec's table.
+               in the spec's table. verified is false, "the verify at <sha7>
+               failed (checks_failed)", when the evidence is invalid by
+               checks_failed (else "the verify evidence is invalid"). When
+               the verdict is "accepted (gate unavailable)", accepted is
+               unavailable, "the acceptance gate is unavailable", for a task
+               the result reports done that is neither settled nor blocked;
+               such a task that is not done, settled or blocked stays false.
 
 spec_match compares a review's spec_sha256 with the sha256 of the archived
 spec copy, else with the spec_sha256 of a setup run_started event: the
@@ -87,6 +93,7 @@ NO_REPO = "no --repo"
 PREFLIGHT_LABEL = "context added by pre-flight (not ordering)"
 TRANSITIONS = ("committed", "settled")
 UNREVIEWED_STATUSES = ("skipped", "not_run")
+GATE_UNAVAILABLE_VERDICT = "accepted (gate unavailable)"
 
 ref = core.ref
 src = core.src
@@ -673,6 +680,10 @@ def _verified_status(ctx, task_head, head_src):
         return ref("not_required", "present", [], "the manifest configures no test, lint or build command")
     if not f.get("order_known"):
         return ref(None, "unavailable", [], "launch order unknown")
+    if evidence == "invalid" and f.get("evidence_rule") == "checks_failed":
+        head = f.get("verify_head")
+        at = " at %s" % head[:7] if isinstance(head, str) and head else ""
+        return ref(False, "present", [], "the verify%s failed (checks_failed)" % at)
     if evidence == "invalid":
         return ref(False, "present", [], "the verify evidence is invalid")
     if evidence != "valid":
@@ -701,13 +712,18 @@ def _accepted_status(ctx, events, result_status):
     settled = bool(transitions) and transitions[-1]["event"].get("event") == "settled"
     blocked = _blocked_after(events)
     sources = list(result_status["sources"][:1])
-    if not f.get("accepted_run"):
+    # The run said accepted but the gate could not judge the evidence: a task
+    # that would otherwise be accepted is unknown, the others stay false.
+    gate_unavailable = f.get("verdict") == GATE_UNAVAILABLE_VERDICT
+    if not f.get("accepted_run") and not gate_unavailable:
         return ref(False, "present", sources, "the run is not accepted")
     if result_status["value"] != "done":
         return ref(False, "present", sources, "the result does not report the task done")
     if settled or blocked:
         return ref(False, "present", sources + [_line_src(transitions[-1] if settled else blocked)],
                    "the task is settled" if settled else "the task is blocked")
+    if gate_unavailable:
+        return ref(None, "unavailable", sources, "the acceptance gate is unavailable")
     return ref(True, "present", sources)
 
 

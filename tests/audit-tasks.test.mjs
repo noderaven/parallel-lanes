@@ -29,7 +29,10 @@ after(() => {
 });
 
 function facts(over = {}) {
-  return { verdict: 'accepted', gate: 'match', evidence: 'valid', verify_head: null, accepted_run: true, order_known: true, ...over };
+  return {
+    verdict: 'accepted', gate: 'match', evidence: 'valid', evidence_rule: null, verify_head: null, accepted_run: true,
+    order_known: true, ...over,
+  };
 }
 
 // task_sections of a run folder: {A1: section, A2: section}, plus order.
@@ -303,14 +306,44 @@ test('not_required and unknown stay distinct', () => {
   assert.deepEqual(vs(notRequired.A1.status.verified), ['not_required', 'present']);
   const unknown = audit(folder, facts({ evidence: 'unavailable', gate: 'unavailable', verify_head: s2 }), { repo: repo.dir });
   assert.deepEqual(vs(unknown.A1.status.verified), [null, 'unavailable']);
-  const invalid = audit(folder, facts({ evidence: 'invalid', verify_head: s2 }), { repo: repo.dir });
+  const invalid = audit(folder, facts({ evidence: 'invalid', evidence_rule: 'checks_stale', verify_head: s2 }), { repo: repo.dir });
   assert.deepEqual(vs(invalid.A1.status.verified), [false, 'present']);
+  assert.equal(invalid.A1.status.verified.note, 'the verify evidence is invalid');
+  // Checks that ran and failed say so, at the verify head.
+  const failed = audit(folder, facts({ evidence: 'invalid', evidence_rule: 'checks_failed', verify_head: s2 }), { repo: repo.dir });
+  assert.deepEqual(vs(failed.A1.status.verified), [false, 'present']);
+  assert.equal(failed.A1.status.verified.note, `the verify at ${s2.slice(0, 7)} failed (checks_failed)`);
+  const headless = audit(folder, facts({ evidence: 'invalid', evidence_rule: 'checks_failed' }), { repo: repo.dir });
+  assert.equal(headless.A1.status.verified.note, 'the verify failed (checks_failed)');
   const order = audit(folder, facts({ verify_head: s2, order_known: false }), { repo: repo.dir });
   assert.deepEqual(vs(order.A1.status.verified), [null, 'unavailable']);
   const noAncestor = audit(folder, facts({ verify_head: s0 }), { repo: repo.dir });
   assert.deepEqual(vs(noAncestor.A1.status.verified), [false, 'present']);
   const verdict = audit(folder, facts({ verdict: 'unavailable', accepted_run: false }), { repo: repo.dir });
   assert.deepEqual(vs(verdict.A1.status.accepted), [null, 'unavailable']);
+});
+
+test('a gate-unavailable run leaves accepted unavailable only where it would be true', () => {
+  const [s0, s1] = [S('a'), S('b')];
+  const gate = facts({ verdict: 'accepted (gate unavailable)', gate: 'unavailable', evidence: 'unavailable', accepted_run: false });
+  const accepted = (out) => [out.status.accepted.value, out.status.accepted.state, out.status.accepted.note];
+  // A1 is done and reviewed; A2 never ran.
+  const out = audit(makeRun(reviewedRun(s0, s1)), gate);
+  assert.deepEqual(accepted(out.A1), [null, 'unavailable', 'the acceptance gate is unavailable']);
+  assert.deepEqual(out.A1.status.accepted.sources, [{ path: 'wf_1.json', at: '#/result/tasks/A1/status' }]);
+  assert.deepEqual(accepted(out.A2), [false, 'present', 'the result does not report the task done']);
+  // A done task that is settled, or blocked after its last commit, stays false.
+  const settled = audit(makeRun(reviewedRun(s0, s1, [{ task: 'A1', event: 'settled', outcome: 'unblock', base: s0, head: s1 }])), gate);
+  assert.deepEqual(accepted(settled.A1), [false, 'present', 'the task is settled']);
+  const blocked = audit(makeRun(reviewedRun(s0, s1, [{ task: 'A1', event: 'blocked', reason: 'stuck' }])), gate);
+  assert.deepEqual(accepted(blocked.A1), [false, 'present', 'the task is blocked']);
+  // Every other verdict keeps the order: a run that is not accepted says so first.
+  for (const verdict of ['unverified', 'rejected']) {
+    const other = audit(makeRun(reviewedRun(s0, s1)), facts({ verdict, accepted_run: false }));
+    assert.deepEqual(accepted(other.A1), [false, 'present', 'the run is not accepted'], verdict);
+    assert.deepEqual(accepted(other.A2), [false, 'present', 'the run is not accepted'], verdict);
+  }
+  assert.deepEqual(accepted(audit(makeRun(reviewedRun(s0, s1)), facts()).A1), [true, 'present', undefined]);
 });
 
 test('without a repo every git fact is unavailable', () => {

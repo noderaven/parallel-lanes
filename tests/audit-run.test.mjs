@@ -168,6 +168,7 @@ test('evidence validity names the rule', () => {
     const s = sections(makeRun({ launches: [launch(accepted(D, { verify }))] }));
     assert.equal(s.facts.verdict, 'unverified', rule);
     assert.equal(s.facts.evidence, 'invalid', rule);
+    assert.equal(s.facts.evidence_rule, rule, rule);
     assert.equal(s.checks.evidence.value, 'invalid', rule);
     assert.equal(s.checks.evidence.note, rule);
     assert.equal(s.acceptance.verdict.value, 'unverified');
@@ -179,12 +180,14 @@ test('evidence validity names the rule', () => {
   assert.equal(s.checks.evidence.value, 'unavailable');
   assert.equal(s.checks.evidence.state, 'unavailable');
   assert.equal(s.checks.evidence.note, 'integrity_not_recorded');
+  assert.equal(s.facts.evidence_rule, 'integrity_not_recorded');
   // A match whose lists were not recorded falls through to the run verdict.
   assert.equal(s.facts.verdict, 'accepted');
   const good = sections(makeRun({ launches: [launch(accepted(D))] }));
   assert.equal(good.facts.verdict, 'accepted');
   assert.deepEqual(good.facts, {
-    verdict: 'accepted', gate: 'match', evidence: 'valid', verify_head: D, accepted_run: true, order_known: true,
+    verdict: 'accepted', gate: 'match', evidence: 'valid', evidence_rule: null, verify_head: D, accepted_run: true,
+    order_known: true,
   });
   assert.equal(good.checks.verify_head.state, 'present');
   const stale = sections(makeRun({ launches: [launch(accepted(D, { verify: verifyAt(OTHER) }))] }));
@@ -230,7 +233,10 @@ test('the final re-review covers the final fix', () => {
   assert.deepEqual(Object.keys(cov), [r.merge, r.fix]);
   assert.equal(cov[r.merge].state, 'present');
   assert.equal(cov[r.merge].value, 'final review');
+  // A lane merge a lens head contains names that head.
+  assert.equal(cov[r.merge].note, `contained in the final review's head ${r.merge.slice(0, 7)}`);
   assert.equal(cov[r.fix].state, 'inferred');
+  assert.equal(cov[r.fix].note, undefined);
   assert.equal(cov[r.fix].value, 'final re-review');
   assert.deepEqual(cov[r.fix].sources, [{ path: 'transcript:wf_aaaaaa/final re-review', at: null }]);
 
@@ -308,6 +314,7 @@ test('lens heads fall back to structured results', () => {
     const cov = coverage(s);
     assert.equal(cov[r.merge].state, 'present', label);
     assert.equal(cov[r.merge].value, 'final review');
+    assert.equal(cov[r.merge].note, `contained in the final review's head ${r.merge.slice(0, 7)}`, label);
     assert.ok(cov[r.merge].sources.some((x) => x.path === `transcript:wf_aaaaaa/${label}`));
   }
 });
@@ -457,6 +464,35 @@ test('named missing launches are listed by wf id', () => {
     [['wf_bbbbbb', 'missing', MISSING_NOTE], ['wf_cccccc', 'missing', MISSING_NOTE], [null, 'missing', MISSING_NOTE]]);
   assert.deepEqual(auditGaps(folder).filter((g) => g.where.startsWith('#/run/launches/missing')).map((g) => g.where),
     ['#/run/launches/missing/0', '#/run/launches/missing/1', '#/run/launches/missing/2']);
+});
+
+test('e2e is stale only when both shas are recorded and differ', () => {
+  const NO_CHECKED = 'the end-to-end check recorded no sha';
+  const NO_DELIVERED = 'the run recorded no delivered sha';
+  const cases = [
+    // [checked_sha (undefined: no key), delivered_sha, state, note]
+    [D, D, 'present', undefined],
+    [OTHER, D, 'stale', `the end-to-end check covered ${OTHER}, not the delivered ${D}`],
+    [null, D, 'unavailable', NO_CHECKED],
+    [undefined, D, 'unavailable', NO_CHECKED],
+    ['', D, 'unavailable', NO_CHECKED],
+    [D, null, 'unavailable', NO_DELIVERED],
+    [null, null, 'unavailable', `${NO_CHECKED}; ${NO_DELIVERED}`],
+    [undefined, undefined, 'unavailable', `${NO_CHECKED}; ${NO_DELIVERED}`],
+  ];
+  for (const [checked, delivered, state, note] of cases) {
+    const result = accepted(D, { e2e: { checked_sha: checked, items: [{ result: 'PASS' }, { result: 'FAIL' }] } });
+    if (delivered === undefined) delete result.delivered_sha;
+    else result.delivered_sha = delivered;
+    const folder = makeRun({ launches: [launch(result)] });
+    const e2e = sections(folder).checks.e2e;
+    const name = JSON.stringify([checked, delivered]);
+    assert.deepEqual([e2e.state, e2e.note], [state, note], name);
+    assert.deepEqual(e2e.value, { checked_sha: checked === undefined ? null : checked, items: 2, failed: 1 }, name);
+    // Stale and unavailable are both gaps: the gap count stays.
+    const gaps = auditGaps(folder).filter((g) => g.where === '#/run/checks/e2e');
+    assert.deepEqual(gaps.map((g) => [g.state, g.note]), state === 'present' ? [] : [[state, note]], name);
+  }
 });
 
 test('an override at another head is stale and changes nothing', () => {

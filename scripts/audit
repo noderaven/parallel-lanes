@@ -32,7 +32,11 @@ and every recorded text a quote {"quote", "sources", "commands_replaced"}
 in which configured commands are check ids; gaps lists every value whose
 state is missing, stale, conflicting or unavailable. audit.md starts with a
 line saying it holds local paths and recorded text and is not meant to be
-shared as-is. The same inputs give the same bytes.
+shared as-is. In audit.md, checks that ran and failed read 'failed checks'
+(audit.json keeps invalid and the checks_failed rule), review verdicts read
+from the journal '[inferred: read from the transcript]', and a ruling
+without a by 'implementer (no role recorded)'. The same inputs give the
+same bytes.
 
 An --out that is RUN_FOLDER, is equal to or inside any *.ledger or wf_* dir
 of the run, would make one (its first part under RUN_FOLDER matches *.ledger

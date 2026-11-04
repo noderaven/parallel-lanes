@@ -2176,16 +2176,22 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
 - **Evidence validity.** The audit judges evidence validity from `result.verify` against the manifest's
   configured checks, with each failed rule named: `checks_missing`, `checks_stale`,
   `checks_incomplete`, `checks_failed`, `checks_unclean`, or `integrity_not_recorded` (older
-  engines, shown as a gap).
+  engines, shown as a gap). Checks that ran and failed (`invalid` by `checks_failed`) read
+  `failed checks` in `audit.md`: the Acceptance line `- evidence: failed checks (checks_failed)`,
+  the Checks line `evidence validity: failed checks [present] - checks_failed` and each task's
+  verified note `the verify at <sha7> failed (checks_failed)`; `audit.json` keeps `invalid` and
+  the rule. The e2e entry is `stale` only when the check's `checked_sha` and the delivered sha are
+  both recorded and differ; when one is not recorded it is `unavailable`, its note naming what is
+  missing (`the end-to-end check recorded no sha`, `the run recorded no delivered sha`, or both).
 - **Code outside recorded task ranges** needs `--repo`, a known latest launch and a 40 or 64 digit
   `delivered_sha`; else it is `unavailable` with the reason. It lists the commits reachable from
   the delivered sha but not from the run's start point that no task's recorded range holds
-  (integration merges and the final fix). Each is `present` when a final lens head contains it,
-  `inferred` when the final re-review's head contains it (or, for engines from 1.2.1 on when no
-  re-review head was recorded, when `final.head` does, differs from every lens head, and
-  `final.unreviewed_fix` is absent), and `missing` otherwise, with `final.unreviewed_fix` quoted
-  when it is set. When `ledger status` fails on the archived ledger, the section names that
-  failure.
+  (integration merges and the final fix). Each is `present` when a final lens head contains it
+  (note `contained in the final review's head <sha7>`), `inferred` when the final re-review's
+  head contains it (or, for engines from 1.2.1 on when no re-review head was recorded, when
+  `final.head` does, differs from every lens head, and `final.unreviewed_fix` is absent), and
+  `missing` otherwise, with `final.unreviewed_fix` quoted when it is set. When `ledger status`
+  fails on the archived ledger, the section names that failure.
 - **After delivery** (with `--head`): the commits between the delivered sha and the head,
   `unavailable` (no run evidence); with none, it is `present` and adds no gap, so a clean run
   audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
@@ -2195,7 +2201,13 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
 - **Per task,** in run order, the audit shows the requirement (plan section and brief hashes),
   placement, changes (rulings, events, escalations), commits and review (reviews, each with its
   brief and spec hashes against the run's, packages, verdicts and approval), each with its state. A launch is the union of `wf_*` dirs and
-  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`.
+  `wf_*.json` files; its result comes only from `<run folder>/<wf>.json`. Review verdicts come
+  from the journal and are `inferred`; `audit.md` shows them as
+  `[inferred: read from the transcript]` (other `inferred` values keep `[inferred]`). A ruling
+  without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
+  verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
+  settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
+  a task that is not done, settled or blocked stays `false`.
 - **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
   (counted as archive-run counts them, see "Run history") with the archived ones.
   `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one

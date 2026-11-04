@@ -29,9 +29,15 @@ render_md(audit) is audit.md: its first line is FIRST_LINE, then the
 sections Summary, Acceptance, Launches, Tasks (one block per task), Code
 outside recorded task ranges, Checks, After delivery (only with --head), Open
 work and Evidence gaps. A value is shown as '<value> [<state>]', with its
-note after ' - ' and its sources in parentheses. Recorded text appears only
-as Markdown quote lines ('> '), under a line naming where it was quoted
-from; configured commands in it are already check ids.
+note after ' - ' and its sources in parentheses; a review verdict read from
+the journal shows its state as '[inferred: read from the transcript]'
+(TRANSCRIPT_INFERRED; other inferred values keep '[inferred]'). Evidence
+validity invalid by checks_failed reads 'failed checks' (FAILED_CHECKS) on
+the Acceptance and Checks lines, while audit.json keeps 'invalid' and the
+rule. A ruling without by reads 'ruling by implementer (no role recorded)'
+(NO_ROLE), the ledger's own rule. Recorded text appears only as Markdown
+quote lines ('> '), under a line naming where it was quoted from;
+configured commands in it are already check ids.
 
 render_summary(audit, md_path) is at most 10 lines, the last 'full report:
 <md_path>'.
@@ -51,6 +57,11 @@ import _audit_tasks  # noqa: E402
 FIRST_LINE = "This audit holds local paths and recorded text from the run; it is not meant to be shared as-is."
 NO_REPO = "no --repo"
 UNCHECKED = "repo not checked against the run"
+# audit.md's bracket for a review verdict read from the journal.
+TRANSCRIPT_INFERRED = "inferred: read from the transcript"
+# A ruling without by, as the ledger counts it (ledger ruling_records).
+NO_ROLE = "implementer (no role recorded)"
+FAILED_CHECKS = "failed checks"
 
 
 # ---- build ----
@@ -133,20 +144,30 @@ def _with_sources(text, sources):
     return "%s (%s)" % (text, where) if where else text
 
 
-def _ref_text(r, value=None):
-    """'<value> [<state>] - <note>' for a ref (value overrides its value)."""
+def _ref_text(r, value=None, state=None):
+    """'<value> [<state>] - <note>' for a ref (value overrides its value,
+    state the text in the brackets)."""
     if not _is_ref(r):
         return _scalar(r)
-    text = "%s [%s]" % (_scalar(r.get("value")) if value is None else value, r["state"])
+    text = "%s [%s]" % (_scalar(r.get("value")) if value is None else value,
+                        r["state"] if state is None else state)
     if r.get("note"):
         text += " - %s" % r["note"]
     return text
 
 
-def _ref(label, r, indent="", value=None):
+def _ref(label, r, indent="", value=None, state=None):
     if not _is_ref(r):
         return "%s- %s: %s" % (indent, label, _scalar(r))
-    return _with_sources("%s- %s: %s" % (indent, label, _ref_text(r, value)), r.get("sources"))
+    return _with_sources("%s- %s: %s" % (indent, label, _ref_text(r, value, state)), r.get("sources"))
+
+
+def _evidence_text(evidence, rule):
+    """How audit.md names an evidence validity value: invalid by checks_failed
+    is FAILED_CHECKS (audit.json keeps invalid and the rule)."""
+    if evidence == "invalid" and rule == "checks_failed":
+        return FAILED_CHECKS
+    return None
 
 
 def _quote(label, q, indent=""):
@@ -246,7 +267,8 @@ def _md_summary(audit, out):
     out.append("")
 
 
-def _md_acceptance(a, out):
+def _md_acceptance(a, rule, out):
+    """rule is run.checks.rule, the evidence validity rule."""
     out += ["## Acceptance", ""]
     out.append(_ref("verdict", a["verdict"]))
     if a.get("verdict_rule"):
@@ -261,7 +283,8 @@ def _md_acceptance(a, out):
     for w in a.get("warnings") or []:
         out += _quote("warning", w, "  ")
     out.append("- gate: %s" % _scalar(a.get("gate")))
-    out.append("- evidence: %s" % _scalar(a.get("evidence")))
+    failed = _evidence_text(a.get("evidence"), rule)
+    out.append("- evidence: %s" % ("%s (%s)" % (failed, rule) if failed else _scalar(a.get("evidence"))))
     overrides = a.get("overrides") or []
     if not overrides:
         out.append("- user overrides: none")
@@ -354,7 +377,8 @@ def _md_task(t, out):
     if not ch["rulings"]:
         out.append("- rulings: none")
     for r in ch["rulings"]:
-        out += _quote("ruling by %s" % _scalar(r["value"].get("by")), r["value"].get("text"))
+        by = r["value"].get("by")
+        out += _quote("ruling by %s" % (_scalar(by) if by else NO_ROLE), r["value"].get("text"))
     if not ch["events"]:
         out.append("- blocked, settled and reopened events: none")
     for e in ch["events"]:
@@ -422,7 +446,8 @@ def _md_task(t, out):
         val = v.get("value") or {}
         if v["state"] == "inferred":
             text = "%s, %s finding(s)" % (_scalar(val.get("verdict")), _scalar(val.get("findings")))
-            out.append(_ref("%s in %s" % (val.get("label"), val.get("wf")), v, value=text))
+            out.append(_ref("%s in %s" % (val.get("label"), val.get("wf")), v, value=text,
+                            state=TRANSCRIPT_INFERRED))
         else:
             out.append(_ref("review verdicts", v))
     approval = rv.get("approval")
@@ -475,7 +500,8 @@ def _md_checks(c, out):
     if c.get("gate_exit") is not None:
         line += "; check-verify exit %s" % c["gate_exit"]
     out.append(line)
-    out.append(_ref("evidence validity", c["evidence"]))
+    out.append(_ref("evidence validity", c["evidence"],
+                    value=_evidence_text(c["evidence"].get("value"), c.get("rule"))))
     if c.get("verify_head") is not None:
         out.append(_ref("verify head against delivered", c["verify_head"]))
     e2e = c.get("e2e")
@@ -585,7 +611,7 @@ def render_md(audit):
     out = [FIRST_LINE, "", "# Audit of run %s" % (audit.get("run_id") or "unknown"), ""]
     run = audit["run"]
     _md_summary(audit, out)
-    _md_acceptance(run["acceptance"], out)
+    _md_acceptance(run["acceptance"], run["checks"].get("rule"), out)
     _md_launches(run["launches"], out)
     out += ["## Tasks", ""]
     if not audit["tasks"]:
