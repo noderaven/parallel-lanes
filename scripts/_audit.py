@@ -80,7 +80,9 @@ an exact match over T<id>), and a task block ends with '- open minors:
 one task is in no task block, and Open work names it once ('open task
 minors in no task block'). Open work also says once 'open task minors:
 not recorded by this run's engine' (NOT_RECORDED) when both lists are
-null, 'no final review' (NO_FINAL_REVIEW) without one, and for a lower
+null, 'no final review' (NO_FINAL_REVIEW) without one (no launch, or the
+latest launch has none; nothing when the launch order is unknown, as the
+final review header gives that reason), and for a lower
 bound LOWER_BOUND_NOTE (a task with no line has none listed). When
 open_work.ledger_state is set, the open work line's task count is
 OPEN_TASKS_UNKNOWN and Open work's blocked or deferred tasks read unknown
@@ -900,10 +902,12 @@ def _md_finding(f, out, indent=""):
                 out += _quote("disposition %s" % key, d[key], indent + "    ")
 
 
-def _md_open(o, out, placed):
+def _md_open(o, out, placed, order_unknown=False):
     """placed is _placed_minors' result: after the final review's entries,
     one line on the open task minors when there is something to say (no
-    final review, none recorded, ids in no task block, a lower bound)."""
+    final review, none recorded, ids in no task block, a lower bound).
+    order_unknown (launches archived, the latest not known) adds none: the
+    final review may exist, and its header already gives the reason."""
     out += ["## Open work", ""]
     if not o["tasks"]:
         # Unknown, not none, when ledger status failed (ledger_state is set).
@@ -952,7 +956,8 @@ def _md_open(o, out, placed):
             out.append("  - %s open (carried minor)" % cid)
     # Said once here, never per task.
     if _final_value(final) is None:
-        out.append("- open task minors: %s" % NO_FINAL_REVIEW)
+        if not order_unknown:
+            out.append("- open task minors: %s" % NO_FINAL_REVIEW)
     elif placed is None:
         out.append("- open task minors: %s" % NOT_RECORDED)
     else:
@@ -1012,7 +1017,9 @@ def render_md(audit):
     _md_checks(run["checks"], out)
     if run.get("after_delivery") is not None:
         _md_after(run["after_delivery"], out)
-    _md_open(run["open_work"], out, placed)
+    entries = run["launches"]["entries"].get("value")
+    order_unknown = run["launches"].get("latest") is None and isinstance(entries, list) and bool(entries)
+    _md_open(run["open_work"], out, placed, order_unknown)
     _md_gaps(audit, out)
     _md_terms(out)
     while out and out[-1] == "":

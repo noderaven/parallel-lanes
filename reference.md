@@ -2249,9 +2249,11 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   that names a batch unit (`<first>-<last>`), no task or still more than one task is in no task
   block: Open work lists it once under `- open task minors in no task block: <id>, ...`. Open
   work says once `- open task minors: not recorded by this run's engine` when the result has
-  neither list (no task block then has a line), `- open task minors: no final review` without
-  one, and, for a lower bound, that a task block with no open minors line has none listed and
-  more may be missing (minors of tasks an earlier launch approved).
+  neither list (no task block then has a line), `- open task minors: no final review` when there
+  is no launch or the latest launch has no final review (nothing more when the launch order is
+  unknown: the final review may exist, and its header gives that reason), and, for a lower bound,
+  that a task block with no open minors line has none listed and more may be missing (minors of
+  tasks an earlier launch approved).
 - **Per task,** in run order, the audit shows the requirement (the latest review's brief hash
   against the task's plan section hash, and the brief file), placement, changes (rulings, events,
   escalations), commits and review (reviews, each with its brief and spec hashes against the

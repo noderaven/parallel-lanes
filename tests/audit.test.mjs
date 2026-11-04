@@ -714,6 +714,14 @@ test('the bottom line says what is unavailable and invents nothing', () => {
   // A ledger status that worked keeps the count and none.
   assert.ok(unordered.stdout.split('\n').includes(`open work: 0 task(s), ${neither}`), unordered.stdout);
   assert.ok(mdSection(unordered.md, 'Open work').includes('- blocked or deferred tasks: none'), unordered.md);
+  // Its one launch has a final review that audit cannot pick as the latest:
+  // the header gives the reason, and no line says there is none or that the
+  // engine recorded none.
+  const unorderedOpen = mdSection(unordered.md, 'Open work');
+  assert.ok(unorderedOpen.some((l) => l.startsWith('- final review: ') && l.includes('[unavailable] - launch order unknown')),
+    unordered.md);
+  assert.deepEqual(unorderedOpen.filter((l) => l.startsWith('- open task minors')), []);
+  assert.doesNotMatch(unordered.md, /no final review|not recorded/);
 });
 
 test('the bottom line gives the engine\'s reasons for its own verdict', () => {
