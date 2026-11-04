@@ -21,7 +21,11 @@ the user at the delivered head' (see done), the slowest phase, the top
 three slowdowns with their cost, when a recorded launch has a warned,
 failed or unread check the line 'launch conditions: <n> check(s) warned
 or failed before launch[, <k> could not be read]; <m> possible
-contributor(s)' (see launch_conditions), the full-suite runs, the total
+contributor(s)' (see launch_conditions), the line 'project test runs:
+<P>[ (+<N> unavailable)]; check calls with a test group: <T>[ (<role>
+<n>, ...)]' (see checks: P is project_test_runs' total, with N its
+unavailable count when above 0; T and the roles are the legacy
+full_suite_runs'; each reads unavailable when its source is), the total
 tokens (a minimum when some usage is missing, unavailable when no agent
 has usage), the top suggestion and the absolute path of autopsy.md.
 --quiet prints nothing.
@@ -231,7 +235,9 @@ model turn that came at or before its own result. The kinds:
   times of its redone agents (see launches), "unavailable" (cost_kind
   too) when one of them is untimed, never 0 or a part, and 0 (listed,
   never folded) when no agent was redone.
-- long_tool_call: a tool call over 120 s that no kind above counted.
+- long_tool_call: a tool call over 120 s that no kind above counted, and
+  never a run-checks or task-checks call (check time, below); a direct
+  test command stays one.
 - idle_gap: each time.idle_gaps entry.
 - check_rerun: the same Bash command (whitespace-normalised) runs again in
   one agent, both runs certainly ran a check (certainty ran, see checks),
@@ -251,11 +257,12 @@ window. Rows of one kind and one agent whose spans overlap or touch merge
 into one: at the earliest start, the span their union, cost_kind the
 weakest, evidence the earliest row's (and background_s the length of the
 union of the windows). Then, per agent, the rows take its
-time in five tiers: timeout and background_check; long_tool_call and
-check_rerun; repeated_failure, heredoc_failure and edit_retry; retry,
-escalation and extra_review_round; relaunch (a launch's redone agents, so
-an agent both retried and redone goes to the retry first, and a relaunch
-row covers each launch's own agents, so it never merges with another).
+time in five tiers: timeout and background_check; check time,
+long_tool_call and check_rerun; repeated_failure, heredoc_failure and
+edit_retry; retry, escalation and extra_review_round; relaunch (a
+launch's redone agents, so an agent both retried and redone goes to the
+retry first, and a relaunch row covers each launch's own agents, so it
+never merges with another).
 Within a tier the shorter row (span_s) goes first, then the earlier, then
 the order listed. A row takes only the parts of its span that no row
 before it took: cost_s is their length. A row left with nothing is
@@ -268,6 +275,20 @@ charged or folded. autopsy.md shows a merged row's kind as
 '<kind> xN', a cost below its span as '<cost> (of <span_s> s)', and the
 check id as 'check <id>' and the folded kinds as 'contains <kind>, ...' in
 its Evidence cell.
+Check time (1.6.13): a run-checks or task-checks call with a result that
+is no procedure execution (see checks.waits) is the check policy's own
+execution, timed in checks. Its own time is charged as check time, an
+internal row in the second tier before long_tool_call, so a window or
+whole-agent row that holds the call (edit_retry, extra_review_round, ...)
+keeps only its own time. A procedure execution's start and await-checks
+wait calls with a result are check time too, each over its own time, so
+a whole-agent or relaunch row that holds them keeps only the rest. Check
+time is no slowdown: it has no row, suggestion, detector,
+launch-condition contributor or history entry and is in no contains
+(inside a timeout row of the same call it folds without a trace).
+timeout and background_check still apply to a helper call that is no
+procedure execution, and a call that is a check_rerun stays one (the
+rerun row keeps its time).
 
 detectors: {<kind>: ok | partial | not_available}. A detector is
 not_available when its inputs are missing (no timed tool events, no
@@ -288,7 +309,9 @@ commit any file a check needs and gitignore only known generated output.
 unexplained: [{start, end, s, agent}], the five largest spans over 60 s of
 an agent's time, cut at its events (a model turn, a tool call), that no
 slowdown covers. A slowdown covers its own agent's time (a relaunch row,
-its redone agents'), and an idle gap any agent's.
+its redone agents'), and an idle gap any agent's. Check time covers its
+own agent's time too: a procedure execution's start and wait calls, and
+the check time of helper calls (Check time, above).
 
 launch_conditions: one entry per launch, in launches order: {wf, state,
 reason, observed_at, before_start_s, doctor_version, status, checks:
@@ -371,8 +394,10 @@ the background.
   (commands.test, lint and build, the lane_commands overrides and the
   task_checks entries), run-checks or task-checks (a word whose basename
   is run-checks or task-checks, as the program of a simple command or as
-  the script of python, py, bash or sh, not given -c or -m; a line that
-  runs both is a run-checks call). The line is read as shell words
+  the script of python, py, bash or sh, or of a bare variable ($NAME or
+  ${NAME}, such as "$python", read as an interpreter from 1.6.13), past
+  its options and not given -c or -m; a line that runs both is a
+  run-checks call). The line is read as shell words
   (heredoc bodies left out, a backslash before a path character read as
   '/') split into simple
   commands at ; & | && || ( ) and newlines; an & inside a redirection
@@ -418,19 +443,20 @@ the background.
 - by_check: runs counts the executions that ran, inferred the others;
   untimed counts the ran executions without a duration, and total_s sums
   the timed ones that ran (bound durations in it are upper bounds).
-- full_suite_runs (autopsy.md's 'Check calls with a test group', the
-  legacy count): total and by_role (run-report's roles) count the
-  executions whose full_suite is ran, inferred those whose full_suite is
-  inferred. A test group may be narrower than the project suite (a
-  focused run-checks --cmd test, a targeted task check). total is a lower
-  bound: runs through a wrapper (bash -c, a script) are not seen, and
-  inferred runs may not have happened.
+- full_suite_runs (autopsy.md's 'Check calls with a test group' and the
+  summary's, the legacy count): total and by_role (run-report's roles)
+  count the executions whose full_suite is ran, inferred those whose
+  full_suite is inferred. A test group may be narrower than the project
+  suite (a focused run-checks --cmd test, a targeted task check). total
+  is a lower bound: runs through a wrapper (bash -c, a script) are not
+  seen, and inferred runs may not have happened.
 - task_check_calls: total counts the task-checks executions; by_selected
   splits them by selected; failed counts those whose evidence has ok
   false; reasons tallies the reason codes of the matched evidence
   (no_entry, no_files, outside_files, widen_path, forced, git_failed).
   A call without valid evidence counts as unavailable, never as 0.
-- project_test_runs: total and by_role count the executions that ran an
+- project_test_runs (autopsy.md's 'Project test runs', first on the
+  summary's check line): total and by_role count the executions that ran an
   exact commands.test entry (the whole project suite): a run-checks call
   with a '--cmd test CMD' pair whose CMD is one, a task-checks execution
   whose evidence has project_test_executed true, or a configured command

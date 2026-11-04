@@ -242,6 +242,61 @@ test('a focused run-checks --cmd test is a legacy full-suite run but not a proje
   assert.deepEqual(checks.task_check_calls, { total: 0, by_selected: NONE, failed: 0, reasons: {} });
 });
 
+// The chat summary's check line, from a run printed without --quiet.
+function summaryLine(dir) {
+  const r = spawnSync('python3', [SCRIPT, dir], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const found = r.stdout.split('\n').filter((l) => l.startsWith('project test runs'));
+  assert.equal(found.length, 1, r.stdout);
+  assert.ok(!r.stdout.includes('full-suite runs'), r.stdout);
+  return found[0];
+}
+
+test('the summary names the project test runs first, then the check calls with a test group', () => {
+  // A targeted task-checks call runs a test group but not the project suite;
+  // verify's run-checks call passes commands.test exactly: T 2, P 1.
+  const runChecks = `cd '/w' && 'python3' '/skill/scripts/run-checks' '/w' --cmd test '${TEST_CMD}'`;
+  const dir = buildRun({
+    launches: [{ agents: [
+      { label: 'A1 implement', start: '10:00:05', end: '10:05:00',
+        calls: [{ command: taskChecks('A1'), start: '10:00:10', end: '10:00:40' }] },
+      { label: 'verify', phase: 'Verify', start: '10:06:00', end: '10:09:00',
+        calls: [{ command: runChecks, start: '10:06:10', end: '10:07:00' }] },
+    ] }],
+    evidenceFiles: { 'task-A1.1.json': evidence({ unit: 'A1', started: T('10:00:11') }) },
+  });
+  assert.equal(summaryLine(dir), 'project test runs: 1; check calls with a test group: 2 (implement 1, verify 1)');
+  const checks = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).checks;
+  assert.deepEqual(checks.project_test_runs, { total: 1, by_role: { verify: 1 }, unavailable: 0 });
+  assert.deepEqual(checks.full_suite_runs, { total: 2, inferred: 0, by_role: { implement: 1, verify: 1 } });
+  // Each count reads unavailable when its source is, on its own.
+  const line = (edit) => python([
+    'a = json.load(open(sys.argv[1], encoding="utf-8"))',
+    edit,
+    'print(json.dumps([l for l in _autopsy.render_summary(a, "x.md").split("\\n") if l.startswith("project")]))',
+  ], [join(dir, 'autopsy.json')]);
+  assert.deepEqual(line('a["checks"]["project_test_runs"] = "unavailable"'),
+    ['project test runs: unavailable; check calls with a test group: 2 (implement 1, verify 1)']);
+  assert.deepEqual(line('a["checks"]["full_suite_runs"] = {"total": "unavailable", "inferred": "unavailable", '
+    + '"by_role": "unavailable"}'), ['project test runs: 1; check calls with a test group: unavailable']);
+});
+
+test('the summary line when the counts are unavailable or have unavailable entries', () => {
+  // No tool event in the run: both counts are unavailable.
+  const none = buildRun({ launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }] });
+  assert.equal(summaryLine(none), 'project test runs: unavailable; check calls with a test group: unavailable');
+  // A task-checks call without evidence may have run the project suite: it
+  // is counted apart as unavailable, never as 0 or 1.
+  const unmatched = buildRun({
+    launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:05:00', calls: [
+      { command: taskChecks('A1'), start: '10:00:10', end: '10:00:40' },
+      { command: `cd /w && ${TEST_CMD}`, start: '10:01:00', end: '10:01:30' },
+    ] }] }],
+  });
+  assert.equal(summaryLine(unmatched),
+    'project test runs: 1 (+1 unavailable); check calls with a test group: 1 (implement 1)');
+});
+
 test('missing or malformed evidence is unavailable, never zero', () => {
   const noSelected = evidence({ unit: 'B1', started: T('10:01:11') });
   delete noSelected.policy.selected;
@@ -430,13 +485,13 @@ test('legacy full_suite_runs is unchanged on the existing fixtures', () => {
   assert.ok(existsSync(join(dir, 'autopsy.md')));
 });
 
-test('AUTOPSY_VERSION is 9', () => {
+test('AUTOPSY_VERSION is 10', () => {
   assert.deepEqual(python(['print(json.dumps([_autopsy.AUTOPSY_VERSION, _autopsy.SUGGESTIONS["long_tool_call"]]))']), [
-    9, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
+    10, 'A single tool call likely ran for over 2 minutes. Try a narrower command while iterating, and the task '
       + 'checks once before committing.',
   ]);
   const dir = buildRun({ launches: [{ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 9);
+  assert.equal(autopsy(dir).json.autopsy_version, 10);
 });
 
 test('autopsy counts an empty task evidence file as malformed and unmatched', () => {

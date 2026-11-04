@@ -51,6 +51,8 @@
 //   Before 1.6.11 the cat call counted as a 120 s long_tool_call, and the
 //   background_check as its whole 134.1 s window, not the 129.3 s the agent
 //   waited in it (loop 1, the gap between the loops, loop 2 to the notice).
+//   The line runs run-checks through "$python" (python='<py>'; "$python"
+//   '<skill>/scripts/run-checks' ...): before 1.6.13 no check execution.
 //
 // background-loop (r140, J1 implement, 02:38:10-02:51:00Z; the prompt is
 // moved to just before the kept lines):
@@ -91,6 +93,8 @@
 //     git ls-files and git rev-parse
 //   Before 1.6.11 the long call's program was grep, the first word of the
 //   line; it is now run-checks, the check it ran (evidence.check run-checks).
+//   From 1.6.13 the call is check time, no long_tool_call: only its check
+//   execution (run-checks) is listed.
 //
 // relaunch-redone (r167, both launches, every agent; 2026-10-16 23:06:22 to
 // 2026-10-17 01:00:47Z): each agent is two lines, its prompt (one neutral
@@ -193,14 +197,21 @@ test('real r140 case: a call queued behind a timeout is no long call', () => {
   assert.deepEqual(ofKind(a, 'long_tool_call'), []);
   const timeouts = ofKind(a, 'timeout').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool]);
   assert.deepEqual(timeouts, [['integrate', T('02:31:16.772'), 120.8, 'measured', 'Bash']]);
-  // "$python" .../run-checks names the script it runs; match_check does not
-  // read a variable as an interpreter, so the line ran no check it knows.
+  // "$python" .../run-checks names the script it runs, and from 1.6.13
+  // match_check reads the variable as an interpreter: the line runs
+  // run-checks. Its check time folds into the timeout row without a trace.
   const [timeout] = ofKind(a, 'timeout');
-  assert.deepEqual([timeout.evidence.program, timeout.evidence.check], ['run-checks', null]);
+  assert.deepEqual([timeout.evidence.program, timeout.evidence.check, timeout.contains], ['run-checks', 'run-checks', []]);
   // The wait inside the background window: loop 1 112.303 + the gap 1.888 +
   // loop 2 to the notice 15.155 (+ the Monitor error, 0.002).
   assert.deepEqual(ofKind(a, 'background_check').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.background_s]),
     [['integrate', T('02:33:17.603'), 129.3, 'bound', 134.1]]);
+  assert.equal(ofKind(a, 'background_check')[0].evidence.check, 'run-checks');
+  // The call is a run-checks execution: inferred (a ';' follows 'cd ... &&'),
+  // in the background from its timeout to the notification.
+  assert.deepEqual(a.checks.executions.map((x) => [x.agent, x.check, x.certainty, x.full_suite, x.background,
+    x.timing, x.start, x.s]),
+  [['integrate', 'run-checks', 'inferred', 'inferred', true, 'bound', '2026-10-10T02:31:16.772Z', 254.9]]);
 });
 
 test('real r140 case: a wait loop that outlives its background check', () => {
@@ -234,11 +245,13 @@ test('real r150 case: a background suite the agent did not wait for is no slowdo
 
 test('real r153 case: a compound line names the check it ran', () => {
   const a = autopsy('compound-check');
-  const long = ofKind(a, 'long_tool_call');
-  assert.deepEqual(long.map((s) => [s.agent, s.at, s.cost_s]),
-    [['A1 implement', '2026-10-11T20:21:36.495Z', 289.9]]);
+  // From 1.6.13 the 289.9 s run-checks call is check time, no long_tool_call
+  // (the program rule stays tested by the unit tests).
+  assert.deepEqual(ofKind(a, 'long_tool_call'), []);
+  assert.deepEqual(a.slowdowns, []);
   // The suite run-checks ran, not the grep and git status before it.
-  assert.deepEqual([long[0].evidence.program, long[0].evidence.check], ['run-checks', 'run-checks']);
+  assert.deepEqual(a.checks.executions.map((x) => [x.agent, x.check, x.start, x.s]),
+    [['A1 implement', 'run-checks', '2026-10-11T20:21:36.495Z', 289.9]]);
 });
 
 test('real r167 case: a relaunch costs only the work the later launch ran again', () => {

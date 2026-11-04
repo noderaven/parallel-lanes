@@ -208,6 +208,33 @@ test('a procedure check is one measured execution timed from its report', () => 
   assert.deepEqual(kinds(old), ['background_check']);
 });
 
+test('a procedure\'s start and wait calls are check time: a fix agent\'s round keeps only the rest', () => {
+  // The f1a, sc1, r167 and e1a shape: a whole-agent row (the
+  // extra_review_round over A1 fix 1, 10:00:00-10:13:00, 780 s) holds a long
+  // check run as the procedure. The start (1 s) and the two waits (540 s and
+  // 120 s) are check time, as a foreground helper call's own time is, so the
+  // round keeps 780 - 661 = 119 s (the reserve call's second included).
+  const out = checksFile('final-fix.1.json');
+  const dir = buildRun({
+    agents: [{ label: 'A1 fix 1', start: '10:00:00', end: '10:13:00', calls: [
+      bash(reserve('final-fix'), '10:00:05', '10:00:06', { text: out }),
+      bash(runChecks(out), '10:00:10', '10:00:11', { background: true, text: started('bx1') }),
+      bash(wait(out), '10:00:12', '10:09:12', { exit: 4, text: RUNNING(out) }),
+      bash(wait(out), '10:09:13', '10:11:13', { text: '{"ok": true}' }),
+    ] }],
+    files: { 'final-fix.1.json': report([['10:00:12', '10:11:00']]) },
+  });
+  const { json, md } = autopsy(dir);
+  assert.deepEqual(json.slowdowns.filter((s) => s.agent === 'A1 fix 1')
+    .map((s) => [s.kind, s.at, s.cost_s, s.span_s, s.merged, s.contains]),
+  [['extra_review_round', T('10:00:00'), 119, 780, 1, []]]);
+  assert.deepEqual(json.suggestions.filter((g) => g.kind === 'extra_review_round').map((g) => g.stake_s), [119]);
+  assert.equal(json.checks.waits.checks_via_procedure, 1);
+  // The check time is covered, not an open question, and named nowhere.
+  assert.deepEqual(json.unexplained, []);
+  for (const text of [JSON.stringify(json), md]) assert.ok(!text.includes('check_time'));
+});
+
 test('a procedure task check matches its evidence by path', () => {
   const three = checksFile('task-A1.3.json');
   const dir = buildRun({
@@ -399,10 +426,10 @@ test('an older run says checks_via_procedure unavailable', () => {
   assert.match(autopsy(untimed).md, /^Checks via the procedure: unavailable$/m);
 });
 
-test('the version is 9', () => {
-  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 9);
+test('the version is 10', () => {
+  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 10);
   const dir = buildRun({ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 9);
+  assert.equal(autopsy(dir).json.autopsy_version, 10);
 });
 
 test('checks.waits lists background checks never waited on, and checks left running when the waits stopped', () => {

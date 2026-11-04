@@ -53,6 +53,11 @@ execution when its command line runs one, run-checks or task-checks
   is no separator. A line whose quoting does not parse runs no check, and
   text that only mentions one (echo "npm test", a heredoc body, bash -c
   "npm test") is no execution.
+- A helper (run-checks, task-checks, await-checks) runs where a simple
+  command's program word, or the script word of an interpreter (python*,
+  py, bash, sh) or of a bare variable ($NAME or ${NAME}, such as
+  "$python": it holds an interpreter) past its options, has the helper's
+  basename (_script_args); not after -c or -m.
 - A configured command matches a simple command whose words start with its
   words, with redirections, leading keywords, NAME=value assignments and
   prefixes such as env, timeout DURATION or npx left out of both. The
@@ -97,6 +102,22 @@ execution, recognised by the script names and the flag, never by prose:
 checks.waits (waits_section) counts the executions whose agent reserved a
 path first, the wait calls, the stops and the improvised waits.
 
+Check time (1.6.13). Any other helper call with a result (a foreground
+run-checks or task-checks call, or one sent to the background without the
+procedure) is the check policy's own execution, timed in checks: never a
+long_tool_call. tool_slowdowns gives it an internal check_time row over
+its own time, charged in CHARGE_TIERS' second tier before long_tool_call,
+so a window or whole-agent row that holds the call (edit_retry,
+extra_review_round, ...) keeps only its own time. A procedure execution's
+start and wait calls with a result get check_time rows too, each over its
+own time, so check time is one category however the check ran.
+find_slowdowns leaves check_time out of the rows it returns (no slowdown,
+suggestion, detector, launch-condition contributor or history entry;
+never in a contains) and keeps the parts it took in run["_check_time"],
+which unexplained_section counts as covered. timeout and background_check
+still apply to a helper call outside a procedure; a call that is a
+check_rerun gets no check_time row.
+
 Relaunches. An agent of a launch but the last is redone when a later launch
 ran an agent for the same work (redone_agents): the same task and role, or,
 for an agent without a task, the same role; else it is kept, as is every
@@ -120,7 +141,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 9
+AUTOPSY_VERSION = 10
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -801,6 +822,10 @@ TOOL_KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failur
 KINDS = ("background_check", "timeout", "repeated_failure", "heredoc_failure", "edit_retry",
          "extra_review_round", "escalation", "retry", "relaunch", "long_tool_call", "idle_gap",
          "check_rerun")
+# The internal row of a helper check call's own time (tool_slowdowns): it is
+# charged with the slowdowns (CHARGE_TIERS) and then left out of them
+# (find_slowdowns), so it is no member of KINDS or TOOL_KINDS.
+CHECK_TIME = "check_time"
 
 # One suggestion per kind: a likely cause, then a change to try.
 SUGGESTIONS = {
@@ -1392,7 +1417,14 @@ def tool_slowdowns(agent, checks):
     an observed completion covers only the agent's waiting in its window
     (background_waiting), and _background is the window's length (None
     without a completion); a window without waiting adds no row, and its
-    call is still no long_tool_call."""
+    call is still no long_tool_call. Any other call with a result whose
+    line match_check reads as run-checks or task-checks (a helper call) is
+    check time, timed in checks_section: an internal CHECK_TIME row over
+    its own time, so it is no long_tool_call, while timeout and
+    background_check still apply to it. A procedure execution's start and
+    wait calls with a result get a CHECK_TIME row over each call's own
+    time too. A call that is a check_rerun gets no check_time row: the
+    rerun row keeps its time."""
     calls = _calls(agent)
     out = []
     procedures = _procedures(calls)
@@ -1474,11 +1506,15 @@ def tool_slowdowns(agent, checks):
     # A rerun needs proof that nothing changed: both runs certainly ran the
     # check, and every call between only reads.
     last_run = {}  # command -> (index, whether that run certainly ran)
+    helpers = []  # the indexes of helper calls with a result, outside procedures
+    reruns = set()
     for i, c in enumerate(calls):
         command = _command(c) if c["name"] == "Bash" else None
         match = match_check(command, checks, _call_exit(c)) if command is not None else None
         if match is None:
             continue
+        if match["check"] in (RUN_CHECKS, TASK_CHECKS) and c["end"] is not None and i not in procedure_calls:
+            helpers.append(i)
         key = " ".join(command.split())
         prev = last_run.get(key)
         ran = match["certainty"] == RAN
@@ -1488,6 +1524,17 @@ def tool_slowdowns(agent, checks):
         if all(_reads_only(b) for b in calls[prev[0] + 1:i]):
             add("check_rerun", [i], c["own_start"], c["end"], "measured", c,
                 RUN_CHECKS if match["check"] == RUN_CHECKS else None)
+            reruns.add(i)
+
+    # Check time: settle_slowdowns charges it in the second tier, before the
+    # windows and whole-agent rows that may hold the call, and find_slowdowns
+    # then leaves it out (it is no slowdown). A procedure execution's start
+    # and wait calls are check time too, each over its own time, so check
+    # time is one category however the check ran.
+    procedure_ran = [i for i in procedure_calls if calls[i]["end"] is not None]
+    for i in sorted(helpers + procedure_ran):
+        if i not in reruns:
+            add(CHECK_TIME, [i], calls[i]["own_start"], calls[i]["end"], "measured", calls[i])
 
     for i, c in enumerate(calls):
         if i not in counted and c["end"] is not None and c["end"] - c["own_start"] > LONG_CALL_S:
@@ -1601,13 +1648,15 @@ def detector_status(run):
 
 # The order an agent's slowdown rows take its time in (settle_slowdowns):
 # Claude Code's own notice about a call and the wait for it; one call's own
-# time; a window from a failure to its recovery, which may hold other work;
+# time, a check call's (check_time, internal: a helper call, or a procedure
+# execution's start or wait call) first; a window from a
+# failure to its recovery, which may hold other work;
 # a whole agent (retry first: an agent ended by an API error also reads as
 # an escalation); a launch's redone agents, last and in a tier of its own, so
 # that a whole-agent row over one of them (a retry, say) takes it first: in
 # the fourth tier the relaunch row could go first, being shorter or, with the
 # same span, earlier (its _at is the launch start, before any agent's).
-CHARGE_TIERS = (("timeout", "background_check"), ("long_tool_call", "check_rerun"),
+CHARGE_TIERS = (("timeout", "background_check"), ("check_time", "long_tool_call", "check_rerun"),
                 ("repeated_failure", "heredoc_failure", "edit_retry"),
                 ("retry", "escalation", "extra_review_round"), ("relaunch",))
 _CHARGE_ORDER = {kind: (tier, place) for tier, kinds in enumerate(CHARGE_TIERS)
@@ -1669,7 +1718,9 @@ def settle_slowdowns(slowdowns):
        _contains of the row that took most of its span (the earliest on a
        tie, the shares compared to the millisecond). A row of zero length
        goes to the earliest row whose taken parts, ends included, hold its
-       instant; with none it stays at 0.
+       instant; with none it stays at 0. A check_time row is folded
+       without its kind: CHECK_TIME is in no row's _contains (a timeout
+       row of the same call already names the call).
     Rows of unknown cost, rows without a cover (a relaunch row with nothing
     redone) and run-wide rows (an owner None: idle_gap) are neither merged,
     charged nor folded. A relaunch row covers its launch's redone agents, so
@@ -1723,7 +1774,7 @@ def settle_slowdowns(slowdowns):
         holders = [r for r, t in share.values() if round(t, 3) == most]
         if holders:
             into = min(holders, key=lambda r: r["_at"])
-            into["_contains"] |= {s["kind"]} | s["_contains"]
+            into["_contains"] |= ({s["kind"]} | s["_contains"]) - {CHECK_TIME}
             folded.add(id(s))
     return [s for s in rows if id(s) not in folded]
 
@@ -1731,12 +1782,19 @@ def settle_slowdowns(slowdowns):
 def find_slowdowns(run, detectors):
     """Internal slowdowns of every ok or partial detector, settled
     (settle_slowdowns), largest cost first (unknown costs last), then by
-    time and kind."""
+    time and kind. The check_time rows (tool_slowdowns) are settled with
+    them and then left out, since check time is no slowdown: no row,
+    suggestion or launch-condition contributor. The parts of agents' time
+    they took stay in run["_check_time"], [(agent, start, end)], which
+    unexplained_section counts as covered."""
     checks = configured_checks(run["manifest"])
     found = run_slowdowns(run)
     for a in _all_agents(run):
         found += tool_slowdowns(a, checks)
-    found = settle_slowdowns([s for s in found if detectors[s["kind"]] in ("ok", "partial")])
+    found = settle_slowdowns([s for s in found
+                              if s["kind"] == CHECK_TIME or detectors[s["kind"]] in ("ok", "partial")])
+    run["_check_time"] = [cover for s in found if s["kind"] == CHECK_TIME for cover in s["_covers"]]
+    found = [s for s in found if s["kind"] != CHECK_TIME]
     found.sort(key=lambda s: (s["_cost"] is None, -(s["_cost"] or 0.0), s["_at"] is None, s["_at"] or 0.0,
                               KINDS.index(s["kind"])))
     return found
@@ -1895,14 +1953,15 @@ def _skip_prefixes(words):
 def _script_args(words, name):
     """The words after the script name when a simple command runs it (as
     the program, or as the script of an interpreter such as python or
-    bash), else None. An interpreter given -c or -m runs inline code, not a
-    script."""
+    bash), else None. A bare variable ($NAME or ${NAME}, its quotes
+    removed, such as "$python") is read as an interpreter: it holds one.
+    An interpreter given -c or -m runs inline code, not a script."""
     i = _skip_prefixes(words)
     if i >= len(words):
         return None
     if _basename(words[i]) == name:
         return words[i + 1:]
-    if not _INTERPRETER.match(_basename(words[i])):
+    if not (_INTERPRETER.match(_basename(words[i])) or _BARE_VARIABLE.match(words[i])):
         return None
     i += 1
     while i < len(words) and words[i].startswith("-"):
@@ -2321,11 +2380,11 @@ def match_check(command, checks, exit_code=None):
     ; & | && || ( ) and newlines; a & inside a redirection (2>&1, >&2, &>f)
     is no separator. A line whose quoting does not parse runs nothing.
 
-    A line with a simple command that runs run-checks (as the program, or as
-    an interpreter's script, after prefixes such as env or timeout DURATION;
-    not an interpreter given -c or -m) is a run-checks call: check
-    'run-checks', and full_suite is the certainty of the run-checks command
-    passing '--cmd test', or None.
+    A line with a simple command that runs run-checks (as the program, as
+    an interpreter's script, or after a bare $NAME; past prefixes such as
+    env or timeout DURATION; not an interpreter given -c or -m) is a
+    run-checks call: check 'run-checks', and full_suite is the certainty of
+    the run-checks command passing '--cmd test', or None.
 
     Otherwise a line with a simple command that runs task-checks (in the
     same ways) is a task-checks call: check 'task-checks', and full_suite
@@ -2901,13 +2960,17 @@ def unexplained_section(run, slowdowns):
     """The largest TOP_UNEXPLAINED spans over IDLE_GAP_S that no slowdown
     covers. Each agent's time is cut at its events (a model turn, a tool
     call); a slowdown covers its own agent's time (a relaunch row, its
-    redone agents'), and an idle gap any agent's. A procedure
-    execution's start and wait calls (_procedures) cover their own time: it
-    is check time, counted in the checks section."""
+    redone agents'), and an idle gap any agent's. Check time, counted in the
+    checks section, covers its own time too: a procedure execution's start
+    and wait calls (_procedures), and the parts of check calls the
+    check_time rows took (run["_check_time"], which find_slowdowns sets;
+    none before it ran)."""
     found = []
+    checked = run.get("_check_time") or []
     for a in _timed(_all_agents(run)):
         covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
-                         if owner is None or owner is a] + _procedure_spans(a))
+                         if owner is None or owner is a]
+                        + [(s, e) for owner, s, e in checked if owner is a] + _procedure_spans(a))
         times = sorted(set([a["start"]] + [e["ts"] for e in a["events"]]))
         for start, end in zip(times, times[1:]):
             for s, e in _uncovered(start, end, covers):
@@ -3719,6 +3782,24 @@ def render_markdown(analysis):
     return "\n".join(_ascii(line) for line in text.split("\n"))
 
 
+def _checks_line(checks):
+    """The summary's check line: the project test runs (with ' (+N
+    unavailable)' when some executions cannot be known), then the legacy
+    check calls with a test group and their roles; each reads 'unavailable'
+    when its source is."""
+    project = checks.get("project_test_runs", UNAVAILABLE)
+    if isinstance(project, dict) and _is_num(project.get("total")):
+        unknown = project.get("unavailable")
+        runs = "%d%s" % (project["total"], " (+%d unavailable)" % unknown if _is_num(unknown) and unknown else "")
+    else:
+        runs = UNAVAILABLE
+    full = checks["full_suite_runs"]
+    by_role = full["by_role"]
+    calls = "%s%s" % (full["total"], " (%s)" % ", ".join(
+        "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else "")
+    return "project test runs: %s; check calls with a test group: %s" % (runs, calls)
+
+
 def render_summary(analysis, md_path):
     """The chat summary: at most SUMMARY_MAX_LINES lines."""
     a = analysis
@@ -3744,10 +3825,7 @@ def render_summary(analysis, md_path):
     conditions = _conditions_line(a)
     if conditions is not None:
         lines.append(conditions)
-    full = a["checks"]["full_suite_runs"]
-    by_role = full["by_role"]
-    lines.append("full-suite runs: %s%s" % (full["total"], " (%s)" % ", ".join(
-        "%s %d" % (r, n) for r, n in by_role.items()) if isinstance(by_role, dict) and by_role else ""))
+    lines.append(_checks_line(a["checks"]))
     tot = a["tokens"]["totals"]
     if tot.get("agents_with_usage") == 0:
         lines.append("tokens: unavailable (no agent has usage data)")

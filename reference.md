@@ -1828,7 +1828,10 @@ for a run with more than one launch `earlier launches: kept N agents, redid M (X
 the delivered head and the run's own verdict is not `accepted` the line
 `acceptance: <status>; accepted by the user at the delivered head`
 (see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
-full-suite runs, total tokens, the top suggestion and the path of `autopsy.md`. The session
+line `project test runs: P; check calls with a test group: T (implement 11, verify 1)`, total
+tokens, the top suggestion and the path of `autopsy.md`. P is the `project_test_runs` total, with
+` (+N unavailable)` when its `unavailable` count is above 0; T and the roles are the legacy
+`full_suite_runs` (see "Checks" below); each reads `unavailable` when its source is. The session
 appends that summary to the hand-back report.
 
 **Sections of `autopsy.json`:** `launches` (one per launch, with its kept and redone work),
@@ -1840,7 +1843,7 @@ appends that summary to the hand-back report.
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 9, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 10, so `history` runs autopsy again on an older `autopsy.json`.
 - `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
   redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
   ran an agent for the same work: an agent with a task when a later one has the same task and
@@ -1875,8 +1878,9 @@ appends that summary to the hand-back report.
   least tool time that can be shown, a minimum and not the total.
 - `checks` lists every execution of a configured project command or of `run-checks` (agent,
   phase, role, `start`, `end`, seconds, whether it ran in the background, whether it was on the
-  critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), and the
-  full-suite runs in total, inferred and per role. See "Checks" below.
+  critical path, and whether it `ran` or is `inferred`), the totals per check id (`by_check`), the
+  check calls with a test group (the legacy `full_suite_runs`, in total, inferred and per role)
+  and the project test runs. See "Checks" below.
   - `full_suite_runs` keeps its 1.5 meaning, check calls with a test group: a `run-checks`
     call passing `--cmd test`, whatever the command, a configured `commands.test` line, or a
     `task-checks` call whose evidence shows a test group ran.
@@ -1929,6 +1933,13 @@ text, because a command may carry a secret.
   Text that only mentions a check (`echo "npm test"`, a heredoc body, `bash -c "npm test"`) never
   counts. A full-suite run is a command that exactly matches a `commands.test` entry, or
   `run-checks` with `--cmd test`.
+- **Helpers:** `run-checks`, `task-checks` and `await-checks` run where a simple command's
+  program word has the helper's basename, or where the word after an interpreter's options
+  (`python*`, `py`, `bash`, `sh`), or after a bare variable, with or without a path, has the
+  helper's basename; not after `-c` or `-m`. From 1.6.13 a bare
+  variable (`$NAME` or `${NAME}`, quoted or not) is read as an interpreter, since it holds one:
+  `python='<py>'; "$python" '<skill>/scripts/run-checks' ...` is a `run-checks` call.
+  `"$GIT" status` or `"$PY" -c x` runs no helper.
 - **`ran` versus `inferred`:** a command is `ran` when it certainly ran: no `if`, `then`, loop
   or function around it, and either every operator before it is `;`, a newline, `|` or a
   background `&`, or the whole line is pipelines joined only by `&&` and the call exited 0.
@@ -1981,7 +1992,7 @@ also has `background_s`, its background window's length):
 | `escalation` | an agent re-run at another model tier; `unavailable` when it is untimed |
 | `retry` | a retried agent; `unavailable` when it is untimed |
 | `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
-| `long_tool_call` | a tool call over 120 s that no other kind counted |
+| `long_tool_call` | a tool call over 120 s that no other kind counted; never a `run-checks` or `task-checks` call (check time, under One second, one row). A direct test command stays one: its suggestion is about it |
 | `idle_gap` | over 60 s with no agent of the launch running |
 | `check_rerun` | the same check command ran twice (both `ran`) with only read-only calls between |
 
@@ -1991,7 +2002,7 @@ also has `background_s`, its background window's length):
   `evidence` the earliest row's, and `merged` the number of detections. A `background_check`'s
   span is its waiting; a merged one's `background_s` is the length of the union of its windows.
 - **Charging:** per agent, the rows take its time in five tiers, in this order: `timeout` and
-  `background_check` (Claude Code's notice about a call, and the wait for it);
+  `background_check` (Claude Code's notice about a call, and the wait for it); check time,
   `long_tool_call` and `check_rerun` (one call's own time); `repeated_failure`,
   `heredoc_failure` and `edit_retry` (a window from a failure to its recovery, which may hold
   other work); `retry`, `escalation` and `extra_review_round` (a whole agent); `relaunch` (a
@@ -2009,6 +2020,20 @@ also has `background_s`, its background window's length):
   charged; it never merges with another launch's. Before 1.6.12 it was run-wide and cost the
   whole earlier launch, which also hid the kept agents' long gaps: those now show under Open
   questions.
+- **Check time (1.6.13):** a `run-checks` or `task-checks` call with a result that is no
+  procedure execution ("Long checks") is the check policy's own execution, timed in `checks`:
+  an internal check-time row over its own time, charged in the second tier before
+  `long_tool_call`, so an `edit_retry` window or a fix agent's `extra_review_round` that holds the
+  call keeps only its own time. A procedure execution's start and `await-checks wait` calls
+  with a result are check time too, each over its own time, so a whole-agent row (`retry`,
+  `escalation`, `extra_review_round`) or a `relaunch` row that holds a long check keeps only the
+  rest, however the check ran. Check time is no slowdown: no row, suggestion, detector or
+  launch-condition contributor, never in a `contains` (one inside a `timeout` row of the same call
+  folds into it without a trace) and nothing in history. Its time counts as covered in
+  `unexplained` (Open questions). `timeout` and `background_check` still apply to a helper call
+  that is no procedure execution, and a call that is a `check_rerun` stays one (the rerun row
+  keeps its time). Before 1.6.13 such a helper call over 120 s was a `long_tool_call`, and the
+  procedure's calls were held by the whole-agent and `relaunch` rows around them.
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
 name, the exit code when known, the matched marker string, the program that ran, and the id of
@@ -2035,8 +2060,9 @@ gives the script's basename, else the program is null (`"$GIT" status`); a word 
 a variable and holds a path (`$VENV/bin/skein`) is a path like any other (`skein`). A script
 word holds `/` or `\`, or ends in `.py`, `.js`, `.mjs`, `.cjs`, `.sh` or `.ps1`. A word with `*`
 or `?` (a case pattern such as `*.meta)`) is never a program or a script word. The program is
-also null when it holds `=`, `@` or `:`. Check matching does not read a variable as an
-interpreter, so `"$python" .../run-checks` names the program `run-checks` with check null. A
+also null when it holds `=`, `@` or `:`. From 1.6.13 check matching reads a bare variable as
+an interpreter too (Helpers, under Checks), so `"$python" .../run-checks` names the program
+`run-checks` and the check `run-checks`. A
 line whose quoting does not parse is read as plain words, which may split quoted text, so its
 program is only the first simple command's (past the same words), with no rule above and no
 check. Markers in command output, files read or other tools' results never count. A suggestion's `stake_s` is the sum of its kind's charged
@@ -2071,7 +2097,12 @@ Never ignore source a check needs.
 recurring slowdowns ranked by total time lost with the engine versions they appeared in, token
 trends per task and role by engine version, suggestions ranked by total stake, and the runs
 whose data is too old for a section (left out of that section's totals). There is no automatic
-"regressed after its fix" flag.
+"regressed after its fix" flag. Each run in `history.json` carries `full_suite_runs` (the legacy
+check calls with a test group), `project_test_runs` (the autopsy's `checks.project_test_runs`
+total: the executions known to have run an exact `commands.test` entry) and, beside it,
+`project_test_runs_unavailable` (its `unavailable` count: the executions where that cannot be
+known), each a number or `unavailable`; the per-run table in `history.md` shows them as
+`Test-group calls` and `Project test runs`, the latter as `N (+M unavailable)` when M is above 0.
 
 Exit codes: `autopsy` ends with exit 0 on success, exit 2 on a usage error or a folder without
 a `*.lanes.json` or a `wf_*` dir, and exit 3 when a path needs converting on Windows and no Git
