@@ -31,9 +31,9 @@ agent can read such text from a file.
 
 Queued calls. The calls of one model turn share its message id and run one
 after the other; Claude Code returns their results in order. A call's own
-time starts at its own start (_calls' own_start): the latest result of an
-earlier call of its turn that came before its own, else its tool_use. A
-fast call queued behind a slow one is charged only its own time. A
+time starts at its own start (_calls' own_start): the later of its
+tool_use and the latest result of an earlier call of its turn that came at
+or before its own result. A fast call queued behind a slow one is charged only its own time. A
 procedure's times, span_agent and unexplained_section use the raw times.
 
 Checks. configured_checks gives each configured command an id: test#1 is
@@ -969,31 +969,38 @@ def _calls(agent):
     end, result_i, is_error, text}; end is None when no result answers it.
 
     own_start is when the call's own time begins. The calls of one model
-    turn (the same message id; without one, the tool_use events next to each
-    other) run one after the other and their results come back in order, so
+    turn (the same message id; a tool_use without one joins the tool_use
+    right before it) run one after the other and their results come back in order, so
     a call queued behind an earlier one of its turn starts at that call's
     result: own_start is the latest end among the earlier calls of its turn
     that ended no later than the call, and at least start. A call without a
     result, or an earlier call without one, leaves own_start at start."""
     calls = []
     waiting = {}
-    turns = []  # per call: its turn's key
-    run = 0
+    turns = []  # per call: its turn's number
+    by_msg = {}  # message id -> its turn's number
+    turn = -1
+    prev = None  # the kind of the event before
     for i, e in enumerate(agent["events"]):
         if e["kind"] == "tool_use":
             call = {"name": e["name"], "input": e["input"] or {}, "start": e["ts"], "own_start": e["ts"],
                     "end": None, "result_i": None, "is_error": False, "text": ""}
             calls.append(call)
             msg = e.get("msg")
-            turns.append(msg if msg is not None else ("run", run))
+            if msg is not None and msg in by_msg:
+                turn = by_msg[msg]
+            elif msg is not None or prev != "tool_use":
+                turn += 1  # a new message id, or no tool_use right before
+            if msg is not None:
+                by_msg[msg] = turn
+            turns.append(turn)
             if e["id"] is not None:
                 waiting[e["id"]] = call
         elif e["kind"] == "tool_result" and e["id"] in waiting:
             call = waiting.pop(e["id"])
             if e["ts"] >= call["start"]:
                 call.update(end=e["ts"], result_i=i, is_error=e["is_error"], text=e["text"])
-        if e["kind"] != "tool_use":
-            run += 1
+        prev = e["kind"]
     for k, call in enumerate(calls):
         if call["end"] is None:
             continue

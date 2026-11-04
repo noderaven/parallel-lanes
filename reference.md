@@ -1834,7 +1834,7 @@ agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `ch
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 7, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 8, so `history` runs autopsy again on an older `autopsy.json`.
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1912,8 +1912,8 @@ text, because a command may carry a secret.
   heredoc file write. `check_rerun` needs both runs `ran` with the same command, and only
   reading calls between them; an `inferred` run never proves a rerun.
 - **Queued calls:** calls sent in one model turn share its message id. A call's time starts at
-  its own start: the latest result of an earlier call of its turn that came before its own,
-  else its tool_use. Claude Code returns a turn's results in order, so a fast call queued
+  its own start: the later of its tool_use and the latest result of an earlier call of its
+  turn that came at or before its own result. Claude Code returns a turn's results in order, so a fast call queued
   behind a slow one is charged only its own time.
 
 **Detectors** (`slowdowns` entries have a `kind`, the `agent`, `at`, `cost_s`, `cost_kind` and

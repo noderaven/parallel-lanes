@@ -687,6 +687,22 @@ test('a call queued behind an earlier call of its turn starts at that call\'s re
     res(5, 'e1', 'Edit', 'ok'),
   ]);
   assert.deepEqual(out.own_starts, [0, 3]);
+  // A tool_use without a message id right after one with an id joins its turn.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 9' }, 'm1'),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, null),
+    res(9, 'b1', 'Bash', 'ok'),
+    res(9.1, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 9]);
+  // A tool_use with another id right after an id-less one starts its own turn.
+  out = detect([
+    use(0, 'b1', 'Bash', { command: 'sleep 9' }, null),
+    use(1, 'e1', 'Edit', { file_path: 'a.js' }, 'm2'),
+    res(9, 'b1', 'Bash', 'ok'),
+    res(9.1, 'e1', 'Edit', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 1]);
   // Review focus 2: an earlier call without a result is ignored.
   out = detect([
     use(0, 'b1', 'Bash', { command: 'sleep 99' }, 'm1'),
