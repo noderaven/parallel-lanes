@@ -622,17 +622,22 @@ test('the hand-back runs audit before tool-outcomes', () => {
   assert.match(handBack.slice(tools), /--audit-exit N/, handBack.slice(tools));
 });
 
-test('a user accept reruns the archive and audit', () => {
+test('a user accept reruns the archive, autopsy and audit', () => {
   const skill = flat(SKILL_MD);
   const handBack = skill.slice(skill.indexOf('## Hand-back'), skill.indexOf('## Resume'));
   const accept = handBack.indexOf('scripts/ledger accept');
   assert.ok(accept >= 0, handBack);
   const after = handBack.slice(accept, handBack.indexOf('Report: run', accept));
   const archive = after.indexOf('archive-run');
+  const autopsy = after.indexOf('autopsy');
   const audit = after.indexOf('audit');
   const tools = after.indexOf('tool-outcomes');
-  assert.ok(archive >= 0 && audit > archive && tools > audit, after);
+  assert.ok(archive >= 0 && autopsy > archive && audit > autopsy && tools > audit, after);
   assert.match(after, /rerun/, after);
+  // reference.md says the same, in the same order, in Report and in Audit.
+  const ref = flat(REFERENCE_MD);
+  assert.ok(ref.includes('and archive-run, autopsy, audit and tool-outcomes have run again'), 'Report');
+  assert.ok(ref.includes('run archive-run, autopsy, audit and `tool-outcomes` again'), 'Audit');
 });
 
 test('reference.md documents the audit', () => {

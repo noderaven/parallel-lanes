@@ -15,16 +15,16 @@ the wall time, for a run with more than one launch the line 'earlier
 launches: kept <N> agents, redid <M> (<X> of agent time)' (the earlier
 launches' kept_agents, redone_agents and redone_agent_s summed, and
 '(agent time unavailable)' in place of '(<X> of agent time)' if any is;
-see launches), when the user accepted the
-delivered head and the run's own verdict is not accepted the line
-'acceptance: <status>; accepted by the user at the delivered head' (see
-done), the slowest phase, the top three slowdowns with their cost, when
-a recorded launch has a warned, failed or unread check the line
-'launch conditions: <n> check(s) warned or failed before launch[, <k> could
-not be read]; <m> possible contributor(s)' (see launch_conditions), the
-full-suite runs, the total tokens (a minimum when some usage is missing,
-unavailable when no agent has usage), the top suggestion and the absolute
-path of autopsy.md. --quiet prints nothing.
+see launches), when the user accepted the delivered head and the run's
+own verdict is not accepted the line 'acceptance: <status>; accepted by
+the user at the delivered head' (see done), the slowest phase, the top
+three slowdowns with their cost, when a recorded launch has a warned,
+failed or unread check the line 'launch conditions: <n> check(s) warned
+or failed before launch[, <k> could not be read]; <m> possible
+contributor(s)' (see launch_conditions), the full-suite runs, the total
+tokens (a minimum when some usage is missing, unavailable when no agent
+has usage), the top suggestion and the absolute path of autopsy.md.
+--quiet prints nothing.
 
 autopsy.md is plain ASCII with these sections, in order: Summary (with
 the earlier launches line as '- Earlier launches: ...' and the acceptance

@@ -1390,9 +1390,10 @@ and shown as accepted by the user, never folded into `accepted`. `checks_failed_
 shown like any rejection, with its detail and evidence file, and the hand-back suggests the
 accept text, for example `ledger accept <ledger_dir> <repo root> <delivered_sha>
 "checks_failed_at_start: <command> fails at the start point <start> too (evidence <file>)"`.
-Once the accepts cover every reason (and the warnings the user named) and archive-run, audit
-and tool-outcomes have run again, remove the marker with `bash <skill_dir>/scripts/active-run
-remove <run_id>`: a marker left `unaccepted` sends a later session to Resume.
+Once the accepts cover every reason (and the warnings the user named) and archive-run,
+autopsy, audit and tool-outcomes have run again, remove the marker with `bash
+<skill_dir>/scripts/active-run remove <run_id>`: a marker left `unaccepted` sends a later
+session to Resume.
 Each task result's `commits` is its range `[base, head]` (the base before its first commit and
 its last head), not a list of commits; the ledger's `committed` events list every commit.
 
@@ -2159,9 +2160,9 @@ nothing is written. exit 2 also when `--out` cannot be made or written (`cannot 
 <error>`). exit 3: a Windows path cannot be converted. The same inputs give the same bytes. A
 non-zero exit goes to `tool-outcomes --audit-exit` and never changes `acceptance`.
 
-After `ledger accept`, run archive-run, audit and `tool-outcomes` again so the override and any
-session-verify evidence reach the archive and `audit.json`; once the accepts cover every reason,
-remove the marker (see "Report").
+After `ledger accept`, run archive-run, autopsy, audit and `tool-outcomes` again so the override
+and any session-verify evidence reach the archive and `audit.json`; once the accepts cover every
+reason, remove the marker (see "Report").
 
 ## Doctor
 
