@@ -4,7 +4,9 @@
 // agent's transcript, trimmed to the lines that make the case and scrubbed
 // (neutral paths under C:/u/, neutral tool and message ids, short commit
 // ids). Timestamps, models and token counts are the real ones. Each wf_1.json
-// starts 2 s before its agent and ends 2 s after it, so no idle gap shows.
+// starts 2 s before its agent and ends 2 s after it, so no idle gap shows;
+// relaunch-redone keeps every agent of a run's two launches, with their real
+// launch times (below).
 // The tests copy a fixture to a temp dir first, since autopsy writes
 // autopsy.json into the folder it reads.
 //
@@ -89,6 +91,25 @@
 //     git ls-files and git rev-parse
 //   Before 1.6.11 the long call's program was grep, the first word of the
 //   line; it is now run-checks, the check it ran (evidence.check run-checks).
+//
+// relaunch-redone (r167, both launches, every agent; 2026-10-16 23:06:22 to
+// 2026-10-17 01:00:47Z): each agent is two lines, its prompt (one neutral
+// sentence) at its real first timestamp and a final assistant text line at
+// its real last one, with its real model and the usage of its last
+// assistant line, so it is timed exactly and has no open call. The wf
+// results keep only what autopsy reads (task statuses and short commit ids,
+// the acceptance without its text), the ledger only run_started and
+// run_ended, and the manifest lists the task ids 1-7.
+//   wf_c9a04453-fcc (stopped, 13 agents) from 23:06:22.325Z: pre-flight
+//     379.796 s, tasks 1-4 and 7 implemented and reviewed, integrate
+//     416.477 s, wave 1 merge
+//   wf_9c1adb4f-1c7 (complete, 13 agents): pre-flight and integrate again,
+//     a recovery merge, tasks 5 and 6, the final reviews, final fix, verify
+//     and the final re-review
+//   Only pre-flight and integrate ran again. Launch 1's wave 1 merge counts as
+//   kept although launch 2 ran a recovery merge: the roles differ, and an
+//   agent without a task is redone only when a later one has its role.
+//   Before 1.6.12 the relaunch row cost the whole first launch (2325.7 s).
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -195,6 +216,8 @@ test('real r140 case: a wait loop that outlives its background check', () => {
   // A loop that runs sleep is a wait loop: its program is sleep, not grep.
   assert.equal(ofKind(a, 'long_tool_call')[0].evidence.program, 'sleep');
   assert.equal(a.checks.waits.background_not_waited, 0);
+  // The run-checks call is kept without its result: the agent is partial.
+  assert.equal(a.detectors.long_tool_call, 'partial');
 });
 
 test('real r150 case: a background suite the agent did not wait for is no slowdown', () => {
@@ -216,4 +239,18 @@ test('real r153 case: a compound line names the check it ran', () => {
     [['A1 implement', '2026-10-11T20:21:36.495Z', 289.9]]);
   // The suite run-checks ran, not the grep and git status before it.
   assert.deepEqual([long[0].evidence.program, long[0].evidence.check], ['run-checks', 'run-checks']);
+});
+
+test('real r167 case: a relaunch costs only the work the later launch ran again', () => {
+  const a = autopsy('relaunch-redone');
+  // The manifest's task ids make '1 implement' task 1's.
+  assert.equal(agentOf(a, '1 implement').task, '1');
+  // pre-flight 379.796 s + integrate 416.477 s.
+  assert.deepEqual(ofKind(a, 'relaunch').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.span_s, s.contains]),
+    [[null, '2026-10-16T23:06:22.325Z', 796.3, 'measured', 796.3, []]]);
+  const [first, second] = a.launches;
+  assert.deepEqual([first.wf, first.status, first.redone_agents, first.kept_agents, first.redone_agent_s],
+    ['wf_c9a04453-fcc', 'stopped', 2, 11, 796.3]);
+  assert.deepEqual([second.wf, second.status, second.redone_agents, second.kept_agents, second.redone_agent_s],
+    ['wf_9c1adb4f-1c7', 'complete', 0, 13, 0]);
 });

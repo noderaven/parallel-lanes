@@ -1,0 +1,6 @@
+{"task":"_run","event":"run_started","phase":"setup","head":"225c65a325c6c25fadd439441788986c77ac954e","plan_sha256":"1d1225f586749f42d095b788f5df6c8eaff3b8e48efed326238afddc9a14ed43","spec_sha256":"1de6f6ef75a99839baf4a6baf6a48fabe60e32f54e5055722383792279e0173a","setup_skipped":[]}
+{"task":"_run","event":"run_started","phase":"join","head":"acf6e8265b5cfd81020e97dc878ee7c1db6e3f6d"}
+{"task":"_run","event":"run_ended","status":"stopped","agents":13,"rulings":0}
+{"task":"_run","event":"run_started","phase":"setup","head":"acf6e8265b5cfd81020e97dc878ee7c1db6e3f6d","plan_sha256":"1d1225f586749f42d095b788f5df6c8eaff3b8e48efed326238afddc9a14ed43","spec_sha256":"1de6f6ef75a99839baf4a6baf6a48fabe60e32f54e5055722383792279e0173a","setup_skipped":[]}
+{"task":"_run","event":"run_started","phase":"join","head":"acf6e8265b5cfd81020e97dc878ee7c1db6e3f6d"}
+{"task":"_run","event":"run_ended","status":"complete","agents":13,"rulings":0}

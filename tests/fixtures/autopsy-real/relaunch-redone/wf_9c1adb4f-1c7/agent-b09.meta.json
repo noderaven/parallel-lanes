@@ -1,0 +1,1 @@
+{"agentType":"parallel-lanes-worker","description":"final review correctness","workflowPhase":"Final review","spawnDepth":1,"requestShape":"foreground","requestNonInteractive":false,"model":"opus"}

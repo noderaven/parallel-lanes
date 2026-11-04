@@ -287,10 +287,10 @@ The run returns `status`:
   for it (reference.md "Report").
   The user fixes and resumes, or explicitly accepts named reasons or warnings: record that
   with `<python> <skill_dir>/scripts/ledger accept <ledger_dir> <repo root> <delivered_sha>
-  "<what>"`. Then rerun archive-run, audit and tool-outcomes, so the override reaches the archive.
-  Once the accepts cover every reason (and the warnings the user named) and those reruns are
-  done, remove the marker with `bash <skill_dir>/scripts/active-run remove <run_id>`, so a later
-  session does not resume the run.
+  "<what>"`. Then rerun archive-run, autopsy, audit and tool-outcomes, so the override reaches
+  the archive. Once the accepts cover every reason (and the warnings the user named) and those
+  reruns are done, remove the marker with `bash <skill_dir>/scripts/active-run remove <run_id>`,
+  so a later session does not resume the run.
 
 Report: run `<python> <skill_dir>/scripts/run-report <transcript dir> <manifest> --out
 <run_dir>/<plan-name>.<run_id>.report.json` (Launch step 4's transcript dir) and append

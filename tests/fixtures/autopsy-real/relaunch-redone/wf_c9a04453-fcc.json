@@ -1,0 +1,57 @@
+{
+  "startTime": 1792191982325,
+  "durationMs": 2325742,
+  "status": "completed",
+  "result": {
+    "status": "stopped",
+    "run_id": "r167",
+    "version": "1.6.6",
+    "delivered_sha": null,
+    "tasks": {
+      "1": {
+        "status": "done",
+        "commits": [
+          "225c65a",
+          "4cbcf97"
+        ]
+      },
+      "2": {
+        "status": "done",
+        "commits": [
+          "225c65a",
+          "67daa8f"
+        ]
+      },
+      "3": {
+        "status": "done",
+        "commits": [
+          "225c65a",
+          "409704a"
+        ]
+      },
+      "4": {
+        "status": "done",
+        "commits": [
+          "acf6e82",
+          "efd35f8"
+        ]
+      },
+      "5": {
+        "status": "not_run",
+        "commits": null
+      },
+      "6": {
+        "status": "not_run",
+        "commits": null
+      },
+      "7": {
+        "status": "done",
+        "commits": [
+          "acf6e82",
+          "0d5dcfe"
+        ]
+      }
+    },
+    "acceptance": null
+  }
+}

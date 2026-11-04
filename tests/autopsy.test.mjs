@@ -102,15 +102,17 @@ test('done lists each task and the acceptance', () => {
     'tokens', 'checks', 'slowdowns', 'detectors', 'suggestions', 'unexplained', 'launch_conditions',
     'orphan_snapshots',
   ]);
-  assert.equal(A.autopsy_version, 8);
+  assert.equal(A.autopsy_version, 9);
   assert.equal(A.run_id, 'f1');
   assert.equal(A.engine_version, '1.5.0');
   assert.deepEqual(A.done.tasks, {
     A1: { status: 'done', commits: ['1'.repeat(40)], rounds: 1, tier_used: 'standard' },
     B1: { status: 'done', commits: ['2'.repeat(40), '3'.repeat(40)], rounds: 0, tier_used: 'standard' },
   });
+  // run1's ledger has no accepted event at its delivered head.
   assert.deepEqual(A.done.acceptance, {
     status: 'unverified', reasons: [{ kind: 'checks_stale', class: 'missing' }], warnings: 1,
+    accepted_by_user: false,
   });
   assert.deepEqual(A.done.final, { fixed: 1, declined: 0, open: 0 });
   assert.equal(A.done.e2e, 'pass');
@@ -127,7 +129,8 @@ test('done lists each task and the acceptance', () => {
 
 test('phase and lane times come from agent timestamps', () => {
   assert.deepEqual(A.launches, [
-    { wf: 'wf_1', start: T('07:00:00'), end: T('07:10:00'), wall_s: 600, status: 'complete' },
+    { wf: 'wf_1', start: T('07:00:00'), end: T('07:10:00'), wall_s: 600, status: 'complete', kept_agents: 4,
+      redone_agents: 0, kept_s: 455, redone_s: 0, redone_agent_s: 0 },
   ]);
   assert.equal(A.time.wall_s, 600);
   const phases = Object.fromEntries(A.time.phases.map((p) => [p.phase, p]));
@@ -273,9 +276,11 @@ test('damaged and old runs report unavailable or partial, never zero', () => {
   assert.equal(D.done.e2e, 'unavailable');
   assert.equal(D.engine_version, 'unavailable');
   assert.equal(D.run_id, 'f1');
-  // Without wf_1.json the launch is timed from its agents' first and last events.
+  // Without wf_1.json the launch is timed from its agents' first and last events;
+  // B1 implement is untimed, so the time its kept agents covered is unavailable.
   assert.deepEqual(D.launches, [
-    { wf: 'wf_1', start: T('07:00:05'), end: T('07:09:50'), wall_s: 585, status: 'unavailable' },
+    { wf: 'wf_1', start: T('07:00:05'), end: T('07:09:50'), wall_s: 585, status: 'unavailable', kept_agents: 4,
+      redone_agents: 0, kept_s: 'unavailable', redone_s: 0, redone_agent_s: 0 },
   ]);
   // B1 implement may have run in what looks like a gap (its 07:01:00 to
   // 07:04:00 holds no other agent), so no gap is listed and the detector
@@ -462,6 +467,14 @@ test('read_events gives timed events in file order and skips damaged lines', () 
   assert.deepEqual(counted, [2, 2, 2]);
 });
 
+test('a tool_use event carries its line\'s message id', () => {
+  const events = python([
+    'import _autopsy',
+    `print(json.dumps(_autopsy.read_events(${JSON.stringify(join(RUN1, 'wf_1', 'agent-b1.jsonl'))})))`,
+  ]);
+  assert.deepEqual(events.filter((e) => e.kind === 'tool_use').map((e) => e.msg), ['m_b1_2', 'm_b1_3']);
+});
+
 test('exit 2 without a manifest or a wf_ dir, and nothing written', () => {
   const empty = join(TMP, 'empty');
   mkdirSync(empty, { recursive: true });
@@ -505,7 +518,8 @@ test('each detector finds its slowdown with its cost', () => {
     escalation: ['B1 implement', T('09:02:10'), 170, 'measured'],
     retry: ['B1 review retry', T('09:05:40'), 60, 'measured'],
     extra_review_round: ['A1 fix 1', T('09:13:30'), 140, 'measured'],
-    relaunch: [null, T('08:00:00'), 300, 'measured'],
+    // wf_1's A1 implement (08:00:10-08:04:50), which wf_2 ran again.
+    relaunch: [null, T('08:00:00'), 280, 'measured'],
     idle_gap: [null, T('09:16:00'), 240, 'measured'],
   };
   assert.equal(S.slowdowns.length, KINDS.length);
@@ -598,9 +612,11 @@ test('a detector without data is not_available, not zero', () => {
   for (const kind of ['extra_review_round', 'escalation', 'retry', 'relaunch']) {
     assert.equal(D.detectors[kind], 'ok', kind);
   }
-  // The launch times still come from wf_1.json.
+  // The launch times still come from wf_1.json, but wf_1's A1 implement,
+  // which wf_2 ran again, is untimed: the relaunch cost is unknown, never 0.
   const relaunch = D.slowdowns.find((s) => s.kind === 'relaunch');
-  assert.equal(relaunch.cost_s, 300);
+  assert.deepEqual([relaunch.at, relaunch.cost_s, relaunch.cost_kind], [T('08:00:00'), 'unavailable', 'unavailable']);
+  assert.deepEqual([D.launches[0].redone_s, D.launches[0].redone_agent_s], ['unavailable', 'unavailable']);
   // Agents without timestamps have no wall time to cost.
   const retry = D.slowdowns.find((s) => s.kind === 'retry');
   assert.deepEqual([retry.agent, retry.at, retry.cost_s], ['B1 review retry', 'unavailable', 'unavailable']);
@@ -701,6 +717,7 @@ function detect(events, notes = [], notices = []) {
     '                  "suggestions": _autopsy.suggestions_section(settled, None),',
     '                  "waits": _autopsy.waits_section(run),',
     '                  "ends": [list(_autopsy._execution_end(agent, c)) for c in calls],',
+    '                  "times": [list(_autopsy._execution_times(agent, c)) for c in calls],',
     '                  "own_starts": [c["own_start"] for c in calls],',
     '                  "completions": [_autopsy._completion_after(agent, c) for c in calls]}))',
   ]);
@@ -768,6 +785,34 @@ test('a call queued behind an earlier call of its turn starts at that call\'s re
     res(10, 'e1', 'Edit', 'ok'),
   ]);
   assert.deepEqual(out.own_starts, [0, 1]);
+});
+
+test('a message id seen again gives no later turn its number', () => {
+  // m1, m2, m1 again, then m3: m3 is a turn of its own, not m2's, so d starts
+  // at its own use (8), not at b's result (9).
+  const out = detect([
+    use(0, 'a', 'Bash', { command: 'x' }, 'm1'),
+    res(5, 'a', 'Bash', 'ok'),
+    use(6, 'b', 'Bash', { command: 'y' }, 'm2'),
+    use(7, 'c', 'Bash', { command: 'z' }, 'm1'),
+    use(8, 'd', 'Bash', { command: 'w' }, 'm3'),
+    res(9, 'b', 'Bash', 'ok'),
+    res(10, 'c', 'Bash', 'ok'),
+    res(11, 'd', 'Bash', 'ok'),
+  ]);
+  assert.deepEqual(out.own_starts, [0, 6, 7, 8]);
+});
+
+test('a check call queued behind a call of its turn starts at that call\'s result', () => {
+  // A Read and the test command sent in one turn: the test runs after the
+  // Read's result (60), so its execution starts there.
+  const out = detect([
+    use(0, 'r1', 'Read', { file_path: 'a.js' }, 'm1'),
+    use(0.5, 't1', 'Bash', { command: 'npm test' }, 'm1'),
+    res(60, 'r1', 'Read', 'x'),
+    res(90, 't1', 'Bash', '9 passed'),
+  ]);
+  assert.deepEqual(out.times[1], [false, 60, 90, 'measured']);
 });
 
 test('timeouts and background runs come only from Claude Code notices on Bash results', () => {
@@ -900,6 +945,24 @@ test('a background check costs only the time the agent waited', () => {
   ]), [true, true, true, true, true, true, true, false, false, false]);
 });
 
+test('the scan stops at the first call past the window but keeps that call\'s gap', () => {
+  // bx1 runs from 0; a running poll 10-11; a poll at 150, after the notice.
+  // The poll at 150 starts past the window's end, so the scan stops there,
+  // but its gap (b) from the poll before (11-150) still counts, clipped.
+  const polls = [...bxRun, ...call1(10, 'o1', 'BashOutput', { bash_id: 'bx1' }, RUNNING_POLL),
+    ...call1(150, 'o2', 'BashOutput', { bash_id: 'bx1' }, '<status>completed</status>')];
+  const rows = (out) => out.slowdowns.filter((s) => s.kind === 'background_check')
+    .map((s) => [s.at, s.cost_s, s.span_s, s.cost_kind, s.background_s]);
+  // Notice at 100: gap 1-10, poll 10-11, gap 11-150 clipped to 11-100 (the
+  // idle stretch (c) from 11 covers 11-100 too): 99 s.
+  assert.deepEqual(rows(detect(polls, [], [{ ts: 100, task_id: 'bx1', status: 'completed' }])),
+    [[at(0), 99, 99, 'bound', 100]]);
+  // Notice at 50: 11-50 is 39 s, no idle stretch, so only the gap before the
+  // poll at 150 covers it: 49 s, not 10.
+  assert.deepEqual(rows(detect(polls, [], [{ ts: 50, task_id: 'bx1', status: 'completed' }])),
+    [[at(0), 49, 49, 'bound', 50]]);
+});
+
 test('a background window without waiting is no slowdown, and its call no long call', () => {
   // Review focus 4: a call moved to the background at its timeout whose
   // completion notice comes at that same result (a window of length 0).
@@ -918,6 +981,17 @@ test('a background window without waiting is no slowdown, and its call no long c
     ...call1(150, 'g1', 'Bash', { command: 'git status' }),
   ], [], [{ ts: 160, task_id: 'bx1', status: 'completed' }]);
   assert.deepEqual(out.slowdowns, []);
+  assert.equal(out.waits.background_not_waited, 1);
+});
+
+test('a call open across the stretch before the notice is no idle waiting', () => {
+  // bx1 runs from 0; a build runs 10-400 and no wait call follows. The agent
+  // is not idle from 10 to the notice at 300: the build is open across it.
+  const out = detect([...bxRun,
+    use(10, 'b2', 'Bash', { command: 'npm run build' }),
+    res(400, 'b2', 'Bash', 'built'),
+  ], [], [{ ts: 300, task_id: 'bx1', status: 'completed' }]);
+  assert.deepEqual(out.slowdowns.filter((s) => s.kind === 'background_check'), []);
   assert.equal(out.waits.background_not_waited, 1);
 });
 
@@ -1047,9 +1121,10 @@ test('slowdowns that overlap in time are counted once in the stake', () => {
 
 // The public rows settle_slowdowns leaves of internal rows built with
 // _slowdown, each {kind, start, end}: of agent X unless runWide, and with an
-// unknown cost (its covers kept) when unknown. Each row comes back as [kind,
-// at, cost_s, span_s, merged, contains]; inputs is whether the input rows are
-// unchanged.
+// unknown cost (its covers kept) when unknown; costKind and marker, when
+// given, are the row's cost_kind and evidence marker. Each row comes back as
+// [kind, at, cost_s, span_s, merged, contains], and whole in public; inputs is
+// whether the input rows are unchanged.
 function settle(rows) {
   return python([
     'import _autopsy',
@@ -1057,14 +1132,15 @@ function settle(rows) {
     'rows = []',
     `for r in json.loads(${JSON.stringify(JSON.stringify(rows))}):`,
     '    sd = _autopsy._slowdown(r["kind"], None if r.get("runWide") else X, r["start"], r["end"],',
-    '                            "unavailable" if r.get("unknown") else "measured")',
+    '                            r.get("costKind") or ("unavailable" if r.get("unknown") else "measured"),',
+    '                            marker=r.get("marker"))',
     '    if r.get("unknown"):',
     '        sd["_cost"] = None',
     '    rows.append(sd)',
     'before = repr(rows)',
     'out = [_autopsy.public_slowdown(s) for s in _autopsy.settle_slowdowns(rows)]',
     'print(json.dumps({"rows": [[s["kind"], s["at"], s["cost_s"], s["span_s"], s["merged"], s["contains"]]',
-    '                           for s in out], "inputs": repr(rows) == before}))',
+    '                           for s in out], "public": out, "inputs": repr(rows) == before}))',
   ]);
 }
 
@@ -1158,6 +1234,43 @@ test('a row inside a higher row is folded into it', () => {
   ]);
 });
 
+test('a row that took nothing folds into the row that took most of its span', () => {
+  // The 20 s holder is the earlier one; the 40 s holder takes the fold.
+  assert.deepEqual(settle([
+    { kind: 'long_tool_call', start: 0, end: 20 },
+    { kind: 'check_rerun', start: 20, end: 60 },
+    { kind: 'repeated_failure', start: 0, end: 60 },
+  ]).rows, [
+    ['long_tool_call', at(0), 20, 20, 1, []],
+    ['check_rerun', at(20), 40, 40, 1, ['repeated_failure']],
+  ]);
+});
+
+test('two equal shares at epoch times fold into the earlier holder', () => {
+  // Real timestamps are epoch seconds with milliseconds: the two 0.1 s shares
+  // differ as floats, but are equal to the millisecond.
+  const T0 = 1791613911.832;
+  const out = settle([
+    { kind: 'timeout', start: T0 + 0.1, end: T0 + 0.3 },
+    { kind: 'background_check', start: T0 + 0.3, end: T0 + 1.0 },
+    { kind: 'long_tool_call', start: T0 + 0.2, end: T0 + 0.4 },
+  ]);
+  assert.deepEqual(out.rows.map(([kind, _at, cost, span, _merged, contains]) => [kind, cost, span, contains]), [
+    ['timeout', 0.2, 0.2, ['long_tool_call']],
+    ['background_check', 0.7, 0.7, []],
+  ]);
+});
+
+test('a merge keeps the weakest cost_kind and the earliest row\'s evidence', () => {
+  // The later row is bound and listed first; the earlier is measured.
+  const out = settle([
+    { kind: 'edit_retry', start: 10, end: 30, costKind: 'bound', marker: 'has been modified since' },
+    { kind: 'edit_retry', start: 0, end: 20, costKind: 'measured', marker: 'has not been read yet' },
+  ]);
+  assert.deepEqual(out.rows, [['edit_retry', at(0), 30, 30, 2, []]]);
+  assert.deepEqual([out.public[0].cost_kind, out.public[0].evidence.marker], ['bound', 'has not been read yet']);
+});
+
 test('a row of unknown cost is never merged, charged or folded', () => {
   // Review focus 3: a background run without an observed completion, beside
   // a known one of the same kind over the same time.
@@ -1170,20 +1283,239 @@ test('a row of unknown cost is never merged, charged or folded', () => {
   ]);
 });
 
-test('run-wide rows are never merged, charged or folded', () => {
-  // Review focus 5: a relaunch over an agent's edit_retry, and two idle gaps
-  // that touch.
+test('idle gaps, the only run-wide rows, are never merged, charged or folded', () => {
+  // A run-wide row over an agent's edit_retry, and two idle gaps that touch.
+  // Relaunch rows are not run-wide: they cover the redone agents' own time.
   assert.deepEqual(settle([
-    { kind: 'relaunch', start: 0, end: 300, runWide: true },
+    { kind: 'idle_gap', start: 0, end: 300, runWide: true },
     { kind: 'edit_retry', start: 40, end: 80 },
     { kind: 'idle_gap', start: 300, end: 400, runWide: true },
     { kind: 'idle_gap', start: 400, end: 500, runWide: true },
   ]).rows, [
-    ['relaunch', at(0), 300, 300, 1, []],
+    ['idle_gap', at(0), 300, 300, 1, []],
     ['edit_retry', at(40), 40, 40, 1, []],
     ['idle_gap', at(300), 100, 100, 1, []],
     ['idle_gap', at(400), 100, 100, 1, []],
   ]);
+});
+
+// ---- relaunches: the work a later launch ran again ----
+
+// A run folder of several launches, laid out as buildRun in
+// tests/autopsy-check-policy.test.mjs lays one out: launches [{start, s,
+// agents: [{label, phase, start, end}]}], s the launch's wall time, and a
+// manifest listing the task ids. An agent's transcript is its prompt at start
+// and a last assistant line at end; an agent given neither has lines without
+// a timestamp (untimed). An agent's model tier (sonnet unless given as model)
+// is requested in its meta and resolved in its assistant line.
+function buildLaunches(launches, tasks = ['A1', 'B1', 'C1']) {
+  copies += 1;
+  const dir = join(TMP, `launches${copies}`);
+  mkdirSync(join(dir, 'p.f9.ledger'), { recursive: true });
+  writeFileSync(join(dir, 'p.f9.ledger', '_run.jsonl'), `${JSON.stringify({ event: 'run_started', run_id: 'f9' })}\n`);
+  writeFileSync(join(dir, 'p.lanes.json'), JSON.stringify({
+    version: 1, run_id: 'f9', plan: 'C:/src/plans/p.md', spec: null,
+    repo: { mode: 'git', root: 'C:/src/proj', branch: 'feat', base: 'main', worktree_root: 'C:/src/proj-wt',
+      ledger_dir: 'C:/src/plans/p.f9.ledger' },
+    commands: { setup: [], test: ['npm test'], lint: [], build: [] },
+    prelude: [],
+    lanes: [{ id: 'a', name: 'Lane a', tasks: tasks.map((id) => ({ id, title: id, tier: 'standard' })) }],
+    join: [],
+  }, null, 2));
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  launches.forEach((launch, i) => {
+    const wf = `wf_${i + 1}`;
+    const last = i === launches.length - 1;
+    writeFileSync(join(dir, `${wf}.json`), JSON.stringify({
+      runId: wf, workflowName: 'parallel-lanes', status: last ? 'completed' : 'stopped',
+      startTime: Date.parse(T(launch.start)), durationMs: launch.s * 1000,
+      result: { status: last ? 'complete' : 'stopped', run_id: 'f9', version: '1.6.11' },
+    }));
+    mkdirSync(join(dir, wf));
+    launch.agents.forEach((a, k) => {
+      const id = `${i + 1}x${k + 1}`;
+      const model = a.model || 'sonnet';
+      writeFileSync(join(dir, wf, `agent-${id}.meta.json`), JSON.stringify({
+        agentType: 'workflow-subagent', description: a.label, workflowPhase: a.phase || 'Lane a', model }));
+      const lines = [
+        { type: 'user', timestamp: a.start && T(a.start), message: { role: 'user', content: 'Do the task.' } },
+        { type: 'assistant', timestamp: a.end && T(a.end), message: {
+          id: `m_${id}`, role: 'assistant', model: `claude-${model}-4-6`, stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'Done.' }], usage } },
+      ];
+      writeFileSync(join(dir, wf, `agent-${id}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
+    });
+  });
+  return dir;
+}
+
+// Launch 1 (10:00:00-10:12:15): pre-flight 120 s, A1 implement 600 s and
+// B1 implement 480 s side by side, then B1 review 100 s. Launch 2
+// (11:00:00-11:02:45): pre-flight 60 s and B1 review 90 s.
+const PRE_FLIGHT = { label: 'pre-flight', phase: 'Pre-flight', start: '10:00:05', end: '10:02:05' };
+const A1_IMPLEMENT = { label: 'A1 implement', start: '10:02:10', end: '10:12:10' };
+const B1_IMPLEMENT = { label: 'B1 implement', start: '10:02:10', end: '10:10:10' };
+const B1_REVIEW = { label: 'B1 review', start: '10:10:20', end: '10:12:00' };
+const firstLaunch = (agents = [PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, B1_REVIEW]) => (
+  { start: '10:00:00', s: 735, agents });
+const secondLaunch = (agents = [
+  { label: 'pre-flight', phase: 'Pre-flight', start: '11:00:05', end: '11:01:05' },
+  { label: 'B1 review', start: '11:01:10', end: '11:02:40' },
+]) => ({ start: '11:00:00', s: 165, agents });
+const LAUNCH_KEYS = ['kept_agents', 'redone_agents', 'kept_s', 'redone_s', 'redone_agent_s'];
+const counts = (launch) => LAUNCH_KEYS.map((k) => launch[k]);
+const rowOf = (s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.span_s, s.merged, s.contains];
+const ofKind = (analysis, kind) => analysis.slowdowns.filter((s) => s.kind === kind);
+
+test('a relaunch costs only the agent time a later launch ran again', () => {
+  // run2: wf_2 runs A1 implement again, so wf_1's only agent was redone.
+  assert.deepEqual(ofKind(S, 'relaunch').map(rowOf), [[null, T('08:00:00'), 280, 'measured', 280, 1, []]]);
+  assert.deepEqual(counts(S.launches[0]), [0, 1, 0, 280, 280]);
+  assert.deepEqual(counts(S.launches[1]), [9, 0, 985, 0, 0]);
+  // It still has the largest stake (idle_gap's is 240 s).
+  assert.deepEqual(S.suggestions.slice(0, 2).map((g) => [g.kind, g.stake_s]), [['relaunch', 280], ['idle_gap', 240]]);
+});
+
+test('an agent is redone when a later launch ran its task and role, or its role without a task', () => {
+  const D = autopsy(buildLaunches([firstLaunch(), secondLaunch()])).json;
+  // pre-flight and B1 review ran again; A1 implement did not, and B1
+  // implement did not either (launch 2 ran only B1's review).
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 220, 'measured', 220, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 220, 220]);
+  assert.deepEqual(counts(D.launches[1]), [2, 0, 150, 0, 0]);
+  // A task done earlier and run again later is redone; redone_s is the wall
+  // time the redone agents covered, redone_agent_s and the cost their sum.
+  const again = autopsy(buildLaunches([firstLaunch(), secondLaunch([
+    { label: 'pre-flight', phase: 'Pre-flight', start: '11:00:05', end: '11:01:05' },
+    { label: 'A1 implement', start: '11:01:10', end: '11:05:00' },
+    { label: 'B1 implement', start: '11:01:10', end: '11:04:00' },
+  ])])).json;
+  assert.deepEqual(counts(again.launches[0]), [1, 3, 100, 720, 1200]);
+  assert.deepEqual(ofKind(again, 'relaunch').map(rowOf), [[null, T('10:00:00'), 1200, 'measured', 1200, 1, []]]);
+});
+
+test('a redone agent without timestamps makes the relaunch cost unavailable, never 0', () => {
+  // Review focus 1.
+  const dir = buildLaunches([firstLaunch([PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, { label: 'B1 review' }]),
+    secondLaunch()]);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf),
+    [[null, T('10:00:00'), 'unavailable', 'unavailable', 'unavailable', 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 'unavailable', 'unavailable']);
+  assert.equal(D.suggestions.find((g) => g.kind === 'relaunch').stake_s, 'unavailable');
+  assert.match(res.md, /^- Earlier launches: kept 2 agents, redid 2 \(agent time unavailable\)$/m);
+  assert.match(res.stdout, /^earlier launches: kept 2 agents, redid 2 \(agent time unavailable\)$/m);
+});
+
+test('an earlier launch with nothing redone keeps its relaunch row at 0', () => {
+  // Review focus 2: launch 2 runs only a new task, C1.
+  const dir = buildLaunches([firstLaunch(), { start: '11:00:00', s: 100,
+    agents: [{ label: 'C1 implement', start: '11:00:05', end: '11:01:35' }] }]);
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const D = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8'));
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 0, 'measured', 0, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [4, 0, 720, 0, 0]);
+  assert.deepEqual(D.suggestions.filter((g) => g.kind === 'relaunch').map((g) => [g.stake_s, g.count]), [[0, 1]]);
+  assert.match(res.md, /^- Earlier launches: kept 4 agents, redid 0 \(0\.0 s of agent time\)$/m);
+});
+
+test('an agent both retried and redone is charged to the retry first', () => {
+  // Review focus 3: launch 1's B1 review is a retry, and launch 2 runs B1
+  // review again. The retry keeps the agent's 100 s; the relaunch the rest.
+  const retried = { ...B1_REVIEW, label: 'B1 review retry' };
+  const D = autopsy(buildLaunches([firstLaunch([PRE_FLIGHT, A1_IMPLEMENT, B1_IMPLEMENT, retried]),
+    secondLaunch()])).json;
+  assert.deepEqual(ofKind(D, 'retry').map(rowOf), [['B1 review retry', T('10:10:20'), 100, 'measured', 100, 1, []]]);
+  assert.deepEqual(ofKind(D, 'relaunch').map(rowOf), [[null, T('10:00:00'), 120, 'measured', 220, 1, []]]);
+  assert.deepEqual(counts(D.launches[0]), [2, 2, 600, 220, 220]);
+  // With nothing else redone the relaunch takes nothing: it folds into the
+  // retry row (as its own tier, after the whole-agent rows, though its at,
+  // the launch start, is earlier and its span the same).
+  const folded = autopsy(buildLaunches([firstLaunch([{ ...A1_IMPLEMENT, start: '10:00:05' }, retried]),
+    secondLaunch([{ label: 'B1 review', start: '11:00:05', end: '11:02:40' }])])).json;
+  assert.deepEqual(ofKind(folded, 'retry').map(rowOf),
+    [['B1 review retry', T('10:10:20'), 100, 'measured', 100, 1, ['relaunch']]]);
+  assert.deepEqual(ofKind(folded, 'relaunch'), []);
+  assert.deepEqual(counts(folded.launches[0]), [1, 1, 725, 100, 100]);
+});
+
+test('relaunch is the fifth charging tier, after the whole-agent rows', () => {
+  const tiers = python(['import _autopsy', 'print(json.dumps(_autopsy.CHARGE_TIERS))']);
+  assert.equal(tiers.length, 5);
+  assert.deepEqual(tiers[3], ['retry', 'escalation', 'extra_review_round']);
+  assert.deepEqual(tiers[4], ['relaunch']);
+});
+
+test('every kind but idle_gap has a charging tier', () => {
+  assert.equal(python(['import _autopsy',
+    'print(json.dumps(set(k for tier in _autopsy.CHARGE_TIERS for k in tier) | {"idle_gap"}',
+    '                 == set(_autopsy.KINDS)))']), true);
+});
+
+test('an extra review round with an untimed fix or re-review costs unavailable', () => {
+  // One launch: A1 implement and review, then a fix and a re-review, one of
+  // them without timestamps.
+  const round = (fix, reReview) => autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents: [
+    { label: 'A1 implement', start: '10:00:05', end: '10:05:00' },
+    { label: 'A1 review', start: '10:05:10', end: '10:06:00' },
+    { label: 'A1 fix 1', ...fix },
+    { label: 'A1 re-review 1', ...reReview },
+  ] }])).json;
+  const FIX = { start: '10:06:10', end: '10:08:00' };
+  const RE_REVIEW = { start: '10:08:10', end: '10:09:00' };
+  const roundRow = (D) => ofKind(D, 'extra_review_round').map((s) => [s.cost_s, s.cost_kind, s.span_s]);
+  assert.deepEqual(roundRow(round(FIX, RE_REVIEW)), [[160, 'measured', 160]]);
+  assert.deepEqual(roundRow(round({}, RE_REVIEW)), [['unavailable', 'unavailable', 'unavailable']]);
+  assert.deepEqual(roundRow(round(FIX, {})), [['unavailable', 'unavailable', 'unavailable']]);
+});
+
+test('a retry or escalation of an untimed agent costs unavailable', () => {
+  // One launch: B1 implement at sonnet, then again at opus (an escalation),
+  // and a B1 review retry. Untimed, every agent lacks timestamps, so they
+  // keep their file order.
+  const at = (timed, start, end) => (timed ? { start, end } : {});
+  const launch = (timed) => autopsy(buildLaunches([{ start: '10:00:00', s: 735, agents: [
+    { label: 'B1 implement', ...at(timed, '10:00:05', '10:05:00') },
+    { label: 'B1 implement', model: 'opus', ...at(timed, '10:05:10', '10:08:00') },
+    { label: 'B1 review retry', ...at(timed, '10:08:10', '10:09:00') },
+  ] }])).json;
+  const rows = (D) => ['escalation', 'retry'].map((kind) => ofKind(D, kind).map(rowOf));
+  assert.deepEqual(rows(launch(true)), [
+    [['B1 implement', T('10:05:10'), 170, 'measured', 170, 1, []]],
+    [['B1 review retry', T('10:08:10'), 50, 'measured', 50, 1, []]],
+  ]);
+  const NONE = ['unavailable', 'unavailable', 'unavailable', 'unavailable', 1, []];
+  assert.deepEqual(rows(launch(false)), [[['B1 implement', ...NONE]], [['B1 review retry', ...NONE]]]);
+});
+
+test('a run with one launch keeps all its agents and shows no launches table', () => {
+  // Review focus 5: run1.
+  assert.deepEqual(ofKind(A, 'relaunch'), []);
+  assert.deepEqual([A.launches[0].kept_agents, A.launches[0].redone_agents], [A.time.agents.length, 0]);
+  const res = runCli(copyRun(RUN1));
+  assert.equal(res.code, 0, res.stderr);
+  assert.ok(!res.md.includes('| Launch | Status |'), res.md);
+  assert.ok(!/earlier launches/i.test(res.md), res.md);
+  assert.ok(!/earlier launches/i.test(res.stdout), res.stdout);
+});
+
+test('autopsy.md opens Where time went with the launches table, and the summaries say what was redone', () => {
+  const res = runCli(copyRun(RUN2));
+  assert.equal(res.code, 0, res.stderr);
+  const time = res.md.split('## Where time went\n\n')[1].split('\n## ')[0];
+  assert.deepEqual(time.split('\n').slice(0, 4), [
+    '| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+    '| wf_1 | stopped | 300.0 s | 0 | 0.0 s | 1 | 280.0 s |',
+    '| wf_2 | complete | 1290.0 s | 9 | 985.0 s | 0 | 0.0 s |',
+  ]);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0];
+  assert.match(summary, /^- Earlier launches: kept 0 agents, redid 1 \(280\.0 s of agent time\)$/m);
+  assert.match(res.stdout, /^earlier launches: kept 0 agents, redid 1 \(280\.0 s of agent time\)$/m);
+  assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
 });
 
 test('unclean checks are explained without suggesting to ignore source', () => {
@@ -1211,6 +1543,124 @@ test('unclean checks are explained without suggesting to ignore source', () => {
   assert.match(g.text, /never ignore a file a check reads/i);
   assert.doesNotMatch(g.text, /ignore (all|every|these|them|the listed|the files|coverage)/i);
   assert.ok(!res.text.includes('REASON-DETAIL-2'));
+});
+
+// ---- acceptance by the user ----
+// ledger accept appends {"task": "_run", "event": "accepted", "head": <full
+// sha>, "text": TEXT} to the ledger's _run.jsonl. run1 delivers 3333...3333
+// and its _run.jsonl holds only a run_started event.
+
+const DELIVERED = '3'.repeat(40);
+const BY_USER = 'accepted by the user at the delivered head';
+
+// A copy of run1 whose last result has acceptance status `status` (its one
+// reason, checks_stale, kept) and delivers `delivered` (no delivered_sha when
+// null), with `lines` appended to the ledger's _run.jsonl.
+function acceptanceRun({ status = 'rejected', delivered = DELIVERED, lines = [] } = {}) {
+  const dir = copyRun();
+  const wfPath = join(dir, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  wf.result.acceptance.status = status;
+  if (delivered === null) delete wf.result.delivered_sha;
+  else wf.result.delivered_sha = delivered;
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  editLines(join(dir, 'p.f1.ledger', '_run.jsonl'), (ls) => [...ls, ...lines]);
+  return dir;
+}
+
+const acceptedAt = (head) => JSON.stringify({ task: '_run', event: 'accepted', head, text: 'ACCEPT-TEXT-9 by Someone' });
+
+function byUser(dir) {
+  const res = autopsy(dir);
+  assert.equal(res.code, 0, res.stderr);
+  return res.json.done.acceptance.accepted_by_user;
+}
+
+test('a user acceptance in the ledger is reported, its text never', () => {
+  const dir = acceptanceRun({ lines: [acceptedAt(DELIVERED)] });
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const json = readFileSync(join(dir, 'autopsy.json'), 'utf8');
+  // status stays the run's own verdict; only the boolean is added.
+  assert.deepEqual(JSON.parse(json).done.acceptance, {
+    status: 'rejected', reasons: [{ kind: 'checks_stale', class: 'missing' }], warnings: 1, accepted_by_user: true,
+  });
+  const done = res.md.split('## What got done\n\n')[1].split('\n## ')[0];
+  assert.ok(done.split('\n').includes(`- Acceptance: rejected (checks_stale: missing); warnings 1; ${BY_USER}`), done);
+  const summary = res.md.split('## Summary\n\n')[1].split('\n## ')[0];
+  assert.ok(summary.split('\n').includes(`- Acceptance: rejected; ${BY_USER}`), summary);
+  assert.ok(res.stdout.split('\n').includes(`acceptance: rejected; ${BY_USER}`), res.stdout);
+  assert.ok(res.stdout.split('\n').filter((l) => l !== '').length <= 15);
+  // The event's text names a person: it never reaches any output.
+  for (const [name, text] of [['autopsy.json', json], ['autopsy.md', res.md], ['summary', res.stdout]]) {
+    for (const marker of ['ACCEPT-TEXT-9', 'Someone']) assert.ok(!text.includes(marker), `${name} holds ${marker}`);
+  }
+});
+
+test('accepted_by_user needs an accepted event at the delivered head exactly', () => {
+  // Review focus 4. An event at another head changes nothing, nor one whose
+  // head is a prefix or another case of the delivered sha.
+  for (const [delivered, head] of [[DELIVERED, '4'.repeat(40)], [DELIVERED, DELIVERED.slice(0, 7)],
+    ['a'.repeat(40), 'A'.repeat(40)], [DELIVERED, null]]) {
+    assert.equal(byUser(acceptanceRun({ delivered, lines: [acceptedAt(head)] })), false, String(head));
+  }
+  // Several events: true when any is at the delivered head, in either order.
+  assert.equal(byUser(acceptanceRun({ lines: [acceptedAt(DELIVERED), acceptedAt('4'.repeat(40))] })), true);
+  assert.equal(byUser(acceptanceRun({ lines: [acceptedAt('4'.repeat(40)), acceptedAt(DELIVERED)] })), true);
+  // Lines that are not JSON objects are skipped; other events never count.
+  assert.equal(byUser(acceptanceRun({ lines: ['not json {', '[1]', '"accepted"', 'null',
+    JSON.stringify({ task: '_run', event: 'run_ended', head: DELIVERED }), acceptedAt(DELIVERED)] })), true);
+  assert.equal(byUser(acceptanceRun({ lines: ['not json {',
+    JSON.stringify({ task: '_run', event: 'run_ended', head: DELIVERED })] })), false);
+  // No accepted event (run1 as archived): false, and nothing is added.
+  const none = acceptanceRun();
+  const res = runCli(none);
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(JSON.parse(readFileSync(join(none, 'autopsy.json'), 'utf8')).done.acceptance.accepted_by_user, false);
+  assert.ok(!res.md.includes(BY_USER), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: rejected'), res.md);
+  assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
+});
+
+test('accepted_by_user is unavailable without a ledger, its _run.jsonl or a delivered sha', () => {
+  const noLedger = acceptanceRun();
+  rmSync(join(noLedger, 'p.f1.ledger'), { recursive: true });
+  assert.equal(byUser(noLedger), 'unavailable');
+  const noRunFile = acceptanceRun();
+  rmSync(join(noRunFile, 'p.f1.ledger', '_run.jsonl'));
+  assert.equal(byUser(noRunFile), 'unavailable');
+  // A delivered sha must be 7-64 hex digits (l131's is see-below).
+  for (const delivered of [null, 'see-below', '', 'abc123', 42]) {
+    const dir = acceptanceRun({ delivered, lines: [acceptedAt(delivered)] });
+    const res = runCli(dir);
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).done.acceptance.accepted_by_user,
+      'unavailable', String(delivered));
+    assert.ok(!res.md.includes(BY_USER), res.md);
+    assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
+  }
+  // Without an acceptance object there is no field to add.
+  const noAcceptance = copyRun();
+  const wfPath = join(noAcceptance, 'wf_1.json');
+  const wf = JSON.parse(readFileSync(wfPath, 'utf8'));
+  delete wf.result.acceptance;
+  writeFileSync(wfPath, JSON.stringify(wf, null, 2));
+  editLines(join(noAcceptance, 'p.f1.ledger', '_run.jsonl'), (ls) => [...ls, acceptedAt(DELIVERED)]);
+  const D = autopsy(noAcceptance);
+  assert.equal(D.code, 0, D.stderr);
+  assert.equal(D.json.done.acceptance, 'unavailable');
+});
+
+test('a run the engine accepted adds nothing for a user acceptance', () => {
+  const dir = acceptanceRun({ status: 'accepted', lines: [acceptedAt(DELIVERED)] });
+  const res = runCli(dir);
+  assert.equal(res.code, 0, res.stderr);
+  const acc = JSON.parse(readFileSync(join(dir, 'autopsy.json'), 'utf8')).done.acceptance;
+  assert.deepEqual([acc.status, acc.accepted_by_user], ['accepted', true]);
+  assert.ok(!res.md.includes(BY_USER), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: accepted (checks_stale: missing); warnings 1'), res.md);
+  assert.ok(res.md.split('\n').includes('- Acceptance: accepted'), res.md);
+  assert.ok(!res.stdout.split('\n').some((l) => l.startsWith('acceptance:')), res.stdout);
 });
 
 const run3 = autopsy(copyRun(RUN3));
@@ -1505,7 +1955,7 @@ test('autopsy.md has every section in order', () => {
   // Slowdown rows are numbered from 1, and each suggestion names its rows.
   assert.match(md, /^\| 1 \| relaunch \|/m);
   assert.ok(!/^\| 0 \|/m.test(md));
-  assert.match(md, /^1\. relaunch \(stake 300\.0 s, 1 time; slowdown row #1\):/m);
+  assert.match(md, /^1\. relaunch \(stake 280\.0 s, 1 time; slowdown row #1\):/m);
   // A row charged less than its span shows both.
   assert.match(md, /^\| \d+ \| heredoc_failure \| A1 implement \| 2026-10-10 09:01:50Z \| 10\.0 s \(upper bound\) \(of 32\.0 s\) \| tool Bash, exit 2, marker '<<', program cat \|$/m);
   assert.match(md, /^\| \d+ \| edit_retry \| A1 implement \| 2026-10-10 09:02:00Z \| 22\.0 s \| /m);

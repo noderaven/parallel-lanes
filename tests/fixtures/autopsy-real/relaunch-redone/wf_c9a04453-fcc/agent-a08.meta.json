@@ -1,0 +1,1 @@
+{"agentType":"parallel-lanes-worker","description":"integrate","workflowPhase":"Integrate","spawnDepth":1,"requestShape":"foreground","requestNonInteractive":false,"model":"sonnet"}

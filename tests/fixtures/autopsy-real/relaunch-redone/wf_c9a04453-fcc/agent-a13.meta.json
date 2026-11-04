@@ -1,0 +1,1 @@
+{"agentType":"parallel-lanes-worker","description":"wave 1 merge","workflowPhase":"Join","spawnDepth":1,"requestShape":"foreground","requestNonInteractive":false,"model":"sonnet"}

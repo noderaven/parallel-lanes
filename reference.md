@@ -1121,12 +1121,12 @@ check-file lock is held a little longer. `RUN_CHECKS_BUSY_WAIT_S` overrides the 
 tests only.
 
 **Mapping a project's tools.** A tool rarely exits with these codes by itself: a project maps
-its tools to the contract in a wrapper. Thistledown's `unity-batch.sh` is the example: it turns
-the Unity CLI's timeout into `124` and its preflight that finds another Unity holding the
-project open into `75`. A tool's own `--timeout` is not its wall time: it may bound only one
-phase and exit with a code of its own (sc1's Unity CLI timeout exited `6`, read as a test
-failure), so a wrapper that needs a wall-time limit times the whole command and exits `124`
-itself.
+its tools to the contract in a wrapper. A Unity project's `unity-batch.sh` wrapper is the
+example: it turns the Unity CLI's timeout into `124` and its preflight that finds another Unity
+holding the project open into `75`. A tool's own `--timeout` is not its wall time: it may bound
+only one phase and exit with a code of its own (sc1's Unity CLI timeout exited `6`, read as a
+test failure), so a wrapper that needs a wall-time limit times the whole command and exits
+`124` itself.
 
 ## Active-run markers and stops
 
@@ -1390,9 +1390,10 @@ and shown as accepted by the user, never folded into `accepted`. `checks_failed_
 shown like any rejection, with its detail and evidence file, and the hand-back suggests the
 accept text, for example `ledger accept <ledger_dir> <repo root> <delivered_sha>
 "checks_failed_at_start: <command> fails at the start point <start> too (evidence <file>)"`.
-Once the accepts cover every reason (and the warnings the user named) and archive-run, audit
-and tool-outcomes have run again, remove the marker with `bash <skill_dir>/scripts/active-run
-remove <run_id>`: a marker left `unaccepted` sends a later session to Resume.
+Once the accepts cover every reason (and the warnings the user named) and archive-run,
+autopsy, audit and tool-outcomes have run again, remove the marker with `bash
+<skill_dir>/scripts/active-run remove <run_id>`: a marker left `unaccepted` sends a later
+session to Resume.
 Each task result's `commits` is its range `[base, head]` (the base before its first commit and
 its last head), not a list of commits; the ledger's `committed` events list every commit.
 
@@ -1820,21 +1821,52 @@ acquired.
 
 `<python> <skill_dir>/scripts/autopsy <run folder> [--quiet]` reads one archived run folder
 (never a live path from the manifest, so imported runs and runs from another OS work), writes
-`autopsy.json` and `autopsy.md` into it, and prints a summary of at most 15 lines: the wall time
-and slowest phase, the top three slowdowns with their cost, the full-suite runs, total tokens,
-the top suggestion and the path of `autopsy.md`. The session appends that summary to the
-hand-back report.
+`autopsy.json` and `autopsy.md` into it, and prints a summary of at most 15 lines: the wall time,
+for a run with more than one launch `earlier launches: kept N agents, redid M (X of agent time)`
+(the earlier launches' `kept_agents`, `redone_agents` and `redone_agent_s` summed, and
+`(agent time unavailable)` in place of `(X of agent time)` if any is), when the user accepted
+the delivered head and the run's own verdict is not `accepted` the line
+`acceptance: <status>; accepted by the user at the delivered head`
+(see `accepted_by_user` below), the slowest phase, the top three slowdowns with their cost, the
+full-suite runs, total tokens, the top suggestion and the path of `autopsy.md`. The session
+appends that summary to the hand-back report.
 
-**Sections of `autopsy.json`:** `done` (per task status, commits, rounds, tier; acceptance;
-final-review counts; E2E), `time` (wall time per launch, phases, lanes with busy and idle time,
-agents with `tool_s` and `other_s`, the critical path, idle gaps), `tokens`, `checks`,
-`slowdowns`, `detectors`, `suggestions`, `unexplained`, `launch_conditions` and
-`orphan_snapshots`.
+**Sections of `autopsy.json`:** `launches` (one per launch, with its kept and redone work),
+`done` (per task status, commits, rounds, tier; acceptance; final-review counts; E2E), `time`
+(wall time per launch, phases, lanes with busy and idle time, agents with `tool_s` and
+`other_s`, the critical path, idle gaps), `tokens`, `checks`, `slowdowns`, `detectors`,
+`suggestions`, `unexplained`, `launch_conditions` and `orphan_snapshots`.
 - `launch_conditions` has one entry per launch, from the doctor result saved for it, and
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 8, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 9, so `history` runs autopsy again on an older `autopsy.json`.
+- `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
+  redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
+  ran an agent for the same work: an agent with a task when a later one has the same task and
+  the same role (when only a task's review ran again, its implement is kept), an agent without
+  a task (pre-flight, integrate, verify, final review, merge agents) when a later one without a
+  task has the same role. Else it is **kept**, as is every agent of
+  the last launch. Matching is exact: a batch unit run later as another unit (`A1-A3`, then
+  `A2-A3`) never matches, and neither do `wave 1 merge` and a later `recovery merge`.
+  `kept_agents` and `redone_agents` count them; `kept_s` and `redone_s` are the wall time the kept
+  or redone agents covered (the union of their spans) and `redone_agent_s` the redone agents'
+  summed time (the `relaunch` row's `span_s`); each is `unavailable` when one of its agents is
+  untimed. With more than one launch, autopsy.md's "Where time went" opens with a launches table
+  (`| Launch | Status | Wall | Kept agents | Kept | Redone agents | Redone |`) and its Summary
+  has an `Earlier launches:` line, as the chat summary has.
+- `done.acceptance` is `{status, reasons: [{kind, class}], warnings, accepted_by_user}` from the
+  last launch's result (`unavailable` when the result has no acceptance object). `status` stays
+  the run's own verdict. `accepted_by_user` is `true` when the ledger's `_run.jsonl` holds an
+  `accepted` event (what `ledger accept` appends) whose `head` equals the result's
+  `delivered_sha` exactly, as audit compares it ("accepted by user"); with several events, when
+  any does. It is `false` when none is at that head, and `unavailable` without a ledger dir,
+  without a `_run.jsonl` in it, or without a `delivered_sha` of 7-64 hex digits. Lines that are
+  not JSON objects are skipped. Only the boolean is copied: never the event's text, which names
+  a person, nor its head. When it is `true` and the status is not `accepted`, autopsy.md's
+  What got done `- Acceptance:` line and its Summary's both end with
+  `; accepted by the user at the delivered head`, and the chat summary has the `acceptance:`
+  line above (it has no acceptance line otherwise).
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -1945,10 +1977,10 @@ also has `background_s`, its background window's length):
 | `repeated_failure` | the same Bash command failed twice or more in one agent |
 | `heredoc_failure` | a failing Bash command that is nothing but a heredoc file write by `cat` or `tee` (`>`, `>>` or `tee`), plus `cd` or assignments; not an inline script such as `python3 - <<EOF > out.json` |
 | `edit_retry` | an Edit or Write failed as unread, changed or text not found |
-| `extra_review_round` | a task's fix and re-review rounds |
-| `escalation` | an agent re-run at another model tier |
-| `retry` | a retried agent |
-| `relaunch` | every launch but the last |
+| `extra_review_round` | a task's fix and re-review rounds; `unavailable` when one of them is untimed |
+| `escalation` | an agent re-run at another model tier; `unavailable` when it is untimed |
+| `retry` | a retried agent; `unavailable` when it is untimed |
+| `relaunch` | every launch but the last, at its start: the summed time of its redone agents (`launches`, above); `unavailable` when one of them is untimed (never 0 or a part), 0 and still listed when none was redone |
 | `long_tool_call` | a tool call over 120 s that no other kind counted |
 | `idle_gap` | over 60 s with no agent of the launch running |
 | `check_rerun` | the same check command ran twice (both `ran`) with only read-only calls between |
@@ -1958,20 +1990,25 @@ also has `background_s`, its background window's length):
   the earliest start, the span their union, `cost_kind` the weakest (`bound` over `measured`),
   `evidence` the earliest row's, and `merged` the number of detections. A `background_check`'s
   span is its waiting; a merged one's `background_s` is the length of the union of its windows.
-- **Charging:** per agent, the rows take its time in four tiers, in this order: `timeout` and
+- **Charging:** per agent, the rows take its time in five tiers, in this order: `timeout` and
   `background_check` (Claude Code's notice about a call, and the wait for it);
   `long_tool_call` and `check_rerun` (one call's own time); `repeated_failure`,
   `heredoc_failure` and `edit_retry` (a window from a failure to its recovery, which may hold
-  other work); `retry`, `escalation` and `extra_review_round` (a whole agent). Within a tier the
-  shorter row goes first (its `span_s`), then the earlier one. Each row takes only the parts of
-  its span that no row before it took: `cost_s` is their length and `span_s` its length before
-  charging, so an `edit_retry` inside a `heredoc_failure`'s window keeps its own time and the
-  heredoc row the rest.
+  other work); `retry`, `escalation` and `extra_review_round` (a whole agent); `relaunch` (a
+  launch's redone agents, in a tier of its own so that an agent both retried and redone goes to
+  the retry first). Within a tier the shorter row goes first (its `span_s`), then the earlier
+  one, then the order listed. Each row takes only the parts of its span that no row before it
+  took: `cost_s` is their length and `span_s` its length before charging, so an `edit_retry`
+  inside a `heredoc_failure`'s window keeps its own time and the heredoc row the rest.
 - **Folding:** a row left with nothing is removed, and its kind goes into `contains` of the row
   that took most of its span (the earliest on a tie). A row of zero length folds into the
   earliest row whose time, ends included, holds its instant; with none it stays at 0 s.
-- Run-wide rows (`relaunch`, `idle_gap`) and rows of unknown cost are never merged, charged or
-  folded.
+- Run-wide rows (`idle_gap`, shown with agent `(run-wide)`), a `relaunch` row with nothing redone
+  (no span) and rows of unknown cost are never merged, charged or folded. A `relaunch` row has no
+  agent either (autopsy.md shows `(run-wide)`), but it covers its launch's redone agents, so it is
+  charged; it never merges with another launch's. Before 1.6.12 it was run-wide and cost the
+  whole earlier launch, which also hid the kept agents' long gaps: those now show under Open
+  questions.
 
 **Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
 name, the exit code when known, the matched marker string, the program that ran, and the id of
@@ -2123,9 +2160,9 @@ nothing is written. exit 2 also when `--out` cannot be made or written (`cannot 
 <error>`). exit 3: a Windows path cannot be converted. The same inputs give the same bytes. A
 non-zero exit goes to `tool-outcomes --audit-exit` and never changes `acceptance`.
 
-After `ledger accept`, run archive-run, audit and `tool-outcomes` again so the override and any
-session-verify evidence reach the archive and `audit.json`; once the accepts cover every reason,
-remove the marker (see "Report").
+After `ledger accept`, run archive-run, autopsy, audit and `tool-outcomes` again so the override
+and any session-verify evidence reach the archive and `audit.json`; once the accepts cover every
+reason, remove the marker (see "Report").
 
 ## Doctor
 

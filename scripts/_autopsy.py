@@ -22,6 +22,9 @@ slowdown's evidence holds only the tool name, an exit code, a marker string
 from MARKERS (or HEREDOC, RUN_CHECKS) and a program name (program_of); a
 check execution is named by a check id or 'run-checks', never by the
 command line or the configured command (which may carry a secret).
+The ledger's accepted events give only a boolean,
+done.acceptance.accepted_by_user (user_accepted): their text names a
+person and is never written out.
 
 Background completions come only from Claude Code's own task
 notifications (attachment lines, read_transcript's notices) and from the
@@ -93,6 +96,14 @@ execution, recognised by the script names and the flag, never by prose:
   none; calls without --evidence keep the unit and start-time matching.
 checks.waits (waits_section) counts the executions whose agent reserved a
 path first, the wait calls, the stops and the improvised waits.
+
+Relaunches. An agent of a launch but the last is redone when a later launch
+ran an agent for the same work (redone_agents): the same task and role, or,
+for an agent without a task, the same role; else it is kept, as is every
+agent of the last launch. Each launch but the last has one relaunch row over
+its redone agents' own time (agent-owned covers, so settle_slowdowns charges
+them, as the last tier), and each launch reports its kept and redone agents
+and time.
 """
 import functools
 import glob
@@ -109,7 +120,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 8
+AUTOPSY_VERSION = 9
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -481,7 +492,43 @@ def _count(value):
     return len(value) if isinstance(value, list) else UNAVAILABLE
 
 
-def done_section(result):
+ACCEPTED_BY_USER = "accepted by the user at the delivered head"
+
+
+def user_accepted(run_folder, result):
+    """done.acceptance.accepted_by_user: True when the run's ledger
+    _run.jsonl holds an accepted event (what ledger accept appends) whose
+    head equals result's delivered_sha exactly, as audit's
+    _matching_override compares; False when it holds none at that head;
+    UNAVAILABLE without a ledger dir, without a _run.jsonl in it, or
+    without a delivered_sha of 7-64 hex digits. Several events: True when
+    any matches. Lines that are not JSON objects are skipped. Only the
+    boolean comes out: never an event's text (it names a person) or head."""
+    delivered = result.get("delivered_sha") if isinstance(result, dict) else None
+    if not isinstance(delivered, str) or not _SHA.fullmatch(delivered):
+        return UNAVAILABLE
+    ledger = find_ledger(run_folder)
+    path = os.path.join(ledger, "_run.jsonl") if ledger else None
+    if path is None or not os.path.isfile(path):
+        return UNAVAILABLE
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return UNAVAILABLE
+    for raw in data.splitlines():
+        try:
+            event = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            continue
+        if isinstance(event, dict) and event.get("event") == "accepted" and event.get("head") == delivered:
+            return True
+    return False
+
+
+def done_section(result, run_folder):
+    """The done section from the last launch's result; run_folder gives the
+    ledger that accepted_by_user reads."""
     if not isinstance(result, dict):
         result = {}
     tasks = result.get("tasks")
@@ -510,6 +557,7 @@ def done_section(result):
                         for r in reasons if isinstance(r, dict)]
             if isinstance(reasons, list) else UNAVAILABLE,
             "warnings": _count(acc.get("warnings")),
+            "accepted_by_user": user_accepted(run_folder, result),
         }
     else:
         acceptance = UNAVAILABLE
@@ -558,6 +606,17 @@ def _span(agents):
     if not timed:
         return None, None
     return min(a["start"] for a in timed), max(a["end"] for a in timed)
+
+
+def _wall_of(agents):
+    """The wall time the agents covered (the union of their spans), or None
+    when one of them is untimed."""
+    return union_length([(a["start"], a["end"]) for a in agents]) if len(_timed(agents)) == len(agents) else None
+
+
+def _agent_time(agents):
+    """The agents' summed wall times, or None when one of them is untimed."""
+    return sum((a["end"] - a["start"] for a in agents), 0.0) if len(_timed(agents)) == len(agents) else None
 
 
 def launch_idle_gaps(launch):
@@ -1084,7 +1143,8 @@ def _calls(agent):
     waiting = {}
     turns = []  # per call: its turn's number
     by_msg = {}  # message id -> its turn's number
-    turn = -1
+    turn = -1  # the turn of the call before
+    next_turn = 0  # the number a new turn gets: a message id seen again reuses its own
     prev = None  # the kind of the event before
     for i, e in enumerate(agent["events"]):
         if e["kind"] == "tool_use":
@@ -1095,7 +1155,7 @@ def _calls(agent):
             if msg is not None and msg in by_msg:
                 turn = by_msg[msg]
             elif msg is not None or prev != "tool_use":
-                turn += 1  # a new message id, or no tool_use right before
+                turn, next_turn = next_turn, next_turn + 1  # a new message id, or no tool_use right before
             if msg is not None:
                 by_msg[msg] = turn
             turns.append(turn)
@@ -1281,16 +1341,22 @@ def background_waiting(agent, calls, i, start, end):
         it (own start before end, and a result after that event or none):
         the agent sat idle until the notice.
     The backgrounded call's own time is no waiting. Empty when the agent
-    did not wait (a window of length 0 included)."""
-    waits = {j: _is_wait_call(calls[j]) for j in range(i + 1, len(calls))}
+    did not wait (a window of length 0 included).
+    The scan of later calls for (a) and (b) ends at the first one that
+    starts at or past end (start, not own_start, grows in call order): the
+    calls after it hold nothing of the window, though its own gap (b) may."""
     pieces = []
+    prev_wait = False  # whether calls[j - 1] is a wait call
     for j in range(i + 1, len(calls)):
-        if not waits[j]:
-            continue
         c, prev = calls[j], calls[j - 1]
-        pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
-        if prev["end"] is not None and (j - 1 == i or waits[j - 1]):
-            pieces.append((prev["end"], c["own_start"]))
+        wait = _is_wait_call(c)
+        if wait:
+            pieces.append((c["own_start"], end if c["end"] is None else c["end"]))
+            if prev["end"] is not None and (j - 1 == i or prev_wait):
+                pieces.append((prev["end"], c["own_start"]))
+        if c["start"] >= end:
+            break
+        prev_wait = wait
     last = max((e["ts"] for e in agent["events"] if start <= e["ts"] < end), default=None)
     if last is not None and end - last > IDLE_GAP_S and not any(
             c["own_start"] < end and (c["end"] is None or c["end"] > last) for c in calls):
@@ -1299,14 +1365,31 @@ def background_waiting(agent, calls, i, start, end):
     return [(a, b) for a, b in merged([p for p in clipped if p[0] < p[1]])]
 
 
+def _background_calls(agent, calls):
+    """(i, start, end, waiting) for each of calls (_calls(agent)) that Claude
+    Code moved to the background (a background_check notice) and that is
+    no procedure execution's start or wait (_procedures), in call order:
+    start and end its window (_background_window), end None when its
+    completion was never observed, and waiting the agent's waiting in it
+    (background_waiting), empty without an end. tool_slowdowns makes its
+    rows from them, and waits_section counts the windows without waiting."""
+    procedures = _procedures(calls)
+    procedure_calls = set(procedures).union(*procedures.values())
+    for i, c in enumerate(calls):
+        if i in procedure_calls or not notice("background_check", c):
+            continue
+        start, end = _background_window(agent, c)
+        yield i, start, end, [] if end is None else background_waiting(agent, calls, i, start, end)
+
+
 def tool_slowdowns(agent, checks):
     """The slowdowns found in one agent's tool calls (TOOL_KINDS); checks is
     configured_checks(manifest). A procedure execution's start and its wait
     calls (_procedures) are no timeout, background_check or long_tool_call:
     they are one check execution (checks_section). An await-checks call that
     exits non-zero reports a status (still running, stopped, busy), so it is
-    no repeated_failure either. A background_check with an observed
-    completion covers only the agent's waiting in its window
+    no repeated_failure either. A background_check (_background_calls) with
+    an observed completion covers only the agent's waiting in its window
     (background_waiting), and _background is the window's length (None
     without a completion); a window without waiting adds no row, and its
     call is still no long_tool_call."""
@@ -1322,23 +1405,22 @@ def tool_slowdowns(agent, checks):
         out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker, checks=checks))
         counted.update(indexes)
 
+    background = {i: (start, end, waiting) for i, start, end, waiting in _background_calls(agent, calls)}
     for i, c in enumerate(calls):
         if i in procedure_calls:
             continue
         timeout = notice("timeout", c)
         if timeout:
             add("timeout", [i], c["own_start"], c["end"], "measured", c, timeout)
-        marker = notice("background_check", c)
-        if marker:
+        if i in background:
             counted.add(i)
-            start, end = _background_window(agent, c)
+            marker = notice("background_check", c)
+            start, end, waiting = background[i]
             if end is None:
                 sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker, checks=checks)
                 sd["_background"] = None
                 out.append(sd)
-                continue
-            waiting = background_waiting(agent, calls, i, start, end)
-            if waiting:  # else no slowdown: waits_section counts it as not waited
+            elif waiting:  # else no slowdown: waits_section counts it as not waited
                 sd = _slowdown("background_check", agent, start, end, "bound", c, marker,
                                covers=[(agent, a, b) for a, b in waiting], checks=checks)
                 sd["_cost"] = sum(b - a for a, b in waiting)
@@ -1416,6 +1498,40 @@ def tool_slowdowns(agent, checks):
 _model = _transcripts.agent_model
 
 
+def redone_agents(run):
+    """{id(agent): True when redone, False when kept} for every agent of
+    every launch. An agent of a launch but the last is redone when a later
+    launch has an agent for the same work: with a task (entry task not None),
+    one with the same task and the same role; without a task (pre-flight,
+    integrate, verify, final review <lens>, merge agents and the like), one
+    without a task with the same role. Matching is exact on run-report's
+    strings, so a batch unit (A1-A3) a later launch runs as another unit
+    (A2-A3) never matches, and neither do 'wave 1 merge' and a later
+    'recovery merge'. Every agent of the last launch is kept."""
+    out = {}
+    later = set()
+    for launch in reversed(run["launches"]):
+        work = [(a["entry"]["task"], a["entry"]["role"]) for a in launch["agents"]]
+        for a, key in zip(launch["agents"], work):
+            out[id(a)] = key in later
+        later.update(work)
+    return out
+
+
+def relaunch_slowdown(launch, redone):
+    """The relaunch row of a launch but the last: at the launch's start, over
+    its redone agents' own time (each its own owner), costing the sum of
+    their spans; unavailable when a redone agent is untimed (never 0 or a
+    part), and 0 with no cover when no agent was redone."""
+    agents = [a for a in launch["agents"] if redone[id(a)]]
+    sd = _slowdown("relaunch", None, launch["start"], None, "measured",
+                   covers=[(a, a["start"], a["end"]) for a in _timed(agents)])
+    sd["_cost"] = _agent_time(agents)
+    if sd["_cost"] is None:
+        sd["cost_kind"] = UNAVAILABLE
+    return sd
+
+
 def run_slowdowns(run):
     """The slowdowns found in roles, launches and idle gaps."""
     out = []
@@ -1430,18 +1546,23 @@ def run_slowdowns(run):
         sd = _slowdown("extra_review_round", first, first["start"], None, "measured",
                        covers=[(a, a["start"], a["end"]) for a in timed])
         sd["_cost"] = sum(a["end"] - a["start"] for a in timed) if len(timed) == len(members) else None
+        if sd["_cost"] is None:
+            sd["cost_kind"] = UNAVAILABLE  # an untimed fix or re-review
         out.append(sd)
     for launch in run["launches"]:
         # Retries and escalations exactly as run-report counts them, per
         # launch (_transcripts.escalations).
         entries = [a["entry"] for a in launch["agents"]]
+        # An untimed agent's row costs unavailable, cost_kind too.
         for a, earlier in zip(launch["agents"], _transcripts.escalations(entries)):
+            kind = UNAVAILABLE if a["start"] is None or a["end"] is None else "measured"
             if a["entry"]["retried"]:
-                out.append(_slowdown("retry", a, a["start"], a["end"], "measured"))
+                out.append(_slowdown("retry", a, a["start"], a["end"], kind))
             if earlier is not None:
-                out.append(_slowdown("escalation", a, a["start"], a["end"], "measured"))
+                out.append(_slowdown("escalation", a, a["start"], a["end"], kind))
+    redone = redone_agents(run)
     for launch in run["launches"][:-1]:
-        out.append(_slowdown("relaunch", None, launch["start"], launch["end"], "measured"))
+        out.append(relaunch_slowdown(launch, redone))
     for launch in run["launches"]:
         for start, end in launch_idle_gaps(launch) or []:
             out.append(_slowdown("idle_gap", None, start, end, "measured"))
@@ -1482,10 +1603,13 @@ def detector_status(run):
 # Claude Code's own notice about a call and the wait for it; one call's own
 # time; a window from a failure to its recovery, which may hold other work;
 # a whole agent (retry first: an agent ended by an API error also reads as
-# an escalation).
+# an escalation); a launch's redone agents, last and in a tier of its own, so
+# that a whole-agent row over one of them (a retry, say) takes it first: in
+# the fourth tier the relaunch row could go first, being shorter or, with the
+# same span, earlier (its _at is the launch start, before any agent's).
 CHARGE_TIERS = (("timeout", "background_check"), ("long_tool_call", "check_rerun"),
                 ("repeated_failure", "heredoc_failure", "edit_retry"),
-                ("retry", "escalation", "extra_review_round"))
+                ("retry", "escalation", "extra_review_round"), ("relaunch",))
 _CHARGE_ORDER = {kind: (tier, place) for tier, kinds in enumerate(CHARGE_TIERS)
                  for place, kind in enumerate(kinds)}
 _COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
@@ -1493,7 +1617,8 @@ _COST_KINDS = ("unavailable", "bound", "measured")  # weakest first
 
 def _charged(s):
     """Whether settle_slowdowns charges a row: a known cost over agents' own
-    time only (no run-wide cover)."""
+    time only (no run-wide cover, as an idle gap has, and at least one
+    cover: a relaunch row with nothing redone has none)."""
     return s["_cost"] is not None and bool(s["_covers"]) and all(o is not None for o, _s, _e in s["_covers"])
 
 
@@ -1542,10 +1667,14 @@ def settle_slowdowns(slowdowns):
        those become its _covers and their length its _cost.
     3. Fold: a row that took nothing is removed and its kind added to the
        _contains of the row that took most of its span (the earliest on a
-       tie). A row of zero length goes to the earliest row whose taken
-       parts, ends included, hold its instant; with none it stays at 0.
-    Rows of unknown cost and run-wide rows (an owner None: relaunch,
-    idle_gap) are neither merged, charged nor folded."""
+       tie, the shares compared to the millisecond). A row of zero length
+       goes to the earliest row whose taken parts, ends included, hold its
+       instant; with none it stays at 0.
+    Rows of unknown cost, rows without a cover (a relaunch row with nothing
+    redone) and run-wide rows (an owner None: idle_gap) are neither merged,
+    charged nor folded. A relaunch row covers its launch's redone agents, so
+    it is charged like any agent's row (CHARGE_TIERS' last tier) and never
+    merges with another launch's."""
     rows = [dict(s, _span_cost=s["_cost"], _merged=1, _contains=set()) for s in slowdowns]
     # 1. Merge: group[i] is the index of the group row i joins.
     group = list(range(len(rows)))
@@ -1588,8 +1717,10 @@ def settle_slowdowns(slowdowns):
             for a, b, r in taken.get(id(owner), []):
                 if (a <= start <= b) if zero else (min(b, end) > max(a, start)):
                     share.setdefault(id(r), [r, 0.0])[1] += max(0.0, min(b, end) - max(a, start))
-        most = max([t for _r, t in share.values()], default=0.0)
-        holders = [r for r, t in share.values() if t == most]
+        # Shares are compared to the millisecond: epoch-second floats make
+        # two equal shares differ in their last bits.
+        most = max([round(t, 3) for _r, t in share.values()], default=0.0)
+        holders = [r for r, t in share.values() if round(t, 3) == most]
         if holders:
             into = min(holders, key=lambda r: r["_at"])
             into["_contains"] |= {s["kind"]} | s["_contains"]
@@ -2020,9 +2151,9 @@ def waits_section(run):
     result file's name only: the path holds the user's config dir.
 
     background_not_waited counts the calls Claude Code moved to the
-    background, outside a procedure, whose completion was observed and in
-    whose window the agent did not wait (background_waiting is empty): no
-    background_check slowdown."""
+    background, outside a procedure (_background_calls), whose completion
+    was observed and in whose window the agent did not wait (background_waiting
+    is empty): no background_check slowdown."""
     if not _has_tool_events(run):
         return UNAVAILABLE
     via = waits = stopped = not_waited = 0
@@ -2033,13 +2164,8 @@ def waits_section(run):
         calls = _calls(a)
         procedures = _procedures(calls)
         label = a["entry"]["label"]
-        procedure_calls = set(procedures).union(*procedures.values())
-        for i, c in enumerate(calls):
-            if i in procedure_calls or not notice("background_check", c):
-                continue
-            start, end = _background_window(a, c)
-            if end is not None and not background_waiting(a, calls, i, start, end):
-                not_waited += 1
+        not_waited += sum(1 for _i, _start, end, waiting in _background_calls(a, calls)
+                          if end is not None and not waiting)
         for i, c in enumerate(calls):
             path = procedure_file(c)
             if path is None:
@@ -2774,10 +2900,10 @@ def _procedure_spans(agent):
 def unexplained_section(run, slowdowns):
     """The largest TOP_UNEXPLAINED spans over IDLE_GAP_S that no slowdown
     covers. Each agent's time is cut at its events (a model turn, a tool
-    call); a slowdown covers its own agent's time, and one without an agent
-    (relaunch, idle gap) covers any agent's. A procedure execution's start
-    and wait calls (_procedures) cover their own time: it is check time,
-    counted in the checks section."""
+    call); a slowdown covers its own agent's time (a relaunch row, its
+    redone agents'), and an idle gap any agent's. A procedure
+    execution's start and wait calls (_procedures) cover their own time: it
+    is check time, counted in the checks section."""
     found = []
     for a in _timed(_all_agents(run)):
         covers = merged([(s, e) for sd in slowdowns for owner, s, e in sd["_covers"]
@@ -3008,18 +3134,27 @@ def _engine_version(run):
     return UNAVAILABLE
 
 
+def launch_entry(launch, redone):
+    """A launches[] entry: the launch's times and status, its kept and
+    redone agents (redone_agents) and the time each covered."""
+    result = launch["result"] or {}
+    wall = None if launch["start"] is None else launch["end"] - launch["start"]
+    kept = [a for a in launch["agents"] if not redone[id(a)]]
+    again = [a for a in launch["agents"] if redone[id(a)]]
+    return {"wf": launch["wf"], "start": iso(launch["start"]), "end": iso(launch["end"]),
+            "wall_s": seconds(wall), "status": _str_or_unavailable(result.get("status")),
+            "kept_agents": len(kept), "redone_agents": len(again), "kept_s": seconds(_wall_of(kept)),
+            "redone_s": seconds(_wall_of(again)), "redone_agent_s": seconds(_agent_time(again))}
+
+
 def analyze(run_folder):
     """The autopsy.json object for a history run folder."""
     run = load(run_folder)
-    launches = []
-    for launch in run["launches"]:
-        result = launch["result"] or {}
-        wall = None if launch["start"] is None else launch["end"] - launch["start"]
-        launches.append({"wf": launch["wf"], "start": iso(launch["start"]), "end": iso(launch["end"]),
-                         "wall_s": seconds(wall), "status": _str_or_unavailable(result.get("status"))})
+    redone = redone_agents(run)
+    launches = [launch_entry(launch, redone) for launch in run["launches"]]
     last = run["launches"][-1]["result"] if run["launches"] else None
     run_id = run["manifest"].get("run_id")
-    done = done_section(last)
+    done = done_section(last, run_folder)
     detectors = detector_status(run)
     found = find_slowdowns(run, detectors)
     slowdowns = [public_slowdown(s) for s in found]
@@ -3141,6 +3276,32 @@ def _evidence_text(evidence, contains=()):
     return ", ".join(parts) if parts else "-"
 
 
+def _earlier_launches(a):
+    """'kept N agents, redid M (X of agent time)' over the launches but the
+    last, X the sum of their redone_agent_s; '(agent time unavailable)' when
+    any is unavailable. None for a run with one launch or none."""
+    launches = _launch_names(a)
+    if len(launches) < 2:
+        return None
+    earlier = launches[:-1]
+    times = [l["redone_agent_s"] for l in earlier]
+    spent = "%s of agent time" % _secs(round(sum(times), 1)) if all(_is_num(t) for t in times) \
+        else "agent time unavailable"
+    return "kept %s, redid %d (%s)" % (
+        _count_word(sum(l["kept_agents"] for l in earlier), "agent"), sum(l["redone_agents"] for l in earlier),
+        spent)
+
+
+def _by_user(acceptance):
+    """'; accepted by the user at the delivered head' when the user accepted
+    the delivered head (accepted_by_user true) and the run's own verdict is
+    not accepted, else ''."""
+    if isinstance(acceptance, dict) and acceptance.get("accepted_by_user") is True \
+            and acceptance.get("status") != "accepted":
+        return "; " + ACCEPTED_BY_USER
+    return ""
+
+
 def _md_summary(a):
     launches = _launch_names(a)
     detail = ", ".join("%s %s" % (l["wf"], l["status"]) for l in launches) or "none"
@@ -3148,8 +3309,12 @@ def _md_summary(a):
     lines = [
         "- Run: %s (engine %s)" % (a["run_id"], a["engine_version"]),
         "- Wall time: %s over %s: %s" % (_wall(a["time"]["wall_s"]), _count_word(len(launches), "launch"), detail),
-        "- Acceptance: %s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE),
     ]
+    earlier = _earlier_launches(a)
+    if earlier is not None:
+        lines.append("- Earlier launches: %s" % earlier)
+    lines.append("- Acceptance: %s%s" % (acceptance["status"] if isinstance(acceptance, dict) else UNAVAILABLE,
+                                         _by_user(acceptance)))
     slowest = _slowest_phase(a)
     if slowest is not None:
         lines.append("- Slowest phase: %s (%s)" % (slowest["phase"], _secs(slowest["wall_s"])))
@@ -3181,7 +3346,7 @@ def _md_done(a):
         reasons = acc["reasons"]
         why = "" if not isinstance(reasons, list) or not reasons else \
             " (" + ", ".join("%s: %s" % (r["kind"], r["class"]) for r in reasons) + ")"
-        lines.append("- Acceptance: %s%s; warnings %s" % (acc["status"], why, acc["warnings"]))
+        lines.append("- Acceptance: %s%s; warnings %s%s" % (acc["status"], why, acc["warnings"], _by_user(acc)))
     else:
         lines.append("- Acceptance: unavailable")
     fin = done["final"]
@@ -3239,9 +3404,22 @@ def _timeline(a):
     return out
 
 
+def _md_launches(a):
+    """The launches table and its note, or nothing for a run with one
+    launch or none."""
+    launches = _launch_names(a)
+    if len(launches) < 2:
+        return []
+    return _table(["Launch", "Status", "Wall", "Kept agents", "Kept", "Redone agents", "Redone"],
+                  [[l["wf"], l["status"], _secs(l["wall_s"]), l["kept_agents"], _secs(l["kept_s"]),
+                    l["redone_agents"], _secs(l["redone_s"])] for l in launches]) + [
+        "", "An agent is redone when a later launch ran the same task and role (the same role, for an agent "
+            "without a task); Kept and Redone are the wall time the launch's kept or redone agents covered.", ""]
+
+
 def _md_time(a):
     t = a["time"]
-    lines = ["Wall time: %s." % _wall(t["wall_s"]), ""]
+    lines = _md_launches(a) + ["Wall time: %s." % _wall(t["wall_s"]), ""]
     if t["phases"]:
         lines += _table(["Phase", "Launch", "Start", "End", "Wall", "Agents"],
                         [[p["phase"], p["launch"], _when(p["start"]), _when(p["end"]), _secs(p["wall_s"]),
@@ -3546,6 +3724,12 @@ def render_summary(analysis, md_path):
     a = analysis
     lines = ["autopsy %s: wall %s over %s" % (a["run_id"], _wall(a["time"]["wall_s"]),
                                               _count_word(len(_launch_names(a)), "launch"))]
+    earlier = _earlier_launches(a)
+    if earlier is not None:
+        lines.append("earlier launches: %s" % earlier)
+    by_user = _by_user(a["done"]["acceptance"])
+    if by_user:
+        lines.append("acceptance: %s%s" % (a["done"]["acceptance"]["status"], by_user))
     slowest = _slowest_phase(a)
     lines.append("slowest phase: %s" % ("unavailable" if slowest is None else
                                         "%s (%s)" % (slowest["phase"], _secs(slowest["wall_s"]))))
