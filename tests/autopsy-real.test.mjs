@@ -79,6 +79,16 @@
 //   Before 1.6.11 the window (128.7 s) counted as a background_check though
 //   the agent kept working; it is now no slowdown, counted in
 //   checks.waits.background_not_waited.
+//
+// compound-check (r153, A1 implement, 2026-10-11 20:21:30-20:26:35Z; the
+// prompt is moved to just before the kept lines):
+//   Bash 20:21:36.495-20:26:26.349  cd <lane> && LC_ALL=C grep -nP on two
+//     files; git status --short; python.exe .../run-checks <lane> --cmd test
+//     'node tests/run-tests.mjs' (the full suite, 287.3 s), a long_tool_call
+//   Bash 20:26:30.273-20:26:32.620  rm -rf the run-checks log folder, then
+//     git ls-files and git rev-parse
+//   Before 1.6.11 the long call's program was grep, the first word of the
+//   line; it is now run-checks, the check it ran (evidence.check run-checks).
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -162,6 +172,10 @@ test('real r140 case: a call queued behind a timeout is no long call', () => {
   assert.deepEqual(ofKind(a, 'long_tool_call'), []);
   const timeouts = ofKind(a, 'timeout').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.evidence.tool]);
   assert.deepEqual(timeouts, [['integrate', T('02:31:16.772'), 120.8, 'measured', 'Bash']]);
+  // "$python" .../run-checks names the script it runs; match_check does not
+  // read a variable as an interpreter, so the line ran no check it knows.
+  const [timeout] = ofKind(a, 'timeout');
+  assert.deepEqual([timeout.evidence.program, timeout.evidence.check], ['run-checks', null]);
   // The wait inside the background window: loop 1 112.303 + the gap 1.888 +
   // loop 2 to the notice 15.155 (+ the Monitor error, 0.002).
   assert.deepEqual(ofKind(a, 'background_check').map((s) => [s.agent, s.at, s.cost_s, s.cost_kind, s.background_s]),
@@ -178,6 +192,8 @@ test('real r140 case: a wait loop that outlives its background check', () => {
   // The loop past the notice is a long call of its own.
   assert.deepEqual(ofKind(a, 'long_tool_call').map((s) => [...row(s), s.span_s]),
     [['J1 implement', T('02:41:37.914'), 498.6, 'measured', 554.3]]);
+  // A loop that runs sleep is a wait loop: its program is sleep, not grep.
+  assert.equal(ofKind(a, 'long_tool_call')[0].evidence.program, 'sleep');
   assert.equal(a.checks.waits.background_not_waited, 0);
 });
 
@@ -191,4 +207,13 @@ test('real r150 case: a background suite the agent did not wait for is no slowdo
   assert.equal(a.checks.waits.background_not_waited, 1);
   const md = readFileSync(join(TMP, 'background-not-waited', 'autopsy.md'), 'utf8');
   assert.match(md, /^Background commands not waited for: 1\.$/m);
+});
+
+test('real r153 case: a compound line names the check it ran', () => {
+  const a = autopsy('compound-check');
+  const long = ofKind(a, 'long_tool_call');
+  assert.deepEqual(long.map((s) => [s.agent, s.at, s.cost_s]),
+    [['A1 implement', '2026-10-11T20:21:36.495Z', 289.9]]);
+  // The suite run-checks ran, not the grep and git status before it.
+  assert.deepEqual([long[0].evidence.program, long[0].evidence.check], ['run-checks', 'run-checks']);
 });

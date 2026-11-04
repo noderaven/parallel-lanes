@@ -786,6 +786,13 @@ _FIX_ROLE = re.compile(r"^(fix|re-review) \d+$")
 _LEAD_WORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "{", "time")
 _NOT_PROGRAMS = ("cd", "pushd", "popd", "for", "case", "select", "function", "fi", "done", "esac", "}",
                  "export", "set", "unset", "shopt", "trap", "umask", "ulimit", "local", "declare", "readonly")
+# Programs that read, test, move or wait around the work of a line: the
+# program of a line is the first that is none of these (program_of).
+PLUMBING = ("cat", "head", "tail", "grep", "ls", "wc", "echo", "pwd", "which", "true", "false", "printf",
+            "test", "[", "seq", "read", "break", "continue", "sort", "uniq", "cut", "tr", "tee", "sed", "awk",
+            "rm", "mv", "cp", "mkdir", "mktemp", "touch", "date", "git", "sleep")
+_LOOP_WORDS = ("for", "while", "until")
+_SCRIPT_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".sh", ".ps1")
 
 
 def _marker(kind, text):
@@ -824,30 +831,106 @@ def exit_code(text):
     return int(m.group(1)) if m else None
 
 
-def program_of(command):
-    """The program a Bash command runs: in the first simple command that runs
-    one (not 'cd DIR', 'export ...', a loop header or a closing keyword;
-    leading keywords such as 'if' or 'do' are skipped), its first word that
-    is not a NAME=value assignment or a prefix such as env, nohup or
-    'timeout DURATION', reduced to its basename. None when there is none,
-    or when that word still holds '=', '@' or ':' (it may carry a secret or
-    a URL)."""
+def program_of(command, checks=None):
+    """The program a Bash command line ran, as a basename, or None. checks
+    is configured_checks(manifest), or None. The line is read as
+    match_check reads it (_simple_commands; plain words when its quoting
+    does not parse), and the first rule that applies names the program:
+    1. with checks, when match_check finds a check in the line: the program
+       of the simple command that runs it;
+    2. when the line holds a loop (for, while or until) and a simple command
+       runs sleep: sleep (a wait loop);
+    3. the program of the first simple command whose program is not
+       PLUMBING, else of the first one.
+    Only simple commands that run a program count (not 'cd DIR', 'export
+    ...', a loop header, a closing keyword or assignments alone); each
+    one's program is _program's. None when no simple command runs one."""
     if not isinstance(command, str):
         return None
-    for words in _segments(without_heredoc_bodies(command)):
+    if checks is not None:
+        found = _match(command, checks)
+        if found is not None:
+            return _first_program(found["words"])
+    commands = _program_commands(command)
+    loop = any(w in _LOOP_WORDS for lead, words in commands for w in lead + words[:1])
+    if loop and any(_program(words) == "sleep" for _lead, words in commands if _runs_program(words)):
+        return "sleep"
+    return _first_program([words for _lead, words in commands])
+
+
+def _program_commands(command):
+    """(lead, words) of each simple command of a line, as _simple_commands
+    gives them; when the quoting does not parse, the plain words of each
+    piece between separators, with leading keywords and prefixes split off
+    the same way."""
+    try:
+        simple, _every = _simple_commands(command)
+        return [(lead, words) for _ops, lead, words in simple]
+    except ValueError:
+        pass
+    out = []
+    for words in _plain_segments(without_heredoc_bodies(command)):
         i = 0
         while i < len(words) and words[i] in _LEAD_WORDS:
             i += 1
-        words = words[i:]
-        if not words or words[0] in _NOT_PROGRAMS or words[0].startswith("-"):
-            continue
-        i = _skip_prefixes(words)
-        if i >= len(words):
-            continue
-        name = _basename(words[i])
-        if not name or any(c in name for c in "=@:"):
+        rest = words[i:]
+        out.append((words[:i], rest[_skip_prefixes(rest):]))
+    return out
+
+
+def _runs_program(words):
+    """Whether a simple command's words (leading keywords and prefixes
+    skipped) run a program: not none, not 'cd DIR', 'export ...', a loop
+    header or a closing keyword (_NOT_PROGRAMS), and not an option."""
+    return bool(words) and words[0] not in _NOT_PROGRAMS and not words[0].startswith("-")
+
+
+def _first_program(commands):
+    """Rule 3 of program_of over the words of simple commands: the program
+    of the first that runs one and whose program is not PLUMBING, else of
+    the first that runs one; None when none does."""
+    programs = [_program(words) for words in commands if _runs_program(words)]
+    return next((p for p in programs if p not in PLUMBING), programs[0] if programs else None)
+
+
+def _program(words):
+    """The program of a simple command's words (leading keywords and
+    prefixes skipped): the basename of its first word. An interpreter
+    (python*, py, bash or sh, with .exe) followed by a script word, past
+    its options, runs that script: the script's basename; followed by -c,
+    -m or - (inline code), or by no script word, it is the interpreter
+    itself. A word that starts with '$' (a variable such as "$python")
+    names the basename of a script word after it in the same way, else
+    None. None also when the name holds '=', '@' or ':' (it may carry a
+    secret or a URL)."""
+    name = _basename(words[0])
+    variable = words[0].startswith("$")
+    if variable or _INTERPRETER.match(name):
+        script = _script_word_after(words)
+        if script is not None:
+            name = _basename(script)
+        elif variable:
             return None
-        return name
+    if not name or any(c in name for c in "=@:"):
+        return None
+    return name
+
+
+def _script_word_after(words):
+    """The script word an interpreter's words (words[0] the interpreter)
+    run: the first word past its options when it holds '/' or '\\' or ends
+    in a _SCRIPT_SUFFIXES suffix; None when there is none, or when an
+    option for inline code (-c, -m or -) comes first."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] == "-" or _INLINE_FLAG.match(words[i]):
+            return None
+        i += 2 if words[i] in _ARG_FLAGS else 1
+    if i >= len(words):
+        return None
+    word = words[i]
+    if "/" in word or "\\" in word or word.lower().endswith(_SCRIPT_SUFFIXES):
+        return word
     return None
 
 
@@ -1068,13 +1151,20 @@ def _reads_only(call):
     return call["name"] == "Bash" and _read_only_bash(_command(call))
 
 
-def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None):
+def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers=None, checks=None):
     """An internal slowdown: the public fields, plus _cost (seconds or None),
     _at and _covers [(agent or None, start, end)], the spans it explains (an
-    agent's own time, or any agent's time for None)."""
+    agent's own time, or any agent's time for None). checks is
+    configured_checks(manifest): with it, the evidence of a Bash call names
+    the check id the call ran (match_check), else check is None, and its
+    program is program_of's with checks."""
     cost = None if start is None or end is None else end - start
     if covers is None:
         covers = [] if cost is None else [(agent, start, end)]
+    command = _command(call) if call is not None else None
+    if call is None or call["name"] != "Bash":
+        checks = None
+    found = match_check(command, checks, _call_exit(call)) if checks is not None else None
     return {
         "kind": kind,
         "agent": agent["entry"]["label"] if agent is not None else None,
@@ -1085,7 +1175,8 @@ def _slowdown(kind, agent, start, end, cost_kind, call=None, marker=None, covers
             "tool": call["name"] if call is not None else None,
             "exit": exit_code(call["text"]) if call is not None else None,
             "marker": marker,
-            "program": program_of(_command(call)) if call is not None else None,
+            "program": program_of(command, checks) if call is not None else None,
+            "check": found["check"] if found is not None else None,
         },
         "_covers": covers,
     }
@@ -1210,7 +1301,7 @@ def tool_slowdowns(agent, checks):
     procedure_calls = set(counted)
 
     def add(kind, indexes, start, end, cost_kind, call, marker=None):
-        out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker))
+        out.append(_slowdown(kind, agent, start, end, cost_kind, call, marker, checks=checks))
         counted.update(indexes)
 
     for i, c in enumerate(calls):
@@ -1224,14 +1315,14 @@ def tool_slowdowns(agent, checks):
             counted.add(i)
             start, end = _background_window(agent, c)
             if end is None:
-                sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker)
+                sd = _slowdown("background_check", agent, start, None, "unavailable", c, marker, checks=checks)
                 sd["_background"] = None
                 out.append(sd)
                 continue
             waiting = background_waiting(agent, calls, i, start, end)
             if waiting:  # else no slowdown: waits_section counts it as not waited
                 sd = _slowdown("background_check", agent, start, end, "bound", c, marker,
-                               covers=[(agent, a, b) for a, b in waiting])
+                               covers=[(agent, a, b) for a, b in waiting], checks=checks)
                 sd["_cost"] = sum(b - a for a, b in waiting)
                 sd["_background"] = end - start
                 out.append(sd)
@@ -1623,25 +1714,9 @@ def _merge_redirections(tokens):
     return out
 
 
-def _segments(command):
-    """The simple commands of a line as word lists: shell words split at
-    ; & | ( ) and newlines (a & inside a redirection such as 2>&1 is no
-    separator), or, when the quoting does not parse, plain whitespace words
-    of each piece between those characters."""
-    try:
-        tokens = _merge_redirections(_shell_tokens(command, _SEPARATORS))
-    except ValueError:
-        return _plain_segments(command)
-    out = [[]]
-    for token in tokens:
-        if _is_operator(token):
-            out.append([])
-        else:
-            out[-1].append(token)
-    return [s for s in out if s]
-
-
 def _plain_segments(command):
+    """The plain whitespace words of each piece of a line between ; & | ( )
+    and newlines, for a line whose quoting does not parse."""
     out = []
     for piece in _SEGMENT_SPLIT.split(command):
         words = [w.strip("'\"") for w in piece.split()]
@@ -2144,7 +2219,10 @@ def _match(command, checks, exit_code=None):
     """match_check's result plus project_test: the certainty that the line
     ran an exact commands.test entry (a run-checks '--cmd test CMD' pair
     whose CMD is one, or a simple command that exactly matches one), else
-    None; always None for a task-checks call."""
+    None; always None for a task-checks call; and words: the words of the
+    simple commands that named the match, as a list (the first run-checks
+    or task-checks command, or the simple commands of the first match of
+    the configured command that names the execution), for program_of."""
     if not isinstance(command, str):
         return None
     try:
@@ -2165,13 +2243,13 @@ def _match(command, checks, exit_code=None):
             if any(p and p[0] in project for p in pairs):
                 exact.append(certainty[i])
         return {"check": RUN_CHECKS, "certainty": _surest([certainty[i] for i, _args in runs]),
-                "full_suite": _surest(tests), "project_test": _surest(exact)}
+                "full_suite": _surest(tests), "project_test": _surest(exact), "words": [simple[runs[0][0]][2]]}
     tasks = [i for i, args in enumerate(_task_checks_args(words) for _ops, _lead, words in simple)
              if args is not None]
     if tasks:
         return {"check": TASK_CHECKS, "certainty": _surest([certainty[i] for i in tasks]), "full_suite": None,
-                "project_test": None}
-    best = None  # (word count, check_id, certainties)
+                "project_test": None, "words": [simple[tasks[0]][2]]}
+    best = None  # (word count, check_id, certainties, words of its first match)
     full = []
     for check_id, configured, is_full in checks:
         parts = _check_words(configured)
@@ -2185,7 +2263,7 @@ def _match(command, checks, exit_code=None):
                 continue
             sure = RAN if all(c == RAN for c in certainty[k:k + len(parts)]) else INFERRED
             if best is None or size > best[0]:
-                best = (size, check_id, [sure])
+                best = (size, check_id, [sure], [words for _ops, _lead, words in simple[k:k + len(parts)]])
             elif best[1] == check_id:
                 best[2].append(sure)
             if is_full and here[last] == parts[last]:
@@ -2193,7 +2271,7 @@ def _match(command, checks, exit_code=None):
     if best is None:
         return None
     return {"check": best[1], "certainty": _surest(best[2]), "full_suite": _surest(full),
-            "project_test": _surest(full)}
+            "project_test": _surest(full), "words": best[3]}
 
 
 def _call_exit(call):
@@ -3036,6 +3114,8 @@ def _evidence_text(evidence, contains=()):
         parts.append("marker '%s'" % evidence["marker"])
     if evidence.get("program"):
         parts.append("program %s" % evidence["program"])
+    if evidence.get("check"):
+        parts.append("check %s" % evidence["check"])
     if contains:
         parts.append("contains %s" % ", ".join(contains))
     return ", ".join(parts) if parts else "-"

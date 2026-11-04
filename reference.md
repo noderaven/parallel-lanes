@@ -1973,12 +1973,30 @@ also has `background_s`, its background window's length):
 - Run-wide rows (`relaunch`, `idle_gap`) and rows of unknown cost are never merged, charged or
   folded.
 
-**Structured evidence only:** `evidence` is `{tool, exit, marker, program}`: the tool name, the
-exit code when known, the matched marker string, and the program name (in the first simple
-command that is not `cd DIR`, `export ...`, a loop header or a closing keyword, the first word
-that is not a `NAME=value` assignment or a prefix such as `env` or `timeout DURATION`, as a
-basename; null when it still holds `=`, `@` or `:`). Markers in command output, files read or
-other tools' results never count. A suggestion's `stake_s` is the sum of its kind's charged
+**Structured evidence only:** `evidence` is `{tool, exit, marker, program, check}`: the tool
+name, the exit code when known, the matched marker string, the program that ran, and the id of
+the check the call ran, as `checks` names it (such as `test#1`, `<lane>.test#1`, `run-checks` or
+`task-checks`), or null. A Bash line is read as check matching reads it, in simple commands (leading keywords,
+`NAME=value` assignments and prefixes such as `env`, `timeout DURATION` or `npx` skipped; a
+simple command that is `cd DIR`, `export ...`, a loop header, a closing keyword or assignments
+alone runs no program). The program is, by the first rule that applies:
+1. when the line runs a check: the program of the simple command that runs it;
+2. when the line holds a loop (`for`, `while` or `until`) and a simple command runs `sleep`:
+   `sleep` (a wait loop);
+3. the first program that is not plumbing, else the first program. Plumbing: `cat head tail
+   grep ls wc echo pwd which true false printf test [ seq read break continue sort uniq cut tr
+   tee sed awk rm mv cp mkdir mktemp touch date git sleep` (`sleep 30; python3 long.py` names
+   `long.py`).
+
+A program is the basename of the simple command's first word. An interpreter (`python*`, `py`,
+`bash`, `sh`, with `.exe`) followed by a script word, past its options, gives the script's
+basename; followed by `-c`, `-m` or `-` (or no script word) it is the interpreter itself. A word
+that starts with `$` (a variable, `"$python"`) followed by a script word gives the script's
+basename, else the program is null (`"$GIT" status`). A script word holds `/` or `\`, or ends in
+`.py`, `.js`, `.mjs`, `.cjs`, `.sh` or `.ps1`. The program is also null when it holds `=`, `@`
+or `:`. Check matching does not read a variable as an interpreter, so `"$python" .../run-checks`
+names the program `run-checks` with check null. Markers in command output, files read or other
+tools' results never count. A suggestion's `stake_s` is the sum of its kind's charged
 time (One second, one row). No command text, tool output or prompt text reaches
 `autopsy.json`, `autopsy.md`, history or the chat summary; `checks` names a check id (or
 `run-checks`), never the command line or the configured command.

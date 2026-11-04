@@ -523,15 +523,24 @@ test('each detector finds its slowdown with its cost', () => {
   // The largest cost comes first.
   const costs = S.slowdowns.map((s) => s.cost_s);
   assert.deepEqual(costs, [...costs].sort((x, y) => y - x));
+  // The background call and the rerun run the manifest's test command
+  // (node tests/run-tests.mjs): check test#1. No other row runs a check.
   assert.deepEqual(byKind.background_check.evidence,
-    { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node' });
+    { tool: 'Bash', exit: null, marker: 'Command running in background with ID', program: 'node', check: 'test#1' });
+  assert.deepEqual(byKind.check_rerun.evidence,
+    { tool: 'Bash', exit: null, marker: null, program: 'node', check: 'test#1' });
   assert.deepEqual(byKind.timeout.evidence,
-    { tool: 'Bash', exit: null, marker: 'Command timed out after', program: 'npm' });
-  assert.deepEqual(byKind.repeated_failure.evidence, { tool: 'Bash', exit: 6, marker: null, program: 'curl' });
-  assert.deepEqual(byKind.heredoc_failure.evidence, { tool: 'Bash', exit: 2, marker: '<<', program: 'cat' });
+    { tool: 'Bash', exit: null, marker: 'Command timed out after', program: 'npm', check: null });
+  assert.deepEqual(byKind.repeated_failure.evidence,
+    { tool: 'Bash', exit: 6, marker: null, program: 'curl', check: null });
+  assert.deepEqual(byKind.heredoc_failure.evidence,
+    { tool: 'Bash', exit: 2, marker: '<<', program: 'cat', check: null });
   assert.deepEqual(byKind.edit_retry.evidence,
-    { tool: 'Edit', exit: null, marker: 'has not been read yet', program: null });
-  assert.deepEqual(byKind.idle_gap.evidence, { tool: null, exit: null, marker: null, program: null });
+    { tool: 'Edit', exit: null, marker: 'has not been read yet', program: null, check: null });
+  assert.deepEqual(byKind.idle_gap.evidence, { tool: null, exit: null, marker: null, program: null, check: null });
+  for (const s of S.slowdowns) {
+    assert.equal(s.evidence.check, ['background_check', 'check_rerun'].includes(s.kind) ? 'test#1' : null, s.kind);
+  }
 });
 
 test('suggestions rank by time at stake', () => {
@@ -610,11 +619,16 @@ test('evidence holds structured fields only', () => {
     assert.ok(!run2.text.includes(marker), `autopsy.json holds ${marker}`);
   }
   for (const s of S.slowdowns) {
-    assert.deepEqual(Object.keys(s.evidence).sort(), ['exit', 'marker', 'program', 'tool']);
+    assert.deepEqual(Object.keys(s.evidence).sort(), ['check', 'exit', 'marker', 'program', 'tool']);
   }
   const program = (command) => python([
     'import _autopsy',
     `print(json.dumps(_autopsy.program_of(${JSON.stringify(command)})))`,
+  ]);
+  const programWith = (command) => python([
+    'import _autopsy',
+    'checks = _autopsy.configured_checks({"commands": {"test": ["node tests/run-tests.mjs"]}})',
+    `print(json.dumps(_autopsy.program_of(${JSON.stringify(command)}, checks)))`,
   ]);
   assert.equal(program('API_KEY=abc123 PATH=/x env node a.js'), 'node');
   assert.equal(program('"C:/Program Files/nodejs/node.exe" a.js'), 'node.exe');
@@ -627,6 +641,29 @@ test('evidence holds structured fields only', () => {
   assert.equal(program("cd /w && cat > f <<'EOF'\ncurl x\nEOF"), 'cat');
   assert.equal(program('cd /w'), null);
   assert.equal(program('export PATH=/x:$PATH; timeout 600 npm test'), 'npm');
+  // 1. A simple command that runs a check names the program: an
+  // interpreter's script, as a basename.
+  assert.equal(programWith('git status && node tests/run-tests.mjs'), 'node');
+  assert.equal(programWith('grep -c x f; C:/u/py/python.exe C:/u/skill/scripts/run-checks --cmd test x'), 'run-checks');
+  assert.equal(programWith('python3 C:/u/skill/scripts/task-checks a b'), 'task-checks');
+  // 2. A loop that runs sleep is a wait loop.
+  assert.equal(program('for i in $(seq 1 60); do grep -q done f && break; sleep 5; done'), 'sleep');
+  assert.equal(program('until grep -q x f; do sleep 5; done'), 'sleep');
+  // 3. Else the first program that is not plumbing, else the first one.
+  assert.equal(program('sleep 30; python3 long.py'), 'long.py');
+  assert.equal(program('sed -i s/a/b/ f && node a.js'), 'node');
+  assert.equal(program('rm -rf x; mkdir x'), 'rm');
+  assert.equal(program('git commit -m x'), 'git');
+  // A line whose quoting does not parse is read as plain words, by the same rules.
+  assert.equal(program("sleep 5; node a.js 'open"), 'node');
+  // An interpreter runs a script word (a path, or a script suffix), or
+  // inline code (-c, -m, -), which names the interpreter itself; a variable
+  // names only the script it runs.
+  assert.equal(program('bash /tmp/task-checks-x.sh'), 'task-checks-x.sh');
+  assert.equal(program('python3 -c "print(1)"'), 'python3');
+  assert.equal(program(`python='C:/u/py/python.exe'; "$python" C:/u/skill/scripts/run-checks --out f`), 'run-checks');
+  assert.equal(program('"$python" -m pytest'), null);
+  assert.equal(program('"$GIT" status'), null);
 });
 
 // ---- detector cases on synthetic events (tool_slowdowns) ----
@@ -1462,6 +1499,8 @@ test('autopsy.md has every section in order', () => {
   // A row charged less than its span shows both.
   assert.match(md, /^\| \d+ \| heredoc_failure \| A1 implement \| 2026-10-10 09:01:50Z \| 10\.0 s \(upper bound\) \(of 32\.0 s\) \| tool Bash, exit 2, marker '<<', program cat \|$/m);
   assert.match(md, /^\| \d+ \| edit_retry \| A1 implement \| 2026-10-10 09:02:00Z \| 22\.0 s \| /m);
+  // A row whose call ran a check names the check id.
+  assert.match(md, /^\| \d+ \| check_rerun \| A1 implement \| 2026-10-10 09:03:40Z \| 40\.0 s \| tool Bash, program node, check test#1 \|$/m);
   // Paths are relative to the run folder.
   assert.ok(!md.includes(TMP));
 });
