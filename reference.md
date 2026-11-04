@@ -1851,7 +1851,7 @@ appends that summary to the hand-back report.
   `orphan_snapshots` lists the snapshot files that name no archived launch. `autopsy.md` gets a
   "Launch conditions" section after "Where time went", and the summary one line after the
   slowdowns when a recorded launch has a warned, failed or unread check. See "Launch conditions".
-  `AUTOPSY_VERSION` is 12, so `history` runs autopsy again on an older `autopsy.json`.
+  `AUTOPSY_VERSION` is 13, so `history` runs autopsy again on an older `autopsy.json`.
 - `launches` entries are `{wf, start, end, wall_s, status, kept_agents, redone_agents, kept_s,
   redone_s, redone_agent_s}`. An agent of a launch but the last is **redone** when a later launch
   ran an agent for the same work: an agent with a task when a later one has the same task and
@@ -1897,8 +1897,8 @@ appends that summary to the hand-back report.
   `task_minors_open_min` is `true` when a `final.cannot_verify` string holds the engine's note
   that some minors "did not reach the final lenses or task_minors_open" (the count is then a lower
   bound), `false` otherwise, and `unavailable` with the count. autopsy.md's What got done prints
-  `- Final review: N fixed, N declined, N open; task minors open: M` (or `at least M`, or
-  `unavailable`).
+  `- Final review: N fixed, N declined, N open; task minors open: M` (or, for a lower bound,
+  1.6.16, `M listed (more may be missing)`, or `unavailable`).
 - `tool_s` is the union of an agent's tool-call spans; the rest is `other_s` (model time,
   transport and scheduling), never called model time. The critical path is a timing-based
   estimate. A lane is matched by the manifest lane `name`, else `Lane <id>`.
@@ -2197,7 +2197,10 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   outcome. `accepted (gate unavailable)` is its own value: the run said `accepted`, but
   check-verify could not judge the evidence (for example `verify_evidence_time_untrusted`), so it
   is neither `accepted` nor `unverified`. An override counts only at the delivered sha; at
-  another head it is listed `stale`.
+  another head it is listed `stale`. `acceptance.verdict_without_override` (1.6.16) is the
+  verdict with no override, and `acceptance.verdict_rule_without_override` what made it
+  `unverified` when the run said `accepted` (else `null`), so `accepted by user` can name a fault
+  the audit found that the override set aside.
 - **Evidence validity.** The audit judges evidence validity from `result.verify` against the manifest's
   configured checks, with each failed rule named: `checks_missing`, `checks_stale`,
   `checks_incomplete`, `checks_failed`, `checks_unclean`, or `integrity_not_recorded` (older
@@ -2225,15 +2228,30 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   deferred tasks are then unknown, and the summary's open work line gives their count as `unknown
   (ledger status unavailable)` and Open work as `- blocked or deferred tasks: unknown`, never 0 or
   none. `open_work.final` also holds `task_minors_open` (the result's task minors no final lens
-  raised, quoted; `null` when the result has no such list, as before 1.3.1) and
-  `carried_minors_open` (the carried minor ids no final lens raised; `null` before 1.6.3). The
-  summary's open work line and the Open work header read `<N> open or declined final finding(s),
-  <M> open task minor(s)`: M is the open task minors plus the carried ones, `at least M` when the
-  result's `cannot_verify` holds the engine's note that some minors "did not reach the final
-  lenses or task_minors_open" (a resume whose earlier tasks no carried snapshot covers), and
-  `unavailable` when the result has neither list, never 0; N and M read `unavailable` when the
-  final review is. Under the header the open task minors are listed, then each carried id as `<id>
-  open (carried minor)`.
+  raised, quoted; `null` when the result has no such list, as before 1.3.1),
+  `carried_minors_open` (the carried minor ids no final lens raised; `null` before 1.6.3) and
+  `carried_minor_tasks` (1.6.16: `{id: task}` for the carried ids a ledger `minors` snapshot
+  lists with a task, the latest snapshot that lists each; `null` with `carried_minors_open`) and
+  `not_recorded` (which of `open` and `declined` the result has no list for: older engines'
+  finals have no `open` list, so that count reads `unavailable`, never 0). The summary's open
+  work line and the Open work header read `<open> open and <declined> declined final
+  finding(s), <M> open task minor(s)`: M is the open task minors plus the carried ones,
+  `<M> open task minor(s) listed (more may be missing)` when the result's `cannot_verify` holds
+  the engine's note that some minors "did not reach the final lenses or task_minors_open" (a
+  resume whose earlier tasks no carried snapshot covers), and `unavailable` when the result has
+  neither list, never 0; every count reads `unavailable` when the final review is. Under the
+  header the open task minors are listed, then each carried id as `<id> open (carried minor)`.
+- **Open minors per task** (1.6.16). Each open task minor and carried id is placed by its id's
+  prefix, as the engine numbers them (`<prefix>-<n>`, the prefix being the task id when it starts
+  with a letter, else `T<id>`): a task block ends with `- open minors: <id>, <id>` for its own. A
+  carried id goes to the task its `minors` snapshot names when that task is one of the prefix's;
+  a `T<id>` prefix that both a task `T<id>` and a task `<id>` have goes to the exact match. An id
+  that names a batch unit (`<first>-<last>`), no task or still more than one task is in no task
+  block: Open work lists it once under `- open task minors in no task block: <id>, ...`. Open
+  work says once `- open task minors: not recorded by this run's engine` when the result has
+  neither list (no task block then has a line), `- open task minors: no final review` without
+  one, and, for a lower bound, that a task block with no open minors line has none listed and
+  more may be missing (minors of tasks an earlier launch approved).
 - **Per task,** in run order, the audit shows the requirement (the latest review's brief hash
   against the task's plan section hash, and the brief file), placement, changes (rulings, events,
   escalations), commits and review (reviews, each with its brief and spec hashes against the
@@ -2267,21 +2285,25 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   text: the verdict with what made it so (audit's own rule when it disagrees with the engine, else
   the engine's reason kinds for the engine's own verdict, as Acceptance lists them, for example
   `Verdict: unverified (checks_stale, final_fix_unreviewed).`), or why it is `unavailable`;
-  `accepted by user` with what the user overrode, the run's own verdict and reason kinds as
-  Acceptance's `overrode` gives them (`Verdict: accepted by user (over unverified:
-  checks_failed).`), and `accepted (gate unavailable)` with check-verify's reason code inside its
-  parenthesis (`Verdict: accepted (gate unavailable: verify_evidence_time_untrusted).`), each only
-  when there is one; `accepted by the user at the delivered head` when an override at the
-  delivered sha is in effect and the verdict is not already `accepted by user` (never the
-  override's text); the tasks `committed C, reviewed R, verified V, accepted A of N`, each
-  counting `true` values with `(k settled)`, `(k not required)` and `(k unavailable)` where a task
-  has such a value, then the blocked and deferred counts above 0 (`blocked and deferred unknown`
-  when `ledger status` failed); the final findings (`N open or declined`, or `Final review
-  unavailable`), the open task minors as above and the cannot-verify items; the code outside
-  recorded task ranges and how many lack review evidence; the launches missing from the archive
-  when the ledger records more; and `<G> evidence gap(s) in <C> cause(s) (cannot-verify items and
-  inferred lines are not gaps)`. Nothing else. The summary's last line before the report path
-  gives the same `<G> evidence gap(s) in <C> cause(s)`.
+  `accepted by user` with what the user overrode: the audit's verdict without the override and
+  its rule when that differs from the run's own (1.6.16: `Verdict: accepted by user (over
+  unverified: gate mismatch).`, or `(over accepted (gate unavailable: <reason>))`), else the run's
+  own verdict and reason kinds as Acceptance's `overrode` gives them (`Verdict: accepted by user
+  (over unverified: checks_failed).`); and `accepted (gate unavailable)` with check-verify's
+  reason code inside its parenthesis (`Verdict: accepted (gate unavailable:
+  verify_evidence_time_untrusted).`), each only when there is one; `accepted by the user at the
+  delivered head` when an override at the delivered sha is in effect and the verdict is not
+  already `accepted by user` (never the override's text); the tasks `committed C, reviewed R,
+  verified V, accepted A of N`, each counting `true` values with `(k settled)`, `(k not
+  required)` and `(k unavailable)` where a task has such a value (the summary's tasks line counts
+  the same way), then the blocked and deferred counts above 0 (`blocked and deferred unknown`
+  when `ledger status` failed); `Final findings: <open> open, <declined> declined; open task
+  minors: <M>` (M a number, `<M> listed (more may be missing)` or `unavailable`), or `Final
+  review unavailable`, and the cannot-verify items; the code outside recorded task ranges and how
+  many lack review evidence; the launches missing from the archive when the ledger records more;
+  and `<G> evidence gap(s) in <C> cause(s) (cannot-verify items and inferred lines are not
+  gaps)`. Nothing else. The summary's last line before the report path gives the same `<G>
+  evidence gap(s) in <C> cause(s)`.
 - **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
   states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
   validity's), round(s), task rulings and run-end rulings, gate, carry, context added by

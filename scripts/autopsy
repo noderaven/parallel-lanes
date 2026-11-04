@@ -101,7 +101,7 @@ never copied.
   task_minors_open" (the count is then a lower bound), false otherwise,
   and "unavailable" with the count. What got done prints '- Final review:
   <fixed> fixed, <declined> declined, <open> open; task minors open: <M>'
-  ('at least <M>', or unavailable).
+  ('<M> listed (more may be missing)' for a lower bound, or unavailable).
 - tasks.commits is the task's commit count from the ledger: the distinct
   SHAs in the commits lists of its committed and settled events (one per
   commit round) in every *.jsonl of the ledger, after its last started

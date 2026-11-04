@@ -43,13 +43,20 @@ labels. In audit.md, checks that ran and failed read 'failed checks'
 (audit.json keeps invalid and the checks_failed rule), review verdicts,
 which come from the journal, read '[inferred: read from the transcript]',
 and a ruling without a by reads 'implementer (no role recorded)'. The
-summary's open work line and audit.md's Open work header count '<N> open
-or declined final finding(s), <M> open task minor(s)', M being the
-result's task_minors_open plus its carried_minors_open ('at least M' when
-the engine noted that some minors did not reach the final lenses;
-unavailable when the result has neither list); when 'ledger status'
-failed, the open work line's task count reads 'unknown (ledger status
-unavailable)'. The summary, the Bottom line and the Evidence gaps header
+summary's open work line and audit.md's Open work header count '<open>
+open and <declined> declined final finding(s), <M> open task minor(s)', M
+being the result's task_minors_open plus its carried_minors_open ('<M> open
+task minor(s) listed (more may be missing)' when the engine noted that some
+minors did not reach the final lenses; unavailable when the result has
+neither list, and Open work then says once that this run's engine recorded
+none); each task block ends with the open minors its id prefix places
+there, and a minor of a batch unit or of no task is under Open work only.
+The summary's tasks line counts as the Bottom line does. For accepted by
+user, the Bottom line names audit's verdict without the override when it
+differs from the run's own (acceptance.verdict_without_override and
+verdict_rule_without_override). When 'ledger status' failed, the open work
+line's task count reads 'unknown (ledger status unavailable)'. The
+summary, the Bottom line and the Evidence gaps header
 say '<G> evidence gap(s) in <C> cause(s)', and Evidence gaps lists one line
 per cause. The same inputs give the same bytes.
 

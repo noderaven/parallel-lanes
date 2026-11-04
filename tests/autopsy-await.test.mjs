@@ -426,10 +426,10 @@ test('an older run says checks_via_procedure unavailable', () => {
   assert.match(autopsy(untimed).md, /^Checks via the procedure: unavailable$/m);
 });
 
-test('the version is 12', () => {
-  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 12);
+test('the version is 13', () => {
+  assert.equal(python(['print(json.dumps(_autopsy.AUTOPSY_VERSION))']), 13);
   const dir = buildRun({ agents: [{ label: 'A1 implement', start: '10:00:05', end: '10:01:00' }] });
-  assert.equal(autopsy(dir).json.autopsy_version, 12);
+  assert.equal(autopsy(dir).json.autopsy_version, 13);
 });
 
 test('checks.waits lists background checks never waited on, and checks left running when the waits stopped', () => {

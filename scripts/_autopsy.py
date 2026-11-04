@@ -143,7 +143,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _transcripts  # noqa: E402
 
-AUTOPSY_VERSION = 12
+AUTOPSY_VERSION = 13
 UNAVAILABLE = _transcripts.UNAVAILABLE
 TOKEN_FIELDS = _transcripts.TOKEN_FIELDS
 IDLE_GAP_S = 60
@@ -519,6 +519,9 @@ def _count(value):
 # tasks' minor findings no carried snapshot covers: those minors are in
 # neither the final lenses nor task_minors_open.
 MINORS_NOT_REACHED = "did not reach the final lenses or task_minors_open"
+# How a lower-bound count of open task minors reads after its number
+# (autopsy.md's What got done; audit's bottom line, Summary and Open work).
+MINORS_LOWER_BOUND = "listed (more may be missing)"
 
 
 def open_task_minors(task_minors, carried, cannot_verify):
@@ -3651,8 +3654,8 @@ def _md_done(a):
     fin = done["final"]
     if isinstance(fin, dict):
         lines.append("- Final review: %s fixed, %s declined, %s open; task minors open: %s%s" % (
-            fin["fixed"], fin["declined"], fin["open"], "at least " if fin["task_minors_open_min"] is True else "",
-            fin["task_minors_open"]))
+            fin["fixed"], fin["declined"], fin["open"], fin["task_minors_open"],
+            " " + MINORS_LOWER_BOUND if fin["task_minors_open_min"] is True else ""))
     else:
         lines.append("- Final review: unavailable")
     lines.append("- End-to-end checks: %s" % done["e2e"])

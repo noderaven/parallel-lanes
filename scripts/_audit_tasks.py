@@ -68,7 +68,8 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                in the spec's table. verified is false, "the verify at <sha7>
                failed (checks_failed)", when the evidence is invalid by
                checks_failed (else "the verify evidence is invalid"). When
-               the verdict is "accepted (gate unavailable)", accepted is
+               the verdict is "accepted (gate unavailable)"
+               (_audit_run.GATE_UNAVAILABLE_VERDICT), accepted is
                unavailable, "the acceptance gate is unavailable", for a task
                the result reports done that is neither settled nor blocked;
                a task that is not done, or is settled or blocked, stays
@@ -92,12 +93,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _audit_core as core  # noqa: E402
 import _brief  # noqa: E402
 import _transcripts  # noqa: E402
+from _audit_run import GATE_UNAVAILABLE_VERDICT  # noqa: E402
 
 NO_REPO = "no --repo"
 PREFLIGHT_LABEL = "context added by pre-flight (not ordering)"
 TRANSITIONS = ("committed", "settled")
 UNREVIEWED_STATUSES = ("skipped", "not_run")
-GATE_UNAVAILABLE_VERDICT = "accepted (gate unavailable)"
 
 ref = core.ref
 src = core.src

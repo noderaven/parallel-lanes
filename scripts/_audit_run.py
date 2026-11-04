@@ -73,7 +73,18 @@ open_work.final, from the latest launch's final review result, is a ref of
 {"findings" (open and declined), "cannot_verify", "task_minors_open" (the
 result's findings, quoted; None when the result has no such list, as before
 1.3.1), "carried_minors_open" (the result's carried minor ids, its strings;
-None when it has none, as before 1.6.3)}.
+None when it has none, as before 1.6.3), "carried_minor_tasks" ({id: task
+id} for the carried ids a ledger minors snapshot lists with a task, the
+latest snapshot that lists each; None with carried_minors_open),
+"not_recorded" (which of "open" and "declined" the result has no list for,
+as older engines have no open list: that count is unknown, not 0)}.
+
+acceptance also holds verdict_without_override (derive_verdict with no
+override) and verdict_rule_without_override (_verdict_rule when that verdict
+is unverified for an accepted run, else None), so a verdict of accepted by
+user can name the fault audit found that the override set aside.
+GATE_UNAVAILABLE_VERDICT is the one constant for accepted (gate
+unavailable).
 
 after_delivery (with --head) lists the commits reachable from the head but
 not from the delivered sha: unavailable, "no run evidence", when there are
@@ -103,6 +114,9 @@ E2E_NO_CHECKED = "the end-to-end check recorded no sha"
 E2E_NO_DELIVERED = "the run recorded no delivered sha"
 
 GATES = ("match", "not_required", "missing", "stale", "mismatch", "invalid", "unavailable", "checker_error")
+# The verdict of an accepted run whose gate check-verify could not judge
+# (derive_verdict); _audit_tasks and _audit use this one constant.
+GATE_UNAVAILABLE_VERDICT = "accepted (gate unavailable)"
 # What check-verify itself prints; checker_error is audit's own.
 CHECKER_STATUSES = GATES[:-1]
 REASONS = ("verify_invalid", "verify_evidence_missing", "verify_evidence_stale", "verify_mismatch",
@@ -317,7 +331,7 @@ def derive_verdict(run_verdict, gate, evidence, override, delivered_sha, order_k
         if (gate == "match" and evidence == "valid") or (gate == "not_required" and evidence == "not_required"):
             return "accepted"
         if gate in ("unavailable", "checker_error"):
-            return "accepted (gate unavailable)"
+            return GATE_UNAVAILABLE_VERDICT
         if gate in ("missing", "stale", "mismatch", "invalid") or evidence == "invalid" \
                 or (gate == "not_required" and evidence != "not_required"):
             return "unverified"
@@ -792,7 +806,8 @@ def _e2e(run, launch, result):
 
 def _acceptance(run, launch, why, facts, gate, evidence, rule, accepted_events, pairs):
     out = {"run_verdict": None, "reasons": [], "warnings": [], "gate": gate["status"], "evidence": evidence,
-           "overrides": [], "verdict": None, "verdict_rule": None, "run_ended": [], "delivered_sha": None}
+           "overrides": [], "verdict": None, "verdict_rule": None, "verdict_without_override": None,
+           "verdict_rule_without_override": None, "run_ended": [], "delivered_sha": None}
     result = (launch.get("result") if launch is not None else None) or {}
     acceptance = result.get("acceptance")
     run_verdict = acceptance.get("status") if isinstance(acceptance, dict) else None
@@ -848,6 +863,12 @@ def _acceptance(run, launch, why, facts, gate, evidence, rule, accepted_events, 
         out["verdict"] = c.ref(verdict, "present", v_sources)
         if verdict == "unverified" and run_verdict == "accepted":
             out["verdict_rule"] = _verdict_rule(gate["status"], evidence, rule)
+    # What the verdict would be with no override, so the bottom line can name
+    # a fault audit found that the user's override set aside.
+    without = derive_verdict(run_verdict, gate["status"], evidence, None, delivered, facts["order_known"])
+    out["verdict_without_override"] = without
+    if without == "unverified" and run_verdict == "accepted":
+        out["verdict_rule_without_override"] = _verdict_rule(gate["status"], evidence, rule)
 
     for event, source in _events(run):
         if event.get("event") == "run_ended":
@@ -992,9 +1013,28 @@ def _open_work(run, launch, why, pairs):
     carried = final.get("carried_minors_open")
     carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
     value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
-             "carried_minors_open": carried}
+             "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
+             # Older engines' finals have no open list: its count is unknown, not 0.
+             "not_recorded": [key for key in ("open", "declined") if not isinstance(final.get(key), list)]}
     out["final"] = c.ref(value, "present", [_wf_src(launch, "final")])
     return out
+
+
+def _carried_tasks(run, carried):
+    """{carried id: task id} for the carried ids a ledger minors snapshot
+    (carry-launch's) lists with a task, the latest snapshot that lists each,
+    in carried order; None when the result has no carried list."""
+    if carried is None:
+        return None
+    found = {}
+    for event, _source in reversed(_events(run)):
+        if event.get("task") != "_run" or event.get("event") != "minors" or not isinstance(event.get("open"), list):
+            continue
+        for m in event["open"]:
+            if isinstance(m, dict) and m.get("id") in carried and m["id"] not in found \
+                    and isinstance(m.get("task"), str) and m["task"]:
+                found[m["id"]] = m["task"]
+    return {cid: found[cid] for cid in carried if cid in found}
 
 
 # ---- the sections ----

@@ -360,6 +360,17 @@ test('a gate-unavailable run leaves accepted unavailable only where it would be 
   assert.deepEqual(accepted(audit(makeRun(reviewedRun(s0, s1)), facts()).A1), [true, 'present', undefined]);
 });
 
+test('the gate-unavailable verdict is one constant, _audit_run\'s', () => {
+  const out = pythonJSON([
+    'import _audit_run as r, _audit_tasks as t',
+    'v = r.derive_verdict("accepted", "unavailable", "unavailable", None, "d" * 40, True)',
+    'src = open(t.__file__, encoding="utf-8").read()',
+    'print(json.dumps([r.GATE_UNAVAILABLE_VERDICT, t.GATE_UNAVAILABLE_VERDICT is r.GATE_UNAVAILABLE_VERDICT,',
+    '                  v is r.GATE_UNAVAILABLE_VERDICT, "GATE_UNAVAILABLE_VERDICT = " in src]))',
+  ]);
+  assert.deepEqual(out, ['accepted (gate unavailable)', true, true, false]);
+});
+
 test('without a repo every git fact is unavailable', () => {
   const [s0, s1] = [S('a'), S('b')];
   const folder = makeRun(reviewedRun(s0, s1));

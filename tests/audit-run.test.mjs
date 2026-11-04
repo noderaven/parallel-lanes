@@ -575,6 +575,54 @@ test('an override at another head is stale and changes nothing', () => {
   assert.equal(s.acceptance.overrides[1].head.state, 'present');
   assert.equal(s.acceptance.overrides[1].overrode, 'rejected: checks_failed');
   assert.deepEqual(s.acceptance.overrides[1].head.sources, [{ path: `${LEDGER}/_run.jsonl`, at: 'L3' }]);
+  // Without the override the verdict is the run's own.
+  assert.deepEqual([s.acceptance.verdict_without_override, s.acceptance.verdict_rule_without_override], ['rejected', null]);
+});
+
+test('acceptance gives the verdict without the override and its rule', () => {
+  const accept = { task: '_run', event: 'accepted', head: D, text: 'ship it' };
+  const keys = (s) => [s.facts.verdict, s.acceptance.verdict_rule, s.acceptance.verdict_without_override,
+    s.acceptance.verdict_rule_without_override];
+  const withOverride = makeRun({ ledger: { '_run.jsonl': [accept] }, launches: [launch(accepted(D))] });
+  const without = makeRun({ launches: [launch(accepted(D))] });
+  // [gate, with the override, without it]
+  const cases = [
+    ['mismatch', ['accepted by user', null, 'unverified', 'gate mismatch'],
+      ['unverified', 'gate mismatch', 'unverified', 'gate mismatch']],
+    ['unavailable', ['accepted by user', null, 'accepted (gate unavailable)', null],
+      ['accepted (gate unavailable)', null, 'accepted (gate unavailable)', null]],
+    ['match', ['accepted by user', null, 'accepted', null], ['accepted', null, 'accepted', null]],
+  ];
+  for (const [gate, over, bare] of cases) {
+    assert.deepEqual(keys(sections(withOverride, { gate })), over, gate);
+    assert.deepEqual(keys(sections(without, { gate })), bare, gate);
+  }
+  // The two keys follow verdict_rule.
+  const order = Object.keys(sections(withOverride).acceptance);
+  assert.deepEqual(order.slice(order.indexOf('verdict_rule'), order.indexOf('verdict_rule') + 3),
+    ['verdict_rule', 'verdict_without_override', 'verdict_rule_without_override']);
+  // No launch: unavailable, as the verdict is.
+  const none = sections(makeRun({}));
+  assert.deepEqual(keys(none), ['unavailable', null, 'unavailable', null]);
+});
+
+test('carried minor tasks come from the ledger minors snapshot', () => {
+  const minors = (wf, open) => ({ task: '_run', event: 'minors', wf, open, covered: [] });
+  const entry = (id, task) => ({ id, task, file: 'a.js', line: 1, issue: 'zqissue', fix: 'f' });
+  const result = accepted(D, { final: finalAt(D, { carried_minors_open: ['A1-1', 'T2-1', 'Z9-1'] }) });
+  const s = sections(makeRun({
+    ledger: { '_run.jsonl': [
+      minors('wf_old', [entry('A1-1', 'A1'), entry('T2-1', '2')]),
+      // The latest snapshot that lists an id names its task.
+      minors('wf_aaaaaa', [entry('T2-1', 'T2'), entry('Q1-1', 'Q1'), { id: 'Z9-1' }]),
+    ] },
+    launches: [launch(result)],
+  }));
+  assert.deepEqual(s.open_work.final.value.carried_minor_tasks, { 'A1-1': 'A1', 'T2-1': 'T2' });
+  assert.doesNotMatch(JSON.stringify(s.open_work.final.value), /zqissue/);
+  // No carried list: null; a carried list without a snapshot: {}.
+  const empty = sections(makeRun({ launches: [launch(accepted(D, { final: finalAt(D, { carried_minors_open: [] }) }))] }));
+  assert.deepEqual(empty.open_work.final.value.carried_minor_tasks, {});
 });
 
 test('checker_error mapping', () => {
@@ -729,6 +777,13 @@ test('open work is listed', () => {
   assert.deepEqual(f.task_minors_open.map((x) => [x.id, x.issue.quote]), [['A1-1', 'nit']]);
   // A result without carried_minors_open (before 1.6.3) has none recorded.
   assert.equal(f.carried_minors_open, null);
+  assert.equal(f.carried_minor_tasks, null);
+  // Both finding lists are recorded; an older engine's final has no open list.
+  assert.deepEqual(f.not_recorded, []);
+  const older = { ...result, final: { ...result.final } };
+  delete older.final.open;
+  const o = sections(makeRun({ launches: [launch(older)] })).open_work.final.value;
+  assert.deepEqual([o.not_recorded, o.findings.map((x) => x.id)], [['open'], ['F2']]);
   assert.deepEqual(ow.excluded.map((x) => [x.id, x.reason.quote]), [['X9', 'manual step']]);
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);

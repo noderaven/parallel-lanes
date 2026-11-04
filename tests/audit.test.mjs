@@ -183,6 +183,19 @@ function mdSection(md, heading) {
   return lines.slice(start + 1, next < 0 ? lines.length : next).filter((l) => l !== '');
 }
 
+// The lines of one task's block in audit.md (from its '### Task <id> ('
+// heading to the next heading), blank lines left out.
+function taskBlock(md, id) {
+  const lines = md.split('\n');
+  const start = lines.findIndex((l) => l.startsWith(`### Task ${id} (`));
+  assert.ok(start >= 0, `no task block ${id}: ${md}`);
+  const next = lines.findIndex((l, i) => i > start && l.startsWith('#'));
+  return lines.slice(start + 1, next < 0 ? lines.length : next).filter((l) => l !== '');
+}
+
+// Why an open minor is under Open work only (audit.md).
+const UNPLACED = 'each id names a batch unit, no task, or more than one task';
+
 // audit.md before its Terms section, the fixed text that names every label.
 function beforeTerms(md) {
   const at = md.indexOf('\n## Terms\n');
@@ -308,12 +321,15 @@ test('an accepted run with a repo', () => {
   assert.deepEqual(mdSection(md, 'Bottom line'), [
     'Verdict: accepted.',
     'Tasks: committed 2, reviewed 2, verified 2, accepted 2 of 2.',
-    'Final findings: 0 open or declined; open task minors: 0; cannot-verify items: 0.',
+    'Final findings: 0 open, 0 declined; open task minors: 0; cannot-verify items: 0.',
     'Code outside recorded task ranges: 1 commit(s), 0 without review evidence.',
     '0 evidence gap(s) in 0 cause(s) (cannot-verify items and inferred lines are not gaps).',
   ]);
-  assert.ok(stdout.split('\n').includes('open work: 0 task(s), 0 open or declined final finding(s), 0 open task minor(s)'),
+  assert.ok(stdout.split('\n').includes('open work: 0 task(s), 0 open and 0 declined final finding(s), 0 open task minor(s)'),
     stdout);
+  assert.ok(stdout.split('\n').includes('tasks: 2; committed 2, reviewed 2, verified 2, accepted 2'), stdout);
+  // No open minor: no task block has a line and Open work adds no note.
+  assert.doesNotMatch(md, /^- open minors|^- open task minors/m);
   assert.doesNotMatch(md, /^## After delivery$/m);
   assert.match(md, /^### Task A1/m);
   assert.match(md, /^### Task A2/m);
@@ -367,8 +383,10 @@ test('late evidence gives accepted (gate unavailable)', () => {
   }
   const line = '- accepted: unknown [unavailable] - the acceptance gate is unavailable (wf_aaaaaa.json #/result/tasks/';
   assert.equal(md.split('\n').filter((l) => l.startsWith(line)).length, 2, md);
-  // The summary counts only accepted tasks, as before.
-  assert.ok(stdout.includes('accepted 0'), stdout);
+  // The summary's tasks line counts as the bottom line does, the unknown ones named.
+  const counted = 'tasks: 2; committed 2, reviewed 2, verified 0 (2 unavailable), accepted 0 (2 unavailable)';
+  assert.ok(stdout.split('\n').includes(counted), stdout);
+  assert.ok(mdSection(md, 'Summary').includes(`- ${counted}`), md);
   // The bottom line names check-verify's reason and the unknown ones.
   assert.deepEqual(mdSection(md, 'Bottom line').slice(0, 2), [
     'Verdict: accepted (gate unavailable: verify_evidence_time_untrusted).',
@@ -486,7 +504,8 @@ test('open counts add the open task minors and the carried ones', () => {
     ...extra,
   });
   // The final value in audit.json, the Summary's and stdout's open work
-  // lines, the Open work header and the bottom line's final review line.
+  // lines, the Open work header, the bottom line's final review line, each
+  // task block's open minors line and Open work's notes on the minors.
   const counts = (final) => {
     const { json, md, stdout } = view(makeRun(acceptedSpec(r, { result: { final } })), ['--repo', r.dir]);
     return {
@@ -497,51 +516,143 @@ test('open counts add the open task minors and the carried ones', () => {
       // The entries under the header that name a minor (ids A1-1, T9-1 ...).
       listed: mdSection(md, 'Open work').filter((l) => /^ {2}- [A-Z]\d-\d open/.test(l)).map((l) => l.replace(/ \(A\d.*$/, '')),
       bottom: mdSection(md, 'Bottom line').find((l) => /^Final (findings|review)/.test(l)),
+      blocks: Object.fromEntries(['A1', 'A2'].map((id) => [id, taskBlock(md, id).filter((l) => /open minors/.test(l))])),
+      notes: mdSection(md, 'Open work').filter((l) => l.startsWith('- open task minors')),
+      md,
     };
   };
+  const declined = [{ id: 'F2', severity: 'minor', file: 'a1.txt', line: 2, issue: 'meh', reason: 'not needed' }];
 
   // The task minors no final lens raised plus the carried ones.
-  const both = counts(finalWith({ task_minors_open: [minor('A1-1'), minor('A2-1')], carried_minors_open: ['T9-1'] }));
+  const both = counts(finalWith({ task_minors_open: [minor('A1-1'), minor('A2-1')], carried_minors_open: ['T9-1'], declined }));
   assert.deepEqual(both.final.task_minors_open.map((f) => f.id), ['A1-1', 'A2-1']);
   assert.deepEqual(both.final.carried_minors_open, ['T9-1']);
-  const three = '1 open or declined final finding(s), 3 open task minor(s)';
+  const three = '1 open and 1 declined final finding(s), 3 open task minor(s)';
   assert.equal(both.summary, `- open work: 0 task(s), ${three}`);
   assert.equal(both.stdout, `open work: 0 task(s), ${three}`);
   assert.equal(both.header, `- final review: ${three} [present] (wf_aaaaaa.json #/result/final)`);
-  assert.equal(both.bottom, 'Final findings: 1 open or declined; open task minors: 3; cannot-verify items: 0.');
+  assert.equal(both.bottom, 'Final findings: 1 open, 1 declined; open task minors: 3; cannot-verify items: 0.');
   // Under the header: the task minors, then the carried ids as recorded.
   assert.deepEqual(both.listed, ['  - A1-1 open', '  - A2-1 open', '  - T9-1 open (carried minor)']);
+  // Each task block ends with the ids its prefix places there; T9 names no
+  // task, so T9-1 is under Open work only.
+  assert.deepEqual(both.blocks, { A1: ['- open minors: A1-1'], A2: ['- open minors: A2-1'] });
+  assert.equal(taskBlock(both.md, 'A1').at(-1), '- open minors: A1-1');
+  assert.deepEqual(both.notes, [`- open task minors in no task block: T9-1 (${UNPLACED})`]);
 
-  // The engine's note makes the count a lower bound.
+  // The engine's note makes the count a lower bound: a task with no line
+  // has none listed, said once under Open work.
   const lower = counts(finalWith({ task_minors_open: [minor('A2-1')], carried_minors_open: [], cannot_verify: [earlier] }));
-  const atLeast = '1 open or declined final finding(s), at least 1 open task minor(s)';
-  assert.equal(lower.summary, `- open work: 0 task(s), ${atLeast}`);
-  assert.equal(lower.stdout, `open work: 0 task(s), ${atLeast}`);
-  assert.equal(lower.header, `- final review: ${atLeast} [present] (wf_aaaaaa.json #/result/final)`);
-  assert.equal(lower.bottom, 'Final findings: 1 open or declined; open task minors: at least 1; cannot-verify items: 1.');
+  const listed = '1 open and 0 declined final finding(s), 1 open task minor(s) listed (more may be missing)';
+  assert.equal(lower.summary, `- open work: 0 task(s), ${listed}`);
+  assert.equal(lower.stdout, `open work: 0 task(s), ${listed}`);
+  assert.equal(lower.header, `- final review: ${listed} [present] (wf_aaaaaa.json #/result/final)`);
+  assert.equal(lower.bottom,
+    'Final findings: 1 open, 0 declined; open task minors: 1 listed (more may be missing); cannot-verify items: 1.');
+  assert.deepEqual(lower.blocks, { A1: [], A2: ['- open minors: A2-1'] });
+  assert.deepEqual(lower.notes, ['- open task minors: a task block with no open minors line has none listed; more may be'
+    + ' missing: minors of tasks an earlier launch approved']);
+  assert.doesNotMatch(lower.md, /at least/);
 
   // An engine before carried minors counts its task minors alone.
   const older = counts(finalWith({ task_minors_open: [minor('A1-1')] }));
   assert.equal(older.final.carried_minors_open, null);
-  assert.equal(older.stdout, 'open work: 0 task(s), 1 open or declined final finding(s), 1 open task minor(s)');
+  assert.equal(older.stdout, 'open work: 0 task(s), 1 open and 0 declined final finding(s), 1 open task minor(s)');
+  assert.deepEqual(older.blocks, { A1: ['- open minors: A1-1'], A2: [] });
+  assert.deepEqual(older.notes, []);
 
-  // Neither key: unavailable, never 0.
+  // An older engine's final records no open list: its count is unavailable,
+  // never 0.
+  const noOpen = counts(finalWith({ open: undefined, declined, task_minors_open: [] }));
+  assert.deepEqual(noOpen.final.not_recorded, ['open']);
+  assert.equal(noOpen.header,
+    '- final review: unavailable open and 1 declined final finding(s), 0 open task minor(s) [present] (wf_aaaaaa.json #/result/final)');
+  assert.equal(noOpen.bottom, 'Final findings: unavailable open, 1 declined; open task minors: 0; cannot-verify items: 0.');
+
+  // Neither key: unavailable, never 0; Open work says once that the engine
+  // recorded none, and no task block has a line.
   const none = counts(finalWith({}));
   assert.deepEqual([none.final.task_minors_open, none.final.carried_minors_open], [null, null]);
-  const unknown = '1 open or declined final finding(s), unavailable open task minor(s)';
+  const unknown = '1 open and 0 declined final finding(s), unavailable open task minor(s)';
   assert.equal(none.summary, `- open work: 0 task(s), ${unknown}`);
   assert.equal(none.stdout, `open work: 0 task(s), ${unknown}`);
   assert.equal(none.header, `- final review: ${unknown} [present] (wf_aaaaaa.json #/result/final)`);
-  assert.equal(none.bottom, 'Final findings: 1 open or declined; open task minors: unavailable; cannot-verify items: 0.');
+  assert.equal(none.bottom, 'Final findings: 1 open, 0 declined; open task minors: unavailable; cannot-verify items: 0.');
+  assert.deepEqual(none.blocks, { A1: [], A2: [] });
+  assert.deepEqual(none.notes, ["- open task minors: not recorded by this run's engine"]);
+  assert.equal(none.md.split('not recorded').length, 2, none.md);
 
-  // No final review: both counts are unavailable.
+  // No final review: every count is unavailable, and Open work says why.
   const noFinal = counts(undefined);
-  const neither = 'unavailable open or declined final finding(s), unavailable open task minor(s)';
+  const neither = 'unavailable open and unavailable declined final finding(s), unavailable open task minor(s)';
   assert.equal(noFinal.summary, `- open work: 0 task(s), ${neither}`);
   assert.equal(noFinal.stdout, `open work: 0 task(s), ${neither}`);
   assert.equal(noFinal.header,
     `- final review: ${neither} [unavailable] - the latest launch has no final review result (wf_aaaaaa.json #/result)`);
   assert.equal(noFinal.bottom, 'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.');
+  assert.deepEqual(noFinal.blocks, { A1: [], A2: [] });
+  assert.deepEqual(noFinal.notes, ['- open task minors: no final review']);
+  assert.doesNotMatch(noFinal.md, /not recorded/);
+});
+
+test('each task block lists its open minors by id prefix; a batch unit or no task stays under Open work', () => {
+  // Tasks A1 and A2, and the numeric 2, T2 and 3 (the engine prefixes a
+  // task id that does not start with a letter with T).
+  const manifest = {
+    lanes: [
+      { id: 'a', name: 'Lane a', tasks: [{ id: 'A1', title: 'First' }, { id: 'A2', title: 'Second' }] },
+      { id: 'b', name: 'Lane b',
+        tasks: [{ id: '2', title: 'Two' }, { id: 'T2', title: 'T two' }, { id: '3', title: 'Three' }] },
+    ],
+  };
+  const minor = (id) => ({ id, severity: 'minor', file: 'a.txt', line: 1, issue: 'nit', fix: 'x' });
+  const final = {
+    open: [], declined: [], fixed: [], cannot_verify: [], findings: [],
+    // A1-A2 is a batch unit; Z9 names no task; T2 is task T2's exactly; T3
+    // is task 3's; 'odd' has no -<n>.
+    task_minors_open: ['A1-1', 'A1-2', 'A2-1', 'A1-A2-1', 'Z9-1', 'T2-1', 'T3-1', 'odd'].map(minor),
+    carried_minors_open: ['A2-7', 'T9-1', 'T2-5'],
+  };
+  // The ledger's minors snapshot names T2-5's task (2, which settles the T2
+  // that two tasks share) and T9-1's (A2, whose prefix is not T9: ignored).
+  const snapshot = {
+    task: '_run', event: 'minors', wf: 'wf_aaaaaa', covered: ['2', 'A2'],
+    open: [{ id: 'T2-5', task: '2', file: 'a.txt', line: 1, issue: 'i', fix: 'f' },
+      { id: 'T9-1', task: 'A2', file: 'a.txt', line: 1, issue: 'i', fix: 'f' }],
+  };
+  const folder = makeRun({
+    manifest,
+    ledger: { '_run.jsonl': [snapshot] },
+    launches: [{ wf: 'wf_aaaaaa', startTime: START, durationMs: DURATION, result: { tasks: {}, final } }],
+  });
+  const { json, md } = view(folder);
+  assert.deepEqual(json.run.open_work.final.value.carried_minor_tasks, { 'T9-1': 'A2', 'T2-5': '2' });
+  const lines = Object.fromEntries(['A1', 'A2', '2', 'T2', '3']
+    .map((id) => [id, taskBlock(md, id).filter((l) => /open minors/.test(l))]));
+  assert.deepEqual(lines, {
+    A1: ['- open minors: A1-1, A1-2'],
+    A2: ['- open minors: A2-1, A2-7'],
+    2: ['- open minors: T2-5'],
+    T2: ['- open minors: T2-1'],
+    3: ['- open minors: T3-1'],
+  });
+  assert.deepEqual(mdSection(md, 'Open work').filter((l) => l.startsWith('- open task minors')),
+    [`- open task minors in no task block: A1-A2-1, Z9-1, odd, T9-1 (${UNPLACED})`]);
+  // Every minor is still listed with its details under the final review.
+  assert.equal(mdSection(md, 'Open work').filter((l) => /^ {2}- \S+ open/.test(l)).length, 11);
+
+  // The placement alone: an exact match wins over T<id>; a task id listed
+  // twice is ambiguous; the snapshot chooses only among the prefix's tasks.
+  const place = pythonJSON([
+    'import _audit',
+    'cases = json.loads(sys.argv[1])',
+    'print(json.dumps([_audit._minor_task(*c) for c in cases]))',
+  ], [JSON.stringify([
+    ['T2-1', ['2', 'T2'], null], ['T2-1', ['2'], null], ['T2-1', ['T2'], null], ['T2-1', ['2', 'T2'], '2'],
+    ['A1-1', ['A1', 'A1'], null], ['A1-A2-1', ['A1', 'A2'], 'A1'], ['T9-1', ['A2'], 'A2'], ['x', ['x'], null],
+    [null, ['A1'], null], ['TA1-1', ['A1'], null], ['T2-12', ['2'], null],
+  ])]);
+  assert.deepEqual(place, ['T2', '2', 'T2', '2', null, null, null, null, null, null, '2']);
 });
 
 test('the bottom line says what is unavailable and invents nothing', () => {
@@ -594,7 +705,7 @@ test('the bottom line says what is unavailable and invents nothing', () => {
   assert.equal(mdSection(broken.md, 'Bottom line')[1],
     'Tasks: committed 0, reviewed 0, verified 0 (2 unavailable), accepted 0 (2 unavailable) of 2; blocked and deferred unknown.');
   // The Summary, stdout and Open work give no 0 and no none for them.
-  const neither = 'unavailable open or declined final finding(s), unavailable open task minor(s)';
+  const neither = 'unavailable open and unavailable declined final finding(s), unavailable open task minor(s)';
   const openLine = `open work: unknown (ledger status unavailable), ${neither}`;
   assert.ok(mdSection(broken.md, 'Summary').includes(`- ${openLine}`), broken.md);
   assert.ok(broken.stdout.split('\n').includes(openLine), broken.stdout);
@@ -665,6 +776,46 @@ test('the bottom line names a user override at the delivered head, never its tex
   const stale = view(makeRun(acceptedSpec(r, { verify: failing, runEvents: [accept(r.a2)] })), ['--repo', r.dir]);
   assert.equal(stale.json.run.acceptance.verdict.value, 'unverified');
   assert.equal(mdSection(stale.md, 'Bottom line')[0], 'Verdict: unverified (checks_failed).');
+  // The engine's own verdict is the one the override overrode: the
+  // no-override verdict is the same, so the run's reason kinds stay.
+  assert.deepEqual([json.run.acceptance.verdict_without_override, json.run.acceptance.verdict_rule_without_override],
+    ['unverified', null]);
+});
+
+test('the bottom line names the fault audit found that an override overrode', () => {
+  const r = repoRun();
+  const accept = { task: '_run', event: 'accepted', head: r.fix, text: 'ship it zqoverride' };
+  // The run said accepted; the saved evidence disagrees with its verify
+  // report, so check-verify says mismatch and audit would say unverified.
+  const mismatch = view(makeRun(acceptedSpec(r, { evidence: verifyAt(r.fix, { ok: false }), runEvents: [accept] })),
+    ['--repo', r.dir]);
+  const a = mismatch.json.run.acceptance;
+  assert.deepEqual([a.verdict.value, a.gate, a.verdict_rule, a.verdict_without_override, a.verdict_rule_without_override],
+    ['accepted by user', 'mismatch', null, 'unverified', 'gate mismatch']);
+  assert.equal(a.overrides[0].overrode, 'accepted');
+  assert.equal(mdSection(mismatch.md, 'Bottom line')[0], 'Verdict: accepted by user (over unverified: gate mismatch).');
+  // Acceptance keeps what the override overrode, the run's own verdict.
+  assert.ok(mismatch.md.split('\n').some((l) => l.startsWith('- user override at: ') && l.endsWith('; it overrode accepted')),
+    mismatch.md);
+  // Late evidence: audit would say accepted (gate unavailable), with
+  // check-verify's reason inside its parenthesis.
+  const late = makeRun(acceptedSpec(r, { evidenceMtime: START / 1000 + DURATION / 1000 + 600, runEvents: [accept] }));
+  const lateView = view(late, ['--repo', r.dir]);
+  assert.deepEqual([lateView.json.run.acceptance.verdict_without_override, lateView.json.run.acceptance.verdict_rule_without_override],
+    ['accepted (gate unavailable)', null]);
+  assert.equal(mdSection(lateView.md, 'Bottom line')[0],
+    'Verdict: accepted by user (over accepted (gate unavailable: verify_evidence_time_untrusted)).');
+  // Without a gate reason the no-override verdict stands bare.
+  const bare = pythonJSON([
+    'import _audit',
+    'a = _audit.build(sys.argv[1], repo=sys.argv[2])',
+    'a["run"]["checks"]["gate_reason"] = None',
+    'md = _audit.render_md(a).split("\\n")',
+    'print(json.dumps(md[md.index("## Bottom line") + 2]))',
+  ], [late, r.dir]);
+  assert.equal(bare, 'Verdict: accepted by user (over accepted (gate unavailable)).');
+  assert.doesNotMatch(mdSection(mismatch.md, 'Bottom line').join('\n') + mdSection(lateView.md, 'Bottom line').join('\n'),
+    /zqoverride/);
 });
 
 test('audit.md ends with its terms', () => {
