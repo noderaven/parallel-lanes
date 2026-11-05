@@ -9,9 +9,11 @@ Import with:
 Evidence references. Every derived value is ref(value, state, sources,
 note=None): {"value", "state", "sources"[, "note"]}, state one of STATES,
 each source src(path, at): path relative to the run folder with '/'
-separators, or git:<sha>, or transcript:<wf>/<label>; at a ledger line
-(L<n>, physical line numbers, blank lines counted), a JSON pointer (#/...),
-a sha, or None. collect_gaps(obj) lists every nested ref whose state is in
+separators (a launch's journal is <wf>/journal.jsonl, journal_src), or
+git:<sha>, or transcript:<wf>/<label> (escalations, read from the agent
+transcripts); at a ledger or journal line (L<n>, physical line numbers,
+blank lines counted), a JSON pointer (#/...), a sha, or None.
+collect_gaps(obj) lists every nested ref whose state is in
 GAP_STATES, in document order, as {"where": <JSON pointer>, "state",
 "value", "note"}.
 
@@ -72,6 +74,9 @@ STATES = ("present", "missing", "stale", "conflicting", "unavailable", "inferred
 GAP_STATES = ("missing", "stale", "conflicting", "unavailable")
 # A sha in a gap note, read as <sha> in the cause key.
 NOTE_SHA = re.compile(r"\b[0-9a-f]{7,64}\b")
+# Why read_journal gives no entries.
+JOURNAL_ABSENT = "absent"
+JOURNAL_UNREADABLE = "unreadable"
 
 
 # ---- evidence references ----
@@ -474,20 +479,44 @@ def task_launch(run, task_id):
     return None
 
 
-def structured_results(launch):
-    """[{"label", "agent_id", "result"}] from <launch dir>/journal.jsonl: each
-    {"type": "started"} entry, in order, joined by agentId to its
-    {"type": "result"} entry (result None when it has none). A dirless
-    launch, or a missing or unreadable journal, gives []."""
-    if not launch.get("dir"):
-        return []
+def journal_src(launch, line=None):
+    """A source in the launch's journal, <wf>/journal.jsonl, at L<line> (the
+    file itself when line is None)."""
+    return src("%s/journal.jsonl" % launch["wf"], None if line is None else "L%d" % line)
+
+
+def read_journal(launch):
+    """(entries, None) for a launch's readable <launch dir>/journal.jsonl,
+    entries as structured_results gives them (lines that do not parse are
+    skipped); (None, JOURNAL_ABSENT) when there is none (a dirless launch
+    included); (None, JOURNAL_UNREADABLE) when the path exists but reading
+    it fails (an OSError, as for a directory of that name)."""
+    path = os.path.join(launch["dir"], "journal.jsonl") if launch.get("dir") else None
+    if path is None or not os.path.exists(path):
+        return None, JOURNAL_ABSENT
     try:
-        with open(os.path.join(launch["dir"], "journal.jsonl"), "rb") as f:
+        with open(path, "rb") as f:
             text = f.read().decode("utf-8", errors="replace")
     except OSError:
-        return []
+        return None, JOURNAL_UNREADABLE
+    return _journal_entries(text), None
+
+
+def structured_results(launch):
+    """[{"label", "agent_id", "result", "line"}] from <launch
+    dir>/journal.jsonl: each {"type": "started"} entry, in order, joined by
+    agentId to its {"type": "result"} entry (result None when it has none).
+    line is the result entry's physical 1-based line number (blank lines
+    counted), or the started entry's when it has none. A dirless launch, or
+    a missing or unreadable journal (read_journal tells them apart), gives
+    []."""
+    return read_journal(launch)[0] or []
+
+
+def _journal_entries(text):
+    """A journal's started entries joined to their results (structured_results)."""
     started, results = [], {}
-    for line in text.split("\n"):
+    for n, line in enumerate(text.split("\n"), 1):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -495,15 +524,16 @@ def structured_results(launch):
         if not isinstance(entry, dict) or not isinstance(entry.get("agentId"), str):
             continue
         if entry.get("type") == "started":
-            started.append(entry)
+            started.append((n, entry))
         elif entry.get("type") == "result":
-            results.setdefault(entry["agentId"], []).append(entry.get("result"))
+            results.setdefault(entry["agentId"], []).append((n, entry.get("result")))
     out = []
-    for entry in started:
+    for n, entry in started:
         queue = results.get(entry["agentId"]) or []
+        line, result = queue.pop(0) if queue else (n, None)
         label = entry.get("label")
         out.append({"label": label if isinstance(label, str) else None, "agent_id": entry["agentId"],
-                    "result": queue.pop(0) if queue else None})
+                    "result": result, "line": line})
     return out
 
 

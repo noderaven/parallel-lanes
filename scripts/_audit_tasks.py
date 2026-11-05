@@ -8,7 +8,7 @@ Import with:
 task_sections(run, git, facts, pairs, git_note=None) returns one dict per
 _audit_core.manifest_tasks entry, in run order (prelude, lanes, join):
 {"id", "lane", "requirement", "placement", "changes", "commits", "review",
-"status"}.
+"status", "checks"}.
 
 run is _audit_core.load_run's dict, git an _audit_git.Git or None, pairs
 _audit_core.command_pairs(manifest), and facts the run-level facts:
@@ -60,7 +60,18 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                (<ledger>/reviews/<id>-*), verdicts (from the journal's
                '<id> review' and '<id> re-review <n>' structured results, a
                trailing ' retry' being the same round with the later result
-               kept: only the verdict and the count of findings, inferred)
+               kept: only the verdict and the count of findings, present,
+               each at its result's journal line, <wf>/journal.jsonl L<n>;
+               a started entry with no result is unavailable at its started
+               line; a launch whose journal is missing or cannot be read,
+               when its result does not report the task skipped or not run,
+               is one unavailable entry, its note _audit_run.journal_note
+               (no journal archived, or it could not be read). For engines
+               from 1.2.0
+               (CHECKED_REVIEW_ENGINE, by result.version) a verdict the
+               engine's checkedReview acts on
+               as another (_engine_read: changes or invalid) has the note
+               ENGINE_READ. The ledger's reviewed event stays the approval.)
                and approval (by event order: a reviewed event approves its
                head, a later reopened withdraws it, a later committed event
                with another head makes it stale).
@@ -73,7 +84,29 @@ ledger dir as their first part (for example p.t1.ledger/briefs/A1.md).
                unavailable, "the acceptance gate is unavailable", for a task
                the result reports done that is neither settled nor blocked;
                a task that is not done, or is settled or blocked, stays
-               false.
+               false. verified false by containment has the note
+               NOT_CONTAINED.
+  checks       task_check: the task's own check before its commit, from
+               _audit_run.task_check_index's attempts for it (no git
+               needed). Never committed, settled, or no ledger: null,
+               present, a note (no line). With attempts, the last decides:
+               {file, unit, attempt, selected, reasons, ok, failed, base,
+               range_base (the task's recorded range base: the base of its
+               first committed or settled event since its last started
+               event with restart true, _since_restart, as ledger status
+               reads it; null when unknown), head, head_is_task_commit
+               (HEAD was one of the task's own commits: a committed event's
+               head or one it lists; null when the file records no head),
+               tree_changed, earlier: {passed, failed, no_result},
+               fix_commits_after (_fix_commits_after over the committed
+               events since the restart; null when range_base is)}, present
+               for passed and failed, unavailable for no result (its note
+               why), stale when its policy base is not range_base. Without
+               one, by _audit_run.task_check_engine: before 1.6.0, null,
+               present, TC_NOT_RECORDED; no launch reports it, unavailable
+               (TC_UNKNOWN_ENGINE); a reporting launch's version does not
+               parse, unavailable (TC_UNREADABLE_ENGINE); else missing when
+               _audit_run.task_has_checks, else not_required.
 
 spec_match compares a review's spec_sha256 with the sha256 of the archived
 spec copy, else with the spec_sha256 of a setup run_started event: the
@@ -91,6 +124,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import _audit_core as core  # noqa: E402
+import _audit_run  # noqa: E402
 import _brief  # noqa: E402
 import _transcripts  # noqa: E402
 from _audit_run import GATE_UNAVAILABLE_VERDICT  # noqa: E402
@@ -99,6 +133,20 @@ NO_REPO = "no --repo"
 PREFLIGHT_LABEL = "context added by pre-flight (not ordering)"
 TRANSITIONS = ("committed", "settled")
 UNREVIEWED_STATUSES = ("skipped", "not_run")
+# verified false by git containment (audit.md words this line itself).
+NOT_CONTAINED = "the verify head does not contain the task head"
+# The task check's notes when there is no file to read.
+TC_NOT_COMMITTED = "not committed"
+TC_SETTLED = "settled by adjudicator"
+TC_NOT_RECORDED = "not recorded by this run's engine (before 1.6.0)"
+TC_UNKNOWN_ENGINE = "no launch result reports this task; its engine is unknown"
+TC_UNREADABLE_ENGINE = "a launch result that reports this task records an engine version audit cannot read"
+TC_MISSING = "no task-check file archived, though the task's commands include a test, lint or build command"
+TC_NOT_REQUIRED = "the task's commands include no test, lint or build command: the engine asks for no task check"
+# A journal verdict the engine's checkedReview read otherwise (engines from
+# 1.2.0): changes or invalid.
+CHECKED_REVIEW_ENGINE = (1, 2, 0)
+ENGINE_READ = "the engine read it as %s"
 
 ref = core.ref
 src = core.src
@@ -138,13 +186,14 @@ def _task_pointer(manifest, task_id):
     return found if found is not None else find(m.get("join"), "#/join")
 
 
-def _event_head(ev):
+def event_head(ev, commits_key="commits"):
     """A committed or settled event's head: its head, else (legacy) its last
-    commits entry, else None."""
+    commits entry, else None. commits_key names the list (a commits entry
+    of a task section keeps it as recorded)."""
     head = ev.get("head")
     if isinstance(head, str) and head:
         return head
-    commits = ev.get("commits")
+    commits = ev.get(commits_key)
     if isinstance(commits, list) and commits and isinstance(commits[-1], str):
         return commits[-1]
     return None
@@ -172,6 +221,7 @@ class _Ctx(object):
         self.plan_text = core.read_text(os.path.join(self.folder, self.plan_path)) if self.plan_path else None
         self.spec_sha = core.file_sha256(os.path.join(self.folder, self.spec_path)) if self.spec_path else None
         self.escalations = {}  # wf -> ([entry], [earlier tier or None]) or a reason
+        self.task_checks = _audit_run.task_check_index(run)
 
     def quote(self, text, sources):
         return core.quote(text, sources, self.pairs)
@@ -408,7 +458,7 @@ def _legacy(ctx, task_id, events, result_launch):
         return {"recorded": recorded, "result": result,
                 "agreement": ref(None, "unavailable", [at], "no committed event recorded")}
     sources = [_line_src(committed[-1]), at]
-    last = _event_head(committed[-1]["event"])
+    last = event_head(committed[-1]["event"])
     if last != pair[1]:
         agreement = ref(False, "conflicting", sources,
                         "the last recorded commit %s is not the result's head %s" % (last, pair[1]))
@@ -499,18 +549,39 @@ def _review_label(task_id):
     return re.compile(r"^%s (review|re-review \d+)( retry)?$" % re.escape(task_id))
 
 
+def _engine_read(result):
+    """How the engine's checkedReview (src/engine.js) acts on a review
+    result: invalid for a verdict other than approve and changes, or for
+    changes with no findings; changes for an approve that carries a critical
+    or important finding; else its verdict."""
+    verdict = result.get("verdict")
+    if verdict not in ("approve", "changes"):
+        return "invalid"
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    if verdict == "approve" and any(isinstance(f, dict) and f.get("severity") in ("critical", "important")
+                                    for f in findings):
+        return "changes"
+    if verdict == "changes" and not findings:
+        return "invalid"
+    return verdict
+
+
 def _verdicts(ctx, task_id):
     pattern = _review_label(task_id)
     out = []
     for launch in ctx.run.get("launches") or []:
-        journal = os.path.join(launch["dir"], "journal.jsonl") if launch.get("dir") else None
-        if journal is None or not os.path.isfile(journal):
+        entries, why = core.read_journal(launch)
+        if entries is None:
             status = core.task_status(launch, task_id)
             if launch.get("result") is None or (status is not None and status not in UNREVIEWED_STATUSES):
-                out.append(ref(None, "unavailable", [src(_wf_file(launch))], "no journal archived for %s" % launch["wf"]))
+                out.append(ref(None, "unavailable", [src(_wf_file(launch))], _audit_run.journal_note(launch, why)))
             continue
+        # checkedReview shipped in 1.2.0; a launch with no version is before
+        # 1.4.3, so whether it read the verdict so is unknown.
+        version = _audit_run.result_version(launch)
+        checked = version is not None and version >= CHECKED_REVIEW_ENGINE
         rounds, order = {}, []
-        for entry in core.structured_results(launch):
+        for entry in entries:
             label = entry.get("label")
             match = pattern.match(label) if isinstance(label, str) else None
             if not match:
@@ -524,14 +595,16 @@ def _verdicts(ctx, task_id):
         for base in order:
             entry = rounds[base]
             result = entry.get("result")
-            at = [src("transcript:%s/%s" % (launch["wf"], entry["label"]))]
+            at = [core.journal_src(launch, entry["line"])]
             if not isinstance(result, dict):
                 out.append(ref({"wf": launch["wf"], "label": base, "verdict": None, "findings": None},
                                "unavailable", at, "no structured result"))
                 continue
             findings = result.get("findings")
+            read = _engine_read(result)
+            note = ENGINE_READ % read if checked and read != result.get("verdict") else None
             out.append(ref({"wf": launch["wf"], "label": base, "verdict": result.get("verdict"),
-                            "findings": len(findings) if isinstance(findings, list) else None}, "inferred", at))
+                            "findings": len(findings) if isinstance(findings, list) else None}, "present", at, note))
     return out
 
 
@@ -562,7 +635,7 @@ def _approval(events):
         elif kind == "reopened" and approval["withdrawn_by"] is None:
             approval["withdrawn_by"] = _line_src(le)
         elif kind == "committed" and approval["stale_by"] is None and approval["head"] is not None \
-                and _event_head(ev) != approval["head"]:
+                and event_head(ev) != approval["head"]:
             approval["stale_by"] = _line_src(le)
     return approval
 
@@ -624,7 +697,7 @@ def _reviewed_status(ctx, events, approval):
     if not committed:
         return ref(False, "present", ctx.ledger_src(), "not committed")
     last = committed[-1]
-    last_head = _event_head(last["event"])
+    last_head = event_head(last["event"])
     sources = [_line_src(last)]
     if approval is None:
         return ref(False, "missing", sources, "no review recorded")
@@ -667,7 +740,7 @@ def _verified_status(ctx, task_head, head_src):
         return ref(None, "unavailable", sources, "the repo cannot tell whether the verify head contains the task head")
     if contained:
         return ref(True, "present", sources)
-    return ref(False, "present", sources, "the verify head does not contain the task head")
+    return ref(False, "present", sources, NOT_CONTAINED)
 
 
 def _accepted_status(ctx, events, result_status):
@@ -739,6 +812,84 @@ def _result_status(ctx, task_id, events, is_legacy):
     return ref(status, "present", sources, note)
 
 
+# ---- checks ----
+
+def _fix_commits_after(committed, range_base):
+    """The committed events after the task's last committed event from its
+    range base: an implement or a rerun commits from the task base after
+    its task check; a fix commits from the previous head and runs none.
+    None when the range base is unknown."""
+    if range_base is None:
+        return None
+    from_base = [i for i, le in enumerate(committed) if le["event"].get("base") == range_base]
+    return len(committed) - 1 - from_base[-1] if from_base else len(committed)
+
+
+def _since_restart(events):
+    """The task's events after its last started event with restart true (a
+    join unit begun again from the feature tip, 1.6.5: its earlier events no
+    longer count, as ledger status reads them); all of them without one."""
+    restarts = [i for i, le in enumerate(events)
+                if le["event"].get("event") == "started" and le["event"].get("restart") is True]
+    return events[restarts[-1] + 1:] if restarts else events
+
+
+def _task_check(ctx, task_id, lane, events):
+    """checks.task_check: the task's own check before its commit, from its
+    last task-check attempt (see the module docstring)."""
+    if not ctx.ledger:
+        return ref(None, "present", [], "no ledger")
+    committed = [le for le in events if le["event"].get("event") == "committed"]
+    transitions = [le for le in events if le["event"].get("event") in TRANSITIONS]
+    if not committed:
+        return ref(None, "present", ctx.ledger_src(), TC_NOT_COMMITTED)
+    if transitions[-1]["event"].get("event") == "settled":
+        return ref(None, "present", [_line_src(transitions[-1])], TC_SETTLED)
+    attempts = ctx.task_checks["attempts"].get(task_id)
+    at = [_line_src(committed[-1])]
+    if not attempts:
+        kind, sources = _audit_run.task_check_engine(ctx.run, task_id)
+        if kind == "before":
+            return ref(None, "present", sources, TC_NOT_RECORDED)
+        if kind == "unknown":
+            return ref(None, "unavailable", at, TC_UNKNOWN_ENGINE)
+        if kind == "unreadable":
+            return ref(None, "unavailable", at + sources, TC_UNREADABLE_ENGINE)
+        if _audit_run.task_has_checks(ctx.manifest, lane):
+            return ref(None, "missing", at, TC_MISSING)
+        manifest_path = ctx.run.get("manifest_path")
+        return ref("not_required", "present", [src(manifest_path)] if manifest_path else [], TC_NOT_REQUIRED)
+    last = attempts[-1]
+    # The task's range since its last restart, as ledger status records it.
+    current = _since_restart(events)
+    current_committed = [le for le in current if le["event"].get("event") == "committed"]
+    current_transitions = [le for le in current if le["event"].get("event") in TRANSITIONS]
+    range_base = current_transitions[0]["event"].get("base") if current_transitions else None
+    range_base = range_base if isinstance(range_base, str) and range_base else None
+    # The task's own commits: each committed event's head and the commits it lists.
+    own = set(event_head(le["event"]) for le in committed)
+    for le in committed:
+        listed = le["event"].get("commits")
+        if isinstance(listed, list):
+            own.update(x for x in listed if isinstance(x, str))
+    earlier = [a["outcome"] for a in attempts[:-1]]
+    value = {
+        "file": last["file"], "unit": last["unit"], "attempt": last["attempt"], "selected": last["selected"],
+        "reasons": last["reasons"], "ok": last["ok"], "failed": last["failed"], "base": last["base"],
+        "range_base": range_base, "head": last["head"],
+        "head_is_task_commit": last["head"] in own if last["head"] is not None else None,
+        "tree_changed": last["tree_changed"],
+        "earlier": {"passed": earlier.count("passed"), "failed": earlier.count("failed"),
+                    "no_result": earlier.count("no result")},
+        "fix_commits_after": _fix_commits_after(current_committed, range_base),
+    }
+    sources = [src(last["file"])]
+    if last["base"] is not None and range_base is not None and last["base"] != range_base:
+        return ref(value, "stale", sources,
+                   "the check ran against %s, not the task's recorded base %s" % (last["base"], range_base))
+    return ref(value, "unavailable" if last["outcome"] == "no result" else "present", sources, last["reason"])
+
+
 # ---- the sections ----
 
 def task_sections(run, git, facts, pairs, git_note=None):
@@ -756,7 +907,7 @@ def task_sections(run, git, facts, pairs, git_note=None):
         review = _review(ctx, task_id, events, section)
 
         transitions = [le for le in events if le["event"].get("event") in TRANSITIONS]
-        task_head = _event_head(transitions[-1]["event"]) if transitions else None
+        task_head = event_head(transitions[-1]["event"]) if transitions else None
         head_src = [_line_src(transitions[-1])] if transitions else []
         out.append({
             "id": task_id,
@@ -773,5 +924,6 @@ def task_sections(run, git, facts, pairs, git_note=None):
                 "accepted": _accepted_status(ctx, events, result_status),
                 "result_status": result_status,
             },
+            "checks": {"task_check": _task_check(ctx, task_id, lane, events)},
         })
     return out

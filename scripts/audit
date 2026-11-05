@@ -26,7 +26,7 @@ It writes audit.json and audit.md, as UTF-8, to --out (default
 RUN_FOLDER/audit/), replacing only those two files, and prints a summary of
 at most 10 lines whose last line is 'full report: <path of audit.md>' (with
 --json it prints audit.json instead). The contract of both files is in
-_audit.py: audit.json is {"audit_version": 2, "run_id", "repo", "run",
+_audit.py: audit.json is {"audit_version": 3, "run_id", "repo", "run",
 "tasks", "gaps", "gap_causes"}, every value a ref {"value", "state",
 "sources"[, "note"]} and every recorded text a quote {"quote", "sources",
 "commands_replaced"} in which configured commands are check ids; gaps lists
@@ -40,17 +40,37 @@ it holds local paths and recorded text and is not meant to be shared
 as-is, then a Bottom line paragraph built only from values audit
 computed (no recorded text), and ends with a Terms section defining its
 labels. In audit.md, checks that ran and failed read 'failed checks'
-(audit.json keeps invalid and the checks_failed rule), review verdicts,
-which come from the journal, read '[inferred: read from the transcript]',
-and a ruling without a by reads 'implementer (no role recorded)'. The
-summary's open work line and audit.md's Open work header count '<open>
-open and <declined> declined final finding(s), <M> open task minor(s)', M
+(audit.json keeps invalid and the checks_failed rule), and a ruling
+without a by reads 'implementer (no role recorded)'. What a launch's
+journal (wf_<id>/journal.jsonl) records reads as recorded, cited by its
+line ('<wf>/journal.jsonl L<n>'): the task review verdicts ('[present]',
+with '(the engine read it as <x>)' where an engine from 1.2.0 acted on
+another), the lens heads and the final re-review's head (the code outside
+the task ranges it contains reads 'final re-review [present] - judged
+<head7>'). Open work gives, under the final review line, the final
+re-review line ('- final re-review: judged <head7>: <r> resolved, <o>
+open, <m> without a result of the <F> final finding(s); <n> new',
+open_work.final.value.re_review) and, after each final finding's
+disposition, its re-review ('- re-review: <status>') with the
+re-reviewer's evidence quoted; task minors have none. Neither needs
+--repo. The summary's open work line and audit.md's Open work header count
+'<open> open and <declined> declined final finding(s), <M> open task
+minor(s)', M
 being the result's task_minors_open plus its carried_minors_open ('<M> open
 task minor(s) listed (more may be missing)' when the engine noted that some
 minors did not reach the final lenses; unavailable when the result has
 neither list, and Open work then says once that this run's engine recorded
 none); each task block ends with the open minors its id prefix places
 there, and a minor of a batch unit or of no task is under Open work only.
+Each task block says whether the task's own check (its ledger's
+checks/task-<unit>.<n>.json, engines from 1.6.0) ran before its commit, how
+its last attempt ended and what it covered ('- checked before its commit:',
+tasks[i].checks.task_check; run.checks.task_checks names the tasks an engine
+before 1.6.0 committed and the files that match no task), never copying a
+check file's error, tail, log or checkout; and its verified line says what
+the containment covers ('its last commit <sha7> is in the head the
+delivered verify passed at, <sha7>'). The task check needs no --repo. The
+Bottom line adds 'task checks: <k> whose last check failed' when k > 0.
 The summary's tasks line counts as the Bottom line does. For accepted by
 user, the Bottom line names audit's verdict without the override when it
 differs from the run's own (acceptance.verdict_without_override and

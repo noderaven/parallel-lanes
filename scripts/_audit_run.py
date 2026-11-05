@@ -47,7 +47,11 @@ delivered sha are both recorded (non-empty strings) and differ; when one is
 missing it is unavailable, its note naming what is missing (E2E_NO_CHECKED,
 E2E_NO_DELIVERED, or both joined by "; "). A commit outside the task ranges
 that a final lens head contains is present with the note LENS_NOTE (that
-head's first 7 digits).
+head's first 7 digits); one that the final re-review's recorded head
+contains (_re_review_head) is present with RE_REVIEW_NOTE, cited by that
+result's journal line (<wf>/journal.jsonl L<n>); only the rule for an
+engine that recorded no re-review head (final re-review (no recorded
+head)) is inferred.
 
 The plan and spec hashes are run-level facts, in checks once (never per
 task; input_hashes): plan_hash and spec_hash hold one ref per setup
@@ -60,6 +64,14 @@ each is one unavailable ref, "no setup run_started recorded". section_hash
 is the plan copy the tasks' section hashes are read from: present, its
 value the copy's path, else unavailable ("no plan copy archived", "the plan
 copy could not be read").
+
+checks.task_checks (1.6.17) is {"not_recorded", "unmatched"}: the committed
+tasks, not settled last, with no task-check file that a launch before 1.6.0
+reports (task_check_engine), in run order, and the task-check files that
+match no task. task_check_index reads those files (each task's attempts in
+order), task_check_engine says which engine judges a task without one, and
+task_has_checks whether the engine asks for one; _audit_tasks builds each
+task's checks.task_check from them.
 
 start_point(run) is the run's start point: the earliest setup run_started
 head (ledger status' start_points.prelude), else the base of the first task,
@@ -79,7 +91,31 @@ is a manifest task id, the latest snapshot that lists each; None with
 carried_minors_open),
 "not_recorded" (which of "open", "declined" and "cannot_verify" the result
 has no list for, as older engines have no open list: that count is
-unknown, not 0; cannot_verify is then [])}.
+unknown, not 0; cannot_verify is then []), "re_review" (_re_review)}.
+
+re_review is the final re-review, from the latest launch's journal and
+result only (no git), its last final re-review entry (RE_REVIEW_LABELS)
+deciding: {form, head, delivered (the result's delivered_sha as recorded),
+resolved, open, without_result, contradictory, of, new}. form judged (a
+valid result: head, results and new_findings; each id of final.findings
+counted by the statuses its results give it: none, more than one, resolved,
+or another, so of = the four counts; new the new findings), not_recorded
+(findings only: before 1.2.0), no_valid_result (any other result, or a
+started entry with none), not_run (no entry, with final findings; note
+RE_REVIEW_NOT_RUN), none (no entry and no final findings, final.findings a
+list), each present with the journal line for judged and no_valid_result;
+unavailable without a journal (NO_JOURNAL) or with one whose file cannot be
+read (UNREADABLE_JOURNAL; _audit_core.read_journal tells them apart), and,
+with no entry, for a final with no findings list and no finding in the
+others (NO_FINDINGS_LIST: unknown, not none).
+
+Each final finding (open or declined, never a task minor) has re_review
+(_finding_re_review): {rule, status, head, delivered, evidence (the
+review's evidence, quoted)}, present, never a gap, rule the first that
+applies of raised, not_recorded, no_result_recorded (a null review with no
+journal or an unreadable one: its note that journal note and REASON_SAYS),
+not_run, no_valid_result, contradictory, no_result, other_head,
+decline_upheld and result.
 
 acceptance also holds verdict_without_override (derive_verdict with no
 override) and verdict_rule_without_override (_verdict_rule when that verdict
@@ -111,6 +147,21 @@ SCRIPTS = os.path.dirname(os.path.realpath(__file__))
 MISSING_LAUNCH = "the ledger records this launch; its transcripts are not archived"
 # The note of a commit outside the task ranges that a final lens head contains.
 LENS_NOTE = "contained in the final review's head %s"
+# The note of one that the final re-review's recorded head contains.
+RE_REVIEW_NOTE = "judged %s"
+# The final re-review's journal labels (a budget retry is the same call).
+RE_REVIEW_LABELS = ("final re-review", "final re-review retry")
+# The final re-review line's note when no journal entry ran it.
+RE_REVIEW_NOT_RUN = "each finding's reason says why"
+# ... and when no entry ran it and the final has no findings list to say none.
+NO_FINDINGS_LIST = "the result records no final findings list"
+# Why a launch's journal gives nothing (read_journal), and what a null
+# review's line adds then.
+NO_JOURNAL = "no journal archived for %s"
+UNREADABLE_JOURNAL = "the journal for %s could not be read"
+REASON_SAYS = "; its reason says why"
+# A finding id the engine gives the re-review's new findings (N1, N2, ...).
+NEW_FINDING_ID = re.compile(r"^N[0-9]+$")
 # What an e2e entry without both shas lacks (both, joined by "; ").
 E2E_NO_CHECKED = "the end-to-end check recorded no sha"
 E2E_NO_DELIVERED = "the run recorded no delivered sha"
@@ -141,6 +192,17 @@ CHECKER_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 WF_NAME = re.compile(r"^wf_[A-Za-z0-9_-]+$")
 EVIDENCE_NAME = re.compile(r"^(session-verify|verify)-([0-9a-f]{40}|[0-9a-f]{64})\.json$")
 CHECK_GROUPS = ("test", "lint", "build")
+# The task checks (scripts/task-checks): <ledger>/checks/task-<unit>.<n>.json
+# (the unit parsed greedily), written from this engine on.
+TASK_CHECK_NAME = re.compile(r"^task-(.+)\.([1-9][0-9]*)\.json$")
+TASK_CHECK_ENGINE = (1, 6, 0)
+# Why a task-check attempt has no result, or says nothing of its policy.
+TC_EMPTY = "the file is empty: reserved, never written"
+TC_UNREADABLE = "the file cannot be read"
+TC_ERROR_NO_POLICY = "an error record with no policy"
+TC_ERROR = "an error record"
+TC_NO_RESULT = "no command result recorded"
+TC_NO_POLICY = "the file records no policy"
 
 
 # ---- check-verify ----
@@ -494,6 +556,19 @@ def _recorded(run):
 
 # ---- code outside recorded task ranges ----
 
+def _parse_version(text):
+    """A version string's leading digits as a tuple of ints, or None."""
+    match = re.match(r"(\d+(?:\.\d+)*)", text) if isinstance(text, str) else None
+    return tuple(int(x) for x in match.group(1).split(".")) if match else None
+
+
+def result_version(launch):
+    """A launch's result.version as a tuple of ints, or None (no version:
+    before 1.4.3, or one that does not parse)."""
+    result = launch.get("result")
+    return _parse_version(result.get("version") if isinstance(result, dict) else None)
+
+
 def _version(run, launch):
     """(the engine version as a tuple of ints or None, its source)."""
     result = launch.get("result") or {}
@@ -509,10 +584,7 @@ def _version(run, launch):
                 data = None
             if isinstance(data, dict) and isinstance(data.get("engine_version"), str):
                 text, source = data["engine_version"], c.src(report, "#/engine_version")
-    match = re.match(r"(\d+(?:\.\d+)*)", text) if isinstance(text, str) else None
-    if match is None:
-        return None, source
-    return tuple(int(x) for x in match.group(1).split(".")), source
+    return _parse_version(text), source
 
 
 def _lens_heads(launch, final):
@@ -532,26 +604,33 @@ def _lens_heads(launch, final):
             continue
         head = result.get("head") if isinstance(result, dict) else None
         if isinstance(head, str) and head:
-            heads.append((head, c.src("transcript:%s/%s" % (launch["wf"], label))))
+            heads.append((head, c.journal_src(launch, entry["line"])))
     return heads
+
+
+def _valid_re_review(result):
+    """A final re-review result that judged a head: an object with a string
+    head and results and new_findings lists (spec 5.5)."""
+    head = result.get("head") if isinstance(result, dict) else None
+    return isinstance(head, str) and bool(head) and isinstance(result.get("results"), list) \
+        and isinstance(result.get("new_findings"), list)
 
 
 def _re_review_head(launch):
     """(head, source) of the last 'final re-review' structured result that
     records a head (a budget retry included), when that result is a valid
-    review: an object with a string head and results and new_findings
-    lists (spec 5.5). False when the last result that records a head is not
-    valid: it covers nothing, and no head-less rule may stand in for it.
-    None when no result records a head."""
+    review (_valid_re_review), its source the result's journal line. False
+    when the last result that records a head is not valid: it covers
+    nothing, and no head-less rule may stand in for it. None when no result
+    records a head."""
     found = None
     for entry in c.structured_results(launch):
         label, result = entry["label"], entry["result"]
-        if label not in ("final re-review", "final re-review retry"):
+        if label not in RE_REVIEW_LABELS:
             continue
         head = result.get("head") if isinstance(result, dict) else None
         if isinstance(head, str) and head:
-            valid = isinstance(result.get("results"), list) and isinstance(result.get("new_findings"), list)
-            found = (head, c.src("transcript:%s/%s" % (launch["wf"], label))) if valid else False
+            found = (head, c.journal_src(launch, entry["line"])) if _valid_re_review(result) else False
     return found
 
 
@@ -618,7 +697,8 @@ def _code_outside(run, git, git_note, launch, why, pairs):
             entry["coverage"] = c.ref("final review", "present", [lens_hit[1], c.src("git:" + lens_hit[0])],
                                       LENS_NOTE % lens_hit[0][:7])
         elif rr and git.is_ancestor(sha, rr[0]):
-            entry["coverage"] = c.ref("final re-review", "inferred", [rr[1]])
+            entry["coverage"] = c.ref("final re-review", "present", [rr[1], c.src("git:" + rr[0])],
+                                      RE_REVIEW_NOTE % rr[0][:7])
         elif no_head_rule and git.is_ancestor(sha, final_head):
             sources = [_wf_src(launch, "final", "head")] + ([v_src] if v_src is not None else [])
             entry["coverage"] = c.ref("final re-review (no recorded head)", "inferred", sources)
@@ -719,6 +799,7 @@ def _checks(run, launch, why, gate, evidence, rule, want):
         e_note = "the gate is %s" % gate["status"]
     out["evidence"] = c.ref(evidence, e_state, g_sources, e_note)
     out["rule"] = rule
+    out["task_checks"] = _task_checks(run, task_check_index(run))
     out.update(input_hashes(run))
     return out
 
@@ -802,6 +883,211 @@ def _e2e(run, launch, result):
         return c.ref(value, "present", [source])
     return c.ref(value, "stale", [source], "the end-to-end check covered %s, not the delivered %s"
                  % (checked, delivered))
+
+
+# ---- task checks ----
+
+def _read_check(path):
+    """(the JSON object in a task-check file, None), or (None, why it gives
+    none: TC_EMPTY or TC_UNREADABLE)."""
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, TC_UNREADABLE
+    if not text.strip():
+        return None, TC_EMPTY
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, TC_UNREADABLE
+    return (data, None) if isinstance(data, dict) else (None, TC_UNREADABLE)
+
+
+def _check_attempt(manifest, rel, stem, n, data, why):
+    """One task-check file as an attempt (see task_check_index)."""
+    policy = data.get("policy") if data is not None else None
+    policy = policy if isinstance(policy, dict) else None
+    results = data.get("results") if data is not None else None
+    ok = data.get("ok") if data is not None else None
+    if data is None:
+        outcome, reason = "no result", why
+    elif ok is True:
+        outcome, reason = "passed", None
+    elif isinstance(results, list) and results:
+        outcome, reason = "failed", None
+    elif "error" in data:
+        outcome, reason = "no result", TC_ERROR if policy is not None else TC_ERROR_NO_POLICY
+    else:
+        outcome, reason = "no result", TC_NO_RESULT
+    if policy is None and reason is None:
+        reason = TC_NO_POLICY
+    failed = None
+    if outcome == "passed":
+        failed = []
+    elif outcome == "failed":
+        failed = [x for x in _check_ids(manifest, results) if not _zero(x["exit"])]
+
+    def text(obj, key):
+        value = obj.get(key) if isinstance(obj, dict) else None
+        return value if isinstance(value, str) and value else None
+
+    reasons = None
+    if policy is not None:
+        listed = policy.get("reasons")
+        reasons = [r["code"] for r in listed if isinstance(r, dict) and isinstance(r.get("code"), str)] \
+            if isinstance(listed, list) else []
+    tree_changed = data.get("tree_changed") if data is not None else None
+    return {
+        "file": rel, "stem": stem, "attempt": n, "outcome": outcome, "reason": reason,
+        "unit": text(policy, "unit") or stem, "selected": text(policy, "selected"), "reasons": reasons,
+        "ok": ok if isinstance(ok, bool) else None, "failed": failed, "base": text(policy, "base"),
+        "head": text(data, "head"), "tree_changed": tree_changed if isinstance(tree_changed, bool) else None,
+        "started": text(policy, "started"), "policy": policy,
+    }
+
+
+def _check_tasks(attempt, tasks):
+    """The manifest task ids (in run order) one task-check file is for, tasks
+    being [(id, lane)] in run order: by its policy's unit and tasks; without
+    a policy, by its stem: an exact id, else a batch unit '<first>-<last>'
+    whose two parts are ids: every task from the first through the last in
+    their lane's order (a batch is consecutive tasks of one lane), or the
+    two parts when they are not in that order in one lane."""
+    ids = [t for t, _lane in tasks]
+    policy = attempt["policy"]
+    if policy is not None:
+        listed = policy.get("tasks")
+        named = [x for x in listed if isinstance(x, str)] if isinstance(listed, list) else []
+        if isinstance(policy.get("unit"), str):
+            named.append(policy["unit"])
+        return [t for t in ids if t in named]
+    stem = attempt["stem"]
+    if stem in ids:
+        return [stem]
+    for first in ids:
+        last = stem[len(first) + 1:]
+        if stem.startswith(first + "-") and last in ids:
+            lane = dict(reversed(tasks))  # each id's lane, its first entry's
+            order = [t for t, l in tasks if l == lane[first]]
+            if lane[first] == lane[last] and order.index(first) <= order.index(last):
+                return order[order.index(first):order.index(last) + 1]
+            return [t for t in ids if t in (first, last)]
+    return []
+
+
+def _ordered_attempts(attempts):
+    """By n within a stem; stems by their earliest policy.started (ISO 8601
+    stamps of one form, compared as text), a stem with none last, then by
+    name."""
+    stems = {}
+    for a in attempts:
+        stems.setdefault(a["stem"], []).append(a)
+
+    def key(stem):
+        started = [a["started"] for a in stems[stem] if a["started"] is not None]
+        return (not started, min(started) if started else "", stem)
+
+    out = []
+    for stem in sorted(stems, key=key):
+        out += sorted(stems[stem], key=lambda a: a["attempt"])
+    return out
+
+
+def task_check_index(run):
+    """{"attempts": {task id: [attempt, ...] in order}, "unmatched": [path]}
+    over the ledger's checks/task-<unit>.<n>.json files (TASK_CHECK_NAME, the
+    unit parsed greedily). Each attempt is {"file", "stem", "attempt" (n),
+    "outcome" (passed: ok true; failed: ok not true, results not empty; no
+    result: an empty or unreadable file or an error record), "reason" (why
+    it has no result, or TC_NO_POLICY), "unit", "selected", "reasons" (the
+    policy's reason codes only; None without a policy), "ok", "failed"
+    ([{check, group, exit}] of each non-zero exit, check ids as Checks gives
+    them; [] for a pass; None for no result), "base", "head",
+    "tree_changed", "started", "policy"}. A file counts for every task
+    _check_tasks names, else it is listed in unmatched (name order). Only
+    the policy's reason codes and the results' check ids, groups and exits
+    are kept: never a file's error, tail, log or checkout."""
+    manifest = run.get("manifest") or {}
+    tasks = [(t["id"], lane) for t, lane in c.manifest_tasks(manifest)]
+    by_task, unmatched = {}, []
+    checks = os.path.join(run["folder"], run["ledger"], "checks") if run.get("ledger") else None
+    try:
+        names = sorted(os.listdir(checks)) if checks else []
+    except OSError:
+        names = []
+    for name in names:
+        match = TASK_CHECK_NAME.match(name)
+        path = os.path.join(checks, name)
+        if match is None or not os.path.isfile(path):
+            continue
+        rel = "%s/checks/%s" % (run["ledger"], name)
+        data, why = _read_check(path)
+        attempt = _check_attempt(manifest, rel, match.group(1), int(match.group(2)), data, why)
+        matched = _check_tasks(attempt, tasks)
+        if not matched:
+            unmatched.append(rel)
+        for tid in matched:
+            by_task.setdefault(tid, []).append(attempt)
+    return {"attempts": dict((tid, _ordered_attempts(a)) for tid, a in by_task.items()), "unmatched": unmatched}
+
+
+def task_check_engine(run, task_id):
+    """(kind, sources): which engine judges a committed task with no
+    task-check file, by every launch whose result reports it with a status
+    other than skipped or not_run, each by its result.version only (the
+    report's engine_version is the latest launch's, not each one's).
+    "before": one of them ran an engine before 1.6.0 (TASK_CHECK_ENGINE), or
+    records no version (before 1.4.3); "unknown": none reports the task;
+    "unreadable": one records a version that does not parse; else
+    "recorded". sources are those launches' version sources."""
+    reporting = [l for l in run.get("launches") or []
+                 if c.task_status(l, task_id) not in (None, "skipped", "not_run")]
+    if not reporting:
+        return "unknown", []
+    before, unreadable = [], []
+    for launch in reporting:
+        text = launch["result"].get("version")
+        version = _parse_version(text)
+        if text is None or text == "":
+            before.append(_wf_src(launch, "version"))
+        elif version is None:
+            unreadable.append(_wf_src(launch, "version"))
+        elif version < TASK_CHECK_ENGINE:
+            before.append(_wf_src(launch, "version"))
+    if before:
+        return "before", before
+    if unreadable:
+        return "unreadable", unreadable
+    return "recorded", [_wf_src(l, "version") for l in reporting]
+
+
+def task_has_checks(manifest, lane):
+    """Whether the engine asks a task's implementer for a task check: its
+    lane (the project's for prelude and join) has a test, lint or build
+    command (src/prompts-task.js taskChecksCommand over laneChecks)."""
+    m = manifest if isinstance(manifest, dict) else {}
+    lane_id = None if lane in ("prelude", "join") else lane
+    return any(_command_group(m, lane_id, group) for group in CHECK_GROUPS)
+
+
+def _task_checks(run, index):
+    """{"not_recorded": [task id], "unmatched": [path]}: the committed tasks
+    whose last committed or settled event is no settled one, with no
+    task-check file, that a launch before 1.6.0 reports (task_check_engine),
+    in run order; and the task-check files that match no task."""
+    events = {}
+    for event, _source in _events(run):
+        if isinstance(event.get("task"), str) and event.get("event") in ("committed", "settled"):
+            events.setdefault(event["task"], []).append(event.get("event"))
+    not_recorded = []
+    for task, _lane in c.manifest_tasks(run.get("manifest")):
+        kinds = events.get(task["id"]) or []
+        if "committed" not in kinds or kinds[-1] == "settled" or index["attempts"].get(task["id"]):
+            continue
+        if task_check_engine(run, task["id"])[0] == "before":
+            not_recorded.append(task["id"])
+    return {"not_recorded": not_recorded, "unmatched": list(index["unmatched"])}
 
 
 # ---- acceptance ----
@@ -923,6 +1209,125 @@ def _finding(f, status, sources, pairs):
     return out
 
 
+def _last_re_review(entries):
+    """The last final re-review entry of a journal's entries
+    (RE_REVIEW_LABELS: a budget retry is the call the engine used), or
+    None."""
+    found = None
+    for entry in entries or []:
+        if entry["label"] in RE_REVIEW_LABELS:
+            found = entry
+    return found
+
+
+def journal_note(launch, why):
+    """Why a launch's journal gives nothing (why: read_journal's reason):
+    NO_JOURNAL or UNREADABLE_JOURNAL."""
+    return (NO_JOURNAL if why == c.JOURNAL_ABSENT else UNREADABLE_JOURNAL) % launch["wf"]
+
+
+def _statuses(results, fid):
+    """The statuses a re-review's results give the id fid, each distinct one
+    once, in order."""
+    seen, out = set(), []
+    for r in results if isinstance(results, list) else []:
+        if isinstance(r, dict) and r.get("id") == fid:
+            key = json.dumps(r.get("status"), sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(r.get("status"))
+    return out
+
+
+def _re_review(launch, final, entry, why):
+    """open_work.final's re_review, from the latest launch's journal (its last
+    final re-review entry decides; why is read_journal's reason it gives
+    nothing, else None) and result, no git: {form, head, delivered, resolved,
+    open, without_result, contradictory, of, new}."""
+    delivered = (launch.get("result") or {}).get("delivered_sha")
+    value = {"form": None, "head": None, "delivered": delivered if isinstance(delivered, str) else None,
+             "resolved": None, "open": None, "without_result": None, "contradictory": None, "of": None, "new": None}
+    if why is not None:
+        value["form"] = "unavailable"
+        return c.ref(value, "unavailable", [], journal_note(launch, why))
+    if entry is None:
+        findings = any(isinstance(final.get(k), list) and final[k] for k in ("findings", "fixed", "declined", "open"))
+        if not findings and not isinstance(final.get("findings"), list):
+            # No list to read none from: unknown, not none.
+            value["form"] = "unavailable"
+            return c.ref(value, "unavailable", [_wf_src(launch, "final", "findings")], NO_FINDINGS_LIST)
+        value["form"] = "not_run" if findings else "none"
+        return c.ref(value, "present", [], RE_REVIEW_NOT_RUN if findings else None)
+    result, at = entry["result"], [c.journal_src(launch, entry["line"])]
+    if _valid_re_review(result):
+        counts = {"resolved": 0, "open": 0, "without_result": 0, "contradictory": 0}
+        listed = final.get("findings")
+        for f in listed if isinstance(listed, list) else []:
+            statuses = _statuses(result["results"], f.get("id") if isinstance(f, dict) else None)
+            kind = ("without_result" if not statuses else "contradictory" if len(statuses) > 1
+                    else "resolved" if statuses[0] == "resolved" else "open")
+            counts[kind] += 1
+        value.update(counts, form="judged", head=result["head"], of=sum(counts.values()),
+                     new=len(result["new_findings"]))
+        return c.ref(value, "present", at)
+    if isinstance(result, dict) and isinstance(result.get("findings"), list) \
+            and "results" not in result and "new_findings" not in result:
+        value["form"] = "not_recorded"
+        return c.ref(value, "present", [])
+    value["form"] = "no_valid_result"
+    return c.ref(value, "present", at)
+
+
+def _finding_re_review(f, key, i, launch, entry, why, form, pairs):
+    """A final open or declined finding's re_review, {rule, status, head,
+    delivered, evidence}, present: the first rule that applies of raised (an
+    open N<k>, the re-review's own), not_recorded (no review key: before
+    1.2.0); for a null review no_result_recorded (no journal, or one that
+    cannot be read, why: audit cannot tell why it is null; the note says so
+    and that the finding's reason says why), not_run (the journal holds no
+    final re-review entry), no_valid_result (the run line's form: the last
+    entry is started only, null or no valid result), contradictory (its
+    results give the id more than one status) or no_result; then
+    other_head (the re-review judged another head than the delivered sha),
+    decline_upheld (declined, resolved) and result. form is the run line's
+    (_re_review). The evidence is the review's, quoted."""
+    f = f if isinstance(f, dict) else {}
+    at = _wf_src(launch, "final", key, i, "review")
+    value = {"rule": None, "status": None, "head": None, "delivered": None, "evidence": None}
+    result = entry["result"] if entry is not None else None
+    line = [c.journal_src(launch, entry["line"])] if entry is not None else []
+    review = f.get("review")
+    if key == "open" and isinstance(f.get("id"), str) and NEW_FINDING_ID.match(f["id"]):
+        value["rule"] = "raised"
+        return c.ref(value, "present", [at])
+    if "review" not in f:
+        value["rule"] = "not_recorded"
+        return c.ref(value, "present", [at])
+    if not isinstance(review, dict):
+        if why is not None:
+            value["rule"] = "no_result_recorded"
+            sources = [at] + ([c.journal_src(launch)] if why == c.JOURNAL_UNREADABLE else [])
+            return c.ref(value, "present", sources, journal_note(launch, why) + REASON_SAYS)
+        if entry is None:
+            value["rule"] = "not_run"
+            return c.ref(value, "present", [at, c.journal_src(launch)])
+        if form == "no_valid_result":
+            value["rule"] = "no_valid_result"
+        else:
+            results = result.get("results") if isinstance(result, dict) else None
+            value["rule"] = "contradictory" if len(_statuses(results, f.get("id"))) > 1 else "no_result"
+        return c.ref(value, "present", [at] + line)
+    value["status"] = review.get("status")
+    value["evidence"] = _q(review.get("evidence"), [at], pairs)
+    head = result.get("head") if isinstance(result, dict) else None
+    delivered = (launch.get("result") or {}).get("delivered_sha")
+    if isinstance(head, str) and head and isinstance(delivered, str) and delivered and head != delivered:
+        value.update(rule="other_head", head=head, delivered=delivered)
+        return c.ref(value, "present", [at] + line)
+    value["rule"] = "decline_upheld" if key == "declined" and value["status"] == "resolved" else "result"
+    return c.ref(value, "present", [at])
+
+
 def _cannot_verify(item, source, pairs):
     if isinstance(item, str):
         return _q(item, [source], pairs)
@@ -999,11 +1404,16 @@ def _open_work(run, launch, why, pairs):
         out["final"] = c.ref(None, "unavailable", [_wf_src(launch, "final")],
                              "the latest launch has no final review result")
         return out
+    entries, why = c.read_journal(launch)
+    entry = _last_re_review(entries)
+    re_review = _re_review(launch, final, entry, why)
     findings = []
     for key, state in (("open", "open"), ("declined", "declined")):
         items = final.get(key)
         for i, f in enumerate(items if isinstance(items, list) else []):
-            findings.append(_finding(f, state, [_wf_src(launch, "final", key, i)], pairs))
+            finding = _finding(f, state, [_wf_src(launch, "final", key, i)], pairs)
+            finding["re_review"] = _finding_re_review(f, key, i, launch, entry, why, re_review["value"]["form"], pairs)
+            findings.append(finding)
     cannot = final.get("cannot_verify")
     cannot = [_cannot_verify(item, _wf_src(launch, "final", "cannot_verify", i), pairs)
               for i, item in enumerate(cannot if isinstance(cannot, list) else [])]
@@ -1014,7 +1424,8 @@ def _open_work(run, launch, why, pairs):
               for i, f in enumerate(minors)] if isinstance(minors, list) else None
     carried = final.get("carried_minors_open")
     carried = [x for x in carried if isinstance(x, str)] if isinstance(carried, list) else None
-    value = {"findings": findings, "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
+    value = {"findings": findings, "re_review": re_review,
+             "cannot_verify": [x for x in cannot if x is not None], "task_minors_open": minors,
              "carried_minors_open": carried, "carried_minor_tasks": _carried_tasks(run, carried),
              # Older engines' finals have no open list: its count is unknown, not 0.
              "not_recorded": [key for key in ("open", "declined", "cannot_verify")

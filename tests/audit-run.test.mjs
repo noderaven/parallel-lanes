@@ -236,16 +236,19 @@ test('the final re-review covers the final fix', () => {
   assert.equal(cov[r.merge].value, 'final review');
   // A lane merge a lens head contains names that head.
   assert.equal(cov[r.merge].note, `contained in the final review's head ${r.merge.slice(0, 7)}`);
-  assert.equal(cov[r.fix].state, 'inferred');
-  assert.equal(cov[r.fix].note, undefined);
+  // The journal records the head it judged: present, cited by journal line
+  // (L1 is the launched line) and the head that contains it.
+  assert.equal(cov[r.fix].state, 'present');
+  assert.equal(cov[r.fix].note, `judged ${r.fix.slice(0, 7)}`);
   assert.equal(cov[r.fix].value, 'final re-review');
-  assert.deepEqual(cov[r.fix].sources, [{ path: 'transcript:wf_aaaaaa/final re-review', at: null }]);
+  assert.deepEqual(cov[r.fix].sources, [{ path: 'wf_aaaaaa/journal.jsonl', at: 'L3' }, { path: `git:${r.fix}`, at: null }]);
 
-  // Without it, on engine 1.4.2 with no unreviewed_fix.
+  // Without it, on engine 1.4.2 with no unreviewed_fix: still inferred.
   s = run(accepted(r.fix, { final, version: '1.4.2' }));
   cov = coverage(s);
   assert.equal(cov[r.fix].state, 'inferred');
   assert.equal(cov[r.fix].value, 'final re-review (no recorded head)');
+  assert.equal(cov[r.fix].note, undefined);
   // The archived report's engine_version when the result has none.
   const noVersion = accepted(r.fix, { final });
   delete noVersion.version;
@@ -282,8 +285,8 @@ test('a repair commit counts as reviewed only through a valid final re-review', 
     return coverage(s)[r.fix];
   };
   const valid = covered({ head: r.fix, results: [], new_findings: [] });
-  assert.deepEqual([valid.value, valid.state], ['final re-review', 'inferred']);
-  assert.deepEqual(valid.sources, [{ path: 'transcript:wf_aaaaaa/final re-review', at: null }]);
+  assert.deepEqual([valid.value, valid.state, valid.note], ['final re-review', 'present', `judged ${r.fix.slice(0, 7)}`]);
+  assert.deepEqual(valid.sources, [{ path: 'wf_aaaaaa/journal.jsonl', at: 'L3' }, { path: `git:${r.fix}`, at: null }]);
   // Anything else gives no coverage: the commit falls through to
   // final.unreviewed_fix (which the engine sets then) or to no evidence.
   const invalid = {
@@ -316,7 +319,8 @@ test('lens heads fall back to structured results', () => {
     assert.equal(cov[r.merge].state, 'present', label);
     assert.equal(cov[r.merge].value, 'final review');
     assert.equal(cov[r.merge].note, `contained in the final review's head ${r.merge.slice(0, 7)}`, label);
-    assert.ok(cov[r.merge].sources.some((x) => x.path === `transcript:wf_aaaaaa/${label}`));
+    assert.deepEqual(cov[r.merge].sources, [{ path: 'wf_aaaaaa/journal.jsonl', at: 'L3' }, { path: `git:${r.merge}`, at: null }],
+      label);
   }
 });
 
@@ -803,6 +807,202 @@ test('open work is listed', () => {
   assert.deepEqual(ow.excluded.map((x) => [x.id, x.reason.quote]), [['X9', 'manual step']]);
   assert.deepEqual(ow.stopped_lanes.value.map((x) => [x.lane, x.task, x.reason.quote]), [['a', 'A2', 'review_rounds <check:test#1>']]);
   assert.doesNotMatch(JSON.stringify(s), /zqcmd|zqsetup/);
+});
+
+// open_work.final over one launch with this final and journal, no repo (the
+// final re-review needs no git).
+function finalWork(final, journal, extra = {}) {
+  const result = accepted(D, { final: finalAt(D, final), ...extra });
+  return sections(makeRun({ launches: [launch(result, { journal })] })).open_work.final;
+}
+const JOURNAL = 'wf_aaaaaa/journal.jsonl';
+const F = (id) => ({ id, severity: 'important', file: 'x.js', line: 1, issue: `issue ${id}` });
+
+test('the final re-review line counts each final finding against the journal', () => {
+  const findings = ['F1', 'F2', 'F3', 'F4'].map(F);
+  const results = [
+    { id: 'F1', status: 'resolved', evidence: 'gone' }, { id: 'F2', status: 'open', evidence: 'still there' },
+    { id: 'F4', status: 'resolved', evidence: 'a' }, { id: 'F4', status: 'open', evidence: 'b' },
+    // An id no final finding has counts for nothing.
+    { id: 'F9', status: 'open', evidence: 'x' },
+  ];
+  const rr = (over = {}) => ({ head: D, results, new_findings: [{ severity: 'minor', issue: 'n' }], ...over });
+  const judged = finalWork({ findings }, [{ label: 'final re-review', result: rr() }]);
+  const re = judged.value.re_review;
+  // F3 has no result and F4 two different ones: F = r + o + m + c.
+  assert.deepEqual([re.value, re.state, re.sources, re.note], [
+    { form: 'judged', head: D, delivered: D, resolved: 1, open: 1, without_result: 1, contradictory: 1, of: 4, new: 1 },
+    'present', [{ path: JOURNAL, at: 'L3' }], undefined]);
+  // Another head, with a delivered value that is no sha (as in l131).
+  const other = finalWork({ findings }, [{ label: 'final re-review', result: rr({ head: OTHER }) }],
+    { delivered_sha: 'see-below' }).value.re_review.value;
+  assert.deepEqual([other.form, other.head, other.delivered], ['judged', OTHER, 'see-below']);
+  // The journal's last entry decides: a budget retry's result.
+  const retried = finalWork({ findings }, [{ label: 'final re-review' }, { label: 'final re-review retry', result: rr() }]);
+  assert.deepEqual([retried.value.re_review.value.form, retried.value.re_review.sources], ['judged', [{ path: JOURNAL, at: 'L4' }]]);
+  // Before 1.2.0 the re-review recorded findings only: said once, no gap.
+  const old = finalWork({ findings }, [{ label: 'final re-review', result: { findings: [] } }]).value.re_review;
+  assert.deepEqual([old.value.form, old.state, old.sources], ['not_recorded', 'present', []]);
+  // Any other result, or a started entry with none: no valid result, at its line.
+  const invalid = [
+    [{ head: D, results: 'none', new_findings: [] }, 'L3'], [{ results: [], new_findings: [] }, 'L3'], [null, 'L3'],
+    [[D], 'L3'], [undefined, 'L2'],
+  ];
+  for (const [result, at] of invalid) {
+    const bad = finalWork({ findings }, [{ label: 'final re-review', result }]).value.re_review;
+    assert.deepEqual([bad.value.form, bad.state, bad.sources], ['no_valid_result', 'present', [{ path: JOURNAL, at }]],
+      JSON.stringify(result));
+  }
+  // No entry: not run with final findings, none without.
+  const notRun = finalWork({ findings }, []).value.re_review;
+  assert.deepEqual([notRun.value.form, notRun.state, notRun.note, notRun.sources],
+    ['not_run', 'present', "each finding's reason says why", []]);
+  const none = finalWork({}, [{ label: 'final review sp', result: { head: D, findings: [] } }]).value.re_review;
+  assert.deepEqual([none.value.form, none.state, none.sources], ['none', 'present', []]);
+  // None needs a findings list: a final with no list is unknown, a gap, not none.
+  const lists = { findings: undefined, fixed: undefined, declined: undefined, open: undefined };
+  const unlisted = finalWork(lists, []).value.re_review;
+  assert.deepEqual([unlisted.value.form, unlisted.state, unlisted.note, unlisted.sources],
+    ['unavailable', 'unavailable', 'the result records no final findings list', [{ path: 'wf_aaaaaa.json', at: '#/result/final' }]]);
+  assert.equal(finalWork({ ...lists, declined: [] }, []).value.re_review.value.form, 'unavailable');
+  // A final finding in another list still means the re-review did not run.
+  assert.equal(finalWork({ ...lists, fixed: [F('F1')] }, []).value.re_review.value.form, 'not_run');
+  // No journal archived, or one that cannot be read: unavailable, a gap.
+  const result = accepted(D, { final: finalAt(D, { findings }) });
+  const lost = sections(makeRun({ launches: [launch(result, { journal: undefined })] })).open_work.final.value.re_review;
+  assert.deepEqual([lost.value.form, lost.state, lost.note], ['unavailable', 'unavailable', 'no journal archived for wf_aaaaaa']);
+  const unreadable = sections(makeRun({ launches: [launch(result, { journal: undefined })],
+    files: { 'wf_aaaaaa/journal.jsonl/keep': '' } })).open_work.final.value.re_review;
+  assert.deepEqual([unreadable.value.form, unreadable.state, unreadable.note],
+    ['unavailable', 'unavailable', 'the journal for wf_aaaaaa could not be read']);
+});
+
+test('each open or declined final finding names its re-review; task minors never do', () => {
+  const review = (id, status, evidence) => ({ id, status, evidence });
+  const final = {
+    findings: ['F1', 'F2', 'F3', 'F4'].map(F),
+    open: [
+      { ...F('F1'), reason: 'still open after the final re-review', disposition: { id: 'F1', status: 'fixed', evidence: 'did' },
+        review: review('F1', 'open', 'still fails npm test zqcmd') },
+      { ...F('F2'), reason: 'the final re-review gave no result for it', disposition: null, review: null },
+      { ...F('F3'), reason: 'the final re-review gave contradictory results for it', disposition: null, review: null },
+      { severity: 'minor', file: 'y.js', line: 2, issue: 'new', id: 'N1', reason: 'new in the final fix' },
+    ],
+    declined: [{ ...F('F4'), reason: 'not needed', disposition: { id: 'F4', status: 'declined', evidence: 'e', reason: 'not needed' },
+      review: review('F4', 'resolved', 'the decline is right') }],
+    task_minors_open: [{ id: 'A1-1', severity: 'minor', file: 'a.txt', line: 1, issue: 'nit', fix: 'x' }],
+  };
+  const results = [review('F1', 'open', 'still fails npm test zqcmd'), review('F3', 'open', 'a'), review('F3', 'resolved', 'b'),
+    review('F4', 'resolved', 'the decline is right')];
+  const journal = [{ label: 'final re-review', result: { head: D, results, new_findings: [{ severity: 'minor', issue: 'new' }] } }];
+  const fw = finalWork(final, journal);
+  const at = (list, i) => ({ path: 'wf_aaaaaa.json', at: `#/result/final/${list}/${i}/review` });
+  const line = { path: JOURNAL, at: 'L3' };
+  const rows = fw.value.findings.map((f) => [f.id, f.re_review.value.rule, f.re_review.value.status, f.re_review.state,
+    f.re_review.sources]);
+  assert.deepEqual(rows, [
+    ['F1', 'result', 'open', 'present', [at('open', 0)]],
+    ['F2', 'no_result', null, 'present', [at('open', 1), line]],
+    ['F3', 'contradictory', null, 'present', [at('open', 2), line]],
+    ['N1', 'raised', null, 'present', [{ path: 'wf_aaaaaa.json', at: '#/result/final/open/3' }]],
+    ['F4', 'decline_upheld', 'resolved', 'present', [at('declined', 0)]],
+  ]);
+  // The evidence is a quote of the finding's review, commands as check ids.
+  const evidence = fw.value.findings[0].re_review.value.evidence;
+  assert.deepEqual(evidence, { quote: 'still fails <check:test#1>', sources: [at('open', 0)], commands_replaced: true });
+  assert.equal(fw.value.findings[4].re_review.value.evidence.quote, 'the decline is right');
+  assert.equal(fw.value.findings[1].re_review.value.evidence, null);
+  assert.equal(fw.value.task_minors_open[0].re_review, undefined);
+  // None is a gap.
+  assert.doesNotMatch(JSON.stringify(fw), /zqcmd/);
+
+  // A null review: not run only when the journal holds no final re-review
+  // entry at all (the journal file cited).
+  const notRun = finalWork(final, []).value.findings[1].re_review;
+  assert.deepEqual([notRun.value.rule, notRun.state, notRun.sources],
+    ['not_run', 'present', [at('open', 1), { path: JOURNAL, at: null }]]);
+  // A last entry that is started only, has a null result or is not a valid
+  // result: no valid result (R3's test), at its journal line.
+  const invalid = [[[{ label: 'final re-review' }], 'L2'], [[{ label: 'final re-review', result: null }], 'L3'],
+    [[{ label: 'final re-review', result: { head: D, results: 'none', new_findings: [] } }], 'L3']];
+  for (const [j, line] of invalid) {
+    const f2 = finalWork(final, j).value.findings[1].re_review;
+    assert.deepEqual([f2.value.rule, f2.state, f2.sources], ['no_valid_result', 'present', [at('open', 1), { path: JOURNAL, at: line }]],
+      JSON.stringify(j));
+  }
+  // No journal, or one that cannot be read: audit cannot tell why the review
+  // is null, so no result is recorded, the finding's reason saying why. Not
+  // a gap.
+  const result = accepted(D, { final: finalAt(D, final) });
+  const lostRun = sections(makeRun({ launches: [launch(result, { journal: undefined })] }));
+  const lost = lostRun.open_work.final.value.findings;
+  assert.deepEqual(lost.map((f) => f.re_review.value.rule),
+    ['result', 'no_result_recorded', 'no_result_recorded', 'raised', 'decline_upheld']);
+  assert.deepEqual([lost[1].re_review.state, lost[1].re_review.note, lost[1].re_review.sources],
+    ['present', "no journal archived for wf_aaaaaa; its reason says why", [at('open', 1)]]);
+  const unreadable = sections(makeRun({ launches: [launch(result, { journal: undefined })],
+    files: { 'wf_aaaaaa/journal.jsonl/keep': '' } })).open_work.final.value.findings[2].re_review;
+  assert.deepEqual([unreadable.value.rule, unreadable.state, unreadable.note, unreadable.sources],
+    ['no_result_recorded', 'present', 'the journal for wf_aaaaaa could not be read; its reason says why',
+      [at('open', 2), { path: JOURNAL, at: null }]]);
+  // A re-review of another head than the delivered sha names both.
+  const otherJournal = [{ label: 'final re-review', result: { head: OTHER, results, new_findings: [] } }];
+  const other = finalWork({ findings: [F('F1')], open: [{ ...F('F1'), reason: 'the final re-review judged x',
+    review: review('F1', 'resolved', 'fine') }] }, otherJournal, { delivered_sha: 'see-below' }).value.findings[0].re_review;
+  assert.deepEqual([other.value, other.sources], [
+    { rule: 'other_head', status: 'resolved', head: OTHER, delivered: 'see-below',
+      evidence: { quote: 'fine', sources: [at('open', 0)], commands_replaced: false } },
+    [at('open', 0), line]]);
+  // Before 1.2.0 a finding has no review key: its rule says so (no line).
+  const old = finalWork({ findings: [F('F1')], open: [{ ...F('F1'), reason: 'r' }], declined: [] },
+    [{ label: 'final re-review', result: { findings: [] } }]).value.findings[0].re_review;
+  assert.deepEqual([old.value.rule, old.state, old.sources], ['not_recorded', 'present', [{ path: 'wf_aaaaaa.json', at: '#/result/final/open/0' }]]);
+});
+
+test('checks name the tasks whose engine records no task check, and the task-check files that match no task', () => {
+  const [s0, s1, s2] = ['a', 'b', 'c'].map((ch) => ch.repeat(40));
+  const ledger = {
+    'a.jsonl': [
+      { task: 'A1', event: 'started', base: s0 },
+      { task: 'A1', event: 'committed', commits: [s1], base: s0, head: s1 },
+      { task: 'A2', event: 'started', base: s1 },
+      { task: 'A2', event: 'committed', commits: [s2], base: s1, head: s2 },
+    ],
+  };
+  const done = { A1: { status: 'done', commits: [s0, s1] }, A2: { status: 'done', commits: [s1, s2] } };
+  const at = (version, tasks, extra = {}) => launch(accepted(D, { version, tasks }), extra);
+  const later = { wf: 'wf_bbbbbb', startTime: START + 600000 };
+  const taskChecks = (spec) => sections(makeRun({ ledger, ...spec })).checks.task_checks;
+  // Every committed task's engine is before 1.6.0.
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', done)] }), { not_recorded: ['A1', 'A2'], unmatched: [] });
+  // Mixed launches: only the task a launch before 1.6.0 reports.
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', { A1: done.A1 }), at('1.6.0', { A2: done.A2 }, later)] }),
+    { not_recorded: ['A1'], unmatched: [] });
+  // A settled or never-committed task is not listed; a task with a file never is.
+  const settled = { ...ledger, 'a.jsonl': [...ledger['a.jsonl'], { task: 'A2', event: 'settled', outcome: 'park', base: s1, head: s2 }] };
+  const policy = (unit, tasks) => JSON.stringify({ results: [], ok: true, head: s0, policy: { unit, tasks, base: s0, selected: 'lane', reasons: [] } });
+  assert.deepEqual(sections(makeRun({ ledger: settled, launches: [at('1.5.1', done)] })).checks.task_checks,
+    { not_recorded: ['A1'], unmatched: [] });
+  assert.deepEqual(taskChecks({ launches: [at('1.5.1', done)], files: { [`${LEDGER}/checks/task-A1.1.json`]: policy('A1', ['A1']) } }),
+    { not_recorded: ['A2'], unmatched: [] });
+  // Files no manifest task matches: by policy (unit and tasks), else by name.
+  const checks = `${LEDGER}/checks`;
+  const out = taskChecks({
+    launches: [at('1.6.0', done)],
+    files: {
+      [`${checks}/task-A1.1.json`]: policy('A1', ['A1']),
+      [`${checks}/task-A1-A2.1.json`]: '',
+      [`${checks}/task-A1-Z9.1.json`]: '',
+      [`${checks}/task-Z8.1.json`]: policy('Z8', ['Z8']),
+      [`${checks}/task-Z9.1.json`]: 'not json',
+      [`${checks}/task-Z9.1.1.log`]: 'zqtail',
+      [`${checks}/verify-${D}.json`]: JSON.stringify(verifyAt(D)),
+    },
+  });
+  assert.deepEqual(out, {
+    not_recorded: [],
+    unmatched: [`${checks}/task-A1-Z9.1.json`, `${checks}/task-Z8.1.json`, `${checks}/task-Z9.1.json`],
+  });
 });
 
 test('audit treats an empty verify-<sha>.json as invalid or missing, never present', () => {

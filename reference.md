@@ -2173,8 +2173,11 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `missing`, `stale`, `conflicting`, `unavailable` or `inferred`; no others. The `gaps` list in
   `audit.json` holds every value whose state is `missing`, `stale`, `conflicting` or
   `unavailable`, one entry per value, and its length is the number `tool-outcomes` prints. Sources
-  are paths relative to the run folder, `git:<sha>` or `transcript:<wf>/<agent label>`, each with a
-  ledger line, a JSON pointer or a sha.
+  are paths relative to the run folder, `git:<sha>` or `transcript:<wf>/<agent label>` (the
+  escalations, read from the agent transcripts), each with a ledger or journal line, a JSON
+  pointer or a sha. What a launch's journal records (1.6.17: the task review verdicts, the lens
+  heads, the final re-review) is cited by its line, `<wf>/journal.jsonl L<n>` (physical lines,
+  blank ones counted; a started entry with no result: its started line).
 - **Gap causes** (1.6.16, `audit_version` 2). One fact missing from the archive is often a gap in
   every task, so `audit.json` also has `gap_causes`, one entry per cause in first-seen order:
   `{pointer, state, note, tasks, values}`. A cause is the gap pointer with every array index read
@@ -2220,11 +2223,13 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   `delivered_sha`; else it is `unavailable` with the reason. It lists the commits reachable from
   the delivered sha but not from the run's start point that no task's recorded range holds
   (integration merges and the final fix). Each is `present` when a final lens head contains it
-  (note `contained in the final review's head <sha7>`), `inferred` when the final re-review's
-  head contains it (or, for engines from 1.2.1 on when no re-review head was recorded, when
-  `final.head` does, differs from every lens head, and `final.unreviewed_fix` is absent), and
-  `missing` otherwise, with `final.unreviewed_fix` quoted when it is set. When `ledger status`
-  fails on the archived ledger, the section names that failure.
+  (note `contained in the final review's head <sha7>`) or when the head the journal records for
+  the final re-review does (1.6.17: `final re-review [present] - judged <head7>`, at its journal
+  line), `inferred` only for engines from 1.2.1 on when no re-review head was recorded and
+  `final.head` contains it, differs from every lens head, and `final.unreviewed_fix` is absent
+  (`final re-review (no recorded head)`), and `missing` otherwise, with `final.unreviewed_fix`
+  quoted when it is set. When `ledger status` fails on the archived ledger, the section names
+  that failure.
 - **After delivery** (with `--head`): the commits between the delivered sha and the head,
   `unavailable` (no run evidence); with none, it is `present` and adds no gap, so a clean run
   audited at the delivered sha has no gap from `--head`. **Open work** lists blocked and deferred
@@ -2260,6 +2265,44 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   unknown: the final review may exist, and its header gives that reason), and, for a lower bound,
   that a task block with no open minors line has none listed and more may be missing (minors of
   tasks an earlier launch approved).
+- **The final re-review** (1.6.17, `audit_version` 3; from the latest launch's journal and
+  result, no `--repo`).
+  Right under the final review line, Open work gives `open_work.final`'s `re_review`, `{form,
+  head, delivered, resolved, open, without_result, contradictory, of, new}`; the journal's last
+  `final re-review` (or `final re-review retry`) entry decides. A result with a head and
+  `results` and `new_findings` lists reads
+  `- final re-review: judged <head7>[, not the delivered sha <delivered>]: <r> resolved, <o>
+  open, <m> without a result[, <c> with contradictory results] of the <F> final finding(s); <n>
+  new [present] (<wf>/journal.jsonl L<n>)`: each id of `final.findings` is counted by the
+  statuses its results give it (none, more than one, `resolved`, or another), and `<delivered>`
+  is as recorded when it is no sha. A re-review that recorded `findings` only (before 1.2.0)
+  reads `per-finding results not recorded by this run's engine`; any other result, or a started
+  entry with none, `no valid result` at its line; no entry, `not run` (`each finding's reason
+  says why`) with final findings, else `none (no final findings)` when `final.findings` is a
+  list; all `present`. A final with no `findings` list and none in the others is `unavailable`
+  (`the result records no final findings list`, a gap: unknown is not none). Without a
+  journal it is `unavailable` (`no journal archived for <wf>`), and so is a journal whose file
+  cannot be read (`the journal for <wf> could not be read`), one gap; a journal line that does
+  not parse is skipped.
+- **Each final finding's re-review** (1.6.17). After its disposition each open or declined final
+  finding (never a task minor) gives its `re_review`, `{rule, status, head, delivered,
+  evidence}`, `present` and never a gap, by the first rule that applies: an open `N<k>` (the
+  re-review's new findings) reads `re-review: raised by the re-review`; a finding with no
+  `review` (before 1.2.0) has no line. A `null` review (the engine records one when no
+  re-review ran, when it gave the id contradictory results, or none) reads, without a journal
+  or with one that cannot be read, `re-review: no result recorded` with the note `no journal
+  archived for <wf>; its reason says why` (or `the journal for <wf> could not be read; its
+  reason says why`); with a journal, `re-review: not run` when it holds no final re-review entry
+  at all, `re-review: no valid result` when the last entry is started only, has a `null` result
+  or no valid result (the run line's `no valid result`), `re-review: contradictory results`
+  when its results give the id more than one status, else `re-review: no result` (the
+  re-review ran and left the id out). A re-review of a head other than the delivered sha reads
+  `re-review of <head7>, not the delivered sha <delivered>: <status>`; a declined finding the
+  re-review resolved reads `re-review: resolved (the decline upheld)`; any other `re-review:
+  <status>`. A line with a status is followed by the re-reviewer's evidence as a quote
+  (`re-review evidence, quoted from wf_<id>.json #/result/final/<list>/<i>/review`). `resolved`
+  is the re-reviewer's word that the defect is gone or the decline is right, not that it was
+  fixed.
 - **Per task,** in run order, the audit shows the requirement (the latest review's brief hash
   against the task's plan section hash, and the brief file), placement, changes (rulings, events,
   escalations), commits and review (reviews, each with its brief and spec hashes against the
@@ -2273,12 +2316,62 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   archived` or `the plan copy could not be read`). `audit.md` prints them in Checks as `plan hash,
   setup event <n>`, `spec hash, setup event <n>` and `plan copy for the section hashes`. A launch
   is the union of `wf_*` dirs and `wf_*.json` files; its result comes only from `<run
-  folder>/<wf>.json`. Review verdicts come from the journal and are `inferred`; `audit.md` shows
-  them as `[inferred: read from the transcript]` (other `inferred` values keep `[inferred]`). A
+  folder>/<wf>.json`. Review verdicts (1.6.17) are recorded in the launch's journal: `present`,
+  each at its result's line (its retry's for a round the engine ran again after a spawn that
+  failed or returned nothing; a started entry with no result is `unavailable` at its started
+  line; a launch whose journal is missing or cannot be read is one `unavailable` entry saying
+  which); the ledger's `reviewed` event stays the approval. For engines from 1.2.0 (by
+  `result.version`: a launch with none is before 1.4.3 and gets no note), a verdict the engine's
+  `checkedReview` acted on as another adds `(the engine read it as changes)` or
+  `(the engine read it as invalid)`. A
   ruling without `by` shows as `implementer (no role recorded)`, as the ledger counts it. When the
   verdict is `accepted (gate unavailable)`, a task the result reports done that is neither
   settled nor blocked has `accepted` `unavailable` (`the acceptance gate is unavailable`, a gap);
   a task that is not done, or is settled or blocked, stays `false`.
+- **Verified** (1.6.17) is git containment, and `audit.md` says so: `- verified: true [present] -
+  its last commit <sha7> is in the head the delivered verify passed at, <sha7>`, or `- verified:
+  false [present] - its last commit <sha7> is not in the head the delivered verify passed at,
+  <sha7>`. It is about the run's delivered checks, not the task's own check. `audit.json`'s value,
+  state and note are unchanged, and the `checks_failed` and invalid-evidence notes stay.
+- **The task's own check** (1.6.17, `audit_version` 3). Each task holds
+  `tasks[i].checks.task_check` (not a status: the Bottom line's four counts are unchanged), read
+  from the archived ledger's `checks/task-<unit>.<n>.json` files, which `scripts/task-checks`
+  writes before the commit (engines from 1.6.0). `audit.md` prints it after `verified`: `- checked
+  before its commit: <passed|failed|no result> [<state>] - <selected> check of the working tree
+  against the task base <base7>[; HEAD was <head7>[, the task's own commit: this check ran after
+  it]][; <k> earlier attempt(s): <p> passed, <f> failed, <m> without a result][; the checkout
+  changed while it ran][; <k> fix commit(s) after its check: fixers run no task checks] (<file>)`;
+  a failure lists each failing check under it as `<check id> (<group>): exit <n>`, or `no command
+  failed (HEAD moved while it ran)`. A file matches by its policy's `unit` and `tasks` (a batch
+  file counts for each of its tasks); one without a policy (empty, or an error record with none)
+  by its name: an exact task id, else a batch unit `<first>-<last>` whose two parts are task ids
+  (it counts for every task from the first through the last in their lane's order), else Checks
+  lists it once as matching no task. Attempts sort by `n` within a name, names by their earliest
+  `policy.started` (a name with none last); the last attempt the archive holds decides, and the
+  earlier ones are counted. `passed` and `failed` are `present`; `no result` (an empty or
+  unreadable file, or an error record: the line says which) is `unavailable`; a policy base other
+  than the task's recorded range base is `stale`. That base, like the fix commits, counts only
+  the task's events since its last `started` event with `restart: true` (a join unit begun again
+  from the feature tip, 1.6.5), as `ledger status` reads them. The fix commits are the task's
+  `committed` events after its last one from the task base (a fix commits from the previous head,
+  and fixers run no task checks). The value is `{file, unit, attempt, selected, reasons, ok,
+  failed, base, range_base, head, head_is_task_commit, tree_changed, earlier: {passed, failed,
+  no_result}, fix_commits_after}`: `reasons` the policy's reason codes only (`null` without a
+  policy), `failed` the failing results as check ids (`[]` for a pass, `null` for no result),
+  `range_base` the task's recorded range base; what is unknown is `null`, never `false` or 0
+  (`range_base` and `fix_commits_after` without a recorded base, `head_is_task_commit` when the
+  file records no head). Without a file: `missing` (a gap) when the task's lane (the project for
+  prelude and join) has a test, lint or build command, else the value `not_required`; when a
+  launch whose result reports the task (not as skipped or not_run) records a `version` before
+  1.6.0, or none (before 1.4.3), no line and no gap, and Checks says once `- task checks: not
+  recorded by this run's engine (before 1.6.0)`, naming the tasks when only some are; when one
+  records a version that does not parse, `unavailable` (`a launch result that reports this task
+  records an engine version audit cannot read`); when no launch result reports it, `unavailable`
+  (`no launch result reports this task; its engine is unknown`). A task never committed, or
+  settled, has no line, even with files (its value `null`, `present`). `run.checks.task_checks`
+  is `{not_recorded, unmatched}`: those task ids, and the files that match no task. None of it
+  needs `--repo`. The check covers the uncommitted working tree before the commit, not the
+  committed code, and acceptance never reads it.
 - **Launch counts** (1.6.8): the run section compares the launches the archived ledger records
   (counted as archive-run counts them, see "Run history") with the archived ones.
   `run.launches.recorded` is `{recorded, archived, named}`; each missing launch is one
@@ -2305,17 +2398,22 @@ has holes. It does not change `acceptance` and is not a second verdict engine.
   verified V, accepted A of N`, each counting `true` values with `(k settled)`, `(k not
   required)` and `(k unavailable)` where a task has such a value (the summary's tasks line counts
   the same way), then the blocked and deferred counts above 0 (`blocked and deferred unknown`
-  when `ledger status` failed); `Final findings: <open> open, <declined> declined; open task
-  minors: <M>` (M a number, `<M> listed (more may be missing)` or `unavailable`), or `Final
-  review unavailable`, and the cannot-verify items; the code outside recorded task ranges and how
-  many lack review evidence; the launches missing from the archive when the ledger records more;
+  when `ledger status` failed) and (1.6.17) `task checks: <k> whose last check failed` when k > 0
+  (a check that ran after the task's own commit, or where no command failed, included); `Final
+  findings: <open> open, <declined> declined; open task minors: <M>` (M a number, `<M> listed
+  (more may be missing)` or `unavailable`), or `Final review unavailable`, and the cannot-verify
+  items; the code outside recorded task ranges and how many lack review evidence; the launches
+  missing from the archive when the ledger records more;
   and `<G> evidence gap(s) in <C> cause(s) (cannot-verify items and inferred lines are not
   gaps)`. Nothing else. The summary's last line before the report path gives the same `<G>
   evidence gap(s) in <C> cause(s)`.
 - **Terms** (1.6.15): `audit.md` ends with `## Terms`, fixed text defining the six bracketed
-  states, `[inferred: read from the transcript]`, the value `invalid` (the gate's and evidence
-  validity's), round(s), task rulings and run-end rulings, gate, carry, context added by
-  pre-flight and (1.6.16) cause.
+  states (1.6.17: `[inferred]` by the rule for a re-review head the engine did not record), the
+  value `invalid` (the gate's and evidence validity's), round(s), task rulings and run-end
+  rulings, gate, carry, context added by pre-flight, (1.6.16) cause, and (1.6.17) verified,
+  checked before its commit, with its known limit: the last attempt the archive holds decides,
+  and re-review (resolved means the defect is gone or the decline is right, not that it was
+  fixed).
 
 **check-verify `--ledger`.** The audit calls `check-verify <wf dir> <manifest> --ledger
 <run folder>/<plan-name>.<run_id>.ledger` for the gate and keeps only its status, a reason from
@@ -2323,10 +2421,12 @@ the fixed list and its exit code. Details in "Verify evidence".
 
 **Privacy.** `audit.md` starts with a line saying it holds local paths and recorded text and is
 not meant to be shared as-is; the report is local-only. It never copies prompts, raw tool output,
-diffs or doctor snapshots. Configured commands become check ids (`test#1`, `<lane>.test#1`,
+diffs or doctor snapshots, and never prints a check file's `error`, `tail`, `log` or `checkout`
+(a task check is named by its archive path; only its reason codes, check ids, groups and exits
+are kept). Configured commands become check ids (`test#1`, `<lane>.test#1`,
 `setup#<n>`, `unmatched#<n>`), never command lines. Other recorded text (rulings, notes, reasons,
-findings, dispositions, warnings) is quoted as written, marked as a quote with its source, and can
-hold a command the manifest never configured.
+findings, dispositions, re-review evidence, warnings) is quoted as written, marked as a quote with
+its source, and can hold a command the manifest never configured.
 
 **Exit codes.** exit 0 whenever a view is written, including a folder with no launch and a repo
 that lacks the start point. exit 2: a usage error (`--head` without `--repo`), a folder that is no

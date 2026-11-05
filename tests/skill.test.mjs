@@ -661,13 +661,30 @@ test('reference.md documents the audit', () => {
     'open task minor(s)', 'carried_minors_open', '## Bottom line', '## Terms',
     '(cannot-verify items and inferred lines are not gaps)',
     // the gap causes and the run-level hashes (1.6.16)
-    'gap_causes', '`audit_version` 2', 'in <C> cause(s) (cannot-verify items and inferred lines are not gaps)',
+    'gap_causes', '`audit_version` 3', 'in <C> cause(s) (cannot-verify items and inferred lines are not gaps)',
     '`run.checks`', 'setup event',
     // each task's open minors and the plain wordings (1.6.16)
     'open minors: <id>, <id>', "not recorded by this run's engine", 'listed (more may be missing)',
     '<open> open and <declined> declined final finding(s)', 'verdict_without_override',
     'verdict_rule_without_override',
+    // each task's own check and what verified covers (1.6.17)
+    'checked before its commit', '`tasks[i].checks.task_check`', '`run.checks.task_checks`',
+    'is in the head the delivered verify passed at', 'the last attempt the archive holds decides',
+    "a check file's `error`, `tail`, `log` or `checkout`",
+    // the final-review fixes: the Bottom line clause, an unreadable engine
+    // version, a join restart, a final with no findings list
+    '`task checks: <k> whose last check failed`', 'records an engine version audit cannot read',
+    '`restart: true`', 'the result records no final findings list',
+    // the journal as a record and each final finding's re-review (1.6.17)
+    '`<wf>/journal.jsonl L<n>`', '(the engine read it as', '`final re-review [present] - judged <head7>`',
+    '- final re-review: judged <head7>', 'raised by the re-review', 'resolved (the decline upheld)',
+    're-review evidence', '`re_review`', '`re-review: no result recorded`', '`re-review: no valid result`',
+    'could not be read',
   ];
+  // The journal's verdicts are recorded, not inferred from the transcript.
+  assert.ok(!audit.includes('read from the transcript'), 'the Audit section still says read from the transcript');
+  // A retried round is the engine's automatic retry, not a budget one.
+  assert.ok(!audit.includes('budget retry'), 'the Audit section still says budget retry');
   for (const word of wants) {
     assert.ok(audit.includes(word), `the Audit section lacks ${word}`);
   }

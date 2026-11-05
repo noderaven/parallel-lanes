@@ -297,7 +297,7 @@ test('an accepted run with a repo', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r));
   const { json, md, stdout } = view(folder, ['--repo', r.dir]);
-  assert.equal(json.audit_version, 2);
+  assert.equal(json.audit_version, 3);
   assert.deepEqual(Object.keys(json), ['audit_version', 'run_id', 'repo', 'run', 'tasks', 'gaps', 'gap_causes']);
   assert.deepEqual(json.gap_causes, []);
   assert.equal(json.run_id, 't1');
@@ -333,6 +333,19 @@ test('an accepted run with a repo', () => {
   assert.doesNotMatch(md, /^## After delivery$/m);
   assert.match(md, /^### Task A1/m);
   assert.match(md, /^### Task A2/m);
+  // verified says what it covers: the task's last commit in the head the
+  // delivered verify passed at (audit.json keeps true, present, no note).
+  const s7 = (sha) => sha.slice(0, 7);
+  assert.deepEqual(taskBlock(md, 'A1').filter((l) => l.startsWith('- verified: ')), [
+    `- verified: true [present] - its last commit ${s7(r.a1)} is in the head the delivered verify passed at, ${s7(r.fix)}`
+    + ` (${LEDGER}/a.jsonl L2; git:${r.fix})`]);
+  assert.equal(tasks.A1.status.verified.note, undefined);
+  // An engine before 1.6.0 records no task checks: Checks says so once, and
+  // no task block has a line.
+  assert.deepEqual(json.run.checks.task_checks, { not_recorded: ['A1', 'A2'], unmatched: [] });
+  assert.deepEqual(mdSection(md, 'Checks').filter((l) => /task check/.test(l)),
+    ["- task checks: not recorded by this run's engine (before 1.6.0)"]);
+  assert.doesNotMatch(beforeTerms(md), /checked before its commit/);
   // The summary: at most 10 lines, the last naming audit.md.
   const lines = stdout.trimEnd().split('\n');
   assert.ok(lines.length <= 10, stdout);
@@ -452,7 +465,177 @@ test('a verify whose checks failed reads failed checks in audit.md', () => {
   assert.equal(mdSection(md, 'Bottom line')[0], 'Verdict: unverified (checks_failed).');
 });
 
-test('audit.md labels transcript verdicts, rulings without a role and lens-covered commits', () => {
+test('a task whose last commit the verify head lacks reads "is not in"', () => {
+  const r = repoRun();
+  // A2's last commit comes after the delivered sha.
+  const late = commit(r.dir, 'late.txt');
+  const { json, md } = view(makeRun(acceptedSpec(r, { a2Head: late })), ['--repo', r.dir]);
+  const a2 = byTask(json).A2.status.verified;
+  // audit.json keeps its value, state and note.
+  assert.deepEqual([a2.value, a2.state, a2.note], [false, 'present', 'the verify head does not contain the task head']);
+  assert.deepEqual(taskBlock(md, 'A2').filter((l) => l.startsWith('- verified: ')), [
+    `- verified: false [present] - its last commit ${late.slice(0, 7)} is not in the head the delivered verify passed at,`
+    + ` ${r.fix.slice(0, 7)} (${LEDGER}/a.jsonl L5; git:${r.fix})`]);
+  assert.ok(taskBlock(md, 'A1').some((l) => l.startsWith('- verified: true [present] - its last commit ')), md);
+});
+
+// A 1.6.0 run audited without --repo: A1 passed its check on the third
+// attempt (an error record, a failure, then a pass); A2 failed its only one,
+// run after its own commit, while the checkout changed, and got a fix commit.
+function taskCheckSpec(r) {
+  const check = (unit, base, minute, over = {}) => ({
+    checkout: '/home/x/proj-wt/zqcheckout', branch: 'feat', head: base,
+    results: [{ group: 'test', command: 'npm test zqcmd', exit: 0, log: '/tmp/zqlog/1.log', tail: 'ok zqtail', duration_s: 1 }],
+    ok: true, clean: false, tracked_before: [], tracked_after: [], untracked_before: [], untracked_after: [], tree_changed: false,
+    policy: { unit, tasks: [unit], lane: 'a', base, started: `2026-10-12T10:0${minute}:00.000Z`, entry: null, selected: 'lane',
+      reasons: [{ code: 'no_entry', detail: 'no entry zqdetail' }], changed: ['a1.txt'] },
+    ...over,
+  });
+  const fail = (exit) => ({ ok: false, results: [{ group: 'test', command: 'npm test zqcmd', exit, log: '/tmp/zqlog/2.log', tail: 'FAIL zqtail' }] });
+  const files = {
+    'task-A1.1.json': { results: [], ok: false, error: 'crashed zqerror', policy: check('A1', r.p0, 0).policy },
+    'task-A1.2.json': check('A1', r.p0, 1, fail(1)),
+    'task-A1.3.json': check('A1', r.p0, 2),
+    'task-A2.1.json': check('A2', r.a1, 3, { ...fail(2), head: r.a2, tree_changed: true }),
+  };
+  return acceptedSpec(r, {
+    result: {
+      version: '1.6.0',
+      tasks: { A1: { status: 'done', commits: [r.p0, r.a1], notes: '' }, A2: { status: 'done', commits: [r.a1, r.fix], notes: '' } },
+    },
+    taskEvents: [{ task: 'A2', event: 'committed', commits: [r.fix], base: r.a2, head: r.fix }, reviewed('A2', r.fix)],
+    files: Object.fromEntries(Object.entries(files).map(([n, d]) => [`${LEDGER}/checks/${n}`, JSON.stringify(d)])),
+  });
+}
+
+test('audit.md says whether each task\'s own check ran before its commit, and how it ended', () => {
+  const r = repoRun();
+  const folder = makeRun(taskCheckSpec(r));
+  const { json, jsonText, md, stdout } = view(folder);
+  const s7 = (sha) => sha.slice(0, 7);
+  const checks = `${LEDGER}/checks`;
+  // After verified, in the Status lines; no git needed.
+  assert.deepEqual(taskBlock(md, 'A1').slice(0, 7), [
+    'Status:',
+    '- committed: true [present] (p.t1.ledger/a.jsonl L2)',
+    `- reviewed: true [present] (p.t1.ledger/a.jsonl L3; p.t1.ledger/a.jsonl L2)`,
+    '- verified: unknown [unavailable] - no --repo',
+    `- checked before its commit: passed [present] - lane check of the working tree against the task base ${s7(r.p0)};`
+    + ` 2 earlier attempt(s): 0 passed, 1 failed, 1 without a result (${checks}/task-A1.3.json)`,
+    '- accepted: true [present] (wf_aaaaaa.json #/result/tasks/A1/status)',
+    '- result status: done [present] (wf_aaaaaa.json #/result/tasks/A1/status)',
+  ]);
+  const a2 = taskBlock(md, 'A2');
+  const at = a2.findIndex((l) => l.startsWith('- checked before its commit: '));
+  assert.deepEqual(a2.slice(at, at + 2), [
+    `- checked before its commit: failed [present] - lane check of the working tree against the task base ${s7(r.a1)};`
+    + ` HEAD was ${s7(r.a2)}, the task's own commit: this check ran after it; the checkout changed while it ran;`
+    + ` 1 fix commit(s) after its check: fixers run no task checks (${checks}/task-A2.1.json)`,
+    '  - test#1 (test): exit 2',
+  ]);
+  assert.equal(a2[at - 1].startsWith('- verified: '), true);
+  const a2Check = byTask(json).A2.checks.task_check;
+  assert.deepEqual([a2Check.value.failed, a2Check.value.head_is_task_commit, a2Check.value.fix_commits_after],
+    [[{ check: 'test#1', group: 'test', exit: 2 }], true, 1]);
+  // The Bottom line counts the tasks whose last check failed (this one ran
+  // after the task's own commit, so not "committed after" it).
+  assert.equal(mdSection(md, 'Bottom line')[1],
+    'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 2 of 2; task checks: 1 whose last check failed.');
+  // A 1.6.0 engine records them: Checks has no task checks line.
+  assert.deepEqual(json.run.checks.task_checks, { not_recorded: [], unmatched: [] });
+  assert.deepEqual(mdSection(md, 'Checks').filter((l) => /task check/.test(l)), []);
+  // No check file's error, tail, log, checkout or reason detail.
+  for (const text of [jsonText, md, stdout]) assert.doesNotMatch(text, /zqcheckout|zqlog|zqtail|zqerror|zqdetail|zqcmd/);
+  assert.ok(walkSources(folder, json) > 40);
+  // A failed attempt where no command failed says so.
+  const spec = taskCheckSpec(r);
+  const moved = JSON.parse(spec.files[`${checks}/task-A2.1.json`]);
+  moved.results[0].exit = 0;
+  spec.files[`${checks}/task-A2.1.json`] = JSON.stringify(moved);
+  const movedA2 = taskBlock(view(makeRun(spec)).md, 'A2');
+  const m = movedA2.findIndex((l) => l.startsWith('- checked before its commit: failed [present] - '));
+  assert.equal(movedA2[m + 1], '  - no command failed (HEAD moved while it ran)');
+  // Every check passed: no Bottom line clause.
+  const passed = taskCheckSpec(r);
+  passed.files[`${checks}/task-A2.1.json`] = JSON.stringify({ ...moved, ok: true, head: r.a1, tree_changed: false });
+  assert.equal(mdSection(view(makeRun(passed)).md, 'Bottom line')[1],
+    'Tasks: committed 2, reviewed 2, verified 0 (2 unavailable), accepted 2 of 2.');
+});
+
+test('the task-check line\'s other wordings: stale, no result with and without a policy, HEAD elsewhere', () => {
+  const r = repoRun();
+  const s7 = (sha) => sha.slice(0, 7);
+  const checks = `${LEDGER}/checks`;
+  const line = (edit) => {
+    const spec = taskCheckSpec(r);
+    edit(spec.files);
+    return taskBlock(view(makeRun(spec)).md, 'A1').filter((l) => l.startsWith('- checked before its commit: '));
+  };
+  const third = (over) => (files) => {
+    const data = JSON.parse(files[`${checks}/task-A1.3.json`]);
+    files[`${checks}/task-A1.3.json`] = JSON.stringify({ ...data, ...over(data) });
+  };
+  const earlier = '2 earlier attempt(s): 0 passed, 1 failed, 1 without a result';
+  // A policy base other than the task's recorded base: stale, both named.
+  assert.deepEqual(line(third((d) => ({ head: r.a2, policy: { ...d.policy, base: r.a2 } }))), [
+    `- checked before its commit: passed [stale] - lane check of the working tree against ${s7(r.a2)}, not the task's`
+    + ` recorded base ${s7(r.p0)}; ${earlier} (${checks}/task-A1.3.json)`]);
+  // HEAD at a sha that is neither the base nor one of the task's commits.
+  assert.deepEqual(line(third(() => ({ head: S('e') }))), [
+    `- checked before its commit: passed [present] - lane check of the working tree against the task base ${s7(r.p0)};`
+    + ` HEAD was eeeeeee; ${earlier} (${checks}/task-A1.3.json)`]);
+  // The last attempt an error record that kept its policy: why first.
+  assert.deepEqual(line((files) => {
+    delete files[`${checks}/task-A1.2.json`];
+    delete files[`${checks}/task-A1.3.json`];
+  }), [`- checked before its commit: no result [unavailable] - an error record; lane check of the working tree against`
+    + ` the task base ${s7(r.p0)} (${checks}/task-A1.1.json)`]);
+  // A reserved file never written: no policy, so why and the earlier attempts only.
+  assert.deepEqual(line((files) => { files[`${checks}/task-A1.4.json`] = ''; }), [
+    '- checked before its commit: no result [unavailable] - the file is empty: reserved, never written;'
+    + ` 3 earlier attempt(s): 1 passed, 1 failed, 1 without a result (${checks}/task-A1.4.json)`]);
+});
+
+test('the task-check lines without a file, for older engines and for files that match no task', () => {
+  const r = repoRun();
+  const block = (md, id) => taskBlock(md, id).filter((l) => l.startsWith('- checked before its commit: '));
+  // A2's launch is 1.6.0 and its lane has a test command, but no file is archived: a gap.
+  const spec = taskCheckSpec(r);
+  delete spec.files[`${LEDGER}/checks/task-A2.1.json`];
+  spec.files[`${LEDGER}/checks/task-Z9.1.json`] = '';
+  const missing = view(makeRun(spec));
+  assert.deepEqual(block(missing.md, 'A2'), ['- checked before its commit: unknown [missing] - no task-check file archived,'
+    + ` though the task's commands include a test, lint or build command (${LEDGER}/a.jsonl L7)`]);
+  assert.ok(mdSection(missing.md, 'Evidence gaps').includes('- #/tasks/N/checks/task_check [missing] - no task-check file'
+    + " archived, though the task's commands include a test, lint or build command (tasks A2)"), missing.md);
+  assert.deepEqual(mdSection(missing.md, 'Checks').filter((l) => /task check/.test(l)),
+    [`- task check files that match no task: ${LEDGER}/checks/task-Z9.1.json`]);
+  // A1 committed by a launch before 1.6.0, A2 by a 1.6.0 one: no line and no
+  // gap for A1, and Checks names it.
+  const mixed = taskCheckSpec(r);
+  for (const n of [1, 2, 3]) delete mixed.files[`${LEDGER}/checks/task-A1.${n}.json`];
+  mixed.launches[0].result.tasks = { A2: mixed.launches[0].result.tasks.A2 };
+  mixed.launches.unshift({ wf: 'wf_000000', startTime: START - DURATION, durationMs: 60000,
+    result: { version: '1.5.1', tasks: { A1: { status: 'done', commits: [r.p0, r.a1] } } } });
+  const m = view(makeRun(mixed));
+  assert.deepEqual(block(m.md, 'A1'), []);
+  assert.equal(block(m.md, 'A2').length, 1);
+  assert.deepEqual(m.json.gaps.filter((g) => g.where.includes('task_check')), []);
+  assert.deepEqual(mdSection(m.md, 'Checks').filter((l) => /task check/.test(l)),
+    ["- task checks: not recorded by this run's engine (before 1.6.0) for tasks A1"]);
+  // No launch result reports the task (as in sh1): unavailable, a gap.
+  const unknown = view(makeRun({ ...taskCheckSpec(r), launches: [] }));
+  assert.deepEqual(block(unknown.md, 'A1'), [
+    `- checked before its commit: passed [present] - lane check of the working tree against the task base ${r.p0.slice(0, 7)};`
+    + ` 2 earlier attempt(s): 0 passed, 1 failed, 1 without a result (${LEDGER}/checks/task-A1.3.json)`]);
+  const none = taskCheckSpec(r);
+  none.launches = [];
+  delete none.files[`${LEDGER}/checks/task-A2.1.json`];
+  assert.deepEqual(block(view(makeRun(none)).md, 'A2'), ['- checked before its commit: unknown [unavailable] - no launch result reports'
+    + ` this task; its engine is unknown (${LEDGER}/a.jsonl L7)`]);
+});
+
+test('audit.md cites journal verdicts by line, and labels rulings without a role and lens-covered commits', () => {
   const r = repoRun();
   const folder = makeRun(acceptedSpec(r, {
     taskEvents: [
@@ -462,16 +645,21 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
   }));
   const { json, md } = view(folder, ['--repo', r.dir]);
   const lines = beforeTerms(md).split('\n');
-  // Review verdicts come from the journal.
-  const label = '[inferred: read from the transcript]';
-  assert.deepEqual(lines.filter((l) => l.includes(label)), [
-    `- A1 review in wf_aaaaaa: changes, 1 finding(s) ${label} (transcript:wf_aaaaaa/A1 review)`,
-    `- A1 re-review 1 in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A1 re-review 1)`,
-    `- A2 review in wf_aaaaaa: approve, 0 finding(s) ${label} (transcript:wf_aaaaaa/A2 review)`,
+  // Review verdicts are recorded in the journal: present, each at its
+  // result's line (L1 is the launched line, then a started and a result
+  // line per agent).
+  const journal = 'wf_aaaaaa/journal.jsonl';
+  assert.deepEqual(lines.filter((l) => /^- A\d (review|re-review \d+) in /.test(l)), [
+    `- A1 review in wf_aaaaaa: changes, 1 finding(s) [present] (${journal} L5)`,
+    `- A1 re-review 1 in wf_aaaaaa: approve, 0 finding(s) [present] (${journal} L7)`,
+    `- A2 review in wf_aaaaaa: approve, 0 finding(s) [present] (${journal} L11)`,
   ]);
-  // Other inferred lines keep the bare state.
-  assert.deepEqual(lines.filter((l) => l.includes('[inferred]')),
-    [`- ${r.fix}: final re-review [inferred] (transcript:wf_aaaaaa/final re-review)`]);
+  // The final re-review's head is recorded too: no inferred line is left,
+  // and nothing reads as from the transcript.
+  assert.deepEqual(lines.filter((l) => l.includes(`: final re-review [`)),
+    [`- ${r.fix}: final re-review [present] - judged ${r.fix.slice(0, 7)} (${journal} L15; git:${r.fix})`]);
+  assert.doesNotMatch(beforeTerms(md), /\[inferred|transcript:/);
+  assert.ok(walkSources(folder, json, r.dir) > 40);
   // A ruling without by is the implementer's, as the ledger counts it;
   // audit.json keeps what was recorded.
   assert.ok(lines.includes(`- ruling by implementer (no role recorded), quoted from ${LEDGER}/a.jsonl L7:`), md);
@@ -488,6 +676,162 @@ test('audit.md labels transcript verdicts, rulings without a role and lens-cover
   assert.deepEqual([entry.coverage.value, entry.coverage.state, entry.coverage.note], ['final review', 'present', note]);
   assert.ok(lens.md.split('\n').includes(
     `- ${r.fix}: final review [present] - ${note} (wf_aaaaaa.json #/result/final/lens_heads/0/head; git:${r.fix})`), lens.md);
+});
+
+// An accepted run whose final review left F1 open (fixed, re-review says
+// open), F2 declined (the re-review upheld it), F3 fixed and N1 new; the
+// journal's final re-review (L15) judged the fix.
+function reReviewSpec(r, over = {}) {
+  const finding = (id) => ({ id, lens: 'security', severity: 'important', file: 'a1.txt', line: 1, issue: `issue ${id}` });
+  const rv = (id, status, evidence) => ({ id, status, evidence });
+  const results = over.results || [rv('F1', 'open', 'still fails npm test zqcmd'), rv('F2', 'resolved', 'the decline is right'),
+    rv('F3', 'resolved', 'gone')];
+  const final = {
+    findings: ['F1', 'F2', 'F3'].map(finding),
+    fixed: [{ ...finding('F3'), disposition: { id: 'F3', status: 'fixed', evidence: 'did' }, review: rv('F3', 'resolved', 'gone') }],
+    open: [
+      { ...finding('F1'), reason: 'still open after the final re-review', disposition: { id: 'F1', status: 'fixed', evidence: 'did it' },
+        review: rv('F1', 'open', 'still fails npm test zqcmd') },
+      { severity: 'minor', file: 'a2.txt', line: 2, issue: 'new one', id: 'N1', reason: 'new in the final fix' },
+    ],
+    declined: [{ ...finding('F2'), reason: 'not needed', disposition: { id: 'F2', status: 'declined', evidence: 'e', reason: 'not needed' },
+      review: rv('F2', 'resolved', 'the decline is right') }],
+    cannot_verify: [], missing_lenses: [], head: r.fix, lens_heads: [{ lens: 'superpowers', head: r.a2 }],
+    task_minors_open: [{ id: 'A1-1', severity: 'minor', file: 'a1.txt', line: 1, issue: 'nit', fix: 'x' }],
+    ...(over.final || {}),
+  };
+  const spec = acceptedSpec(r, { result: { final, ...(over.result || {}) } });
+  spec.launches[0].journal[6] = { label: 'final re-review', result: over.rr === undefined ? {
+    head: over.head || r.fix, results, new_findings: [{ severity: 'minor', file: 'a2.txt', line: 2, issue: 'new one' }],
+  } : over.rr };
+  return spec;
+}
+
+test('Open work gives the final re-review and each final finding\'s re-review, without --repo', () => {
+  const r = repoRun();
+  const { json, jsonText, md } = view(makeRun(reReviewSpec(r)));
+  const open = mdSection(md, 'Open work');
+  const at = (list, i, tail = '') => `wf_aaaaaa.json #/result/final/${list}/${i}${tail}`;
+  const header = open.findIndex((l) => l.startsWith('- final review: '));
+  // Right under the final review line, from the journal and the result (no git).
+  assert.equal(open[header + 1], `- final re-review: judged ${r.fix.slice(0, 7)}: 2 resolved, 1 open, 0 without a result of`
+    + ' the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.deepEqual(json.run.open_work.final.value.re_review.value,
+    { form: 'judged', head: r.fix, delivered: r.fix, resolved: 2, open: 1, without_result: 0, contradictory: 0, of: 3, new: 1 });
+  // After each disposition: the re-review as a value, then its evidence quoted.
+  const block = (id) => {
+    const start = open.findIndex((l) => l.startsWith(`  - ${id} `));
+    const end = open.findIndex((l, i) => i > start && l.startsWith('  - '));
+    return open.slice(start, end < 0 ? open.length : end);
+  };
+  assert.deepEqual(block('F1').slice(-6), [
+    '    - disposition: fixed',
+    `      - disposition evidence, quoted from ${at('open', 0)}:`,
+    '        > did it',
+    `    - re-review: open [present] (${at('open', 0, '/review')})`,
+    `      - re-review evidence, quoted from ${at('open', 0, '/review')}, configured commands shown as check ids:`,
+    '        > still fails <check:test#1>',
+  ]);
+  assert.deepEqual(block('N1').slice(-1), [`    - re-review: raised by the re-review [present] (${at('open', 1)})`]);
+  assert.deepEqual(block('F2').slice(-3), [
+    `    - re-review: resolved (the decline upheld) [present] (${at('declined', 0, '/review')})`,
+    `      - re-review evidence, quoted from ${at('declined', 0, '/review')}:`,
+    '        > the decline is right',
+  ]);
+  // Task minors get none.
+  assert.ok(block('A1-1').length > 1);
+  assert.deepEqual(block('A1-1').filter((l) => /re-review/.test(l)), []);
+  // The evidence is recorded text: quote lines only, never a command.
+  for (const l of beforeTerms(md).split('\n')) if (/decline is right|still fails/.test(l)) assert.match(l, /^\s*> /, l);
+  assert.doesNotMatch(jsonText + md, /zqcmd/);
+  // Neither line is a gap.
+  assert.deepEqual(json.gaps.filter((g) => /re_review/.test(g.where)), []);
+});
+
+test('the final re-review line and each finding\'s line in every recorded shape', () => {
+  const r = repoRun();
+  const s7 = r.fix.slice(0, 7);
+  const lines = (spec) => {
+    const open = mdSection(view(makeRun(spec)).md, 'Open work');
+    return {
+      header: open.find((l) => l.startsWith('- final re-review: ')),
+      findings: open.filter((l) => /^ {4}- re-review/.test(l)),
+    };
+  };
+  // A re-review of another head than delivered, l131's non-sha delivered value.
+  const other = lines(reReviewSpec(r, { head: r.a2, result: { delivered_sha: 'see-below' } }));
+  assert.equal(other.header, `- final re-review: judged ${r.a2.slice(0, 7)}, not the delivered sha see-below: 2 resolved,`
+    + ' 1 open, 0 without a result of the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.equal(other.findings[0], `    - re-review of ${r.a2.slice(0, 7)}, not the delivered sha see-below: open [present]`
+    + ' (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L15)');
+  // Null reviews: contradictory results, no result for the id, a re-review
+  // that never gave a result.
+  const rv = (id, status) => ({ id, status, evidence: 'e' });
+  const nulls = {
+    open: [
+      { id: 'F1', severity: 'important', issue: 'a', reason: 'the final re-review gave contradictory results for it', review: null },
+      { id: 'F2', severity: 'important', issue: 'b', reason: 'the final re-review gave no result for it', review: null },
+    ],
+    declined: [],
+  };
+  const mixed = lines(reReviewSpec(r, { final: nulls, results: [rv('F1', 'open'), rv('F1', 'resolved'), rv('F3', 'resolved')] }));
+  assert.equal(mixed.header, `- final re-review: judged ${s7}: 1 resolved, 0 open, 1 without a result, 1 with contradictory`
+    + ' results of the 3 final finding(s); 1 new [present] (wf_aaaaaa/journal.jsonl L15)');
+  assert.deepEqual(mixed.findings, [
+    '    - re-review: contradictory results [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L15)',
+    '    - re-review: no result [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl L15)',
+  ]);
+  // A re-review that started and returned nothing: no valid result, on the
+  // run line and on each finding's.
+  const started = reReviewSpec(r, { final: nulls });
+  started.launches[0].journal[6] = { label: 'final re-review' };
+  const noValid = lines(started);
+  assert.equal(noValid.header, '- final re-review: no valid result [present] (wf_aaaaaa/journal.jsonl L14)');
+  assert.deepEqual(noValid.findings, [
+    '    - re-review: no valid result [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl L14)',
+    '    - re-review: no valid result [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl L14)',
+  ]);
+  // No re-review entry at all, with and without final findings.
+  const absent = reReviewSpec(r, { final: nulls });
+  absent.launches[0].journal.splice(6, 1);
+  const notRun = lines(absent);
+  assert.equal(notRun.header, "- final re-review: not run [present] - each finding's reason says why");
+  assert.deepEqual(notRun.findings, [
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)',
+    '    - re-review: not run [present] (wf_aaaaaa.json #/result/final/open/1/review; wf_aaaaaa/journal.jsonl)',
+  ]);
+  const clean = acceptedSpec(r);
+  clean.launches[0].journal.splice(6, 1);
+  assert.equal(lines(clean).header, '- final re-review: none (no final findings) [present]');
+  // Before 1.2.0: the re-review recorded findings only; said once, and no
+  // finding has a line.
+  const legacy = reReviewSpec(r, {
+    rr: { findings: [] },
+    final: { open: [{ id: 'F1', severity: 'important', issue: 'a', reason: 'r' }], declined: [], fixed: [] },
+  });
+  assert.deepEqual(lines(legacy), {
+    header: "- final re-review: per-finding results not recorded by this run's engine [present]", findings: [] });
+  // No journal archived: unavailable, a gap; a null review has no result
+  // recorded, its reason saying why (not a gap).
+  const lost = reReviewSpec(r, { final: nulls });
+  delete lost.launches[0].journal;
+  const lostView = view(makeRun(lost));
+  const lostLines = mdSection(lostView.md, 'Open work');
+  assert.equal(lostLines.find((l) => l.startsWith('- final re-review: ')),
+    '- final re-review: unavailable [unavailable] - no journal archived for wf_aaaaaa');
+  assert.deepEqual(lostLines.filter((l) => /^ {4}- re-review/.test(l)), [0, 1].map((i) => '    - re-review: no result recorded'
+    + ` [present] - no journal archived for wf_aaaaaa; its reason says why (wf_aaaaaa.json #/result/final/open/${i}/review)`));
+  assert.deepEqual(lostView.json.gaps.filter((g) => g.where.startsWith('#/run/open_work')).map((g) => g.where),
+    ['#/run/open_work/final/value/re_review']);
+  // A journal that cannot be read: the same, saying so.
+  const broken = reReviewSpec(r, { final: nulls });
+  delete broken.launches[0].journal;
+  broken.files['wf_aaaaaa/journal.jsonl/keep'] = '';
+  const brokenLines = mdSection(view(makeRun(broken)).md, 'Open work');
+  assert.equal(brokenLines.find((l) => l.startsWith('- final re-review: ')),
+    '- final re-review: unavailable [unavailable] - the journal for wf_aaaaaa could not be read');
+  assert.equal(brokenLines.find((l) => /^ {4}- re-review/.test(l)), '    - re-review: no result recorded [present] - the journal'
+    + ' for wf_aaaaaa could not be read; its reason says why (wf_aaaaaa.json #/result/final/open/0/review; wf_aaaaaa/journal.jsonl)');
 });
 
 test('open counts add the open task minors and the carried ones', () => {
@@ -584,7 +928,9 @@ test('open counts add the open task minors and the carried ones', () => {
   assert.equal(none.bottom, 'Final findings: 1 open, 0 declined; open task minors: unavailable; cannot-verify items: 0.');
   assert.deepEqual(none.blocks, { A1: [], A2: [] });
   assert.deepEqual(none.notes, ["- open task minors: not recorded by this run's engine"]);
-  assert.equal(none.md.split('not recorded').length, 2, none.md);
+  // Said once (Checks' task checks line is another fact: this engine is before 1.6.0).
+  const notRecorded = (md) => md.split('\n').filter((l) => /not recorded/.test(l) && !l.startsWith('- task checks: '));
+  assert.equal(notRecorded(none.md).length, 1, none.md);
 
   // No final review: every count is unavailable, and Open work says why.
   const noFinal = counts(undefined);
@@ -596,7 +942,7 @@ test('open counts add the open task minors and the carried ones', () => {
   assert.equal(noFinal.bottom, 'Final review unavailable; open task minors: unavailable; cannot-verify items: unavailable.');
   assert.deepEqual(noFinal.blocks, { A1: [], A2: [] });
   assert.deepEqual(noFinal.notes, ['- open task minors: no final review']);
-  assert.doesNotMatch(noFinal.md, /not recorded/);
+  assert.deepEqual(notRecorded(noFinal.md), []);
 });
 
 test('each task block lists its open minors by id prefix; a batch unit or no task stays under Open work', () => {
@@ -855,15 +1201,28 @@ test('audit.md ends with its terms', () => {
   });
   assert.deepEqual(named, [
     '[present]', '[missing]', '[stale]', '[conflicting]', '[unavailable]', '[inferred]',
-    '[inferred: read from the transcript]', 'invalid', 'round(s)', 'task rulings', 'run-end rulings', 'gate', 'carry',
+    'invalid', 'verified', 'checked before its commit', 'round(s)', 're-review', 'task rulings',
+    'run-end rulings', 'gate', 'carry',
     'context added by pre-flight', 'cause',
   ]);
+  // What verified covers, and the task's own check with its known limit (1.6.17).
+  const term = (name) => terms.find((l) => l.startsWith(`- ${name}: `));
+  assert.match(term('verified'), /its last commit is in the head the delivered verify passed at/);
+  assert.match(term('verified'), /not the task's own check/);
+  assert.match(term('checked before its commit'), /the last attempt the archive holds decides/);
+  assert.match(term('checked before its commit'), /fixers run no task checks/);
+  // The journal is a record (1.6.17): inferred is only the rule for a head
+  // the engine did not record, and resolved is not fixed.
+  assert.doesNotMatch(terms.join('\n'), /rather than recorded|read from the transcript/);
+  assert.match(term('[inferred]'), /no recorded head/);
+  assert.match(term('re-review'), /^- re-review: the final re-reviewer's word on one finding/);
+  assert.match(term('re-review'), /resolved means the defect is gone or the decline is right, not that it was fixed/);
   assert.equal(terms.at(-1), '- cause: gaps that share a pointer (each array index read as N), a state and a note (each '
     + 'sha read as <sha>, and shown so when the notes differ), listed once under Evidence gaps with the tasks whose '
     + 'blocks hold them, or, for a run-level cause, with run, followed by every value when there is more than one or a '
     + 'single string or number.');
   // The four gap states say they are gaps; the others say they are not.
-  for (const l of terms.slice(0, 7)) {
+  for (const l of terms.slice(0, 6)) {
     const gap = /^- \[(missing|stale|conflicting|unavailable)\]/.test(l);
     assert.ok(l.endsWith(gap ? 'An evidence gap.' : 'Not a gap.'), l);
   }
@@ -908,6 +1267,13 @@ test('privacy', () => {
         delivered_sha: r.fix,
         reasons: [{ kind: 'checks_failed', class: 'failed', detail: 'failing at the head: npm test zqcmd (exit 1), then ls zqreason' }],
         warnings: [],
+      },
+      // The re-reviewer's evidence is recorded text too.
+      final: {
+        findings: [{ id: 'F1', severity: 'important', issue: 'i' }], fixed: [], declined: [], cannot_verify: [],
+        missing_lenses: [], head: r.fix, lens_heads: [{ lens: 'superpowers', head: r.a2 }], task_minors_open: [],
+        open: [{ id: 'F1', severity: 'important', issue: 'i', reason: 'still open after the final re-review',
+          review: { id: 'F1', status: 'open', evidence: 'fails at ls and npm test zqcmd zqreason' } }],
       },
     },
     taskEvents: [{ task: 'A1', event: 'ruling', by: 'adjudicator', text: 'run pip install zqsetup first, then ls' }],
